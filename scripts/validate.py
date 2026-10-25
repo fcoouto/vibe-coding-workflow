@@ -23,11 +23,51 @@ def local_file(root, value):
     return path
 
 
+def validate_startup_hook(root, manifest, client, root_variable):
+    hook_file = local_file(root, manifest["hooks"])
+    hooks = read_json(hook_file)["hooks"]
+    if set(hooks) != {"SessionStart"} or len(hooks["SessionStart"]) != 1:
+        raise ValueError("Require one startup hook group per client")
+    group = hooks["SessionStart"][0]
+    if group.get("matcher") != "^(startup|resume|clear|compact|fork)$" or len(group["hooks"]) != 1:
+        raise ValueError("Register each supported startup source once")
+    handler = group["hooks"][0]
+    command = f'python3 -I -B "${{{root_variable}}}/scripts/workflow.py" {client} SessionStart'
+    if handler != {"type": "command", "command": command, "timeout": 5}:
+        raise ValueError("Use the bounded, silent native startup command")
+    local_file(root, "./clients/" + client + ".md")
+    local_file(root, "./runtime/adapters/" + client.replace("-", "_") + ".py")
+
+
+def validate_codex_hooks(root, manifest):
+    hooks = read_json(local_file(root, manifest["hooks"]))["hooks"]
+    events = {
+        "SessionStart": ("^(startup|resume|clear|compact|fork)$", 5),
+        "PreToolUse": ("^apply_patch$", 5),
+        "PostToolUse": ("*", 5),
+        "Stop": (None, 5),
+        "Interrupt": (None, 1),
+    }
+    if set(hooks) != set(events):
+        raise ValueError("Require the supported Codex hook events exactly once")
+    for event, (matcher, timeout) in events.items():
+        groups = hooks[event]
+        if not isinstance(groups, list) or len(groups) != 1:
+            raise ValueError("Register one Codex hook group per event")
+        group = groups[0]
+        expected_group = {"hooks"} if matcher is None else {"matcher", "hooks"}
+        if not isinstance(group, dict) or set(group) != expected_group or group.get("matcher") != matcher:
+            raise ValueError("Use the required Codex event matcher")
+        command = f'python3 -I -B "${{PLUGIN_ROOT}}/scripts/workflow.py" codex {event}'
+        if group["hooks"] != [{"type": "command", "command": command, "timeout": timeout}]:
+            raise ValueError("Use the bounded Codex runtime command")
+
+
 def validate(root=ROOT):
     root = root.resolve(strict=True)
-    manifest = read_json(root / "plugin.json")
-    if manifest["$schema"] != "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json":
-        raise ValueError("Use the portable Agent Plugins manifest schema")
+    manifest = read_json(root / ".codex-plugin/plugin.json")
+    if (root / "plugin.json").exists():
+        raise ValueError("A root manifest hides hooks in the qualified Codex versions")
     if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", manifest["name"]):
         raise ValueError("Use a lowercase, hyphenated plugin name")
     if not re.fullmatch(r"\d+\.\d+\.\d+", manifest["version"]):
@@ -36,6 +76,22 @@ def validate(root=ROOT):
         raise ValueError("Provide a plugin description")
     extension = manifest["extensions"]["com.openai"]
     onboarding = local_file(root, extension["onboardingSkill"])
+    claude = read_json(root / ".claude-plugin/plugin.json")
+    if any(claude.get(key) != manifest[key] for key in ("name", "version", "description")):
+        raise ValueError("Client manifests must identify the same package version")
+    if (root / "hooks/hooks.json").exists():
+        raise ValueError("Default hooks would duplicate Claude's explicit registration")
+    local_file(root, "./clients/codex.md")
+    local_file(root, "./runtime/adapters/codex.py")
+    validate_codex_hooks(root, manifest)
+    validate_startup_hook(root, claude, "claude-code", "CLAUDE_PLUGIN_ROOT")
+    for path in ("scripts/workflow.py", "runtime/__init__.py", "runtime/startup.py",
+                 "runtime/engine.py", "runtime/state.py", "runtime/doctor.py",
+                 "runtime/adapters/__init__.py", "runtime/adapters/session_start.py",
+                 "clients/index.md", "clients/startup.md", "clients/runtime.md", "policies/00-index.md"):
+        local_file(root, "./" + path)
+    if manifest.get("skills") != "./skills/":
+        raise ValueError("Discover the packaged skills directory")
     skills = sorted((root / "skills").glob("*/SKILL.md"))
     if onboarding not in [path.resolve() for path in skills]:
         raise ValueError("Onboarding must reference a packaged skill")
