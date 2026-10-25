@@ -1,10 +1,18 @@
 # Onboard my Project
 
-Design and implementation plan · 25 October 2026 · **Stages, feature baseline, activation behavior and two policy contracts approved; runtime implementation proposed**
+Design and implementation plan · 25 October 2026 · **Stages, feature baseline, activation behavior, client scope and all eleven policy contracts approved; D1 startup implemented; later runtime slices proposed**
 
-Outcome: enroll a project once, then activate its agreed workflow during ordinary coding requests. Qualify each client's actual behavior. This document plans the implementation; onboarding, hooks and merge enforcement are not implemented yet.
+Outcome: enroll a project once, then activate its agreed workflow during ordinary coding requests. Qualify each client's actual behavior. The Codex startup slice exists; onboarding, action guards and merge enforcement remain planned.
 
-Approved contracts: [Delegation and Model Selection](policy-contracts.md#delegation-and-model-selection) · [Proportional Security Review](policy-contracts.md#proportional-security-review).
+Contract loading: [policy index](../policies/00-index.md). The user approved all eleven contracts on 25 October 2026.
+
+Track draft approvals in development records; release packages include only approved contracts.
+
+Contract approval does not establish client execution or project adoption. D1 qualification precedes D2 enforcement work and reuse by other clients.
+
+D1 startup implementation and observed Codex execution are recorded in [Codex validation](codex-validation.md). D2 is the next implementation slice; desktop UI and model policy compliance remain unqualified.
+
+The user authorized the same startup layer for the next clients. Claude Code now reuses the shared startup protocol; Superset is documented as a host for native adapters. See [Claude and Superset validation](claude-and-superset-validation.md). This advances startup support only; D8's full lifecycle qualification still follows the required runtime/onboarding slices.
 
 ## 1. Authority and scope
 
@@ -15,11 +23,13 @@ Approved contracts: [Delegation and Model Selection](policy-contracts.md#delegat
 
 Reviewed toolkit revision: `790a895304e0c08b70a5b215c9d334f1c86b816c`. Secondary reference: `vibe-setup` at `aa72e11fd05252fbedc3258813b9c6144ddb3101`; both matched `main` during research.
 
-For every new onboarding/update run, resolve current toolkit `main` once. Read all required sources at that revision outside the project; record source paths and revision. Resume an interrupted run at its recorded revision. A trusted cached revision may support offline work with freshness explicitly unverified. Do not vendor upstream prompts into this plugin or fetch them on routine hook events. Changed upstream instructions become a reviewed update, not a silent change to an active task.
+For authoring, setup and reviewed updates, consult Toolkit as the workflow authority. For every new onboarding/update run, resolve current toolkit `main` once; read required sources at that revision outside the project and record it. Resume interrupted setup at its recorded revision. A trusted available copy may support offline setup with freshness explicitly unverified; unavailable sources block only dependent setup work.
+
+Runtime uses complete, locally authored contracts and accepted project configuration. It requires no Toolkit checkout, permanent snapshot or upstream fetch, including agent-side policy reads after hooks. Keep source provenance and requirement coverage in the [maintenance source map](policy-sources.md), outside routine loading paths. Temporary source retrieval during authoring/setup is sufficient; do not ship a copied repository or mirrored prompt collection. Review Toolkit changes before updating contracts; never silently change an active task's rules.
 
 ## 2. Stages and policy decisions
 
-The user approved these three stages, the feature tables, activation behavior below and the two linked policy contracts. Other policy details and implementation choices remain proposals.
+The user approved these three stages, the feature tables, activation behavior below and all eleven policy contracts. Implementation choices remain proposals.
 
 | Stage | Responsibility | Evidence |
 | --- | --- | --- |
@@ -29,9 +39,7 @@ The user approved these three stages, the feature tables, activation behavior be
 
 ### Activation and communication
 
-Activate the workflow only for explicitly onboarded projects; installation alone does not enroll a project. Confirm successful onboarding once. During ordinary tasks, check enrollment and load applicable policy and state silently. Do not announce routine activation or repeat unchanged policy explanations.
-
-Briefly explain only useful task steps, blockers (including broken integration), or decisions the user needs to make. Expand explanations only as needed to resolve a blocker or support a decision. Silent activation preserves required checks, evidence and completion reporting; it does not establish that integration is healthy.
+The [Scope contract](../policies/01-project-scope.md#authority-and-activation) defines activation and communication. D1 must verify enrolled, unenrolled and broken-integration behavior; silent activation does not establish integration health.
 
 ### Project Onboarding steps
 
@@ -62,19 +70,19 @@ Installation makes capabilities available. Project adoption and task compliance 
 
 | Feature / policy | Mandatory adoption? | Runtime decision or behavior | Project adoption |
 | --- | --- | --- | --- |
-| Project scope and policy authority | Yes | Resolve the repository, instructions, permissions and task state | Not assessed |
-| Complete toolkit coverage | Yes | Use applicable adopted capabilities; onboarding assesses the full catalog, required integrations, equivalents and justified exclusions | Not assessed |
-| Task scope, planning and acceptance criteria | Yes | Determine planning depth and completion criteria | Not assessed |
-| Checks and completion evidence | Yes | Select relevant checks and require current results before completion | Not assessed |
-| Proportional Security Review | Yes | After implementation, assess actual changes and require applicable security coverage before completion or merge | Not assessed |
-| Independent and specialist review | Yes | Review requirements, behavior and regressions before every merge; determine independence and specialist involvement by risk | Not assessed |
-| Delegation and Model Selection | Yes | Select execution mode, worker capability and effort; coordinate resource ownership and bounded escalation | Not assessed |
-| Documentation, context and handoff | Yes | Update affected records and preserve enough context for reliable continuation | Not assessed |
-| Merge readiness and enforcement | Yes | Permit a merge only after applicable checks and reviews pass for the current changes | Not assessed |
-| Workflow evaluation and maintenance | Yes | Revalidate affected capabilities after relevant changes and investigate observed failures | Not assessed |
-| Additional integrations outside required scope | No | Use selected integrations with their prerequisites; toolkit or accepted project requirements take precedence | Not assessed |
+| [Project Scope](../policies/01-project-scope.md) | Yes | Resolve the repository, instructions, permissions and task state | Not assessed |
+| [Project Onboarding](../policies/10-project-onboarding.md) | Yes | Assess the complete catalog, required integrations, equivalents and justified exclusions; qualify enrollment | Not assessed |
+| [Task Planning](../policies/02-task-planning.md) | Yes | Determine planning depth and completion criteria | Not assessed |
+| [Tests and Builds](../policies/05-tests-and-builds.md) | Yes | Select relevant checks and require current results before completion | Not assessed |
+| [Security Review](../policies/04-security-review.md) | Yes | After implementation, assess actual changes and require applicable security coverage before completion or merge | Not assessed |
+| [Code Review](../policies/06-code-review.md) | Yes | Review requirements, behavior and regressions before every merge; determine independence and specialist involvement by risk | Not assessed |
+| [Agent Delegation](../policies/03-agent-delegation.md) | Yes | Select execution mode, worker capability and effort; coordinate resource ownership and bounded escalation | Not assessed |
+| [Context and Handoff](../policies/07-context-and-handoff.md) | Yes | Update affected records and preserve enough context for reliable continuation | Not assessed |
+| [Merge Readiness](../policies/08-merge-readiness.md) | Yes | Permit a merge only after applicable checks and reviews pass for the current changes | Not assessed |
+| [Workflow Maintenance](../policies/09-workflow-maintenance.md) | Yes | Revalidate affected capabilities after relevant changes and investigate observed failures | Not assessed |
+| [Tool Integrations](../policies/11-tool-integrations.md) outside required scope | No | Use selected additional integrations with their prerequisites; required catalog/project capabilities remain mandatory | Not assessed |
 
-Proportional Security Review names the security policy. General review remains part of Independent and specialist review. Neither policy requires a separate specialist agent for every change. Stack-specific tools follow the full toolkit assessment, including its default native harness method. Capabilities and implementation choices remain distinct: durable state is required; SQLite is proposed.
+Security Review covers security; Code Review covers general requirements, behavior and regressions. Neither requires a separate specialist agent for every change. Stack-specific tools follow the complete onboarding assessment, including its default native evaluation method. Capabilities and implementation choices remain distinct: durable state is required; SQLite is proposed.
 
 ### Readiness and evidence
 
@@ -86,21 +94,9 @@ Proposed feature records: `id, stage, mandatory_adoption, basis/source, executio
 
 ### Choose how to handle existing policies
 
-After the read-only inventory finds conflicts, show a short summary and ask this early question before proposing replacements:
+Use the [scope contract's conflict rules](../policies/01-project-scope.md#when-instructions-conflict) for the three modes, required decisions and runtime boundaries.
 
-> How should Vibe Coding Workflow handle this project's existing workflow?
-
-| Choice | Resolution rule | Further questions |
-| --- | --- | --- |
-| **1. Decide with me** | Present each logical conflict with its existing source, incoming rule and recommended resolution | Ask how to satisfy required features and resolve optional conflicts, one at a time |
-| **2. Preserve my workflow** | Keep existing workflow behavior; add compatible policies and integrations; required incompatibilities block enrollment | Ask about a scoped resolution for required conflicts and unresolved choices outside the standing rule |
-| **3. Replace my workflow** | Adopt the toolkit-based workflow and retire the old workflow within the reviewed migration scope; archive superseded content | Ask about ambiguous ownership, scope or exceptions; do not re-ask every covered replacement |
-
-The user proposed these three modes. Recommend choice 1 when they want guidance, but never select it on their behalf. If there are no conflicts, proceed with the applicable onboarding decisions without this extra question; do not infer a future replacement preference from that absence.
-
-Record `onboarding_mode`, repository/client scope and the decision reference in project policy. Reuse the preference on reruns within its scope. A mode controls conflict resolution; authorization to apply changes remains tied to the reviewed plan. No answer in a noninteractive run means pending, not implied replacement permission.
-
-In preserve mode, reuse compliant existing mechanisms. Present incompatible policies with a scoped resolution; retaining one leaves the required feature `blocked` under the [readiness rules](#readiness-and-evidence). Do not silently overwrite the user's workflow. Record optional conflicts as `not_adopted`, reason `deferred_by_user_policy`. Report actual adoption and enforcement separately.
+Record `onboarding_mode`, repository/client scope and the decision reference in project policy. The enrollment journal binds authorization to the reviewed migration scope. Optional omissions use `not_adopted` with reason `deferred_by_user_policy`; required conflicts remain `blocked`.
 
 **Proposed replacement boundary, awaiting refinement:** replace the selected project's AI workflow instructions, hooks and agent configuration; retain product requirements, application code, architecture constraints, credentials and unrelated tooling. Shared/global integrations require separate scope decisions. The mode does not override host or organization controls, or authorize new costs and production changes.
 
@@ -108,23 +104,33 @@ In preserve mode, reuse compliant existing mechanisms. Present incompatible poli
 
 Archive whole files only when they contain exclusively superseded workflow material. For mixed files, back up the original and replace only reviewed sections. Keep backups outside the repository and client instruction/skill discovery paths; record original locations, hashes and restoration steps. Retire obsolete hook registrations as well as their files, then verify behavior in a new session. Rollback preserves subsequent user edits through the existing conflict checks.
 
-The agent identifies semantic conflicts with source evidence; scripts validate and apply selected resolutions. Do not claim a deterministic scanner can discover every policy contradiction. Treat uncertain compatibility as pending assessment rather than a proven safe addition.
+The agent identifies semantic conflicts; scripts validate and apply recorded resolutions under the scope contract.
 
 ### Questions within the selected mode
 
-Detect facts; reuse explicit prior decisions and the selected mode; ask when an unresolved choice changes scope, behavior, cost, access, architecture or enforcement. A recommendation is never recorded as the user's choice. Minor reversible implementation details may use stated assumptions, following upstream. Preserve existing authorization rather than repeatedly requesting it. Pending decisions block only dependent work.
-
-Examples:
-
-- “These two instruction files disagree about the test command. Which should be canonical?”
-- “Which installed clients should this project support?” Only ask if the selection is not already established.
-- “The required merge gate needs a trusted review source. Which existing integration should satisfy it?” If none qualifies, report incomplete enrollment and continue independent authorized work.
+Use the [scope contract's decision rules](../policies/01-project-scope.md#when-instructions-conflict). The following record format and question transport are proposed implementation details.
 
 Record each material decision as `id, scope, options, selected_value, provenance, status, affected_actions, invalidation_trigger`. Provenance distinguishes user confirmation, existing project rules, observed facts and assumptions. Status is `confirmed`, `inherited`, `proposed` or `pending`. Store the evidence/reference behind inherited choices. The enrollment journal also binds approvals to a design/plan digest, scope and user-message reference. Material revisions reopen only affected decisions and approvals.
 
 Use the host's question UI when available and ordinary conversation otherwise. Hook subprocesses never attempt an interactive questionnaire. In a noninteractive run, return the pending question and continue independent authorized work.
 
 ## 3. Architecture
+
+Keep shared workflow contracts in `policies/`, entry skills in `skills/`, and design, plans and source mapping in `docs/`.
+
+The [Superset feature map](superset-feature-map.md) identifies existing host capabilities to reuse and the workflow guarantees still needed. Consult it when scoping D2–D6; it preserves the approved contracts and standalone client targets.
+
+### Client scope and adapter organization
+
+Support targets are Codex, Superset, Claude Code and Claude Desktop's Code and Cowork surfaces. Claude Chat is out of scope. Keep client implementations under `runtime/adapters/`; add modules or subdirectories only when implementing that client. Share policy and procedures, loading only the adapter instructions needed for the current task.
+
+Codex and Claude Code share the compatible `SessionStart` JSON subset in `runtime/adapters/session_start.py`, with a thin module per native client. Superset launches those agents rather than supplying another startup protocol; preserve that distinction and qualify its launch/permission behavior separately.
+
+Organize client interface specifications under `clients/`, using `index.md` and descriptive client names such as `codex.md`. No numeric prefixes are needed.
+
+The index identifies each client's scope and when to load its specification. Add files with their implementation slice, without empty placeholders. Runtime modules retain language-appropriate names under `runtime/adapters/`.
+
+Qualify Desktop Code and Cowork separately; reuse Claude Code behavior where capabilities match. [Desktop local/SSH Code sessions support plugin installation](https://code.claude.com/docs/en/plugins/install). [Cowork supports hooks and subagents](https://support.claude.com/en/articles/13837440-use-plugins-in-claude). Package availability alone does not establish full workflow support. Missing mandatory mechanisms keep that surface unqualified under the existing readiness rules.
 
 ```mermaid
 flowchart TD
@@ -203,31 +209,21 @@ Runtime rules:
 
 **Verified platform constraints:** Codex requires trust of the current plugin hook definition. Its current `PreToolUse` does not support `permissionDecision: "ask"`; that response can fail the hook and allow the tool to continue. Cloud-orchestrated ChatGPT Work does not support plugin hooks. Qualify local Codex first, and show unsupported surfaces honestly. Claude has different output and registration semantics. [Client sources: 4–7 below.]
 
-### Evidence, general review and Proportional Security Review
+### Evidence, general review and Security Review
 
 Task states: `planned`, `active`, `awaiting_user`, `blocked`, `verifying`, `ready`, `cancelled`. Within the runtime API, only the verifier can transition to `ready`; an agent's success message is insufficient. Accept independent review provenance from a correlated reviewer execution observed by a qualified adapter, or a trusted external integration. A report's own claimed identity cannot establish provenance. Local records protect workflow integrity; they are not a security boundary against processes with the same filesystem permissions. Repository enforcement has a separate trust boundary below.
 
 Bind results to the candidate content, base revision, relevant check definitions, policy digest and reviewer/executor provenance. Account for staged, unstaged and relevant untracked content; HEAD alone is insufficient. A change to those inputs invalidates affected evidence. Recheck actual content before completion because a missing hook must not preserve stale success.
 
-General review covers requirements, behavior and regressions before every merge. The approved [Proportional Security Review contract](policy-contracts.md#proportional-security-review) defines its timing, scope and blockers. Proposed escalation guide for the remaining general-review policy, to refine during Project Onboarding:
+The [Review contract](../policies/06-code-review.md#choose-coverage) defines general coverage and risk-based independence. The [Security Review contract](../policies/04-security-review.md) defines its separate timing, scope and blockers; [Tests and Builds](../policies/05-tests-and-builds.md) defines proof and freshness. The runtime must implement these decisions without treating an unavailable required reviewer as inapplicable.
 
-| Change | Required coverage |
-| --- | --- |
-| Bounded, low-risk | Focused requirement/diff review and applicable deterministic checks |
-| Nontrivial behavior | Independent behavior/regression review plus affected checks |
-| Security, data, migrations, concurrency or uncertain scope | Appropriate specialist review and stronger evidence |
-
-Resolve uncertain risk or obtain appropriate review before accepting dependent completion. Use the complete diff and project rules, not a file-extension shortcut. An inapplicable specialist action needs a policy-based reason; an unavailable required reviewer blocks dependent completion or merge.
-
-Worker routing follows the approved [Delegation and Model Selection contract](policy-contracts.md#delegation-and-model-selection). Cross-vendor execution is a later integration, not an assumed feature of a hook adapter.
+Worker routing follows the approved [Delegation contract](../policies/03-agent-delegation.md). Cross-vendor execution is a later integration, not an assumed feature of a hook adapter.
 
 ### Ownership and merge assurance
 
-Managed workers claim canonical writable files and mutable resources transactionally before dispatch. Include ancestor/path aliases and shared ports/build directories. Reviewers receive read-only scope. Call it enforced only when a qualified sandbox/tool restriction prevents an attempted write; otherwise record it as a workflow convention. The coordinator owns lockfiles, shared configuration and Git operations. An uncertain worker retains ownership until confirmed stopped; elapsed time alone does not release it. Uncontrolled external writers remain a capability limitation.
+The [delegation contract](../policies/03-agent-delegation.md#ownership-and-parallel-work) defines ownership, parallelism and recovery. D6 implements transactional reservations and qualifies which restrictions the client actually enforces.
 
-Client hooks provide workflow guardrails. **Enforcement of every merge needs a repository-controlled gate.** When selected and available, a GitHub adapter must require the final verifier on the actual current candidate/base, handle merge queues when used, and verify the applicable rules and bypass settings.
-
-The verifier must run from a trusted definition and obtain authoritative check/review results. A PR-writable JSON report or a local `review_passed` flag is not proof. Reuse a qualified existing review integration first. If no trusted review source works under the selected subscriptions, required repository review enforcement remains blocked and enrollment stays incomplete for that scope; do not introduce API billing or manufacture a passing result. Repository rules and trusted execution are an explicit deliverable, not a promise supplied by installing client hooks. [GitHub sources: 8–9 below.]
+The [Merge contract](../policies/08-merge-readiness.md) defines the repository gate, trusted evidence, bypass/queue qualification and authorized merge behavior. D7 implements and qualifies those controls; client hooks alone do not establish repository enforcement. [GitHub sources: 8–9 below.]
 
 ## 5. Small deliverables
 
@@ -239,13 +235,15 @@ Each deliverable receives its own reviewable change and evidence. Unit/fixture v
 | **D2** | Deterministic hook runtime | Local state, guarded-action responses, post-tool invalidation, bounded Stop handling and `doctor` | Actual denial blocks; pass preserves native permissions; missing/untrusted/disabled hooks, crash and timeout produce honest health; pending decisions cause no continuation loop or implicit permission grant |
 | **D3** | Guided onboarding plan | `onboard-my-project` skill, source resolver, feature/adoption table, conflict inventory, mode and decision record | Three stages distinguished; full catalog covered; mandatory policies separated from conditional actions; no mode waives a policy; equivalents require evidence; merge feasibility established |
 | **D4** | Reversible Project Onboarding and toolkit adoption | Transaction module, approved component execution, mode-aware configuration/docs, inactive backups, `apply`, `resume`, `rollback` | Missing mandatory policy/mechanism qualification prevents readiness; future task evidence remains separate; required conflicts resolve or block; recovery preserves unrelated content |
-| **D5** | Checks, general review and security review evidence | Approved security contract, remaining risk policies, applicability decisions, check runner and completion verifier | Security review runs after implementation with no planning-time review gate; every merge receives general and applicable security coverage; missing/stale required evidence or blocking findings prevent readiness |
+| **D5** | Checks, general review and security review evidence | Accepted check/review policies, applicability decisions, check runner and completion verifier | Security review runs after implementation with no planning-time review gate; every merge receives general and applicable security coverage; missing/stale required evidence or blocking findings prevent readiness |
 | **D6** | Worker routing and concurrent ownership | Approved delegation contract, model/effort evidence, bounded dispatch, atomic reservations and stop reconciliation | Fifteen concurrent claims cannot acquire overlapping resources; limits/approved fallbacks hold; unsupported selection is explicit; uncertain ownership survives; reviewer restrictions and policy updates are tested |
 | **D7** | Repository merge gate | Trusted evidence integration, disposable enforcement qualification and exact ruleset plan, delivered separately below | Missing/stale review or failed checks prevent merge through supported UI/API/CLI paths; absent trust/access remains blocked |
 | **D8** | Claude Code adapter | Native manifest/config adapter and shared contract fixtures | The same scenarios pass in an actual Claude session; no duplicate handlers or policy fork; settings evidence remains truthful |
 | **D9** | PHIOON pilot | One Python and one Next.js repository, then one bounded cross-repository task | Ordinary requests activate workflow without skill mentions; shared-resource coordination and relevant upstream harness cases pass; overhead is measured |
 
 Sequence: **D1 → D2 → D3 → D4**, then **D5 → D6 → D7**. D8 can follow D4 independently; D9 follows the capabilities selected for the pilot. D7 includes a distinct review of the concrete repository settings before any live changes. Multi-repository rollout follows the pilot, not automatic enrollment of all nine repositories.
+
+Scope Superset and Claude Desktop surfaces as separate follow-up slices after capability discovery; do not infer their qualification from D8. Qualify the implemented D1 startup slice before extending the runtime.
 
 Keep the larger items reviewable:
 
@@ -257,6 +255,15 @@ Keep the larger items reviewable:
 ### First implementation slice: D1
 
 Add only the dispatcher, Codex normalization/response module, root resolution, startup handler, fixtures and manifest reference. Use a disposable enrolled-project fixture. Extend the existing package validator to check hook paths. Keep enforcement handlers for D2.
+
+Implemented with the [Codex client contract](../clients/codex.md). Native probes required the sole `.codex-plugin/plugin.json` compatibility manifest: the tested builds suppress hook discovery when root `plugin.json` exists. See [validation evidence and limits](codex-validation.md) before reusing the pattern.
+
+Implementation steps:
+
+1. Normalize documented `SessionStart` payloads and resolve the nearest Git checkout, including linked worktrees. Check nested, neighboring and inherited-environment cases.
+2. Read only that checkout's enrollment record. Require matching checkout/common-Git identity, selected client and local policy digest; copied or stale records must not activate another checkout. Use fixtures until D4 supplies enrollment.
+3. Return a short local client/policy pointer for enrolled scope, nothing for unenrolled scope, and a diagnostic for invalid integration. Wire one manifest handler with bounded input and execution; test malformed input, missing files and unchanged permissions.
+4. Run package and behavior checks, then observe installed hook discovery, trust and execution in an isolated real Codex process. Report that evidence separately from desktop UI and model behavior.
 
 Run package validation, fixture checks, `git diff --check`, then a real new-session startup probe on the target client. Record client surface/version and hook trust. If that client is unavailable here, report the live probe as not run. Do not change PHIOON as part of D1.
 

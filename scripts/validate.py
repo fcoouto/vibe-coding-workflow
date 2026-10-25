@@ -23,11 +23,27 @@ def local_file(root, value):
     return path
 
 
+def validate_startup_hook(root, manifest, client, root_variable):
+    hook_file = local_file(root, manifest["hooks"])
+    hooks = read_json(hook_file)["hooks"]
+    if set(hooks) != {"SessionStart"} or len(hooks["SessionStart"]) != 1:
+        raise ValueError("Require one startup hook group per client")
+    group = hooks["SessionStart"][0]
+    if group.get("matcher") != "^(startup|resume|clear|compact|fork)$" or len(group["hooks"]) != 1:
+        raise ValueError("Register each supported startup source once")
+    handler = group["hooks"][0]
+    command = f'python3 -I -B "${{{root_variable}}}/scripts/workflow.py" {client} SessionStart'
+    if handler != {"type": "command", "command": command, "timeout": 5}:
+        raise ValueError("Use the bounded, silent native startup command")
+    local_file(root, "./clients/" + client + ".md")
+    local_file(root, "./runtime/adapters/" + client.replace("-", "_") + ".py")
+
+
 def validate(root=ROOT):
     root = root.resolve(strict=True)
-    manifest = read_json(root / "plugin.json")
-    if manifest["$schema"] != "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json":
-        raise ValueError("Use the portable Agent Plugins manifest schema")
+    manifest = read_json(root / ".codex-plugin/plugin.json")
+    if (root / "plugin.json").exists():
+        raise ValueError("A root manifest hides hooks in the qualified Codex versions")
     if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", manifest["name"]):
         raise ValueError("Use a lowercase, hyphenated plugin name")
     if not re.fullmatch(r"\d+\.\d+\.\d+", manifest["version"]):
@@ -36,6 +52,19 @@ def validate(root=ROOT):
         raise ValueError("Provide a plugin description")
     extension = manifest["extensions"]["com.openai"]
     onboarding = local_file(root, extension["onboardingSkill"])
+    claude = read_json(root / ".claude-plugin/plugin.json")
+    if any(claude.get(key) != manifest[key] for key in ("name", "version", "description")):
+        raise ValueError("Client manifests must identify the same package version")
+    if (root / "hooks/hooks.json").exists():
+        raise ValueError("Default hooks would duplicate Claude's explicit registration")
+    validate_startup_hook(root, manifest, "codex", "PLUGIN_ROOT")
+    validate_startup_hook(root, claude, "claude-code", "CLAUDE_PLUGIN_ROOT")
+    for path in ("scripts/workflow.py", "runtime/__init__.py", "runtime/startup.py",
+                 "runtime/adapters/__init__.py", "runtime/adapters/session_start.py",
+                 "clients/index.md", "clients/startup.md", "policies/00-index.md"):
+        local_file(root, "./" + path)
+    if manifest.get("skills") != "./skills/":
+        raise ValueError("Discover the packaged skills directory")
     skills = sorted((root / "skills").glob("*/SKILL.md"))
     if onboarding not in [path.resolve() for path in skills]:
         raise ValueError("Onboarding must reference a packaged skill")
