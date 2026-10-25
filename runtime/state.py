@@ -1,0 +1,460 @@
+"""Private, bounded SQLite task controls and atomic deterministic hook decisions."""
+
+from contextlib import closing, contextmanager
+import hashlib
+import json
+import os
+from pathlib import Path
+import sqlite3
+import stat
+
+from runtime.engine import HookResult, evaluate
+from runtime.startup import StartupError
+
+
+SCHEMA_VERSION = 1
+APPLICATION_ID = 0x56494245
+PACKAGE = Path(__file__).resolve().parents[1]
+LIMITATIONS = ["Supported apply_patch guard only; shell and external edits remain possible",
+               "Hook execution and filesystem locality remain unverified; no workflow readiness claim"]
+STATES = {"planned", "active", "awaiting_user", "blocked", "verifying", "cancelled"}
+TABLES = {"checkouts", "tasks", "bindings", "turns", "receipts"}
+
+
+class StateError(StartupError):
+    """Sanitized task/state diagnostic, without private record contents."""
+
+
+def runtime_fingerprint():
+    """Pin installed runtime sources, dispatcher and adapter contents, by relative path."""
+    digest = hashlib.sha256()
+    paths = sorted((PACKAGE / "runtime").glob("*.py")) + sorted((PACKAGE / "runtime/adapters").glob("*.py"))
+    paths.append(PACKAGE / "scripts/workflow.py")
+    for path in sorted(paths):
+        digest.update(str(path.relative_to(PACKAGE)).encode() + b"\0" + path.read_bytes() + b"\0")
+    return digest.hexdigest()
+
+
+def _pins(scope):
+    return dict(schema_version=SCHEMA_VERSION, policy_digest=scope.policy_digest, runtime_digest=runtime_fingerprint())
+
+
+def _scope_id(scope):
+    return hashlib.sha256(json.dumps([scope.project_id, str(scope.repository_root), str(scope.git_common_dir)]).encode()).hexdigest()
+
+
+def _text(value, field, limit=1024):
+    if not isinstance(value, str) or not value.strip() or len(value) > limit or not value.isprintable():
+        raise StateError("Invalid " + field)
+    return value
+
+
+def _fields(value, required, optional=()):
+    if not isinstance(value, dict) or set(value) - set(required) - set(optional) or not set(required) <= set(value):
+        raise StateError("Invalid task control fields")
+
+
+def _identity(request):
+    for name in ("client", "session_id", "task_id", "scope_ref"):
+        _text(request.get(name), name, 128 if name == "task_id" else 1024)
+    if request["client"] != "codex":
+        raise StateError("Unsupported task client")
+
+
+def _integer(value, field, minimum=0):
+    if type(value) is not int or value < minimum:
+        raise StateError("Invalid " + field)
+
+
+def _private(path, directory=False):
+    info = path.lstat()
+    if (info.st_uid != os.getuid() or info.st_mode & 0o077 or
+            not (stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)) or
+            (not directory and info.st_nlink != 1)):
+        raise StateError("Runtime state requires private current-user directories and regular files")
+
+
+def _path(scope):
+    if scope.runtime is None or scope.runtime.schema_version != SCHEMA_VERSION:
+        raise StateError("Runtime state is not configured with a supported schema")
+    directory = scope.runtime.state_dir
+    if not directory.is_absolute() or directory.resolve() != directory:
+        raise StateError("Runtime state path must be canonical and have no symlinks")
+    for path in (directory, *directory.parents):
+        if os.path.lexists(path) and (path.is_symlink() or not path.is_dir()):
+            raise StateError("Runtime state ancestors must be directories without symlinks")
+    if directory.exists():
+        _private(directory, True)
+    return directory / "runtime.sqlite3"
+
+
+def _sidecars(path):
+    _private(path)
+    for suffix in ("-journal", "-wal", "-shm"):
+        sidecar = Path(str(path) + suffix)
+        if os.path.lexists(sidecar):
+            _private(sidecar)
+            if suffix != "-journal":
+                raise StateError("Unsupported runtime journal mode")
+
+
+def _schema(db):
+    if (db.execute("pragma application_id").fetchone()[0] != APPLICATION_ID or
+            db.execute("pragma user_version").fetchone()[0] != SCHEMA_VERSION or
+            {row[0] for row in db.execute("select name from sqlite_master where type='table'")} != TABLES or
+            db.execute("pragma journal_mode").fetchone()[0] != "delete"):
+        raise StateError("Runtime database is unowned or has an incompatible schema")
+    expected = {"checkouts": ["scope_id", "project_id", "repository_root", "git_common_dir", "generation"],
+                "tasks": ["scope_id", "client", "session_id", "task_id", "data"],
+                "bindings": ["scope_id", "client", "session_id", "task_id"],
+                "turns": ["scope_id", "client", "session_id", "turn_id", "task_id", "continuation_consumed"],
+                "receipts": ["scope_id", "client", "session_id", "turn_id", "tool_call_id", "kind", "fingerprint", "conflicted"]}
+    for table, columns in expected.items():
+        if [row[1] for row in db.execute("pragma table_info(" + table + ")")] != columns:
+            raise StateError("Runtime database has an incompatible schema")
+    if db.execute("select count(*) from sqlite_master where type='trigger'").fetchone()[0]:
+        raise StateError("Runtime database contains unsupported triggers")
+
+
+def _initialize(path):
+    missing = []
+    directory = path.parent
+    while not directory.exists():
+        missing.append(directory)
+        directory = directory.parent
+    for directory in reversed(missing):
+        try:
+            directory.mkdir(mode=0o700)
+        except FileExistsError:
+            _private(directory, True)
+    _private(path.parent, True)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    os.close(descriptor)
+    with closing(sqlite3.connect(path, timeout=0.1)) as db, db:
+        db.executescript("""
+            BEGIN IMMEDIATE;
+            CREATE TABLE checkouts(scope_id TEXT PRIMARY KEY, project_id TEXT NOT NULL,
+                repository_root TEXT NOT NULL, git_common_dir TEXT NOT NULL, generation INTEGER NOT NULL);
+            CREATE TABLE tasks(scope_id TEXT, client TEXT, session_id TEXT, task_id TEXT, data TEXT NOT NULL,
+                PRIMARY KEY(scope_id,client,session_id,task_id));
+            CREATE TABLE bindings(scope_id TEXT, client TEXT, session_id TEXT, task_id TEXT NOT NULL,
+                PRIMARY KEY(scope_id,client,session_id));
+            CREATE TABLE turns(scope_id TEXT, client TEXT, session_id TEXT, turn_id TEXT, task_id TEXT,
+                continuation_consumed INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(scope_id,client,session_id,turn_id));
+            CREATE TABLE receipts(scope_id TEXT, client TEXT, session_id TEXT, turn_id TEXT, tool_call_id TEXT,
+                kind TEXT, fingerprint TEXT NOT NULL, conflicted INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(scope_id,client,session_id,turn_id,tool_call_id,kind));
+        """)
+        db.execute("pragma application_id=" + str(APPLICATION_ID))
+        db.execute("pragma user_version=" + str(SCHEMA_VERSION))
+
+
+@contextmanager
+def _database(scope, write=False, initialize=False):
+    db = None
+    try:
+        path = _path(scope)
+        if not os.path.lexists(path):
+            if initialize:
+                try:
+                    _initialize(path)
+                except FileExistsError:
+                    pass
+            else:
+                yield None
+                return
+        _sidecars(path)
+        db = sqlite3.connect(path.as_uri() + ("?mode=rw" if write else "?mode=ro"), uri=True, timeout=0.1)
+        db.execute("pragma busy_timeout=100")
+        db.execute("pragma trusted_schema=off")
+        _schema(db)
+        db.execute("begin immediate" if write else "begin")
+        yield db
+        if write:
+            _sidecars(path)
+            db.commit()
+    except StateError:
+        raise
+    except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
+        raise StateError("Runtime state is unavailable, corrupt, locked or incompatible") from None
+    finally:
+        if db is not None:
+            db.close()
+
+
+def _task(db, scope_id, client, session, task_id=None):
+    if task_id is None:
+        binding = db.execute("select task_id from bindings where scope_id=? and client=? and session_id=?",
+                             (scope_id, client, session)).fetchone()
+        if binding is None:
+            return None
+        task_id = binding[0]
+    row = db.execute("select data from tasks where scope_id=? and client=? and session_id=? and task_id=?",
+                     (scope_id, client, session, task_id)).fetchone()
+    if row is None:
+        raise StateError("Runtime task binding is corrupt")
+    task = json.loads(row[0])
+    _fields(task, ("client", "session_id", "task_id", "scope_ref", "mode", "decision_ref", "state", "revision",
+                   "pins", "reason", "reference", "conditions", "turn_id", "turn_uncertain"), ("resolution_ref",))
+    _identity(task)
+    _integer(task["revision"], "stored revision", 1)
+    for field in ("decision_ref", "reason", "reference", "resolution_ref"):
+        if field in task:
+            _text(task[field], "stored " + field)
+    if (task["task_id"] != task_id or task["client"] != client or task["session_id"] != session or
+            task["state"] not in STATES or task["mode"] not in {"editable", "read-only"} or
+            type(task["turn_uncertain"]) is not bool or not isinstance(task["conditions"], list) or
+            len(task["conditions"]) > 64):
+        raise StateError("Runtime task record is corrupt")
+    if task["turn_id"] is not None:
+        _text(task["turn_id"], "stored turn_id", 4096)
+    _fields(task["pins"], ("schema_version", "policy_digest", "runtime_digest"))
+    if type(task["pins"]["schema_version"]) is not int:
+        raise StateError("Runtime task pins are corrupt")
+    seen = set()
+    for condition in task["conditions"]:
+        _fields(condition, ("id", "kind", "action", "reason", "reference", "status"), ("resolution_ref", "continuation"))
+        for field in ("id", "reason", "reference", "resolution_ref"):
+            if field in condition:
+                _text(condition[field], "stored condition " + field, 128 if field == "id" else 1024)
+        if (condition["id"] in seen or condition["kind"] not in ("blocker", "decision", "runnable") or
+                condition["action"] not in ("patch", "task") or condition["status"] not in ("pending", "resolved") or
+                (condition["status"] == "resolved" and "resolution_ref" not in condition)):
+            raise StateError("Runtime condition record is corrupt")
+        seen.add(condition["id"])
+        if "continuation" in condition:
+            continuation = condition["continuation"]
+            _fields(continuation, ("turn_id", "budget", "consumed", "revoked"))
+            _text(continuation["turn_id"], "stored continuation turn_id", 4096)
+            if (condition["kind"] != "runnable" or type(continuation["revoked"]) is not bool or any(
+                    type(continuation[field]) is not int or continuation[field] not in (0, 1)
+                    for field in ("budget", "consumed"))):
+                raise StateError("Runtime continuation record is corrupt")
+    return task
+
+
+def _save(db, scope_id, task):
+    db.execute("insert or replace into tasks values(?,?,?,?,?)", (scope_id, task["client"], task["session_id"],
+               task["task_id"], json.dumps(task, separators=(",", ":"))))
+
+
+def _compatible(scope, task):
+    if task is not None and task["pins"] != _pins(scope):
+        raise StateError("Task policy, runtime or schema pins differ; explicit migration is required")
+
+
+def _status(db, scope, client, session):
+    scope_id = _scope_id(scope)
+    task = _task(db, scope_id, client, session) if db else None
+    _compatible(scope, task)
+    row = db.execute("select generation from checkouts where scope_id=?", (scope_id,)).fetchone() if db else None
+    return dict(ok=True, task=task, generation=row[0] if row else 0,
+                blockers=[condition for condition in task["conditions"] if condition["status"] == "pending" and
+                          condition["kind"] in {"blocker", "decision"}] if task else [], limitations=LIMITATIONS)
+
+
+def task_status(scope, client, session_id):
+    _text(client, "client")
+    _text(session_id, "session_id")
+    if client != "codex":
+        raise StateError("Unsupported task client")
+    with _database(scope) as db:
+        return _status(db, scope, client, session_id)
+
+
+def inspect_state(scope):
+    """Inspect ownership/schema/pins without creating files or requiring a session."""
+    report = dict(configured=scope.runtime is not None, present=False, compatible=False,
+                  schema_version=SCHEMA_VERSION, policy_digest=scope.policy_digest,
+                  runtime_digest=runtime_fingerprint(), tasks=[])
+    if scope.runtime is None:
+        report["compatible"] = True
+        return report
+    report["present"] = os.path.lexists(scope.runtime.state_dir / "runtime.sqlite3")
+    try:
+        with _database(scope) as db:
+            if db:
+                for client, session, task_id in db.execute("select client,session_id,task_id from tasks where scope_id=?", (_scope_id(scope),)):
+                    task = _task(db, _scope_id(scope), client, session, task_id)
+                    report["tasks"].append(dict(task_id=task_id, pins=task["pins"], compatible=task["pins"] == _pins(scope)))
+                report["compatible"] = all(task["compatible"] for task in report["tasks"])
+            else:
+                report["compatible"] = True
+    except StateError as error:
+        report["error"] = str(error)
+    return report
+
+
+def start_task(scope, request):
+    _fields(request, ("client", "session_id", "task_id", "scope_ref", "mode", "decision_ref"), ("replaces",))
+    _identity(request)
+    _text(request["decision_ref"], "decision_ref")
+    if request["mode"] not in ("read-only", "editable"):
+        raise StateError("Invalid task mode")
+    replacement = request.get("replaces")
+    if "replaces" in request:
+        _fields(replacement, ("task_id", "expected_revision"))
+        _text(replacement["task_id"], "replaced task_id", 128)
+        _integer(replacement["expected_revision"], "expected_revision", 1)
+    pins = _pins(scope)
+    with _database(scope, write=True, initialize=True) as db:
+        scope_id = _scope_id(scope)
+        current = _task(db, scope_id, request["client"], request["session_id"])
+        if current and current["task_id"] == request["task_id"]:
+            _compatible(scope, current)
+            if any(current[field] != request[field] for field in ("scope_ref", "mode", "decision_ref")):
+                raise StateError("Task mode, scope and decision reference are immutable")
+            return _status(db, scope, request["client"], request["session_id"])
+        if db.execute("select 1 from tasks where scope_id=? and client=? and session_id=? and task_id=?",
+                      (scope_id, request["client"], request["session_id"], request["task_id"])).fetchone():
+            raise StateError("Historical task identity cannot be rebound or replaced")
+        if current:
+            _compatible(scope, current)
+            if replacement != dict(task_id=current["task_id"], expected_revision=current["revision"]):
+                raise StateError("Replacing a bound task requires its identity and current revision")
+            current["revision"] += 1
+            for condition in current["conditions"]:
+                if "continuation" in condition:
+                    condition["continuation"]["revoked"] = True
+            _save(db, scope_id, current)
+        elif replacement is not None:
+            raise StateError("No bound task matches the requested replacement")
+        db.execute("insert or ignore into checkouts values(?,?,?,?,0)",
+                   (scope_id, scope.project_id, str(scope.repository_root), str(scope.git_common_dir)))
+        task = {field: request[field] for field in ("client", "session_id", "task_id", "scope_ref", "mode", "decision_ref")}
+        task.update(state="planned", revision=1, pins=pins, reason="Task started", reference=request["decision_ref"],
+                    conditions=[], turn_id=None, turn_uncertain=True)
+        _save(db, scope_id, task)
+        db.execute("insert or replace into bindings values(?,?,?,?)", (scope_id, request["client"], request["session_id"], request["task_id"]))
+        return _status(db, scope, request["client"], request["session_id"])
+
+
+def _condition(value, task, previous):
+    _fields(value, ("id", "kind", "action", "reason", "reference"), ("continuation",))
+    for field in ("id", "reason", "reference"):
+        _text(value[field], "condition " + field, 128 if field == "id" else 1024)
+    if value["kind"] not in ("blocker", "decision", "runnable") or value["action"] not in ("patch", "task"):
+        raise StateError("Invalid condition kind or affected action")
+    condition = dict(value, status=previous.get("status", "pending") if previous else "pending")
+    if previous and previous.get("resolution_ref"):
+        condition["resolution_ref"] = previous["resolution_ref"]
+    if previous and (value["kind"], value["action"]) != (previous["kind"], previous["action"]):
+        raise StateError("A stable condition cannot change kind or action")
+    old = previous.get("continuation") if previous else None
+    if "continuation" in value:
+        continuation = value["continuation"]
+        _fields(continuation, ("turn_id", "budget"))
+        _text(continuation["turn_id"], "continuation turn_id")
+        if type(continuation["budget"]) is not int or continuation["budget"] not in (0, 1):
+            raise StateError("Continuation budget must be zero or one")
+        if (value["kind"] != "runnable" or task["state"] not in {"active", "verifying"} or
+                task["turn_id"] != continuation["turn_id"] or task["turn_uncertain"]):
+            raise StateError("Continuation requires a runnable condition and observed current task turn")
+        if old and (old["turn_id"] != continuation["turn_id"] or continuation["budget"] > old["budget"]):
+            raise StateError("A stable condition cannot change turns or increase its continuation budget")
+        condition["continuation"] = dict(continuation, consumed=old["consumed"] if old else 0,
+                                         revoked=old["revoked"] if old else False)
+    elif old:
+        condition["continuation"] = old
+    return condition
+
+
+def update_task(scope, request):
+    _fields(request, ("client", "session_id", "task_id", "scope_ref", "expected_revision", "state", "reason", "reference"),
+            ("conditions", "resolutions", "resolution_ref"))
+    _identity(request)
+    _integer(request["expected_revision"], "expected_revision", 1)
+    for field in ("reason", "reference"):
+        _text(request[field], field)
+    if "resolution_ref" in request:
+        _text(request["resolution_ref"], "resolution_ref")
+    if not isinstance(request["state"], str) or request["state"] not in STATES:
+        raise StateError("Invalid task state; D2 cannot declare ready")
+    for field in ("conditions", "resolutions"):
+        if field in request and (not isinstance(request[field], list) or len(request[field]) > 64):
+            raise StateError("Task conditions and resolutions must be bounded lists")
+    with _database(scope, write=True) as db:
+        if db is None:
+            raise StateError("Task state has not been initialized")
+        scope_id = _scope_id(scope)
+        task = _task(db, scope_id, request["client"], request["session_id"])
+        if task is None or task["task_id"] != request["task_id"] or task["scope_ref"] != request["scope_ref"]:
+            raise StateError("Task update does not match the current binding")
+        _compatible(scope, task)
+        if task["revision"] != request["expected_revision"]:
+            raise StateError("Task revision conflict")
+        old_state, state = task["state"], request["state"]
+        allowed = (old_state == state or state in {"awaiting_user", "blocked", "cancelled"} or
+                   (old_state, state) in {("planned", "active"), ("active", "verifying"), ("verifying", "active")} or
+                   (old_state in {"blocked", "awaiting_user"} and state in {"planned", "active", "verifying"} and
+                    "resolution_ref" in request))
+        if old_state == "cancelled" or not allowed:
+            raise StateError("Task state transition is not allowed")
+        task.update(state=state, reason=request["reason"], reference=request["reference"])
+        if "resolution_ref" in request:
+            task["resolution_ref"] = request["resolution_ref"]
+        conditions = {condition["id"]: condition for condition in task["conditions"]}
+        seen = set()
+        for value in request.get("conditions", []):
+            condition = _condition(value, task, conditions.get(value.get("id")) if isinstance(value, dict) and isinstance(value.get("id"), str) else None)
+            if condition["id"] in seen:
+                raise StateError("Duplicate condition identity")
+            seen.add(condition["id"])
+            conditions[condition["id"]] = condition
+        if len(conditions) > 64:
+            raise StateError("Task condition history exceeds its bound")
+        seen = set()
+        for resolution in request.get("resolutions", []):
+            _fields(resolution, ("id", "reference"))
+            _text(resolution["id"], "resolution id", 128)
+            _text(resolution["reference"], "resolution reference")
+            if resolution["id"] not in conditions or resolution["id"] in seen:
+                raise StateError("Resolution must identify an existing condition once")
+            seen.add(resolution["id"])
+            conditions[resolution["id"]].update(status="resolved", resolution_ref=resolution["reference"])
+        task["conditions"] = list(conditions.values())
+        if state in {"blocked", "awaiting_user", "cancelled"}:
+            for condition in task["conditions"]:
+                if "continuation" in condition:
+                    condition["continuation"]["revoked"] = True
+        task["revision"] += 1
+        _save(db, scope_id, task)
+        return _status(db, scope, request["client"], request["session_id"])
+
+
+def process_event(scope, event):
+    """Evaluate and apply in one short transaction; hooks never initialize state."""
+    if scope.runtime is None:
+        return HookResult(event.kind)
+    try:
+        with _database(scope, write=True) as db:
+            if db is None:
+                raise StateError("Task state has not been initialized")
+            scope_id = _scope_id(scope)
+            task = _task(db, scope_id, event.client, event.session_id)
+            _compatible(scope, task)
+            identity = (scope_id, event.client, event.session_id, event.turn_id)
+            row = db.execute("select task_id,continuation_consumed from turns where scope_id=? and client=? and session_id=? and turn_id=?", identity).fetchone() if event.turn_id else None
+            receipt_identity = (*identity, event.tool_call_id, event.kind)
+            receipt = db.execute("select fingerprint,conflicted from receipts where scope_id=? and client=? and session_id=? and turn_id=? and tool_call_id=? and kind=?", receipt_identity).fetchone() if event.turn_id and event.tool_call_id else None
+            result, changes = evaluate(event, dict(task=task, turn={"task_id": row[0], "continuation_consumed": row[1]} if row else None,
+                                                   receipt={"fingerprint": receipt[0], "conflicted": receipt[1]} if receipt else None))
+            if changes["generation_delta"]:
+                db.execute("insert or ignore into checkouts values(?,?,?,?,0)", (scope_id, scope.project_id, str(scope.repository_root), str(scope.git_common_dir)))
+                db.execute("update checkouts set generation=generation+? where scope_id=?", (changes["generation_delta"], scope_id))
+            if "receipt" in changes:
+                db.execute("insert into receipts values(?,?,?,?,?,?,?,0)", (*receipt_identity, changes["receipt"]))
+            if changes.get("poison_receipt"):
+                db.execute("update receipts set conflicted=1 where scope_id=? and client=? and session_id=? and turn_id=? and tool_call_id=? and kind=?", receipt_identity)
+            if "turn" in changes:
+                db.execute("insert into turns values(?,?,?,?,?,0)", (*identity, changes["turn"]["task_id"]))
+            if changes.get("consume_turn"):
+                db.execute("update turns set continuation_consumed=1 where scope_id=? and client=? and session_id=? and turn_id=?", identity)
+            if "task" in changes:
+                _save(db, scope_id, changes["task"])
+            return result
+    except (StateError, KeyError, TypeError):
+        if event.kind == "PreToolUse" and event.tool_name == "apply_patch":
+            return HookResult(event.kind, "deny", "Runtime state is missing, unsafe or incompatible; inspect task status")
+        if event.kind == "Stop":
+            return HookResult(event.kind)
+        return HookResult(event.kind, "context", "Runtime state is unavailable; event processing and coverage are unverified")

@@ -1,16 +1,18 @@
 # Onboard my Project
 
-Design and implementation plan · 25 October 2026 · **Stages, feature baseline, activation behavior, client scope and all eleven policy contracts approved; D1 startup implemented; later runtime slices proposed**
+Design and implementation plan · 25 October 2026 · **Stages, feature baseline, activation behavior, client scope and all eleven policy contracts approved; D1 startup and D2 Codex runtime implemented; bounded native D2 qualification recorded**
 
-Outcome: enroll a project once, then activate its agreed workflow during ordinary coding requests. Qualify each client's actual behavior. The Codex startup slice exists; onboarding, action guards and merge enforcement remain planned.
+Outcome: enroll a project once, then activate its agreed workflow during ordinary coding requests. Qualify each client's actual behavior. Codex startup and opt-in D2 task controls exist; guided onboarding and merge enforcement remain planned.
 
 Contract loading: [policy index](../policies/00-index.md). The user approved all eleven contracts on 25 October 2026.
 
 Track draft approvals in development records; release packages include only approved contracts.
 
-Contract approval does not establish client execution or project adoption. D1 qualification precedes D2 enforcement work and reuse by other clients.
+Contract approval does not establish client execution or project adoption. D1 startup qualification and bounded D2 native execution evidence are recorded separately.
 
-D1 startup implementation and observed Codex execution are recorded in [Codex validation](codex-validation.md). D2 is the next implementation slice; desktop UI and model policy compliance remain unqualified.
+D1 startup implementation is recorded in [Codex validation](codex-validation.md). D2 controls and bounded native observations are in [D2 validation](d2-validation.md); the bundled controlled Stop-held Interrupt case passed, while ordinary read-first correlation, desktop UI and model policy compliance remain unqualified.
+
+The [concrete D2 plan](d2-runtime-plan.md) scopes native state, guards, invalidation, Stop handling and diagnostics. Superset remains optional; no backend integration or onboarding choice is added in D2.
 
 The user authorized the same startup layer for the next clients. Claude Code now reuses the shared startup protocol; Superset is documented as a host for native adapters. See [Claude and Superset validation](claude-and-superset-validation.md). This advances startup support only; D8's full lifecycle qualification still follows the required runtime/onboarding slices.
 

@@ -16,10 +16,11 @@ Read `.vibe-coding-workflow/project.json` only at the checkout root. Startup tes
 | `git_common_dir` | Exact canonical absolute common Git directory |
 | `clients` | Nonempty list of selected native client IDs: `codex`, `claude-code` |
 | `policy_digest` | SHA-256 over sorted `policies/*.md`: filename, NUL, file bytes, NUL, repeated |
+| `runtime` (optional) | Codex D2 opt-in: schema version and private external state directory; see the [runtime contract](runtime.md) |
 
 Additional project fields remain available to later slices. Require the current native client in `clients`. Superset is a host, not a client ID or an enrollment signal. This startup record does not distinguish host surfaces; qualify the actual launch separately.
 
-A copied checkout record, changed policy digest, malformed JSON, link or special-file record produces a diagnostic. Reconcile accepted scope/version through onboarding; never silently rewrite it during startup.
+A copied checkout record, changed policy digest, malformed JSON, link or special-file record produces a diagnostic. Reconcile accepted scope/version through onboarding; never silently rewrite it during startup. Omitting `runtime` preserves startup-only behavior. This field does not enable Claude lifecycle controls.
 
 ## Runtime limits
 

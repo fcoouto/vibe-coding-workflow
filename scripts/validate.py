@@ -39,6 +39,30 @@ def validate_startup_hook(root, manifest, client, root_variable):
     local_file(root, "./runtime/adapters/" + client.replace("-", "_") + ".py")
 
 
+def validate_codex_hooks(root, manifest):
+    hooks = read_json(local_file(root, manifest["hooks"]))["hooks"]
+    events = {
+        "SessionStart": ("^(startup|resume|clear|compact|fork)$", 5),
+        "PreToolUse": ("^apply_patch$", 5),
+        "PostToolUse": ("*", 5),
+        "Stop": (None, 5),
+        "Interrupt": (None, 1),
+    }
+    if set(hooks) != set(events):
+        raise ValueError("Require the supported Codex hook events exactly once")
+    for event, (matcher, timeout) in events.items():
+        groups = hooks[event]
+        if not isinstance(groups, list) or len(groups) != 1:
+            raise ValueError("Register one Codex hook group per event")
+        group = groups[0]
+        expected_group = {"hooks"} if matcher is None else {"matcher", "hooks"}
+        if not isinstance(group, dict) or set(group) != expected_group or group.get("matcher") != matcher:
+            raise ValueError("Use the required Codex event matcher")
+        command = f'python3 -I -B "${{PLUGIN_ROOT}}/scripts/workflow.py" codex {event}'
+        if group["hooks"] != [{"type": "command", "command": command, "timeout": timeout}]:
+            raise ValueError("Use the bounded Codex runtime command")
+
+
 def validate(root=ROOT):
     root = root.resolve(strict=True)
     manifest = read_json(root / ".codex-plugin/plugin.json")
@@ -57,11 +81,14 @@ def validate(root=ROOT):
         raise ValueError("Client manifests must identify the same package version")
     if (root / "hooks/hooks.json").exists():
         raise ValueError("Default hooks would duplicate Claude's explicit registration")
-    validate_startup_hook(root, manifest, "codex", "PLUGIN_ROOT")
+    local_file(root, "./clients/codex.md")
+    local_file(root, "./runtime/adapters/codex.py")
+    validate_codex_hooks(root, manifest)
     validate_startup_hook(root, claude, "claude-code", "CLAUDE_PLUGIN_ROOT")
     for path in ("scripts/workflow.py", "runtime/__init__.py", "runtime/startup.py",
+                 "runtime/engine.py", "runtime/state.py", "runtime/doctor.py",
                  "runtime/adapters/__init__.py", "runtime/adapters/session_start.py",
-                 "clients/index.md", "clients/startup.md", "policies/00-index.md"):
+                 "clients/index.md", "clients/startup.md", "clients/runtime.md", "policies/00-index.md"):
         local_file(root, "./" + path)
     if manifest.get("skills") != "./skills/":
         raise ValueError("Discover the packaged skills directory")

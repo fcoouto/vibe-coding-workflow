@@ -2,7 +2,7 @@
 
 [Vibe Coding Toolkit](https://github.com/soumatheusgomes/vibe-coding-toolkit), packaged for your coding agent.
 
-**Early development.** The workspace skill and Codex/Claude Code startup adapters exist. Explicit project onboarding and workflow enforcement remain planned. See the [client contracts](clients/index.md) for implemented scope and validation limits.
+**Early development.** Codex has opt-in task controls and read-only diagnostics, with bounded CLI and bundled app-server qualification, including a controlled Interrupt case. General turn correlation, desktop UI behavior, and Claude lifecycle remain unqualified. See the [client contracts](clients/index.md) for current scope and [D2 validation](docs/d2-validation.md).
 
 ## Prepare your Workspace
 

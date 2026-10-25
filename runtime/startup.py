@@ -18,6 +18,10 @@ class StartupError(ValueError):
     """A safe, actionable startup diagnostic with no input contents."""
 
 
+class RuntimeScopeError(StartupError):
+    """Accepted runtime scope whose installed policy/client source is incompatible."""
+
+
 @dataclass(frozen=True)
 class StartupEvent:
     client: str
@@ -26,6 +30,21 @@ class StartupEvent:
     source: str
     model: str | None = None
     permission_mode: str | None = None
+
+
+@dataclass(frozen=True)
+class RuntimeSettings:
+    schema_version: int
+    state_dir: Path
+
+
+@dataclass(frozen=True)
+class ProjectScope:
+    project_id: str
+    repository_root: Path
+    git_common_dir: Path
+    policy_digest: str
+    runtime: RuntimeSettings | None = None
 
 
 def json_object(raw):
@@ -111,7 +130,44 @@ def policy_digest(package):
     return digest.hexdigest()
 
 
-def orient(event, package):
+def runtime_settings(record, package, common):
+    """Validate opt-in location without creating or opening runtime state."""
+    if "runtime" not in record:
+        return None
+    settings = record["runtime"]
+    if not isinstance(settings, dict) or type(settings.get("schema_version")) is not int or settings["schema_version"] != 1:
+        raise StartupError("Unsupported runtime configuration schema")
+    value = settings.get("state_dir")
+    if not isinstance(value, str) or not value or len(value) > 4096 or any(not char.isprintable() for char in value):
+        raise StartupError("Invalid runtime state directory")
+    path = Path(value)
+    if not path.is_absolute() or str(path.resolve()) != value:
+        raise StartupError("Runtime state directory must be absolute and canonical")
+    if path.is_relative_to(package.resolve()) or path.is_relative_to(common):
+        raise StartupError("Runtime state directory must be outside repositories and plugin caches")
+    for ancestor in (path, *path.parents):
+        if os.path.lexists(ancestor) and not ancestor.is_dir():
+            raise StartupError("Runtime state directory ancestors must be directories")
+        if os.path.lexists(ancestor / ".git") or (
+                ancestor.name == "plugins" and ancestor.parent.name in {".codex", ".claude"}) or (
+                ancestor.name == "cache" and ancestor.parent.name == "plugins"):
+            raise StartupError("Runtime state directory must be outside repositories and plugin caches")
+    existing = next(ancestor for ancestor in (path, *path.parents) if ancestor.is_dir())
+    # Bare repositories have no .git marker; discover from the nearest existing directory.
+    discovery = subprocess.run(
+        ["git", "-c", "safe.bareRepository=all", "-C", str(existing),
+         "rev-parse", "--absolute-git-dir"],
+        env={**{key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
+             "GIT_DISCOVERY_ACROSS_FILESYSTEM": "1"},
+        capture_output=True, text=True, timeout=2, check=False,
+    )
+    if discovery.returncode == 0:
+        raise StartupError("Runtime state directory must be outside repositories and plugin caches")
+    return RuntimeSettings(1, path)
+
+
+def resolve_project(event, package) -> ProjectScope | None:
+    """Resolve accepted checkout scope, preserving silence outside enrollment."""
     root = repository_root(event.cwd)
     if root is None:
         return None
@@ -132,16 +188,37 @@ def orient(event, package):
     root, common = checkout(root)
     if record.get("repository_root") != str(root) or record.get("git_common_dir") != str(common):
         raise StartupError("Enrollment does not cover this checkout")
-    if record.get("policy_digest") != policy_digest(package):
-        raise StartupError("Installed policies differ from the accepted enrollment")
+    runtime = runtime_settings(record, package, common)
+    scope_error = RuntimeScopeError if runtime is not None else StartupError
+    try:
+        installed_policy = policy_digest(package)
+    except (StartupError, OSError):
+        raise scope_error("Installed policy sources are unavailable") from None
+    if record.get("policy_digest") != installed_policy:
+        raise scope_error("Installed policies differ from the accepted enrollment")
     client_file = package / "clients" / f"{event.client}.md"
     if not client_file.is_file():
-        raise StartupError("Installed client instructions are missing")
-    return (
+        raise scope_error("Installed client instructions are missing")
+    return ProjectScope(record["project_id"], root, common, record["policy_digest"],
+                        runtime)
+
+
+def orient(event, package):
+    scope = resolve_project(event, package)
+    if scope is None:
+        return None
+    client_file = package / "clients" / f"{event.client}.md"
+    context = (
         "Vibe Coding Workflow applies to this enrolled checkout. Read the client instructions at "
         f"{json.dumps(str(client_file))}, the policy index at "
         f"{json.dumps(str(package / 'policies/00-index.md'))}, and accepted project configuration at "
-        f"{json.dumps(str(root / PROJECT_FILE))}. Load only triggered policies and applicable "
+        f"{json.dumps(str(scope.repository_root / PROJECT_FILE))}. Load only triggered policies and applicable "
         "project/directory instructions. Activate silently; explain useful task steps, blockers or "
         "decisions. Startup supplies orientation only; it does not establish enforcement or readiness."
     )
+    if scope.runtime is not None and event.client == "codex":
+        context += (f" Runtime state: {json.dumps(str(scope.runtime.state_dir / 'runtime.sqlite3'))}; "
+                    f"native Codex session: {json.dumps(event.session_id)}. Read existing task status with task status; startup never changes bindings or pins.")
+        if len(context.split()) > 150:
+            raise StartupError("Runtime startup orientation exceeds the context limit")
+    return context
