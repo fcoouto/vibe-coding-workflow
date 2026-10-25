@@ -1,7 +1,5 @@
 # Approved policy contracts
 
-Approved · 25 October 2026 · **Contracts finalized; runtime implementation pending.**
-
 These contracts follow the [three-stage design](onboard-my-project-plan.md#2-stages-and-policy-decisions): Installation provides capabilities; Project Onboarding adopts and qualifies mandatory policies; Runtime determines applicable actions and verifies their outcomes. Agents assess meaning, risk and capability; scripts enforce recorded permissions, limits, ownership and evidence requirements. A completed record alone does not prove a correct decision.
 
 ## Delegation and Model Selection

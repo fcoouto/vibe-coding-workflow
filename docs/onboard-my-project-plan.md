@@ -1,6 +1,6 @@
 # Onboard my Project
 
-Design and implementation plan · 25 October 2026 · **Stages, feature baseline and two policy contracts approved; runtime implementation proposed**
+Design and implementation plan · 25 October 2026 · **Stages, feature baseline, activation behavior and two policy contracts approved; runtime implementation proposed**
 
 Outcome: enroll a project once, then activate its agreed workflow during ordinary coding requests. Qualify each client's actual behavior. This document plans the implementation; onboarding, hooks and merge enforcement are not implemented yet.
 
@@ -19,13 +19,19 @@ For every new onboarding/update run, resolve current toolkit `main` once. Read a
 
 ## 2. Stages and policy decisions
 
-The user approved these three stages, the feature tables below and the two linked policy contracts. Other policy details and implementation choices remain proposals.
+The user approved these three stages, the feature tables, activation behavior below and the two linked policy contracts. Other policy details and implementation choices remain proposals.
 
 | Stage | Responsibility | Evidence |
 | --- | --- | --- |
 | **1. Installation** | Make the plugin's capabilities available in the selected clients | Package discovery and working required adapters, hooks, runtime and diagnostics |
 | **2. Project Onboarding** | Resolve conflicts, adopt mandatory policies and configure their mechanisms for the selected project | Recorded decisions, qualified project configuration and complete toolkit coverage |
 | **3. Runtime** | Evaluate adopted policies for each task and enforce their required actions | Applicability decisions and current check, review and completion evidence |
+
+### Activation and communication
+
+Activate the workflow only for explicitly onboarded projects; installation alone does not enroll a project. Confirm successful onboarding once. During ordinary tasks, check enrollment and load applicable policy and state silently. Do not announce routine activation or repeat unchanged policy explanations.
+
+Briefly explain only useful task steps, blockers (including broken integration), or decisions the user needs to make. Expand explanations only as needed to resolve a blocker or support a decision. Silent activation preserves required checks, evidence and completion reporting; it does not establish that integration is healthy.
 
 ### Project Onboarding steps
 
@@ -76,9 +82,7 @@ Track three facts separately: **policy adopted and mechanism qualified**, **acti
 
 Proposed feature records: `id, stage, mandatory_adoption, basis/source, execution_rule, adoption, verification, evidence_or_blocker`. Stage values are `installation`, `project_onboarding` and `runtime`. Adoption is `not_assessed`, `adopted`, `reused_equivalent`, `not_adopted` or `blocked`; verification is separate (`not_run`, `passed`, `failed`). Runtime decisions record the policy/task identity, applicability, reason, required actions and current evidence. Installed/configured alone is insufficient; existing equivalents require behavioral evidence.
 
-**Project readiness:** every mandatory policy and its mechanism for the accepted scope must be adopted and qualified. Otherwise Project Onboarding remains incomplete, with the blocker and remedy. Qualification proves the policy can operate; it does not require executing every possible future review or preapprove any future task. Runtime enforces triggered actions again. An unavailable required specialist blocks dependent completion or merge while independent authorized work continues. Optional omissions may remain explicit. No onboarding mode, adoption flag or unsupported client can waive a mandatory policy.
-
-Preserve mode reuses a compliant existing mechanism wherever possible. If an existing policy prevents a required feature, present the conflict and a scoped resolution. If the user retains that incompatible policy, keep enrollment incomplete. Do not silently overwrite their workflow or offer to skip the requirement and still mark the project ready. Independent authorized work can continue.
+**Project readiness:** apply the [mandatory-adoption rule](#project-policies-and-runtime-decisions) throughout the accepted scope. Missing adoption or mechanism qualification leaves Project Onboarding incomplete, with the blocker and remedy. Qualification proves the policy can operate; it does not require executing every possible future review or preapprove any future task. Runtime enforces triggered actions again. An unavailable required specialist blocks dependent completion or merge while independent authorized work continues. Optional omissions may remain explicit.
 
 ### Choose how to handle existing policies
 
@@ -96,9 +100,7 @@ The user proposed these three modes. Recommend choice 1 when they want guidance,
 
 Record `onboarding_mode`, repository/client scope and the decision reference in project policy. Reuse the preference on reruns within its scope. A mode controls conflict resolution; authorization to apply changes remains tied to the reviewed plan. No answer in a noninteractive run means pending, not implied replacement permission.
 
-In preserve mode, assess the full toolkit catalog. Optional conflicts may be recorded as `not_adopted`, reason `deferred_by_user_policy`. Required conflicts remain `blocked`, and prevent enrollment readiness until resolved. Report actual adoption and enforcement separately; never describe a deferred or unverified requirement as satisfied.
-
-The earlier ambiguity is resolved: a new mandatory step must be satisfied under every mode. For example, an existing “merge after tests” process cannot be fully enrolled into the requested reviewed-merge workflow without adding or reusing a compliant review step. Additional optional steps remain subject to the selected mode and project decisions.
+In preserve mode, reuse compliant existing mechanisms. Present incompatible policies with a scoped resolution; retaining one leaves the required feature `blocked` under the [readiness rules](#readiness-and-evidence). Do not silently overwrite the user's workflow. Record optional conflicts as `not_adopted`, reason `deferred_by_user_policy`. Report actual adoption and enforcement separately.
 
 **Proposed replacement boundary, awaiting refinement:** replace the selected project's AI workflow instructions, hooks and agent configuration; retain product requirements, application code, architecture constraints, credentials and unrelated tooling. Shared/global integrations require separate scope decisions. The mode does not override host or organization controls, or authorize new costs and production changes.
 
@@ -121,8 +123,6 @@ Examples:
 Record each material decision as `id, scope, options, selected_value, provenance, status, affected_actions, invalidation_trigger`. Provenance distinguishes user confirmation, existing project rules, observed facts and assumptions. Status is `confirmed`, `inherited`, `proposed` or `pending`. Store the evidence/reference behind inherited choices. The enrollment journal also binds approvals to a design/plan digest, scope and user-message reference. Material revisions reopen only affected decisions and approvals.
 
 Use the host's question UI when available and ordinary conversation otherwise. Hook subprocesses never attempt an interactive questionnaire. In a noninteractive run, return the pending question and continue independent authorized work.
-
-Existing constraints carry forward: concise instructions; full toolkit coverage; preserve customizations and the main model; paid subscriptions only for model routing; no local-model or new API-billing default.
 
 ## 3. Architecture
 
@@ -260,6 +260,8 @@ Add only the dispatcher, Codex normalization/response module, root resolution, s
 
 Run package validation, fixture checks, `git diff --check`, then a real new-session startup probe on the target client. Record client surface/version and hook trust. If that client is unavailable here, report the live probe as not run. Do not change PHIOON as part of D1.
 
+Check the [approved activation behavior](#activation-and-communication) in enrolled, unenrolled and broken-integration scenarios, distinguishing internal context loading from user-facing messages.
+
 ### Project Onboarding transaction rules for D4
 
 Bind the apply plan to target identity, source/policy revision and before-file hashes. Back up changed owned content; write each file atomically and journal progress. Filesystem edits are not a single atomic transaction: recovery reconciles each applied operation. Resume from verified state. Rollback restores only content still matching the plugin's recorded output; concurrent user edits become explicit conflicts. Privileged/external changes remain separate operations with their own authorization and recovery.
@@ -290,7 +292,7 @@ Upstream's native harness method supplies the evaluation procedure: run relevant
 8. [GitHub rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets).
 9. [GitHub required-check behavior](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks).
 10. Secondary reference: [`vibe-setup` workflow transactions][reference-workflow], [subagent hooks][reference-hooks] and [native qualification][reference-native].
-11. Refinement method: Superpowers Brainstorming through the available skill; [published reference][brainstorming].
+11. [Instruction authoring standard](../AGENTS.md#instruction-authoring).
 
 [setup]: https://github.com/soumatheusgomes/vibe-coding-toolkit/blob/790a895304e0c08b70a5b215c9d334f1c86b816c/docs/prompts/12-existing-project-setup.md
 [toolkit-hooks]: https://github.com/soumatheusgomes/vibe-coding-toolkit/blob/790a895304e0c08b70a5b215c9d334f1c86b816c/docs/tools/10-hooks-best-practices.md
@@ -299,4 +301,3 @@ Upstream's native harness method supplies the evaluation procedure: run relevant
 [reference-workflow]: https://github.com/fcoouto/vibe-setup/blob/aa72e11fd05252fbedc3258813b9c6144ddb3101/skills/vibe-setup/workflow.py
 [reference-hooks]: https://github.com/fcoouto/vibe-setup/blob/aa72e11fd05252fbedc3258813b9c6144ddb3101/.codex/hooks/subagents.py
 [reference-native]: https://github.com/fcoouto/vibe-setup/blob/aa72e11fd05252fbedc3258813b9c6144ddb3101/skills/vibe-setup/native_qualification.py
-[brainstorming]: https://github.com/obra/superpowers/blob/bb92a77741419a4ab5f06e711a283343f1ada0c3/skills/brainstorming/SKILL.md
