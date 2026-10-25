@@ -2,14 +2,16 @@
 
 [Vibe Coding Toolkit](https://github.com/soumatheusgomes/vibe-coding-toolkit), packaged for your coding agent.
 
-## 1. Start here: Prepare your Workspace
+**Early development.** The workspace skill and package metadata exist. Project onboarding, automatic activation, runtime and enforcement are not implemented. Installed-client execution is not yet qualified.
 
-Paste this into a coding agent with terminal access to the machine you want to prepare:
+## Prepare your Workspace
+
+Open this checkout in a coding agent with terminal access to the destination machine:
 
 ```text
-Read https://raw.githubusercontent.com/soumatheusgomes/vibe-coding-toolkit/main/docs/03-environment-setup.md and execute the complete setup prompt it links on this machine.
+Read skills/prepare-my-workspace/SKILL.md and use it to prepare this machine.
 ```
 
-<sub>For packaged skills in Codex desktop, open this repository and install `vibe-coding-workflow` from the `vibe-coding-workflow-local` marketplace. Refresh the installed copy after plugin changes.</sub>
+For local plugin testing, run `codex plugin marketplace add .` from this checkout, then restart Codex desktop. Select `vibe-coding-workflow-local`, install `vibe-coding-workflow`, and invoke `prepare-my-workspace`, which uses the same instructions. Refresh the installed copy after changes. See [OpenAI's marketplace guide](https://developers.openai.com/plugins/build/plugins#add-a-marketplace-from-the-cli).
 
 [Development guide](AGENTS.md)
