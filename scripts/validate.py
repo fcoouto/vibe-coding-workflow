@@ -86,9 +86,9 @@ def validate(root=ROOT):
     validate_codex_hooks(root, manifest)
     validate_startup_hook(root, claude, "claude-code", "CLAUDE_PLUGIN_ROOT")
     for path in ("scripts/workflow.py", "runtime/__init__.py", "runtime/startup.py",
-                 "runtime/engine.py", "runtime/state.py", "runtime/doctor.py",
+                 "runtime/engine.py", "runtime/state.py", "runtime/doctor.py", "runtime/evidence.py",
                  "runtime/adapters/__init__.py", "runtime/adapters/session_start.py",
-                 "clients/index.md", "clients/startup.md", "clients/runtime.md", "policies/00-index.md",
+                 "clients/index.md", "clients/startup.md", "clients/runtime.md", "clients/evidence.md", "policies/00-index.md",
                  "runtime/onboarding.py", "runtime/changes.py",
                  "skills/onboard-my-project/SKILL.md",
                  "skills/onboard-my-project/references/procedure.md",

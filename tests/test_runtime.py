@@ -1,6 +1,7 @@
 """Runtime boundaries use disposable enrollments; no hooks, models or user state."""
 
 import json
+import hashlib
 import os
 import shutil
 from pathlib import Path
@@ -144,6 +145,64 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(code, 1, output)
             self.assertFalse(output["ok"])
             self.assertNotIn("Traceback", str(output))
+
+    def test_evidence_cli_trivial_completion_and_separate_merge_evidence(self):
+        (self.repo / 'note.txt').write_text('fixture')
+        self.git(self.repo, 'add', '.')
+        self.git(self.repo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture')
+        self.enroll(runtime=self.runtime())
+        identity = dict(client='codex', session_id='session-1', task_id='evidence-cli', scope_ref='user:task')
+        self.assertEqual(self.task_cli('start', identity | dict(mode='editable', decision_ref='user:accepted'))[0], 0)
+        def evidence(parts, request=None, *flags):
+            result = subprocess.run([sys.executable, '-I', '-B', str(PACKAGE / 'scripts/workflow.py'),
+                'evidence', *parts, '--cwd', str(self.repo), *flags], input=json.dumps(request).encode() if request else b'',
+                capture_output=True, timeout=10)
+            self.assertEqual(result.stderr, b'')
+            return result.returncode, json.loads(result.stdout)
+        applicability = dict(applicability='inapplicable', reason='Small text change has no program boundary impact', independent=False)
+        plan = dict(version=1, decision_ref='user:accepted', criteria=[dict(id='static', checks=['unit'], behavior=False)],
+            checks=[dict(id='unit', argv=[sys.executable, '-c', 'pass'], cwd='.', timeout=3, env={'PATH': os.defpath},
+                effects=dict(kind='read-only', inspection_ref='code:inspected', network=False, production=False,
+                             publish=False, migrations=False), baseline=dict(status='passed', reference='baseline:1'), dependencies=['note.txt'])],
+            reviews={'general': applicability, 'security': applicability},
+            security_impact=dict(status='assessed', reason='Text change checked against boundaries', reference='code:impact'),
+            base='HEAD', comparison='endpoint', nontrivial=False, instructions=[], exclusions=[], review_limit=1)
+        code, result = evidence(['plan'], identity | dict(expected_revision=1, plan=plan))
+        self.assertEqual(code, 0, result)
+        code, result = evidence(['check'], identity | dict(expected_revision=result['task']['revision'], check_id='unit'))
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result['attempt']['status'], 'uncertain')
+        # This fixture supplies an explicit synthetic host observation, separate from execution result.
+        attempt = result['attempt']
+        code, observed = evidence(['status'], None, '--client', 'codex', '--session', 'session-1')
+        self.assertEqual(code, 0, observed)
+        proof = dict(version=1, kind='check-writer-reconciliation', identity=identity, expected_pins=result['task']['pins'],
+            expected_revision=result['task']['revision'], scope_id=observed['scope_id'], attempt_id=attempt['id'],
+            candidate_digest=attempt['candidate_digest'], current_candidate_digest=observed['evidence']['candidate_digest'],
+            plan_digest=attempt['plan_digest'], execution_digest=attempt['execution']['digest'], stopped=True,
+            descendants_stopped=True, observation_ref='fixture:explicit-host-observation', coordinator_ref='fixture:checked')
+        raw = json.dumps(proof).encode()
+        host_path = self.base / 'check-host-proof.json'
+        host_path.write_bytes(raw)
+        host_path.chmod(0o400)
+        code, result = evidence(['reconcile-check'], identity | dict(expected_revision=result['task']['revision'],
+            attempt_id=attempt['id'], host_proof=dict(path=str(host_path), sha256=hashlib.sha256(raw).hexdigest())))
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result['attempt']['status'], 'passed')
+        code, result = evidence(['verify'], identity | dict(expected_revision=result['task']['revision'], purpose='completion'))
+        self.assertTrue(result['verified'], result)
+        self.assertEqual(result['task']['state'], 'ready')
+        code, status = evidence(['status'], None, '--client', 'codex', '--session', 'session-1')
+        self.assertEqual(code, 0, status)
+        self.assertEqual(status['task']['state'], 'ready')
+        code, result = evidence(['verify'], identity | dict(expected_revision=status['task']['revision'], purpose='merge-evidence'))
+        self.assertEqual(code, 0, result)
+        self.assertFalse(result['verified'])
+        self.assertFalse(result['merge_authority'])
+        code, result = evidence(['review', 'collect'], identity | dict(expected_revision=result['task']['revision'],
+                            attempt_id='forged', parent_turn_id='turn', spawn_item_id='spawn'))
+        self.assertEqual(code, 1, result)
+        self.assertNotIn('Traceback', str(result))
 
     def test_task_cli_unconfigured_scope_does_not_initialize(self):
         self.enroll()

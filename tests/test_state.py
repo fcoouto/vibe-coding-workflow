@@ -62,6 +62,37 @@ class StateTests(unittest.TestCase):
         self.event()
         self.update(conditions=[self.runnable()])
 
+    def test_historical_retirement_requires_exact_stopped_writer_proof_and_preserves_pins(self):
+        import hashlib
+        self.start()
+        old = self.status()["task"]
+        self.start(task_id="new", replaces={"task_id": "task", "expected_revision": old["revision"]})
+        with self.api()._database(self.scope) as db:
+            historical = self.api()._task(db, self.api()._scope_id(self.scope), "codex", "session", "task")
+        identity = {key: historical[key] for key in ("client", "session_id", "task_id", "scope_ref")}
+        request = identity | dict(expected_revision=historical["revision"], expected_pins=historical["pins"],
+                                 reason="Old writer stopped", reference="host:reconciliation")
+        with self.assertRaises(self.api().StateError):
+            self.api().retire_task(self.scope, request | dict(stop_proof={"stopped": True}))
+        proof = dict(version=1, kind="stopped-writer-reconciliation", identity=identity,
+                     expected_revision=historical["revision"], expected_pins=historical["pins"],
+                     observed_turn_id=historical["turn_id"], stopped=True, descendants_stopped=True,
+                     attempt_ids=[], observation_ref="host:observed-processes", coordinator_ref="coordinator:checked")
+        raw = json.dumps(proof).encode()
+        path = self.base / "stop-proof.json"
+        path.write_bytes(raw)
+        path.chmod(0o400)
+        request["stop_proof"] = dict(path=str(path), sha256=hashlib.sha256(raw).hexdigest())
+        with self.assertRaises(self.api().StateError):
+            self.api().retire_task(self.scope, request | dict(expected_revision=1))
+        with patch.object(self.api(), "runtime_fingerprint", return_value="new-runtime"):
+            result = self.api().retire_task(self.scope, request)
+        self.assertEqual(result["task"]["state"], "cancelled")
+        self.assertEqual(result["task"]["pins"], historical["pins"])
+        self.assertEqual(self.status()["task"]["task_id"], "new")
+        with self.assertRaises(self.api().StateError):
+            self.api().retire_task(self.scope, request)
+
     def test_start_restart_idempotence_and_pins(self):
         first = self.start()
         self.assertEqual(first["task"]["state"], "planned")

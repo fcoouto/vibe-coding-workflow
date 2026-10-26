@@ -25,12 +25,25 @@ def control_main():
         commands = parser.add_subparsers(dest="command", required=True)
         task = commands.add_parser("task", add_help=False)
         actions = task.add_subparsers(dest="action", required=True)
-        for name in ("start", "update", "status"):
+        for name in ("start", "update", "status", "retire"):
             action = actions.add_parser(name, add_help=False)
             action.add_argument("--cwd", required=True)
             if name == "status":
                 action.add_argument("--client", required=True, choices=("codex",))
                 action.add_argument("--session", required=True)
+        evidence = commands.add_parser("evidence", add_help=False)
+        evidence_actions = evidence.add_subparsers(dest="action", required=True)
+        for name in ("plan", "status", "check", "reconcile-check", "verify"):
+            action = evidence_actions.add_parser(name, add_help=False)
+            action.add_argument("--cwd", required=True)
+            if name == "status":
+                action.add_argument("--client", required=True, choices=("codex",))
+                action.add_argument("--session", required=True)
+        review = evidence_actions.add_parser("review", add_help=False)
+        review_actions = review.add_subparsers(dest="review_action", required=True)
+        for name in ("prepare", "collect", "assess"):
+            action = review_actions.add_parser(name, add_help=False)
+            action.add_argument("--cwd", required=True)
         doctor = commands.add_parser("doctor", add_help=False)
         doctor.add_argument("--cwd", required=True)
         doctor.add_argument("--client", required=True, choices=("codex",))
@@ -56,7 +69,8 @@ def control_main():
                 report = operation[args.action](Path(args.plan_dir), request)
             print(json.dumps(report))
             return report["exit_code"]
-        if args.command == "task" and args.action in ("start", "update"):
+        if (args.command == "task" and args.action in ("start", "update", "retire") or
+                args.command == "evidence" and args.action != "status"):
             request = json_object(sys.stdin.buffer.read(MAX_INPUT + 1))
             client = request.get("client")
             if client != "codex":
@@ -73,11 +87,19 @@ def control_main():
             raise StartupError("The requested checkout is not enrolled for this client")
         if scope.runtime is None:
             raise StartupError("Runtime state is not configured for this checkout")
-        from runtime.state import start_task, update_task, task_status
+        if args.command == "evidence":
+            from runtime import evidence
+            operations = {"plan": evidence.plan_evidence, "check": evidence.run_check, "reconcile-check": evidence.reconcile_check, "verify": evidence.verify_completion,
+                          "prepare": evidence.prepare_review, "collect": evidence.collect_review, "assess": evidence.assess_review}
+            report = (evidence.evidence_status(scope, client, args.session) if args.action == "status" else
+                      operations[args.review_action if args.action == "review" else args.action](scope, request))
+            print(json.dumps(report))
+            return 0
+        from runtime.state import start_task, update_task, task_status, retire_task
         if args.action == "status":
             report = task_status(scope, client, args.session)
         else:
-            report = (start_task if args.action == "start" else update_task)(scope, request)
+            report = {"start": start_task, "update": update_task, "retire": retire_task}[args.action](scope, request)
         print(json.dumps(report))
         return 0
     except StartupError as error:
@@ -89,7 +111,7 @@ def control_main():
 
 
 def main():
-    control = len(sys.argv) > 1 and sys.argv[1] in {"task", "doctor", "onboard"}
+    control = len(sys.argv) > 1 and sys.argv[1] in {"task", "doctor", "onboard", "evidence"}
     if sys.version_info < (3, 11):
         print(json.dumps({"ok": False, "error": "Vibe Coding Workflow requires Python 3.11+"} if control else
                          {"systemMessage": "Vibe Coding Workflow requires Python 3.11+ on the hook PATH."}))
