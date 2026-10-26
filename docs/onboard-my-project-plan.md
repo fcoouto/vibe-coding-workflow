@@ -1,6 +1,6 @@
 # Onboard my Project
 
-Design and implementation plan · 25 October 2026 · **Stages, feature baseline, activation behavior, client scope and all eleven policy contracts approved; D1 startup, D2 Codex runtime and D3 private planning implemented; bounded native D2 qualification recorded**
+Design and implementation plan · 26 October 2026 · **Stages, feature baseline, activation behavior, client scope and all eleven policy contracts approved; D1 startup, D2 Codex runtime and D3 private planning implemented; bounded native D2 qualification recorded**
 
 Outcome: enroll a project once, then activate its agreed workflow during ordinary coding requests. Qualify each client's actual behavior. Codex startup, opt-in D2 task controls and the D3 private inspect/plan workflow exist. D3 does not enroll or modify projects; D4 application/recovery, qualification and merge enforcement remain outstanding.
 
@@ -15,6 +15,8 @@ D1 startup implementation is recorded in [Codex validation](codex-validation.md)
 The [concrete D2 plan](d2-runtime-plan.md) scopes native state, guards, invalidation, Stop handling and diagnostics. Superset remains optional; no backend integration or onboarding choice is added in D2.
 
 The [D3 plan and validation record](d3-onboarding-plan.md) describe the implemented private inspect/plan workflow and its limits; D4 applies an approved plan. Native operation remains the default, with no Superset question during initial onboarding. The separate [Enable/Disable Superset skill](superset-feature-map.md#planned-project-control-skill) is planned with qualified Superset integration in D6; explicit disable restores native routing for new tasks.
+
+The [concrete D4 plan](d4-onboarding-plan.md) is prepared for review. It covers recoverable apply/resume/rollback and verified Toolkit adoption; D4 implementation has not started.
 
 The user authorized the same startup layer for the next clients. Claude Code now reuses the shared startup protocol; Superset is documented as a host for native adapters. See [Claude and Superset validation](claude-and-superset-validation.md). This advances startup support only; D8's full lifecycle qualification still follows the required runtime/onboarding slices.
 
