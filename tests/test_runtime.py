@@ -441,5 +441,54 @@ class RuntimeAdapterTests(unittest.TestCase):
                 self.result("PreToolUse", "deny", reason)
 
 
+class OnboardingDispatcherTests(unittest.TestCase):
+    def test_onboarding_routes_before_enrollment_and_returns_bounded_json_errors(self):
+        for args, raw in ((["onboard", "inspect", "--cwd", "/", "--plan-dir", "/uncreated"], b"{}"),
+                          (["onboard", "plan", "--plan-dir", "/uncreated"], b"{}"),
+                          (["onboard", "inspect"], b"{}"),
+                          (["onboard", "plan", "--plan-dir", "/uncreated"], b'{"x":NaN}')):
+            with self.subTest(args=args):
+                result = subprocess.run([sys.executable, "-I", "-B", str(PACKAGE / "scripts/workflow.py"),
+                    *args], input=raw, capture_output=True, timeout=5)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stderr, b"")
+                report = json.loads(result.stdout)
+                self.assertFalse(report["ok"])
+                self.assertNotIn("enrolled", report["error"])
+
+    def test_inspect_and_plan_work_without_enrollment_and_never_activate_runtime(self):
+        from test_onboarding import OnboardingTests
+        fixture = OnboardingTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        def invoke(action, request):
+            args = ["onboard", action, "--plan-dir", str(fixture.directory)]
+            if action == "inspect":
+                args.extend(["--cwd", str(fixture.repo)])
+            result = subprocess.run([sys.executable, "-I", "-B", str(PACKAGE / "scripts/workflow.py"),
+                *args], input=json.dumps(request).encode(), capture_output=True, timeout=5)
+            self.assertEqual(result.stderr, b"")
+            return result.returncode, json.loads(result.stdout)
+        code, report = invoke("inspect", fixture.record)
+        self.assertEqual(code, 2)
+        self.assertEqual(report["status"], "draft")
+        code, report = invoke("plan", fixture.proposal(1))
+        self.assertEqual(code, 0, report)
+        self.assertEqual(report["status"], "ready_for_review")
+        for field, value in (("dependencies", [{}]), ("id", [])):
+            malformed = fixture.proposal(report["revision"])
+            malformed["actions" if field == "dependencies" else "decisions"] = ([{
+                **malformed["actions"][0], field: value}] if field == "dependencies" else [{"id": value}])
+            code, failure = invoke("plan", malformed)
+            self.assertEqual(code, 1, failure)
+            self.assertFalse(failure["ok"])
+        (fixture.directory / "plan.json").write_text('{"schema_version":1,"revision":2}')
+        code, failure = invoke("inspect", fixture.record)
+        self.assertEqual(code, 1, failure)
+        self.assertFalse(failure["ok"])
+        self.assertFalse((fixture.repo / startup.PROJECT_FILE).exists())
+        self.assertFalse(any(fixture.base.rglob("*.sqlite3")))
+
+
 if __name__ == "__main__":
     unittest.main()

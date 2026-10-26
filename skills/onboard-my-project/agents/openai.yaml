@@ -1,0 +1,4 @@
+interface:
+  display_name: "Onboard my Project"
+  short_description: "Plan enrollment for one existing project"
+  default_prompt: "Use $onboard-my-project to plan enrollment for this existing project."

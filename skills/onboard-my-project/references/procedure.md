@@ -1,0 +1,75 @@
+# Existing-project enrollment plan
+
+Use this only for an explicitly selected existing project, authorized update, or repair. This is D3 inspect-and-plan work. D4 applies a separately approved exact proposal; D5–D7 qualify execution and enforcement. Never describe a plan as enrollment, approval, or client qualification.
+
+## Contracts to apply
+
+Read the [policy index](../../../policies/00-index.md), [Project Scope](../../../policies/01-project-scope.md), [Project Onboarding](../../../policies/10-project-onboarding.md), and each applicable linked policy. These contracts define authority, conflict modes, preservation, coverage, validation, recovery and completion; follow them without restating or weakening their rules. For authoring/updating contracts, consult [source coverage](../../../docs/policy-sources.md); routine enrollment does not fetch Toolkit sources through that map.
+
+Keep machine preparation in prepare-my-workspace; keep new-project creation distinct. Do not enroll the toolkit checkout just because it is the current working directory. Native operation is default. Do not ask about or discover Superset during onboarding; manage-superset remains a future D6 workflow.
+
+## Source and plan workflow
+
+For a new run, use the canonical [Vibe Coding Toolkit repository](https://github.com/soumatheusgomes/vibe-coding-toolkit) and resolve its main branch once with a trusted retrieval tool; record the returned commit. When using GitHub, prefer the compact ref endpoint `https://api.github.com/repos/soumatheusgomes/vibe-coding-toolkit/git/ref/heads/main` and take `object.sha` as the commit. Other trusted ref-resolution tools are valid; no particular connector is required. At that commit, retrieve [Prompt 12](https://github.com/soumatheusgomes/vibe-coding-toolkit/blob/main/docs/prompts/12-existing-project-setup.md), README, overview, installation/onboarding playbook, complete dynamically discovered tool/prompt/template catalogs, project defaults, the nine-destination document manifest, and every explicitly required guide 17–23. Read required sources fully before judging applicability; follow relevant links and dependencies. Do not copy prompts into this package. If online retrieval is unavailable, use only an explicitly trusted versioned copy with recorded hashes and mark freshness unverified; missing sources block dependent coverage.
+
+Choose an absolute private --plan-dir outside the target, client discovery paths, plugin caches, and shared runtime state. Do not silently create it under vendor plugin data. Keep credentials, raw transcripts, full environments, and secret file contents out of plans and reports.
+
+The dispatcher accepts JSON on standard input and writes a JSON report. Determine the installed package root from the skill location (the parent of `skills`), never from the target checkout. For example:
+
+```sh
+PLUGIN_ROOT=/absolute/installed/package
+python3 -I -B "$PLUGIN_ROOT/scripts/workflow.py" onboard inspect --cwd /absolute/project --plan-dir /absolute/private-plan < /absolute/private-plan/sources.json
+python3 -I -B "$PLUGIN_ROOT/scripts/workflow.py" onboard plan --plan-dir /absolute/private-plan < /absolute/private-plan/proposal.json
+```
+
+Inspect input has exactly `schema_version`, `clients`, `toolkit`, and `required_sources`. `clients` may contain only `codex` and/or `claude-code`. Toolkit has `commit` (40 lowercase hex), `origin`, `acquisition` (`online|offline`), `provenance`, `trust` (`recorded|pending`), `files`, and `catalog`. A file row has source-relative `path`, absolute `local_path` beneath plan-dir, `sha256` (64 lowercase hex), and boolean `required`; source files must be private (0600). A catalog row has `id`, `source`, `section`, `stage` (`installation|project_onboarding|runtime`), boolean `mandatory`, and `dependencies`. required_sources lists every discovered required path, including missing files. The helper does not authenticate source ownership.
+
+Runnable schema example (intentionally incomplete, so its report is blocked):
+
+```sh
+mkdir -m 700 /absolute/private-plan
+umask 077
+cat > /absolute/private-plan/sources.json <<'JSON'
+{"schema_version":1,"clients":["codex"],"toolkit":{"commit":"0000000000000000000000000000000000000000","origin":"https://github.com/soumatheusgomes/vibe-coding-toolkit","acquisition":"offline","provenance":"trusted copy not supplied","trust":"pending","files":[],"catalog":[]},"required_sources":["docs/prompts/12-existing-project-setup.md"]}
+JSON
+PLUGIN_ROOT=/absolute/installed/package
+python3 -I -B "$PLUGIN_ROOT/scripts/workflow.py" onboard inspect --cwd /absolute/project --plan-dir /absolute/private-plan < /absolute/private-plan/sources.json
+```
+
+For an actual run, replace that schema-only input with the full pinned source manifest, retained files and dynamically discovered catalog. Keep retained files private inside plan-dir, hash exact bytes, and list every required discovered path.
+
+Plan input requires exactly `expected_revision`, `inventory`, `decisions`, `coverage`, `actions`, `evidence`, `semantic_assessment`, with optional `reconcile`; all nested records likewise require their listed keys and reject unknown keys. Inventory sections are `product`, `critical_flows`, `stack`, `quality_commands`, `services`, `client_capabilities`, `merge_feasibility`, `instructions`, `integrations`; each is `{facts:[{summary,evidence}],assumptions:[string]}`. Documents maps all nine manifest destinations to `{path:null|string,reason}`. Evidence requires `{id,kind,summary,scope,inputs,reference}`; kind is `observation|behavior|configuration|baseline|authorization`, and inputs may include individual file fingerprint keys, `package`, `source:<path>`, and checkout metadata keys `checkout:repository_root`, `checkout:git_common_dir`, `checkout:head`, `checkout:index_digest`, `checkout:dirty_inventory`, `checkout:paths`. Decisions require `{id,rule,source,scope,options,recommendation,selected,disposition,provenance,evidence,affected_actions,invalidate_on,conflict,mode}`; recommendation and non-null selected must be options; disposition is `confirmed|inherited|proposed|pending`; conflict is boolean; mode is null or `decide|preserve|replace`. `invalidate_on` uses the same fingerprint keys as evidence inputs. A conflict without a resolved mode blocks dependent coverage.
+
+Coverage preserves catalog fields `{id,source,section,stage,mandatory,dependencies}` and adds `{applicability,reason,current_adoption,qualification_evidence,outcome,actions,scope,risk,verification,blocker,resumption,decision_ids}`. Enums: applicability `applicable|inapplicable`; adoption `absent|configured|qualified`; outcome `planned|reuse|omit|blocked`. Actions require `{id,dependencies,kind,target,section,before,text,after,scope,authorization,verification,preservation_exceptions,decision_ids,backup_required}`. Kind is `write|delete|command|external`; scope is `checkout|shared|global`; every action requires `backup_required:true`. Use one action per file even when changing multiple sections. File write/delete requires checkout scope, relative target, before hash or `absent`; a write's `text` is the entire intended file postimage and `after` its matching SHA-256. `section` identifies the authorized portion only; never treat text as a partial splice. Delete uses null text and `after:"absent"`. Command text is a nonempty argv list; external text is a description. Both use null section/before/after. Native evaluation is `{method,smoke_cases}`; semantic assessment has boolean `complete,catalog_complete,conflicts_checked,instructions_checked,source_provenance_checked`. These are agent judgments, not proof of coverage.
+
+Representative new-file write (the action is structurally valid; replace it with the exact authorized postimage):
+
+```json
+{"id":"create-instructions","dependencies":[],"kind":"write","target":"new-instructions.md","section":null,"before":"absent","text":"New instruction.\n","after":"b509e3ee2b3cf45910ba0a65ea25ab42ef7ff6570398975d89aaf3c182179c0f","scope":"checkout","authorization":"review proposal only; D4 requires scoped apply authority","verification":"Read the new file and run applicable checks","preservation_exceptions":[],"decision_ids":[],"backup_required":true}
+```
+
+This row alone is not a complete proposal: include every required coverage row, its evidence/references, and an ordered action for each planned outcome. Limits: request 2 MiB, plan 4 MiB, source 1 MiB each/8 MiB total, target inventory 8 MiB, 4096 paths/rows, nesting depth 30.
+
+The helper creates or updates only the private plan and returns `plan_id,revision,status,blockers,next_decision,review_digest,current_input_digest,evidence_limits,exit_code`. Status is `draft|awaiting_decision|blocked|ready_for_review|stale`; exit 0 means `ready_for_review`, 1 means invalid/unsafe input, busy lock, or revision conflict, and 2 means draft, awaiting decision, blocked, or stale. It does not fetch sources, execute project commands, prompt interactively, write the target, or apply enrollment. Use the latest returned revision as expected_revision; never overwrite a newer plan.
+
+### Inspect and record
+
+Select one explicit Git checkout. Resolve its actual root with inherited Git selectors removed; nested repositories, linked worktrees, and separate clones are distinct. Non-Git destinations are prerequisites, not an invitation to run git init. Inventory bounded regular files only; note symlinks, unreadable/oversized/excluded paths as evidence gaps. Read applicable ancestor and directory instructions without extending edit authority beyond the selected project.
+
+Record product and critical flows; stack, runtimes, package managers, lockfiles and workspaces; HEAD, staged/unstaged and relevant untracked changes; canonical nine-document mapping; quality commands and services; instruction paths/scopes; selected clients and observed capabilities; merge-gate feasibility. Separate evidence-backed facts, assumptions, inherited choices and pending proposals. Run only safe baseline checks after reviewing their effects; otherwise use a matching disposable snapshot or record not_run and its prerequisite.
+
+Before initial inspect, complete the source-pinned catalog metadata by enumerating named components across the required catalogs, playbook and guides, including named optional plugins and child skills. Do not derive rows only from documents or infer completeness from an old list, row count or plugin inventory. A grouped row is acceptable only if it explicitly names every member and all members share the same applicability and disposition; otherwise give members separate rows. Set `mandatory` only when the pinned source makes that component mandatory for the selected project-onboarding stage. An example, optional component, or machine-preparation foundation does not become an existing-project requirement by inheritance; apply the pinned playbook's project-size and use criteria.
+
+Assess every component in the complete pinned catalog and every approved policy. For each, record applicability and reason, current adoption and qualification evidence, outcome/action, scope, dependencies, risk, verification, and blocker/resumption condition. Outcomes include integrate/update, verified equivalent, justified inapplicability, or blocked. Configuration alone is not working qualification. Save useful partial assessments with the plan command as work progresses; keep semantic completeness false and missing coverage explicit until the assessment is complete. Do not wait for one oversized final proposal. If later source review shows the initial catalog itself was incomplete, leave its pinned declaration unchanged and create a replacement private plan for this assessment at the same verified source revision. Record the superseded plan identity/revision and reason in sanitized assessment evidence; carry forward only verified still-applicable work. Do not resolve main again or treat the old row count as proof of completeness.
+
+Apply all three conflict modes in Project Scope. Ask one focused question only when a missing material decision affects scope, behavior, access, cost, architecture, or enforcement. Preserve mode blocks incompatible required adoption; replace mode proposes retiring the approved legacy workflow layer, preserving product rules and exceptions; decide-with-me presents one conflict and recommendation at a time. Never treat silence or recommendation as approval. Continue independent read-only work while decisions are pending.
+
+The proposal must identify ordered actions, dependencies, exact target paths/sections or external resources, before fingerprints/absence, exact proposed text or argv, deterministic after hashes where possible, preservation exceptions, required authorization, verification, and D4 backup/recovery needs. For file writes, preserve unaffected content in the complete postimage; section identifies the authorized area but is not a splice instruction. Include native harness evaluation method and initial smoke cases; optional labs and paid experiments remain separate choices. Do not generate backups or alter the target during D3.
+
+## Resume, review, and report
+
+Resume using the same plan and pinned source revision: do not resolve main again or upgrade the source pin. If retained files are missing, retrieve only that exact commit when authorized or use a trusted matching copy; changed bytes stale dependent coverage. A requested refresh starts a new run and carries forward only still-applicable decisions.
+
+Inspect again before accepting a proposal. If checkout identity is unchanged but target/package inputs changed, include `reconcile:{"input_digest":"<latest current_input_digest>","reason":"<scoped explanation>"}` in the plan request. This reconciles to the freshly inspected target/package state, retaining invalidation and decision history while revalidating the proposal. Do not reconcile a different checkout or changed pinned source bytes; start a new plan or restore the declared source bytes. The plan digest binds review to content but grants no authority.
+
+Report plan status, scoped blockers, next decision, evidence limits, and the exact private plan location. Keep structural validation distinct from semantic coverage assessment. ready_for_review means no unresolved material planning choice or unexplained coverage gap; mandatory mechanisms may still await D4–D7 qualification. It never means apply authorized, onboarding successful, task ready, or merge permitted.

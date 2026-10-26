@@ -1,8 +1,8 @@
 # Onboard my Project
 
-Design and implementation plan · 25 October 2026 · **Stages, feature baseline, activation behavior, client scope and all eleven policy contracts approved; D1 startup and D2 Codex runtime implemented; bounded native D2 qualification recorded**
+Design and implementation plan · 25 October 2026 · **Stages, feature baseline, activation behavior, client scope and all eleven policy contracts approved; D1 startup, D2 Codex runtime and D3 private planning implemented; bounded native D2 qualification recorded**
 
-Outcome: enroll a project once, then activate its agreed workflow during ordinary coding requests. Qualify each client's actual behavior. Codex startup and opt-in D2 task controls exist; guided onboarding and merge enforcement remain planned.
+Outcome: enroll a project once, then activate its agreed workflow during ordinary coding requests. Qualify each client's actual behavior. Codex startup, opt-in D2 task controls and the D3 private inspect/plan workflow exist. D3 does not enroll or modify projects; D4 application/recovery, qualification and merge enforcement remain outstanding.
 
 Contract loading: [policy index](../policies/00-index.md). The user approved all eleven contracts on 25 October 2026.
 
@@ -13,6 +13,8 @@ Contract approval does not establish client execution or project adoption. D1 st
 D1 startup implementation is recorded in [Codex validation](codex-validation.md). D2 controls and bounded native observations are in [D2 validation](d2-validation.md); the bundled controlled Stop-held Interrupt case passed, while ordinary read-first correlation, desktop UI and model policy compliance remain unqualified.
 
 The [concrete D2 plan](d2-runtime-plan.md) scopes native state, guards, invalidation, Stop handling and diagnostics. Superset remains optional; no backend integration or onboarding choice is added in D2.
+
+The [D3 plan and validation record](d3-onboarding-plan.md) describe the implemented private inspect/plan workflow and its limits; D4 applies an approved plan. Native operation remains the default, with no Superset question during initial onboarding. The separate [Enable/Disable Superset skill](superset-feature-map.md#planned-project-control-skill) is planned with qualified Superset integration in D6; explicit disable restores native routing for new tasks.
 
 The user authorized the same startup layer for the next clients. Claude Code now reuses the shared startup protocol; Superset is documented as a host for native adapters. See [Claude and Superset validation](claude-and-superset-validation.md). This advances startup support only; D8's full lifecycle qualification still follows the required runtime/onboarding slices.
 
@@ -31,7 +33,7 @@ Runtime uses complete, locally authored contracts and accepted project configura
 
 ## 2. Stages and policy decisions
 
-The user approved these three stages, the feature tables, activation behavior below and all eleven policy contracts. Implementation choices remain proposals.
+The user approved these three stages, the feature tables, activation behavior below and all eleven policy contracts. Implementation choices for unbuilt stages remain proposals.
 
 | Stage | Responsibility | Evidence |
 | --- | --- | --- |
@@ -235,15 +237,15 @@ Each deliverable receives its own reviewable change and evidence. Unit/fixture v
 | --- | --- | --- | --- |
 | **D1** | Codex adapter and startup hook | Event contract, root resolver, `codex.py`, `hooks/codex.json`, dispatcher and manifest wiring | Nested/worktree fixtures resolve correctly; unrelated repo is untouched; a real installed/trusted hook loads the policy once |
 | **D2** | Deterministic hook runtime | Local state, guarded-action responses, post-tool invalidation, bounded Stop handling and `doctor` | Actual denial blocks; pass preserves native permissions; missing/untrusted/disabled hooks, crash and timeout produce honest health; pending decisions cause no continuation loop or implicit permission grant |
-| **D3** | Guided onboarding plan | `onboard-my-project` skill, source resolver, feature/adoption table, conflict inventory, mode and decision record | Three stages distinguished; full catalog covered; mandatory policies separated from conditional actions; no mode waives a policy; equivalents require evidence; merge feasibility established |
+| **D3** | Guided onboarding plan | `onboard-my-project` skill/procedure, inspect/plan CLI, private versioned plan and exact proposal schema | Three stages distinguished; full catalog covered; mandatory policies separated from conditional actions; no mode waives a policy; equivalents require evidence; merge feasibility established |
 | **D4** | Reversible Project Onboarding and toolkit adoption | Transaction module, approved component execution, mode-aware configuration/docs, inactive backups, `apply`, `resume`, `rollback` | Missing mandatory policy/mechanism qualification prevents readiness; future task evidence remains separate; required conflicts resolve or block; recovery preserves unrelated content |
 | **D5** | Checks, general review and security review evidence | Accepted check/review policies, applicability decisions, check runner and completion verifier | Security review runs after implementation with no planning-time review gate; every merge receives general and applicable security coverage; missing/stale required evidence or blocking findings prevent readiness |
-| **D6** | Worker routing and concurrent ownership | Approved delegation contract, model/effort evidence, bounded dispatch, atomic reservations and stop reconciliation | Fifteen concurrent claims cannot acquire overlapping resources; limits/approved fallbacks hold; unsupported selection is explicit; uncertain ownership survives; reviewer restrictions and policy updates are tested |
+| **D6** | Worker routing and concurrent ownership | Approved delegation contract, model/effort evidence, bounded native dispatch, atomic reservations and stop reconciliation; optional qualified Superset integration and its separate enable/disable skill | Fifteen concurrent claims cannot acquire overlapping resources; limits/approved fallbacks hold; unsupported selection is explicit; uncertain ownership survives; reviewer restrictions and policy updates are tested; explicit Superset disable routes new tasks natively without migrating active tasks |
 | **D7** | Repository merge gate | Trusted evidence integration, disposable enforcement qualification and exact ruleset plan, delivered separately below | Missing/stale review or failed checks prevent merge through supported UI/API/CLI paths; absent trust/access remains blocked |
 | **D8** | Claude Code adapter | Native manifest/config adapter and shared contract fixtures | The same scenarios pass in an actual Claude session; no duplicate handlers or policy fork; settings evidence remains truthful |
 | **D9** | PHIOON pilot | One Python and one Next.js repository, then one bounded cross-repository task | Ordinary requests activate workflow without skill mentions; shared-resource coordination and relevant upstream harness cases pass; overhead is measured |
 
-Sequence: **D1 → D2 → D3 → D4**, then **D5 → D6 → D7**. D8 can follow D4 independently; D9 follows the capabilities selected for the pilot. D7 includes a distinct review of the concrete repository settings before any live changes. Multi-repository rollout follows the pilot, not automatic enrollment of all nine repositories.
+Sequence: **D1 → D2 → D3 → D4**, then **D5 → D6 → D7**. D3 planning is implemented; D4 adoption/application is the next onboarding stage. D8 can follow D4 independently; D9 follows the capabilities selected for the pilot. D7 includes a distinct review of the concrete repository settings before any live changes. Multi-repository rollout follows the pilot, not automatic enrollment of all nine repositories.
 
 Scope Superset and Claude Desktop surfaces as separate follow-up slices after capability discovery; do not infer their qualification from D8. Qualify the implemented D1 startup slice before extending the runtime.
 

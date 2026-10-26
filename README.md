@@ -16,4 +16,8 @@ For local plugin testing, run `codex plugin marketplace add .` from this checkou
 
 For Claude Code local testing, launch `claude --plugin-dir .` from this checkout. See the [Claude Code contract](clients/claude-code.md) for loading and qualification. Superset uses the underlying native adapter; its [host integration](clients/superset.md) requires separate launch qualification.
 
+## Plan project enrollment
+
+For an explicitly selected existing project, use [onboard-my-project](skills/onboard-my-project/SKILL.md) to inspect and prepare a private enrollment plan. The local CLI records a reviewable plan; D3 does not change the target or qualify client execution. See its procedure for source requirements and safe use.
+
 [Development guide](AGENTS.md)
