@@ -97,16 +97,33 @@ for line in sys.stdin:
         return result
 
     def test_receipt_fetches_actual_report_and_only_read_only_methods(self):
-        observed = self.collect()
-        self.assertEqual(observed["report"], self.report)
-        receipt = observed["receipt"]
-        self.assertEqual(receipt["reviewer_id"], "child")
-        self.assertEqual(receipt["report_digest"], hashlib.sha256(self.text.encode()).hexdigest())
-        self.assertEqual(receipt["mechanism"], "codex-native-agent-path")
+        for version in ("0.163.0", "0.164.0-alpha.11.1"):
+            with self.subTest(version=version):
+                responses = copy.deepcopy(self.responses)
+                for identity in ("parent", "child"):
+                    responses[identity]["thread"]["cliVersion"] = version
+                observed = self.collect(responses, version=version)
+                self.assertEqual(observed["report"], self.report)
+                receipt = observed["receipt"]
+                self.assertEqual(receipt["reviewer_id"], "child")
+                self.assertEqual(receipt["report_digest"], hashlib.sha256(self.text.encode()).hexdigest())
+                self.assertEqual(receipt["mechanism"], "codex-native-agent-path")
+                self.assertEqual(receipt["native_version"], version)
+                self.assertEqual(self.collect(responses, version=version), observed)
         methods = [json.loads(line)["method"] for line in self.log.read_text().splitlines()]
         self.assertEqual(set(methods), {"initialize", "initialized", "thread/read", "thread/items/read",
                                        "thread/turns/list", "thread/items/list"})
-        self.assertEqual(self.collect(), observed)
+
+    def test_thread_versions_must_match_selected_executable(self):
+        for version, other in (("0.163.0", "0.164.0-alpha.11.1"),
+                               ("0.164.0-alpha.11.1", "0.163.0")):
+            for identity in ("parent", "child"):
+                responses = copy.deepcopy(self.responses)
+                for matched in ("parent", "child"):
+                    responses[matched]["thread"]["cliVersion"] = version
+                responses[identity]["thread"]["cliVersion"] = other
+                with self.subTest(version=version, identity=identity), self.assertRaises(StartupError):
+                    self.collect(responses, version=version)
 
     def test_invalid_native_chains_fail_closed(self):
         cases = []

@@ -96,7 +96,7 @@ def runtime_diagnostic(kind, reason):
 
 
 REVIEW_TIMEOUT = 15
-REVIEW_VERSIONS = {"0.163.0"}
+REVIEW_VERSIONS = {"0.163.0", "0.164.0-alpha.11.1"}
 REVIEW_METHODS = {"initialize", "thread/read", "thread/items/read", "thread/turns/list", "thread/items/list"}
 
 

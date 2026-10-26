@@ -2,7 +2,7 @@
 
 [Vibe Coding Toolkit](https://github.com/soumatheusgomes/vibe-coding-toolkit), packaged for your coding agent.
 
-**Early development.** Codex has opt-in task controls and read-only diagnostics, with bounded CLI and bundled app-server qualification, including a controlled Interrupt case. General turn correlation, desktop UI behavior, and Claude lifecycle remain unqualified. See the [client contracts](clients/index.md) for current scope and [D2 validation](docs/d2-validation.md).
+**Early development.** Codex has opt-in task controls and read-only diagnostics, with bounded CLI and bundled app-server qualification, including a controlled Interrupt case. Desktop startup orientation and the D5 checks/review lifecycle are qualified; general guard/continuation turn correlation, other desktop behavior and Claude lifecycle remain unqualified. See the [client contracts](clients/index.md), [D2 validation](docs/d2-validation.md) and [D5 validation](docs/d5-validation.md) for exact scope.
 
 Codex task runtime is opt-in. For accepted checks, general and applicable security review, and completion verification, read the [task runtime](clients/runtime.md) and its selectively loaded [evidence contract](clients/evidence.md). [D5 validation](docs/d5-validation.md) records independent review and actual native execution. Local readiness is evidence for the current content; repository merge enforcement remains a separate D7 gate.
 

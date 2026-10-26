@@ -21,6 +21,8 @@ The plan records acceptance criteria, accepted command definitions and threshold
 
 Checks run only the planned argv and environment, without shell interpretation or inherited credentials. Review collection verifies the prepared task marker in native parent/child records, child checkout, completed turn, and fetched final report. The native prompt is encrypted and is not claimed as observed; receipt proves execution identity, not review quality or read-only enforcement. The coordinator must check semantic coverage and findings against the target. Keep detailed snapshots, output, and reports in the private evidence area; records contain bounded summaries and digests, never raw transcripts or secrets.
 
+Review collection selects `codex` from the command's `PATH` and requires the observer, parent and reviewer native versions to match a qualified version. For Desktop, prefix only the collection command's `PATH` with the matching bundled executable's directory. Preserve global settings and `PATH`. Unavailable or mismatched versions leave independent review unverified.
+
 ## Request fields
 
 Every mutation JSON object includes `client:"codex"`, `session_id`, `task_id`, `scope_ref`, and current positive `expected_revision`. Use the revision returned by the previous operation; after a conflict, read status and prepare a fresh request. JSON input is limited to 128 KiB; unknown fields reject.

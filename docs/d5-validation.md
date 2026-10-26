@@ -1,6 +1,6 @@
 # D5 checks and review validation
 
-26 October 2026. D5 implementation, independent review and disposable native acceptance are complete for Codex CLI 0.163.0. Subsequent desktop observation confirms desktop-origin agent execution on ChatGPT 26.1021.31345 with bundled Codex CLI 0.164.0-alpha.11.1, but does not qualify desktop hook execution or the D5 lifecycle. Repository merge enforcement remains unqualified under D7. Native operation remains the default; Superset controls/dispatch remain D6.
+26 October 2026. D5 implementation, independent review and disposable native acceptance are complete for Codex CLI 0.163.0 and local Codex Desktop 26.1021.31345 with bundled Codex 0.164.0-alpha.11.1. Desktop qualification covers automatic startup orientation and the D5 checks/review/completion lifecycle below. Repository merge enforcement remains unqualified under D7. Native operation remains the default; Superset controls/dispatch remain D6.
 
 ## Implemented behavior
 
@@ -14,13 +14,14 @@ Codex encrypts native delegation messages, including those exposed to tool hooks
 
 | Check | Result | What it establishes |
 | --- | --- | --- |
-| Final full unit suite | 252 passed in 130.042 s | Existing behavior plus evidence, state, CLI and native-protocol regressions |
+| Final full unit suite | 253 passed in 148.894 s | Existing behavior plus evidence, state, CLI and native-protocol regressions, including both qualified native versions and version mismatch rejection |
 | Package validator | Passed; skill entries remain 149/143 words | Package structure and instruction budgets, not client execution |
 | Independent general/security review | Two P1 findings fixed; scoped re-review clear | Final transaction checks concurrent reservations; detached command children cannot silently produce passing evidence |
 | Independent fix verification | Six affected tests passed | Both reproduced defects and exact-proof/public-control regressions |
 | Instruction walkthroughs | Seven scenarios passed | Applicable procedures load; unrelated onboarding/Superset material stays unloaded |
 | Native collector qualification | Positive, duplicate and mismatch cases observed | Actual native identity/result correlation, separate from mocked protocol tests |
 | Final public CLI/native lifecycle | Passed on exact frozen runtime/test/script hashes | Real check reconciliation, independent review, completion and subsequent stale-evidence rejection |
+| Installed Desktop lifecycle | Passed on the frozen installed candidate | Actual startup context, failed/missing evidence blockers, native Luna review, readiness and rejection after an outside-hook edit |
 
 The existing nonfatal SQLite `ResourceWarning` remains. No skill entry point changed. Changed guidance links and whitespace checks passed. Source/test hashes were checked independently against the final acceptance copy.
 
@@ -34,16 +35,28 @@ One native Sol6.1/high coordinator and one Luna/medium reviewer supplied a fresh
 
 All 29 recorded commands returned their expected exits. Native model, provider, effort and permission settings were observed; authentication was inherited without modification. All owned processes stopped.
 
+## Disposable Desktop acceptance
+
+The user installed the isolated local plugin and approved its five hooks. All 70 cached package files matched the frozen candidate; a read-only observer found each exact hook enabled and trusted. The actual Desktop task then received native harness-marked hook context before its first tool, identifying the installed package, fixture and session. The unique SessionStart producer and unchanged inspected definitions/settings establish automatic orientation through combined evidence. No separate per-run hook ID, completion notification or trust receipt is claimed; the initial report that requested those unavailable records is retained alongside the subsequent assessment.
+
+The collector now accepts the observed bundled version as well as CLI 0.163.0. Its executable and both native thread versions must still match. Only the collection subprocess used the bundled executable's directory on `PATH`; global settings stayed unchanged. The prior CLI proof remains applicable to its unchanged code path, with both versions covered by the final regression suite.
+
+A real failed check stayed failed after independently verified host reconciliation and blocked completion. The one-line arithmetic correction passed, but missing general/security reviews still blocked. One native Luna/medium reviewer inspected the actual diff and assertions; the collector fetched its correlated receipt/report, and the Sol6.1/high coordinator assessed coverage and findings. Public verification reached `ready` at revision 17.
+
+With that Desktop task idle, the original coordinator changed the source externally. Generation stayed 28 and receipt count stayed 29. The resumed task's first public status call still observed generation 28, revoked readiness at revision 18, and completion verification rejected stale checks, both reviews and security impact at revision 19. This demonstrates content-based invalidation without a new hook hint. Independent audit verified the command/process proofs, native review bindings and both readiness transitions.
+
+Owned check processes stopped and the reviewer completed. Cleanup cancelled the disposable task at revision 20 and archived its unchanged seeded enrollment outside the checkout. Private state, evidence and the external edit were retained. The user's installed plugin, approved hooks and other settings were preserved. This is a fixture qualification, not completed real-project onboarding.
+
 ## Settings and limits
 
 Native sessions temporarily registered disposable projects in global configuration. The acceptance runs' changes were isolated to their owned project-trust entries; removing those entries in memory reconstructed each immediate baseline exactly. An earlier probe's configuration hash change remains unattributed. A cleanup attempt correctly aborted when unrelated concurrent changes appeared. Final cleanup removed only the three unchanged D5-owned trust tables, preserving every other byte, parsed setting and file mode. No whole-file restoration to an obsolete baseline occurred.
 
 Native receipts prove correlated execution identity, not readable prompt contents, semantic correctness or enforced read-only permissions. Coordinator review and genuine host lifecycle evidence remain required. Output redaction is pattern-based; inspect private diagnostics before sharing them. Local readiness is point-in-time evidence, not a security boundary against same-user filesystem processes or a repository merge gate.
 
-Desktop app-server provenance confirms actual desktop-origin agent execution and the bundled version, but not automatic SessionStart discovery, hook trust, or a desktop D5 checks/reviews/completion lifecycle. The desktop UI inspection attempt was denied before exposing any controls; no desktop hook lifecycle test was performed. Other client/version surfaces and live-project onboarding remain unqualified. Temporary enrollment was test setup, not a D4 onboarding claim.
+Desktop qualification used the user's installation/trust actions and a native Desktop task, without bypassing the earlier denied UI inspection. Raw per-run startup receipts, canonical patch-guard/continuation turn enforcement, other client/version surfaces and live-project onboarding remain unqualified. The Desktop task retained uncertain guard turn correlation; successful D5 evidence verification does not establish D2 enforcement.
 
 Repository gate preflight observed this public personal repository with no rulesets or workflows; the `main` branch-protection API returned 404, "Branch not protected." D7 remains blocked: a trusted final-verifier publisher/source, protected verifier definition, and authoritative review-transfer/freshness path are not implemented. The connected GitHub app is not evidence that it can publish the required trusted final-verifier result. No disposable repository enforcement matrix, live ruleset qualification, or repository enforcement test is claimed. These gaps do not waive the merge gate.
 
 No release archive was created. Repository merge remains blocked pending qualification.
 
-Private evidence: `/Users/fcouto/.local/share/vcw-validation/d5-implementation-okvpko1p`. Final acceptance is in `acceptance/final/`; source review, scoped re-review, suite logs, native qualification, instruction checks, owned-settings cleanup and independent coordinator verification remain separate records. Earlier failed probes and the initial candidate's results are retained without being substituted for final proof.
+Private CLI evidence: `/Users/fcouto/.local/share/vcw-validation/d5-implementation-okvpko1p`, with acceptance in `acceptance/final/`. Desktop evidence: `/Users/fcouto/.local/share/vcw-validation/d5-desktop-run-ra5xynk_/observations`, including startup provenance, installed-package hashes, actual lifecycle results, independent audit, final coordinator verification and fixture cleanup. Earlier failed probes and initial limitation reports remain separate from final proof.
