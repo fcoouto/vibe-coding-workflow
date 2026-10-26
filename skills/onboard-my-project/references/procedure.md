@@ -6,7 +6,7 @@ Use this only for an explicitly selected existing project, authorized update, or
 
 Read the [policy index](../../../policies/00-index.md), [Project Scope](../../../policies/01-project-scope.md), [Project Onboarding](../../../policies/10-project-onboarding.md), and each applicable linked policy. These contracts define authority, conflict modes, preservation, coverage, validation, recovery and completion; follow them without restating or weakening their rules. For authoring/updating contracts, consult [source coverage](../../../docs/policy-sources.md); routine enrollment does not fetch Toolkit sources through that map.
 
-Keep machine preparation in prepare-my-workspace; keep new-project creation distinct. Do not enroll the toolkit checkout just because it is the current working directory. Native operation is default. Do not ask about or discover Superset during onboarding; manage-superset remains a future D6 workflow.
+Keep machine preparation in prepare-my-workspace; keep new-project creation distinct. Do not enroll the toolkit checkout just because it is the current working directory. Native operation is default. Do not ask about or discover Superset during onboarding; any Superset control is a separate optional integration, outside onboarding.
 
 ## Source and plan workflow
 

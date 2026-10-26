@@ -47,7 +47,7 @@ class ProjectScope:
     runtime: RuntimeSettings | None = None
 
 
-def json_object(raw):
+def json_object(raw, *, limit=MAX_INPUT):
     def unique(pairs):
         result = {}
         for key, value in pairs:
@@ -59,8 +59,11 @@ def json_object(raw):
     def invalid_number(_):
         raise StartupError("Non-JSON number")
 
-    if len(raw) > MAX_INPUT:
-        raise StartupError("JSON exceeds 128 KiB")
+    if type(limit) is not int or limit < 1:
+        raise StartupError("Invalid JSON byte limit")
+    size = len(raw.encode('utf-8')) if isinstance(raw, str) else len(raw)
+    if size > limit:
+        raise StartupError("JSON exceeds 128 KiB" if limit == MAX_INPUT else "Internal JSON exceeds its byte limit")
     result = json.loads(raw, object_pairs_hook=unique, parse_constant=invalid_number)
     if not isinstance(result, dict):
         raise StartupError("Expected a JSON object")
@@ -135,7 +138,7 @@ def runtime_settings(record, package, common):
     if "runtime" not in record:
         return None
     settings = record["runtime"]
-    if not isinstance(settings, dict) or type(settings.get("schema_version")) is not int or settings["schema_version"] != 1:
+    if not isinstance(settings, dict) or type(settings.get("schema_version")) is not int or settings["schema_version"] != 2:
         raise StartupError("Unsupported runtime configuration schema")
     value = settings.get("state_dir")
     if not isinstance(value, str) or not value or len(value) > 4096 or any(not char.isprintable() for char in value):
@@ -163,7 +166,7 @@ def runtime_settings(record, package, common):
     )
     if discovery.returncode == 0:
         raise StartupError("Runtime state directory must be outside repositories and plugin caches")
-    return RuntimeSettings(1, path)
+    return RuntimeSettings(2, path)
 
 
 def resolve_project(event, package) -> ProjectScope | None:

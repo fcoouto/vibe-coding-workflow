@@ -90,6 +90,8 @@ def validate(root=ROOT):
                  "runtime/adapters/__init__.py", "runtime/adapters/session_start.py",
                  "clients/index.md", "clients/startup.md", "clients/runtime.md", "clients/evidence.md", "policies/00-index.md",
                  "runtime/onboarding.py", "runtime/changes.py",
+                 "runtime/delegation.py", "clients/delegation.md", "runtime/repository_gate.py",
+                 "scripts/repository_gate.py", "clients/repository-gate.md",
                  "skills/onboard-my-project/SKILL.md",
                  "skills/onboard-my-project/references/procedure.md",
                  "skills/onboard-my-project/references/apply-and-recovery.md",

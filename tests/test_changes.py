@@ -1,12 +1,14 @@
 """Disposable D4 transactions exercise ownership, durability and recovery."""
 
 import copy
+from contextlib import closing
 import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
+import sqlite3
 import unittest
 from unittest.mock import patch
 
@@ -80,6 +82,99 @@ class ChangesTests(d3_tests.OnboardingTests):
                 stopped=True, evidence=[evidence]) for key, value in self.journal()["receipts"].items() if "command" in value]
         return request
 
+    def test_linked_foreign_check_uses_relevant_ledger_claims_and_corrupt_links_block(self):
+        from tests.test_evidence import EvidenceTests
+        from runtime import evidence, state
+        from runtime.startup import ProjectScope, StartupError
+        fixture = EvidenceTests(methodName='runTest')
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.plan()
+        definition = evidence._load_plan(fixture.scope, fixture.identity)
+        definition['checks'][0]['resources'] = [dict(kind='service', key='fixture:unrelated', host='local', mode='read')]
+        evidence.plan_evidence(fixture.scope, fixture.request(plan=definition, change_decision_ref='user:declared-resource'))
+        checked = evidence.run_check(fixture.scope, fixture.request(check_id='unit'))
+        root, _, common = self.changes._checkout(self.repo)
+        target = ProjectScope('target', root, common, policy_digest(onboarding.PACKAGE), fixture.scope.runtime)
+        self.changes._writers({}, {}, {'task_reconciliation': True}, scope=target)
+        with state._database(fixture.scope) as db:
+            original = state._task(db, state._scope_id(fixture.scope), 'codex', 'parent')
+        for delta in ('missing-link', 'wrong-claims', 'wrong-definition'):
+            corrupt = copy.deepcopy(original)
+            attempt = corrupt['evidence']['attempts'][0]
+            if delta == 'missing-link':
+                attempt.pop('ledger_assignment_digest')
+            elif delta == 'wrong-claims':
+                attempt['ledger_claims_digest'] = 'f' * 64
+            else:
+                attempt['check_id'] = 'another-check'
+            with state._database(fixture.scope, write=True) as db:
+                state._save(db, state._scope_id(fixture.scope), corrupt)
+            with self.subTest(delta=delta), self.assertRaises(StartupError):
+                self.changes._writers({}, {}, {'task_reconciliation': True}, scope=target)
+        with state._database(fixture.scope, write=True) as db:
+            state._save(db, state._scope_id(fixture.scope), original)
+        self.assertEqual(checked['attempt']['status'], 'uncertain')
+
+    def test_linked_foreign_review_requires_exact_plain_prompt_and_pair_before_independence(self):
+        from tests.test_delegation import Stage4NativeReviewTests
+        from runtime import state
+        from runtime.startup import ProjectScope, StartupError
+        fixture = Stage4NativeReviewTests(methodName='runTest')
+        fixture.setUp(); self.addCleanup(fixture.doCleanups)
+        plan = fixture.review_plan()
+        plan['jobs'][0]['claims'] = [dict(kind='service', key='fixture:independent-review', host='local', mode='read')]
+        fixture.plan(plan)
+        prepared = fixture.prepared(assignment='Review only the declared independent service read-only.')
+        root, _, common = self.changes._checkout(self.repo)
+        target = ProjectScope('target', root, common, policy_digest(onboarding.PACKAGE), fixture.scope.runtime)
+        self.changes._writers({}, {}, {'task_reconciliation': True}, scope=target)
+        with state._database(fixture.scope) as db:
+            original = state._task(db, state._scope_id(fixture.scope), 'codex', 'parent')
+        for change in ('missing-link', 'plain-digest', 'wrong-job'):
+            corrupt = copy.deepcopy(original)
+            attempt = corrupt['evidence']['attempts'][0]
+            if change == 'missing-link':
+                attempt.pop('ledger_assignment_digest')
+            elif change == 'plain-digest':
+                attempt['assignment_digest'] = 'f' * 64
+            else:
+                attempt['job_id'] = 'another-review'
+            with state._database(fixture.scope, write=True) as db:
+                state._save(db, state._scope_id(fixture.scope), corrupt)
+            with self.subTest(change=change), self.assertRaises(StartupError):
+                self.changes._writers({}, {}, {'task_reconciliation': True}, scope=target)
+        with state._database(fixture.scope, write=True) as db:
+            state._save(db, state._scope_id(fixture.scope), original)
+        self.assertEqual(prepared['attempt']['status'], 'reserved')
+
+    def test_first_authority_directory_race_revalidates_private_ownership_before_retry(self):
+        from runtime.startup import StartupError
+        original = self.changes.d3._plan_path
+        for mode in (0o700, 0o755, 'symlink', 'repository'):
+            directory = self.base / ('authority-first-' + str(mode))
+            calls = []
+            def raced(value):
+                calls.append(value)
+                if len(calls) == 1:
+                    if mode == 'symlink':
+                        target = self.base / 'authority-link-target'
+                        target.mkdir(mode=0o700)
+                        directory.symlink_to(target, target_is_directory=True)
+                    else:
+                        directory.mkdir(mode=0o700 if mode == 'repository' else mode)
+                        if mode == 'repository':
+                            (directory / '.git').mkdir(mode=0o700)
+                    raise FileExistsError('fixture concurrent authority directory creation')
+                return original(value)
+            with self.subTest(mode=mode), patch.object(self.changes, 'LOCK_ROOT', directory), patch.object(self.changes.d3, '_plan_path', side_effect=raced):
+                if mode == 0o700:
+                    self.assertEqual(len(self.changes._authority_locations([self.base / 'private-authority-state'])), 1)
+                    self.assertEqual(len(calls), 2)
+                else:
+                    with self.assertRaises(StartupError):
+                        self.changes._authority_locations([self.base / 'private-authority-state'])
+
     def complete(self, request):
         result = self.changes.apply_plan(self.directory, request)
         if result["exit_code"] == 2:
@@ -102,7 +197,7 @@ class ChangesTests(d3_tests.OnboardingTests):
     def existing_enrollment(self, runtime=False, stale=False):
         record = self.request()["manifest"]["enrollment"]["record"]
         if runtime:
-            record["runtime"] = {"schema_version": 1, "state_dir": str(self.base / "task-state")}
+            record["runtime"] = {"schema_version": 1 if runtime == "legacy" else 2, "state_dir": str(self.base / "task-state")}
         if stale:
             record["policy_digest"] = "f" * 64
         (self.repo / PROJECT_FILE.parent).mkdir()
@@ -113,9 +208,288 @@ class ChangesTests(d3_tests.OnboardingTests):
         onboarding.record_plan(self.directory, self.proposal(1))
         request = self.request()
         if runtime:
-            request["manifest"]["enrollment"]["record"]["runtime"] = record["runtime"]
+            request["manifest"]["enrollment"]["record"]["runtime"] = (
+                {"schema_version": 2, "state_dir": str(self.base / "fresh-state")}
+                if runtime == "legacy" else record["runtime"])
             request = self.bind(request["manifest"])
         return record, original, request
+
+    def legacy_transition(self, retired=True, unresolved=False):
+        """Exact old schema fixture, independent of the current initializer."""
+        record, original, request = self.existing_enrollment(runtime="legacy")
+        directory = Path(record["runtime"]["state_dir"])
+        directory.mkdir(mode=0o700)
+        database = directory / "runtime.sqlite3"
+        database.touch(mode=0o600)
+        scope_id = hashlib.sha256(json.dumps([record["project_id"], str(self.repo),
+            record["git_common_dir"]]).encode()).hexdigest()
+        task = dict(client="codex", session_id="old-session", task_id="old-task", scope_ref="fixture:old",
+            mode="editable", decision_ref="fixture:old", state="cancelled", revision=2,
+            pins=dict(schema_version=1, policy_digest=record["policy_digest"], runtime_digest="a" * 64),
+            reason="Old runtime retired writer", reference="host:stopped", conditions=[], turn_id="old-turn",
+            turn_uncertain=False)
+        attempts = []
+        if unresolved:
+            reference = dict(name="b" * 32 + ".json", digest="c" * 64)
+            attempts = [dict(id="d" * 32, kind="check", status="uncertain", candidate=reference,
+                             candidate_digest="e" * 64, plan_digest="f" * 64)]
+            task["evidence"] = dict(version=1, plan=reference, candidate=reference, attempts=attempts)
+        proof = dict(version=1, kind="stopped-writer-reconciliation",
+            identity={key: task[key] for key in ("client", "session_id", "task_id", "scope_ref")},
+            expected_revision=1, expected_pins=task["pins"], observed_turn_id="old-turn", stopped=True,
+            descendants_stopped=True, attempt_ids=[a["id"] for a in attempts],
+            observation_ref="host:old-writer-tree", coordinator_ref="coordinator:verified-old-runtime")
+        if retired:
+            artifacts = directory / "evidence"
+            artifacts.mkdir(mode=0o700)
+            raw = json.dumps(proof, sort_keys=True, separators=(",", ":")).encode()
+            artifact = artifacts / ("a" * 32 + ".json")
+            artifact.write_bytes(raw)
+            artifact.chmod(0o400)
+            task["retirement"] = dict(proof_digest=hashlib.sha256(raw).hexdigest(),
+                proof=dict(name=artifact.name, digest=hashlib.sha256(raw).hexdigest()),
+                observation_ref=proof["observation_ref"], coordinator_ref=proof["coordinator_ref"], previous_revision=1)
+        with closing(sqlite3.connect(database)) as db, db:
+            db.executescript("""
+                CREATE TABLE checkouts(scope_id TEXT PRIMARY KEY, project_id TEXT NOT NULL,
+                    repository_root TEXT NOT NULL, git_common_dir TEXT NOT NULL, generation INTEGER NOT NULL);
+                CREATE TABLE tasks(scope_id TEXT, client TEXT, session_id TEXT, task_id TEXT, data TEXT NOT NULL,
+                    PRIMARY KEY(scope_id,client,session_id,task_id));
+                CREATE TABLE bindings(scope_id TEXT, client TEXT, session_id TEXT, task_id TEXT NOT NULL,
+                    PRIMARY KEY(scope_id,client,session_id));
+                CREATE TABLE turns(scope_id TEXT, client TEXT, session_id TEXT, turn_id TEXT, task_id TEXT,
+                    continuation_consumed INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(scope_id,client,session_id,turn_id));
+                CREATE TABLE receipts(scope_id TEXT, client TEXT, session_id TEXT, turn_id TEXT, tool_call_id TEXT,
+                    kind TEXT, fingerprint TEXT NOT NULL, conflicted INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(scope_id,client,session_id,turn_id,tool_call_id,kind));
+                PRAGMA application_id=1447641669;
+                PRAGMA user_version=1;
+            """)
+            db.execute("insert into checkouts values(?,?,?,?,0)",
+                (scope_id, record["project_id"], str(self.repo), record["git_common_dir"]))
+            db.execute("insert into tasks values(?,?,?,?,?)",
+                (scope_id, task["client"], task["session_id"], task["task_id"], json.dumps(task)))
+            db.execute("insert into bindings values(?,?,?,?)", (scope_id, task["client"], task["session_id"], task["task_id"]))
+        return record, original, request, database, task
+
+    def rewrite_legacy_task(self, database, task):
+        with closing(sqlite3.connect(database)) as db, db:
+            db.execute("update tasks set data=?", (json.dumps(task),))
+
+    def legacy_other_checkout(self, *, linked=True, retired=False, unresolved=True, mode='editable', task_state=None):
+        record, original, request, database, task = self.legacy_transition(retired=retired, unresolved=unresolved)
+        owner = self.base / ('legacy-linked' if linked else 'legacy-unrelated')
+        if linked:
+            self.git('worktree', 'add', '-q', '--detach', str(owner), 'HEAD')
+            common = record['git_common_dir']
+        else:
+            owner.mkdir()
+            self.git('-C', str(owner), 'init', '-q')
+            common = str((owner / '.git').resolve())
+        owner = owner.resolve()
+        scope_id = hashlib.sha256(json.dumps([record['project_id'], str(owner), common]).encode()).hexdigest()
+        task['mode'] = mode
+        if task_state is not None:
+            task['state'] = task_state
+        with closing(sqlite3.connect(database)) as db, db:
+            db.execute('update checkouts set scope_id=?,repository_root=?,git_common_dir=?', (scope_id, str(owner), common))
+            for table in ('tasks', 'bindings', 'turns', 'receipts'):
+                db.execute('update ' + table + ' set scope_id=?', (scope_id,))
+            db.execute('update tasks set data=?', (json.dumps(task),))
+        return record, original, request, database, task
+
+    def assert_legacy_foreign_owner_blocks_before_mutation(self, **fields):
+        record, original, request, database, _ = self.legacy_other_checkout(**fields)
+        before = {str(p): p.read_bytes() for p in database.parent.rglob('*') if p.is_file()}
+        rules = (self.repo / 'AGENTS.md').read_bytes()
+        result = self.changes.apply_plan(self.directory, self.observe(request))
+        self.assertEqual(result['exit_code'], 2, result)
+        self.assertEqual({str(p): p.read_bytes() for p in database.parent.rglob('*') if p.is_file()}, before)
+        self.assertTrue((self.repo / PROJECT_FILE).exists(), result)
+        self.assertEqual((self.repo / PROJECT_FILE).read_bytes(), original)
+        self.assertEqual((self.repo / 'AGENTS.md').read_bytes(), rules)
+        self.assertFalse((self.base / 'fresh-state').exists())
+        with self.assertRaises(self.changes.Pending):
+            self.changes._writers(self.plan(), record, self.observe(request)['observations'])
+
+    def test_legacy_linked_unresolved_owner_blocks_before_enrollment_and_configuration_mutations(self):
+        self.assert_legacy_foreign_owner_blocks_before_mutation()
+
+    def test_legacy_linked_active_editable_owner_without_check_blocks_before_mutations(self):
+        self.assert_legacy_foreign_owner_blocks_before_mutation(unresolved=False, task_state='active')
+
+    def test_legacy_unrelated_readonly_unresolved_attempt_has_unknown_shared_footprint(self):
+        self.assert_legacy_foreign_owner_blocks_before_mutation(linked=False, mode='read-only')
+
+    def test_legacy_linked_retirement_must_match_exact_task_before_fresh_transition(self):
+        record, _, request, database, task = self.legacy_other_checkout(retired=True)
+        observation = self.observe(request)['observations']
+        before = {str(p): p.read_bytes() for p in database.parent.rglob('*') if p.is_file()}
+        self.changes._writers(self.plan(), record, observation)
+        self.assertEqual({str(p): p.read_bytes() for p in database.parent.rglob('*') if p.is_file()}, before)
+        self.rewrite_legacy_task(database, task | dict(turn_id='another-turn'))
+        corrupt_before = {str(p): p.read_bytes() for p in database.parent.rglob('*') if p.is_file()}
+        with self.assertRaises(self.changes.Pending):
+            self.changes._writers(self.plan(), record, observation)
+        self.assertEqual({str(p): p.read_bytes() for p in database.parent.rglob('*') if p.is_file()}, corrupt_before)
+        self.rewrite_legacy_task(database, task)
+        before = {str(p): p.read_bytes() for p in database.parent.rglob('*') if p.is_file()}
+        result = self.complete(request)
+        if result['exit_code'] == 2:
+            result = self.changes.resume_plan(self.directory, self.observe(request))
+        self.assertEqual(result['exit_code'], 0, result)
+        installed = json.loads((self.repo / PROJECT_FILE).read_bytes())
+        self.assertEqual(installed['schema_version'], 1)
+        self.assertEqual(installed['runtime']['schema_version'], 2)
+        self.assertFalse((self.base / 'fresh-state').exists())
+        self.assertEqual({str(p): p.read_bytes() for p in database.parent.rglob('*') if p.is_file()}, before)
+        self.assertEqual(task['pins']['schema_version'], 1)
+
+    def test_legacy_linked_readonly_owner_without_attempts_does_not_claim_mutation(self):
+        record, _, request, database, _ = self.legacy_other_checkout(unresolved=False, mode='read-only', task_state='active')
+        before = {str(p): p.read_bytes() for p in database.parent.rglob('*') if p.is_file()}
+        self.changes._writers(self.plan(), record, self.observe(request)['observations'])
+        self.assertEqual({str(p): p.read_bytes() for p in database.parent.rglob('*') if p.is_file()}, before)
+
+    def test_legacy_unrelated_retired_owner_remains_safely_reconciled(self):
+        record, _, request, database, _ = self.legacy_other_checkout(linked=False, retired=True)
+        before = {str(p): p.read_bytes() for p in database.parent.rglob('*') if p.is_file()}
+        self.changes._writers(self.plan(), record, self.observe(request)['observations'])
+        self.assertEqual({str(p): p.read_bytes() for p in database.parent.rglob('*') if p.is_file()}, before)
+
+    def test_legacy_retired_state_upgrades_only_to_fresh_schema_two_and_preserves_history(self):
+        record, _, request, database, task = self.legacy_transition(unresolved=True)
+        before = {str(p): p.read_bytes() for p in database.parent.rglob("*") if p.is_file()}
+        result = self.complete(request)
+        if result["exit_code"] == 2:
+            result = self.changes.resume_plan(self.directory, self.observe(request))
+        self.assertEqual(result["exit_code"], 0, result)
+        installed = json.loads((self.repo / PROJECT_FILE).read_text())
+        self.assertEqual(installed["schema_version"], 1)
+        self.assertEqual(installed["runtime"]["schema_version"], 2)
+        self.assertFalse((self.base / "fresh-state").exists())
+        self.assertEqual({str(p): p.read_bytes() for p in database.parent.rglob("*") if p.is_file()}, before)
+        self.assertEqual(task["pins"]["schema_version"], 1)
+        from runtime import startup
+        with self.assertRaises(startup.StartupError):
+            startup.runtime_settings(record, onboarding.PACKAGE, Path(record["git_common_dir"]))
+
+    def test_legacy_cancelled_flag_without_retained_proof_cannot_release_writer(self):
+        _, original, request, database, _ = self.legacy_transition(retired=False, unresolved=True)
+        before = database.read_bytes()
+        result = self.changes.apply_plan(self.directory, self.observe(request))
+        self.assertEqual(result["exit_code"], 2, result)
+        self.assertEqual((self.repo / PROJECT_FILE).read_bytes(), original)
+        self.assertEqual((self.repo / "AGENTS.md").read_text(), "product rules\nlegacy process\n")
+        self.assertEqual(database.read_bytes(), before)
+
+    def test_legacy_proof_binding_corruption_and_unsafe_state_block_transition(self):
+        record, _, request, database, task = self.legacy_transition(unresolved=True)
+        observation = self.observe(request)["observations"]
+        self.changes._writers(self.plan(), record, observation)
+        changes = [dict(pins=task["pins"] | dict(schema_version=2)), dict(turn_id="different"),
+            dict(revision=3), dict(retirement=task["retirement"] | dict(observation_ref="unbound")),
+            dict(evidence=task["evidence"] | dict(attempts=[]))]
+        for delta in changes:
+            with self.subTest(delta=delta):
+                self.rewrite_legacy_task(database, task | delta)
+                with self.assertRaises(self.changes.Pending):
+                    self.changes._writers(self.plan(), record, observation)
+        self.rewrite_legacy_task(database, task)
+        artifact = database.parent / "evidence" / task["retirement"]["proof"]["name"]
+        raw = artifact.read_bytes()
+        proof = json.loads(raw)
+        for delta in (dict(expected_revision=True), dict(expected_pins=task["pins"] | dict(schema_version=True))):
+            with self.subTest(proof=delta):
+                altered = json.dumps(proof | delta).encode()
+                artifact.chmod(0o600)
+                artifact.write_bytes(altered)
+                artifact.chmod(0o400)
+                retirement = task["retirement"] | dict(proof=dict(name=artifact.name,
+                    digest=hashlib.sha256(altered).hexdigest()))
+                self.rewrite_legacy_task(database, task | dict(retirement=retirement))
+                with self.assertRaises(self.changes.Pending):
+                    self.changes._writers(self.plan(), record, observation)
+        artifact.chmod(0o600)
+        artifact.write_bytes(raw)
+        artifact.chmod(0o400)
+        self.rewrite_legacy_task(database, task)
+        artifact.chmod(0o600)
+        with self.assertRaises(self.changes.Pending):
+            self.changes._writers(self.plan(), record, observation)
+        artifact.chmod(0o400)
+        database.chmod(0o644)
+        with self.assertRaises(self.changes.Pending):
+            self.changes._writers(self.plan(), record, observation)
+        database.chmod(0o600)
+        retained = database.with_suffix(".retained")
+        database.rename(retained)
+        with self.assertRaises(self.changes.Pending):
+            self.changes._writers(self.plan(), record, observation)
+        self.assertFalse(database.exists())
+        retained.rename(database)
+        with closing(sqlite3.connect(database)) as db, db:
+            db.execute("create view unsupported as select * from tasks")
+        with self.assertRaises(self.changes.Pending):
+            self.changes._writers(self.plan(), record, observation)
+        self.assertEqual(artifact.read_bytes(), raw)
+
+    def test_legacy_schema_one_rejects_shape_valid_schema_two_delegation_state(self):
+        record, _, request, database, task = self.legacy_transition()
+        task['delegation'] = dict(version=1, plan=task['retirement']['proof'],
+                                  attempts_consumed=0, resource_units_consumed=0)
+        self.rewrite_legacy_task(database, task)
+        before = {str(p): p.read_bytes() for p in database.parent.rglob('*') if p.is_file()}
+        with self.assertRaises(self.changes.Pending):
+            self.changes._writers(self.plan(), record, self.observe(request)['observations'])
+        self.assertEqual({str(p): p.read_bytes() for p in database.parent.rglob('*') if p.is_file()}, before)
+
+    def assert_legacy_null_event_scope_is_rejected(self, table):
+        record, _, request, database, _ = self.legacy_transition(unresolved=True)
+        observation = self.observe(request)["observations"]
+        self.changes._writers(self.plan(), record, observation)
+        values = ((None, "codex", "orphan", "turn", "task", 0) if table == "turns" else
+                  (None, "codex", "orphan", "turn", "call", "edit", "fingerprint", 0))
+        with closing(sqlite3.connect(database)) as db, db:
+            db.execute("insert into " + table + " values(" + ",".join("?" for _ in values) + ")", values)
+        before = {str(p): p.read_bytes() for p in database.parent.rglob("*") if p.is_file()}
+        with self.assertRaises(self.changes.Pending):
+            self.changes._writers(self.plan(), record, observation)
+        self.assertEqual({str(p): p.read_bytes() for p in database.parent.rglob("*") if p.is_file()}, before)
+
+    def test_legacy_null_turn_checkout_blocks_without_mutating_history(self):
+        self.assert_legacy_null_event_scope_is_rejected("turns")
+
+    def test_legacy_null_receipt_checkout_blocks_without_mutating_history(self):
+        self.assert_legacy_null_event_scope_is_rejected("receipts")
+
+    def test_legacy_recovery_inspects_backup_and_blocks_new_unreconciled_writer(self):
+        _, original, request, database, task = self.legacy_transition()
+        fired = False
+        def crash(stage):
+            nonlocal fired
+            if stage == "rename" and not fired:
+                fired = True
+                raise RuntimeError("interrupted transition")
+        with patch.object(self.changes, "_checkpoint", side_effect=crash):
+            with self.assertRaises(RuntimeError):
+                self.changes.apply_plan(self.directory, self.observe(request))
+        self.assertFalse((self.repo / PROJECT_FILE).exists())
+        active = dict(task, state="active")
+        active.pop("retirement")
+        self.rewrite_legacy_task(database, active)
+        result = self.changes.resume_plan(self.directory, self.observe(request))
+        self.assertEqual(result["exit_code"], 2, result)
+        self.assertFalse((self.repo / PROJECT_FILE).exists())
+        self.rewrite_legacy_task(database, task)
+        result = self.changes.resume_plan(self.directory, self.observe(request))
+        if result["exit_code"] == 2:
+            result = self.changes.resume_plan(self.directory, self.observe(request))
+        self.assertEqual(result["exit_code"], 0, result)
+        result = self.changes.rollback_plan(self.directory, self.observe(request))
+        self.assertEqual(result["exit_code"], 2, result)
+        self.assertFalse((self.repo / PROJECT_FILE).exists())
+        self.assertEqual((self.directory / "enrollment.backup").read_bytes(), original)
+        self.assertEqual((self.repo / "AGENTS.md").read_text(), "product rules\nlegacy process\n")
 
     def command_request(self, script):
         action = self.plan()["actions"][0]
@@ -127,6 +501,44 @@ class ChangesTests(d3_tests.OnboardingTests):
         request["manifest"]["actions"][0]["effects"] = [{"path": "result.txt", "before": None,
             "after": {"sha256": hashlib.sha256(b"result").hexdigest(), "mode": 0o644}}]
         return self.bind(request["manifest"])
+
+    def test_runtime_resume_reuses_current_retained_observation_without_weakening_writer_guard(self):
+        from runtime import state
+        record, _, request = self.existing_enrollment(runtime=True)
+        result = self.changes.apply_plan(self.directory, request)
+        for _ in range(3):
+            if result['exit_code'] == 0:
+                break
+            result = self.changes.resume_plan(self.directory, self.observe(request))
+        self.assertEqual(result['exit_code'], 0, result)
+        self.assertEqual(self.changes.resume_plan(self.directory, self.observe(request))['exit_code'], 0)
+        retained = len(self.journal()['observations'])
+        resumed = self.changes.resume_plan(self.directory, request)
+        self.assertEqual(resumed['exit_code'], 0, resumed)
+        self.assertEqual(len(self.journal()['observations']), retained)
+        scope = self.changes._record(record, self.plan())
+        state.start_task(scope, dict(client='codex', session_id='new-writer', task_id='new-writer',
+            scope_ref='fixture:new-authorized-work', mode='editable', decision_ref='fixture:user'))
+        before = (self.repo / PROJECT_FILE).read_bytes()
+        refused = self.changes.resume_plan(self.directory, request)
+        self.assertEqual(refused['exit_code'], 2, refused)
+        self.assertEqual((self.repo / PROJECT_FILE).read_bytes(), before)
+
+    def test_runtime_resume_rejects_stale_retained_observation(self):
+        _, _, request = self.existing_enrollment(runtime=True)
+        result = self.changes.apply_plan(self.directory, request)
+        for _ in range(3):
+            if result['exit_code'] == 0:
+                break
+            result = self.changes.resume_plan(self.directory, self.observe(request))
+        self.assertEqual(result['exit_code'], 0, result)
+        self.assertEqual(self.changes.resume_plan(self.directory, self.observe(request))['exit_code'], 0)
+        (self.repo / 'README.md').write_text('independent external edit\n')
+        before = (self.repo / PROJECT_FILE).read_bytes()
+        result = self.changes.resume_plan(self.directory, request)
+        self.assertEqual(result['exit_code'], 2, result)
+        self.assertEqual((self.repo / PROJECT_FILE).read_bytes(), before)
+        self.assertEqual((self.repo / 'README.md').read_text(), 'independent external edit\n')
 
     def test_configuration_waits_for_current_qualification_and_returns_digest(self):
         request = self.request()

@@ -1,0 +1,77 @@
+# D11: Workflow diagnostics
+
+Planning only · 26 October 2026 · Approved design; **last deliverable**. No dashboard, measurement collection, cleanup or client qualification is delivered by this document.
+
+**Goal:** show how the selected onboarded Projects' workflow is configured, operating and supported by evidence, including measured benefits and costs. Produce a local, self-contained **offline HTML report on request**, using existing authoritative records. The requested experience is **“Clear, Straight to the point and a very good looking dashboard”**.
+
+**Basis:** the [canonical implementation sequence](onboard-my-project-plan.md#5-small-deliverables), user-approved [Project/Repository model](onboard-my-project-plan.md#project-and-repository-model) and [evidence-retention policy](onboard-my-project-plan.md#evidence-retention). These two shared sections own membership and retention; D11 consumes them without a parallel registry or policy. Follow the [instruction authoring standard](../AGENTS.md#instruction-authoring). Preserve the chosen coordinator settings, current task-based worker selection, permissions and customizations. Superset integration remains suspended.
+
+## Read existing evidence
+
+**Canonical owner:** diagnostics projection/reporting owner, with independent evidence and rendering review. Reuse each established source owner and its freshness rules:
+
+| Source owner | Facts available to project into the report |
+| --- | --- |
+| D1–D4 configuration, doctor, enrollment and recovery | Registered scope/membership, selected clients, accepted configuration, adoption and observed loading/health; pending compatibility or activation and recovery dependencies. |
+| D5 checks and reviews | Candidate-bound checks, review coverage, findings, verification and freshness; local completion evidence remains distinct from repository enforcement. |
+| D6 worker control | Task/worker/attempt identity, observed lifecycle/settings, ownership, failures, retries, stop reconciliation and uncertainty. |
+| D7 repository gate | Repository/candidate/revision-bound verification, enforcement observations and their exact scope, including unqualified paths. |
+| D8 client adapter | Client/surface/version capability and execution observations, without inheriting another client's qualification. |
+| D9 behavior, usage and pilot | Scoped behavioral qualification, comparable observations, reconciled usage and pilot results; authoritative numerical receipts, corrections and missing coverage. |
+
+Use existing private state/artifacts outside Git and plugin caches. D11 may normalize them into a dated projection for this request; it creates no second measurement ledger or source of truth. Missing or unsupported source data stays explicit. Existing hook receipts, budgets, instruction length and task counts cannot substitute for native usage measurements.
+
+Rendering or changing filters must not rerun lint, tests, review, native qualification or usage collection. Add no background analyzer, automatic repair, self-adjustment, scheduled agent, service or GitHub Actions job. A report may identify a gap and its existing owner/next action; performing that work retains its own authority and workflow.
+
+## Project selection, identity and aggregation
+
+Cover all **accessible, selected, onboarded Projects** from the canonical enrollment authority. Provide **All Projects / Project** and relevant **Repository** filters and drilldown, grouped **Project → Repository**. A standalone Project has its repository; an umbrella displays its approved members. An inaccessible, excluded, pending or unsupported member leaves an explicit coverage gap rather than disappearing from a completeness claim. Do not scan the filesystem or enroll repositories to fill the report.
+
+The [canonical owner follow-up](onboard-my-project-plan.md#project-and-repository-model) is required before umbrella discovery/join/activation claims. D11 projects the bounded coordinator adoption result; it neither adopts members nor makes startup write. Report configuration/activity/qualification per repository/client, preserving separate hook-owner and execution observations rather than inferring them from sibling success.
+
+Carry stable qualified Project, Repository, checkout, task, worker/attempt and source observation identities from the existing owners. Project the [logical request's existing linked tasks](onboard-my-project-plan.md#cross-repository-tasks-and-delivery), distinguishing logical and repository-task counts while counting shared workers once. Deduplicate clones/worktrees, repeated receipts and cumulative updates by qualified identity/source semantics; unresolved identity stays a gap. Do not add worker totals already included in parent totals, or cache/reasoning subsets already included in usage. Retain corrected source provenance rather than counting both versions. Unknown/shared attribution remains visible; do not invent a per-repository split or silently transfer historical attribution.
+
+Aggregate only metrics with compatible definitions, periods, units, scope and attribution. Use qualified inclusive totals when available; otherwise sum only proven-disjoint components with stated coverage. Known subtotals and unknown totals remain distinguishable. All Projects is not a completeness claim beyond selected accessible scope. Filtering must recompute **every** total, chart, table, comparison, detail and coverage gap from the same selected scope; no panel may retain a broader total or baseline under a narrower label.
+
+## Present honest workflow status and gains
+
+Lead with a concise overview, consistent hierarchy and a small number of useful facts. Use an attractive responsive layout and the established product identity, with readable accessible labels, keyboard operation and explicit text status. Charts require supported comparable values; do not draw a reassuring chart from missing observations. Offer expandable source evidence and targeted Project/Repository detail without forcing every record into the overview.
+
+Show the selected scope, client/surface, workflow revision, period, snapshot time and source freshness. Distinguish **configured / active**, **observed / qualified**, and **stale / unavailable / unverified**, with the reason and relevant source. Keep policy adoption, applicable actions and satisfied actions separate. Package validation, native client execution and repository enforcement must remain separately labeled. Never collapse these into a combined score that conceals unknowns or treat an old snapshot as current qualification.
+
+Benefits require comparable baseline/candidate observations, quality and acceptance outcomes, sample counts and coverage. Account for all attributable observed overhead: failures, retries, coordination, review, verification, integration, diagnostics and reporting. If an overhead class is unobserved, state the attribution gap and limit the comparison. Show regressions and additional cost alongside gains, with units, period and comparison scope. Counts, shorter instructions and completed actions show activity only. Observed comparison does not establish causality.
+
+When baseline or attribution is inadequate, display exactly **“Benefit not yet measured”**. Do not replace it with an estimated saving from text length, a generic efficiency score or a promotional claim. A filtered comparison must use a baseline comparable to that same selection; an incompatible or missing baseline becomes a visible gap.
+
+## Privacy, retention and offline rendering
+
+Apply [shared retention](onboard-my-project-plan.md#evidence-retention) through D2/D5/D6 lifecycle owners before projecting evidence. Safe closure is distinct from ready: execution/merge/recovery dependencies, including proof needed by companions, must settle. Existing owners retire eligible task/assignment history under shared-state-authority-wide 4096 inspection bounds while retaining live owners, replay/reference safety and compact proof. If all remain needed, preserve them, block dependent new admission and permit bounded truthful read-only status/recovery, without a database/authority switch. D11 projects that status and protected excess; it creates no replacement ledger. Numerical reports outlive prose only with sufficient compact receipts/provenance/corrections/coverage/verification. Label expired detail unavailable; no dangling drilldown or fresh validation claim is allowed.
+
+The HTML is a dated projection, not a fresh measurement or source proof. Managed report/snapshot/export contents must respect the same detailed-evidence expiry and per-Project size accounting; copying detailed text into HTML is not a retention exception. Where retention cannot be maintained, use compact projections and disclose unmanaged-copy limits. Keep only needed non-content expiry metadata. Do not add full transcripts, context windows, repeated source copies or a new summarizer; reuse normal completion summaries.
+
+Render untrusted project names, paths, findings and source text as data. Escape/contain HTML and script content, validate links, and prevent injected navigation, file reads or network requests. Bundle required assets locally in the self-contained file; opening, filtering and drilldown work offline without remote fonts, analytics or dependencies. Use the existing privacy boundaries and include only needed evidence; disclose report/export contents and sensitive-source limits without promising universal redaction. Report malformed, unavailable, partial, stale and empty sources accessibly, preserving other valid panels and never exposing secrets through error details.
+
+## Delivery owners and bounded work
+
+D11 follows the preceding deliverables' accepted slices and remains last. Unknown or unqualified capabilities render honestly; universal client success is not a prerequisite. The membership and retention follow-up belongs to its existing owners and is a dependency for affected claims, not permission for D11 to change runtime or enrollment silently.
+
+| Subdeliverable / owner | Dependencies and bounded output | Completion evidence |
+| --- | --- | --- |
+| D11a — evidence projection / diagnostics owner with source-owner review | Canonical membership and D2/D5/D6 retirement/retention support for claimed scope; D1–D9 source contracts and existing `runtime/state.py`/`runtime/evidence.py`/`runtime/delegation.py` owners. Define the smallest read-only projection with identity/coverage/comparison rules; no collector or ledger. | Standalone/umbrella and two-Project fixtures reconcile to source receipts, including overlaps, unknown attribution, corrections, settled-history retirement, expiry and protected dependencies. Unsupported sources produce explicit gaps. |
+| D11b — offline HTML / reporting owner | Reviewed D11a, established identity and available private evidence. Implement the requested overview, filters, grouping, comparisons and expandable detail as one local self-contained report. | Every panel responds consistently to filters, offline rendering works, untrusted text stays inert, and responsive accessible empty/error states preserve honest coverage. |
+| D11c — qualification / independent evidence and rendering reviewer | Reviewed D11a/b, source-owner retention/identity proof and representative snapshots. Exercise the cases below without rerunning project checks to render or filter. | Reconciled numerical output, observed UI/filter/privacy behavior and evidence limits. Report document/package checks separately from native client and repository-enforcement observations. |
+
+Keep implementation reviewable and reuse existing tooling. Concrete file/schema and exact retention boundary/correction-age decisions are bounded implementation details to settle with the existing owners; they do not reopen the approved limits, authorize a parallel contract or block this planning deliverable.
+
+## Acceptance cases
+
+1. A standalone Git Project and one umbrella containing two repositories use canonical membership. A future in-scope repository joins through bounded task-entry D3/D4 coordinator preflight under standing authority before dependent writes; hooks only report pending/unresolved membership, and startup does not write. Exclusions/symlink escapes do not join. Common-Git worktrees, clones/overlaps and historical attribution resolve without preference copying. Configuration/activity/compatibility are truthful; hook-owner loading/qualification stay observed per client/repository. Current checkout-only startup/inspect cannot pass without owner follow-up.
+2. Two accessible selected Projects, including the umbrella, appear in All Projects. Project and Repository filtering updates every total, chart, table, comparison, detail and gap; unrelated baselines do not persist. Inaccessible, empty, partial and stale data remain clear.
+3. A cross-repository task, shared worker, inclusive parent/child usage, replayed receipts, corrected observations and clones/worktrees count once under qualified identities. Unknown/shared attribution and incomplete coverage stay explicit, with only comparable aggregation.
+4. Comparable baseline/candidate evidence includes acceptance/quality, coverage, samples and observed overhead, and exposes regressions/additional costs. Missing baseline or attribution displays **“Benefit not yet measured”**; activity counts cannot imply savings.
+5. Four-month compact expiry and seven-day detailed expiry after safe closure remove only eligible support at the next normal cleanup opportunity. One umbrella shares a single **100 MiB** closed-task detailed allowance across both repositories, with oldest eligible content removed first. Active, uncertain, merge and recovery evidence survives every limit, including four months, and protected excess is visible.
+6. After supporting prose expires, numerical totals still reconcile to sufficient retained authoritative compact evidence. Unavailable detail is labeled honestly; unsupported fresh-validation claims and dangling links disappear. Later compact expiry limits the report accordingly. Rendering/filtering performs no lint, tests, review or native requalification. Managed HTML/export does not defeat detailed retention or the Project cap.
+7. The report opens offline and uses the established responsive identity, readable accessible labels and keyboard controls. Malicious source text and links remain inert; no network or file access occurs. Missing/malformed sources produce bounded safe errors, explicit empty/partial states and usable source drilldown where support remains available.
+8. More than 4096 settled tasks and assignments across the shared state authority do not exhaust lifetime inspection. Relevant uncertain/dependency-bound owners and companion-required proof remain live; findings/references, replay safety and compact proof survive eligible retirement. If all records remain needed, preserve them and block dependent admission while allowing bounded truthful read-only status/recovery. Minimal retired identity/expiry markers cannot restore passing evidence. Four-month/seven-day limits, one umbrella 100 MiB cap and protected excess still apply, without authority/database switching, missing-proof success, analyzers or check reruns.
+
+These are future implementation and qualification criteria. This planning task executes none of them and establishes no measured benefit, live membership, retention enforcement or client qualification.

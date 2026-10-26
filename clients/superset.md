@@ -1,8 +1,8 @@
-# Superset
+# Superset — implementation suspended
 
-Read this when launching or qualifying the workflow inside Superset. Superset hosts native agents; it has no independently qualified `SessionStart` protocol for this plugin. Use the [Codex](codex.md) or [Claude Code](claude-code.md) adapter for the agent actually running.
+Superset integration is **implementation suspended**, including launch support and the Enable/Disable Superset skill. This file retains future qualification notes only; it is not a current runtime instruction. Superset hosts native agents; it has no independently qualified `SessionStart` protocol for this plugin. If separately approved for future implementation, use the [Codex](codex.md) or [Claude Code](claude-code.md) adapter for the agent actually running.
 
-Install the plugin through that native client's supported mechanism. Enroll the native client and exact checkout through the [shared startup contract](startup.md). `SUPERSET_WORKSPACE_ID`, `SUPERSET_WORKSPACE_PATH`, `SUPERSET_ROOT_PATH` and `SUPERSET_TERMINAL_ID` are context hints, never enrollment authority. Superset workspace setup scripts do not replace per-session startup hooks.
+For future approved qualification, install the plugin through that native client's supported mechanism and enroll the native client and exact checkout through the [shared startup contract](startup.md). `SUPERSET_WORKSPACE_ID`, `SUPERSET_WORKSPACE_PATH`, `SUPERSET_ROOT_PATH` and `SUPERSET_TERMINAL_ID` are context hints, never enrollment authority. Superset workspace setup scripts do not replace per-session startup hooks.
 
 Preserve Superset's existing status hooks and the user's model, provider, account and permission choices. Connector availability does not establish model-routing or lifecycle-hook support.
 

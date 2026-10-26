@@ -2,9 +2,9 @@
 
 [Vibe Coding Toolkit](https://github.com/soumatheusgomes/vibe-coding-toolkit), packaged for your coding agent.
 
-**Early development.** Codex has opt-in task controls and read-only diagnostics, with bounded CLI and bundled app-server qualification, including a controlled Interrupt case. Desktop startup orientation and the D5 checks/review lifecycle are qualified; general guard/continuation turn correlation, other desktop behavior and Claude lifecycle remain unqualified. See the [client contracts](clients/index.md), [D2 validation](docs/d2-validation.md) and [D5 validation](docs/d5-validation.md) for exact scope.
+**Early development.** Codex has opt-in task controls, read-only diagnostics and shared schema-2 worker/check/review ownership. Recorded [D2](docs/d2-validation.md) and [D5](docs/d5-validation.md) qualification covers bounded CLI/bundled app-server behavior, a controlled Interrupt case, Desktop startup orientation and the earlier D5 lifecycle at their stated versions and pins. It does not qualify the new schema-2 native lifecycle. General guard/continuation turn correlation, other desktop behavior and Claude lifecycle remain unqualified. See the [client contracts](clients/index.md) for local procedures.
 
-Codex task runtime is opt-in. For accepted checks, general and applicable security review, and completion verification, read the [task runtime](clients/runtime.md) and its selectively loaded [evidence contract](clients/evidence.md). [D5 validation](docs/d5-validation.md) records independent review and actual native execution. Local readiness is evidence for the current content; repository merge enforcement remains a separate D7 gate.
+For task controls, read [task runtime](clients/runtime.md); for accepted checks, review and completion, load [evidence](clients/evidence.md); for native delegated work only, load [native delegation](clients/delegation.md). Local readiness covers current task evidence and grants no merge authority. D7's [bounded fixture inspector](clients/repository-gate.md) is implemented but always exits 1; production evidence sources, publishing and repository enforcement remain unqualified.
 
 ## Prepare your Workspace
 
@@ -16,7 +16,7 @@ Read skills/prepare-my-workspace/SKILL.md and use it to prepare this machine.
 
 For local plugin testing, run `codex plugin marketplace add .` from this checkout, then restart Codex desktop. Select `vibe-coding-workflow-local`, install `vibe-coding-workflow`, and invoke `prepare-my-workspace`, which uses the same instructions. Refresh the installed copy after changes. See [OpenAI's marketplace guide](https://developers.openai.com/plugins/build/plugins#add-a-marketplace-from-the-cli).
 
-For Claude Code local testing, launch `claude --plugin-dir .` from this checkout. See the [Claude Code contract](clients/claude-code.md) for loading and qualification. Superset uses the underlying native adapter; its [host integration](clients/superset.md) requires separate launch qualification.
+For Claude Code local testing, launch `claude --plugin-dir .` from this checkout. See the [Claude Code contract](clients/claude-code.md) for loading and qualification. Superset [host integration](clients/superset.md) and its Enable/Disable skill are **implementation suspended**; their future design uses the underlying native adapter and requires separate launch qualification.
 
 ## Enroll a project
 

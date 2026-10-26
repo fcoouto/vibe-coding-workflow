@@ -24,6 +24,8 @@ from runtime.startup import MAX_INPUT, StartupError, json_object, policy_digest
 
 VERSION = 1
 MAX_ATTEMPTS = 32
+MAX_CHECKS = 32
+MAX_LIST_ITEMS = 64
 MAX_ARTIFACT = 4 * 1024 * 1024
 MAX_OUTPUT = 128 * 1024
 COVERAGE = {'general', 'security', 'behavior'}
@@ -51,7 +53,7 @@ def _bounded(value, limit=MAX_INPUT):
 
 
 def _strings(value, field, choices=None):
-    _require(isinstance(value, list) and len(value) <= 64 and all(isinstance(v, str) for v in value)
+    _require(isinstance(value, list) and len(value) <= MAX_LIST_ITEMS and all(isinstance(v, str) for v in value)
              and len(value) == len(set(value)), 'Invalid ' + field)
     for v in value:
         state._text(v, field, 4096)
@@ -59,8 +61,8 @@ def _strings(value, field, choices=None):
     return value
 
 
-def _request(request, required=(), optional=()):
-    _bounded(request)
+def _request(request, required=(), optional=(), *, limit=MAX_INPUT):
+    _bounded(request, limit)
     state._fields(request, (*IDENTITY, *required), optional)
     state._identity(request)
     state._integer(request['expected_revision'], 'expected_revision', 1)
@@ -202,10 +204,10 @@ def _plan(value):
     _require(value['security_impact']['status'] in {'assessed', 'unresolved'}, 'Invalid security impact assessment')
     for name in ('reason', 'reference'):
         state._text(value['security_impact'][name], 'security impact ' + name)
-    _require(isinstance(value['checks'], list) and len(value['checks']) <= 32, 'Invalid accepted checks')
+    _require(isinstance(value['checks'], list) and len(value['checks']) <= MAX_CHECKS, 'Invalid accepted checks')
     ids = set()
     for check in value['checks']:
-        state._fields(check, ('id', 'argv', 'cwd', 'timeout', 'env', 'effects', 'baseline', 'dependencies'), ('thresholds',))
+        state._fields(check, ('id', 'argv', 'cwd', 'timeout', 'env', 'effects', 'baseline', 'dependencies'), ('thresholds', 'resources'))
         state._text(check['id'], 'check id', 128)
         _require(check['id'] not in ids, 'Duplicate check id')
         ids.add(check['id'])
@@ -224,6 +226,13 @@ def _plan(value):
         _require(check['effects']['kind'] in {'read-only', 'disposable'} and all(check['effects'][key] is False for key in
                  ('network', 'production', 'publish', 'migrations')), 'Check effects exceed safe local execution')
         state._text(check['effects']['inspection_ref'], 'command inspection reference')
+        if 'resources' in check:
+            from runtime import delegation
+            claims = delegation._claims(check['resources'])
+            _require(check['effects']['kind'] != 'read-only' or all(c['mode'] == 'read' for c in claims),
+                     'Read-only checks cannot declare mutable resources')
+        else:
+            _require(check['effects']['kind'] == 'read-only', 'Mutable checks require declared resources')
         state._fields(check['baseline'], ('status', 'reference'), ('exit_code', 'output_digest'))
         _require(check['baseline']['status'] in {'passed', 'failed', 'not-run'}, 'Invalid baseline status')
         state._text(check['baseline']['reference'], 'baseline reference')
@@ -356,32 +365,43 @@ def plan_evidence(scope, request):
 
 
 def _reserve(scope, request, kind, detail):
-    plan = _load_plan(scope, request)
-    candidate = capture_candidate(scope, plan)
-    attempt = dict(id=uuid.uuid4().hex, kind=kind, status='reserved', candidate=_artifact(scope, candidate),
-                   candidate_digest=_digest(candidate), plan_digest=_digest(plan), **detail)
-    if kind == 'review':
-        attempt['task_name'] = 'review_' + attempt['id']
-    with state._database(scope, write=True) as db:
-        task = _task(db, scope, request)
-        _require('evidence' in task and len(task['evidence']['attempts']) < MAX_ATTEMPTS, 'Evidence attempt bound reached')
-        if kind == 'review':
-            _require(sum(a['kind'] == 'review' for a in task['evidence']['attempts']) < plan['review_limit'],
-                     'Review round limit reached; preserve limits and seek a scoped decision')
-        task['evidence']['attempts'].append(attempt)
-        task['revision'] += 1
-        if task['state'] == 'ready':
-            task['state'] = 'verifying'
-        state._save(db, state._scope_id(scope), task)
-    return plan, candidate, attempt, task['revision']
+    if kind == 'check':
+        result = _reserve_check(scope, _check_request(dict(request, check_id=detail['check_id'])))
+        with state._database(scope) as db:
+            from runtime import delegation
+            record = next(row for row in delegation._ledger(scope, db) if row['id'] == result['attempt_id'])
+        return _read(scope, record['body']['d5_plan']), _read(scope, result['attempt']['candidate']), result['attempt'], result['task']['revision']
+    raise state.StateError('Native reviews require explicit linked prepare_review admission')
 
 
-def _finish(scope, request, attempt, expected_revision):
-    with state._database(scope, write=True) as db:
-        task = _task(db, scope, dict(request, expected_revision=expected_revision))
+def _finish(scope, request, attempt, expected_revision, *, execution_owner=None):
+    from runtime import delegation
+    context = delegation._reservation_write(scope) if attempt['kind'] == 'check' or 'ledger_assignment_digest' in attempt else state._database(scope, write=True)
+    with context as db:
+        if execution_owner is None:
+            task = _task(db, scope, dict(request, expected_revision=expected_revision))
+        else:
+            _require(attempt['kind'] == 'check' and 'ledger_assignment_digest' in attempt and 'execution' in attempt,
+                     'Only exact managed check execution may attach a late result')
+            task = delegation._assignment_task(scope, db, request, revision=False)
         attempts = task['evidence']['attempts']
         index = next((n for n, a in enumerate(attempts) if a['id'] == attempt['id']), None)
         _require(index is not None, 'Evidence attempt binding changed')
+        if execution_owner is not None:
+            _require(execution_owner['status'] == 'running' and attempts[index] == execution_owner,
+                     'Check execution ownership changed before result attachment')
+        if attempt['kind'] == 'check' and 'ledger_assignment_digest' in attempt:
+            record = delegation._linked_check(scope, state._scope_id(scope), task, attempts[index], delegation._ledger(scope, db))
+            _require(record is not None, 'Current check has no supported ownership link')
+            _require(all(attempt[key] == attempts[index][key] for key in ('id', 'check_id', 'candidate_digest',
+                'plan_digest', 'ledger_assignment_digest', 'ledger_claims_digest', 'dispatch_id')), 'Check immutable binding changed')
+            record['data'].update(status='uncertain', observation=attempt.get('execution'))
+            db.execute('update assignments set data=? where id=?', (_raw(record['data']).decode(), record['id']))
+        if attempt['kind'] == 'review' and 'ledger_assignment_digest' in attempt:
+            delegation._linked_review(scope, state._scope_id(scope), task, attempts[index], delegation._ledger(scope, db))
+            _require(all(attempt[key] == attempts[index][key] for key in ('id', 'assignment_digest', 'assignment',
+                'candidate_digest', 'plan_digest', 'ledger_assignment_digest', 'ledger_claims_digest', 'dispatch_id',
+                'job_id', 'coverage', 'criteria', 'task_name')), 'Review immutable binding changed')
         attempts[index] = attempt
         task['revision'] += 1
         state._save(db, state._scope_id(scope), task)
@@ -474,21 +494,100 @@ def _execute(scope, check, tool):
                 private_output=_redact_output(bytes(captured), size > MAX_OUTPUT))
 
 
+def _check_response(scope, db, request, record, replayed=True):
+    from runtime import delegation
+    task = delegation._assignment_task(scope, db, request, revision=False)
+    attempt = next((a for a in task.get('evidence', {}).get('attempts', []) if a['id'] == record['id']), None)
+    _require(attempt is not None and delegation._linked_check(scope, state._scope_id(scope), task, attempt, [record]) is not None,
+             'Check replay has no exact retained D5 attempt')
+    return dict(ok=True, task=task, attempt=attempt, attempt_id=attempt['id'], scope_id=state._scope_id(scope), replayed=replayed)
+
+
+def _check_admission(scope, db, task, check, claims, records):
+    from runtime import delegation
+    # Exclusive bookkeeping for an unknown read footprint does not grant mutable command effects.
+    _require(task['state'] not in {'blocked', 'awaiting_user'} and
+        (task['mode'] == 'editable' or check['effects']['kind'] == 'read-only'), 'Task cannot reserve this check')
+    _require(len(task['evidence']['attempts']) < MAX_ATTEMPTS, 'Evidence attempt bound reached')
+    owner = dict(scope_id=state._scope_id(scope), **{key: task[key] for key in ('client', 'session_id', 'task_id')})
+    _require(not any(r['data']['role'] == 'check' and r['data']['job_id'] == check['id'] and
+        r['data']['status'] != 'settled' and all(r['owner'][key] == value for key, value in owner.items()) for r in records),
+        'Exact check remains unresolved; reconcile its original execution first')
+    delegation._resources_available(scope, db, claims, records)
+
+
+def _reserve_check(scope, request):
+    from runtime import delegation
+    with state._database(scope) as db:
+        _require(db is not None, 'Task state has not been initialized')
+        replay = delegation._replay(scope, delegation._ledger(scope, db), request)
+        if replay:
+            _require(replay['data']['role'] == 'check', 'Dispatch identity belongs to another role')
+            return _check_response(scope, db, request, replay)
+        task = _task(db, scope, request)
+        plan = _read(scope, task['evidence']['plan'])
+        check = next((c for c in plan['checks'] if c['id'] == request['check_id']), None)
+        _require(check is not None, 'Check id is not an accepted canonical command')
+        claims = delegation._check_claims(scope, check)
+        _check_admission(scope, db, task, check, claims, delegation._ledger(scope, db))
+        generation = db.execute('select generation from checkouts where scope_id=?', (state._scope_id(scope),)).fetchone()[0]
+    candidate = capture_candidate(scope, plan)
+    reference = _artifact(scope, candidate)
+    git_directory = delegation._git_directory(scope)
+    routing = dict(git_directory=git_directory, git_routing=delegation._git_routing(scope, git_directory))
+    attempt = dict(id=uuid.uuid4().hex, kind='check', status='reserved', check_id=check['id'], dispatch_id=request['dispatch_id'], candidate=reference,
+                   candidate_digest=reference['digest'], plan_digest=_digest(plan))
+    record = delegation._operation_record(scope, task, request, 'check', claims, attempt['id'], reference,
+        dict(id=check['id'], kind='check'), job_id=check['id'], routing=routing)
+    attempt['ledger_assignment_digest'] = record['data']['assignment']['digest']
+    attempt['ledger_claims_digest'] = _digest(record['data']['claims'])
+    with delegation._reservation_write(scope) as db:
+        records = delegation._ledger(scope, db)
+        replay = delegation._replay(scope, records, request)
+        if replay:
+            return _check_response(scope, db, request, replay)
+        task = _task(db, scope, request)
+        _require(_read(scope, task['evidence']['plan']) == plan and delegation._check_claims(scope, check) == claims and
+            delegation._git_routing(scope, git_directory) == routing['git_routing'] and
+            db.execute('select generation from checkouts where scope_id=?', (state._scope_id(scope),)).fetchone()[0] == generation,
+            'Prepared check definition/resources/routing/generation changed')
+        _check_admission(scope, db, task, check, claims, records)
+        delegation._insert_assignment(db, scope, task, record)
+        task['evidence']['attempts'].append(attempt)
+        state._save(db, state._scope_id(scope), task)
+    return dict(ok=True, task=task, attempt=attempt, attempt_id=attempt['id'], scope_id=state._scope_id(scope),
+                replayed=False, plan=plan, candidate=candidate)
+
+
+def _check_request(request):
+    _request(request, ('check_id',), ('dispatch_id',))
+    request = deepcopy(request)
+    if 'dispatch_id' not in request:
+        request['dispatch_id'] = 'check:' + _digest(dict(check_id=request['check_id'], revision=request['expected_revision']))
+    state._text(request['dispatch_id'], 'stable check dispatch id', 128)
+    return request
+
+
 def run_check(scope, request):
-    _request(request, ('check_id',))
-    plan = _load_plan(scope, request)
-    check = next((c for c in plan['checks'] if c['id'] == request['check_id']), None)
-    _require(check is not None, 'Check id is not an accepted canonical command')
-    plan, candidate, attempt, revision = _reserve(scope, request, 'check', dict(check_id=check['id']))
+    request = _check_request(request)
+    reserved = _reserve_check(scope, request)
+    if reserved['replayed']:
+        return reserved
+    plan, candidate, attempt = reserved['plan'], reserved['candidate'], reserved['attempt']
+    check = next(c for c in plan['checks'] if c['id'] == attempt['check_id'])
     attempt['status'] = 'running'
-    result = _finish(scope, request, attempt, revision)
+    result = _finish(scope, request, attempt, reserved['task']['revision'])
     revision = result['task']['revision']
-    # A crash or revision conflict leaves the durable running reservation blocking readiness.
+    execution_owner = deepcopy(result['attempt'])
     attempt.update(_execute(scope, check, candidate['tools'][check['id']]))
-    after = capture_candidate(scope, plan)
-    attempt['inputs_changed'] = candidate != after
-    if candidate != after and attempt['status'] != 'uncertain':
-        attempt['status'] = 'changed-inputs'
+    output_ref = _artifact(scope, attempt.pop('private_output'))
+    try:
+        after = capture_candidate(scope, plan)
+        attempt['inputs_changed'] = candidate != after
+        if candidate != after and attempt['status'] != 'uncertain':
+            attempt['status'] = 'changed-inputs'
+    except StartupError:
+        attempt.update(inputs_changed=True, status='uncertain', diagnostic='Post-execution candidate unavailable; ownership retained')
     baseline = check['baseline']
     if attempt['status'] == 'failed':
         comparable = 'exit_code' in baseline and 'output_digest' in baseline
@@ -500,10 +599,8 @@ def run_check(scope, request):
     attempt['observed_status'] = attempt['status']
     if attempt.get('process_started'):
         attempt['status'] = 'uncertain'
-    output_ref = _artifact(scope, attempt.pop('private_output'))
-    attempt['execution'] = _artifact(scope, dict(command=check, tool=candidate['tools'][check['id']],
-                                               output=output_ref, result=attempt.copy()))
-    return _finish(scope, request, attempt, revision)
+    attempt['execution'] = _artifact(scope, dict(command=check, tool=candidate['tools'][check['id']], output=output_ref, result=attempt.copy()))
+    return _finish(scope, request, attempt, revision, execution_owner=execution_owner)
 
 
 def _read_host_proof(scope, reference):
@@ -516,7 +613,7 @@ def _read_host_proof(scope, reference):
                  for p in (path, *path.parents)), 'Host proof must be canonical, private and outside repositories/caches')
     try:
         from runtime.startup import runtime_settings
-        runtime_settings({'runtime': {'schema_version': 1, 'state_dir': str(path.parent)}}, state.PACKAGE, scope.git_common_dir)
+        runtime_settings({'runtime': {'schema_version': state.SCHEMA_VERSION, 'state_dir': str(path.parent)}}, state.PACKAGE, scope.git_common_dir)
         _no_links(path)
         raw = _read_file(path, MAX_INPUT, private=True)
         _require(hashlib.sha256(raw).hexdigest() == reference['sha256'], 'Host proof integrity failed')
@@ -525,7 +622,7 @@ def _read_host_proof(scope, reference):
         raise state.StateError('Trusted host lifecycle proof is unavailable, unsafe or corrupt') from None
 
 
-def reconcile_check(scope, request):
+def _reconcile_unlinked_check(scope, request):
     """Bind independently inspected host writer/descendant evidence to one current check.
 
     This is D4's coordinator-trusted host-proof boundary, not process supervision
@@ -571,19 +668,111 @@ def reconcile_check(scope, request):
     return _finish(scope, request, attempt, request['expected_revision'])
 
 
-def prepare_review(scope, request):
-    _request(request, ('coverage', 'criteria', 'assignment'))
+def reconcile_check(scope, request):
+    """Settle one exact linked D5 check and resource owner using independent host proof."""
+    _request(request, ('attempt_id', 'host_proof'))
+    request = deepcopy(request)
+    from runtime import delegation
+    with state._database(scope) as db:
+        task = deepcopy(delegation._assignment_task(scope, db, request, revision=False))
+        attempt = next((a for a in task.get('evidence', {}).get('attempts', []) if a['id'] == request['attempt_id']), None)
+        _require(attempt is not None and attempt['kind'] == 'check', 'Exact check attempt is absent')
+        if 'ledger_assignment_digest' not in attempt:
+            legacy = True
+        else:
+            legacy = False
+            records = delegation._ledger(scope, db)
+            record = delegation._linked_check(scope, state._scope_id(scope), task, attempt, records)
+            if record['data']['status'] == 'settled':
+                retained = _read(scope, record['data']['reconciliation'])
+                _require(retained.get('request_digest') == _digest(delegation._semantic(request)), 'Settled check replay payload changed')
+                return _check_response(scope, db, request, record)
+            _require(task['revision'] == request['expected_revision'], 'Task revision conflict')
+            plan = _read(scope, record['body']['d5_plan'])
+            generation = db.execute('select generation from checkouts where scope_id=?', (state._scope_id(scope),)).fetchone()[0]
+            reservations = {r['id']: _digest(r['data']) for r in records}
+    if legacy:
+        return _reconcile_unlinked_check(scope, request)
+    proof = _read_host_proof(scope, request['host_proof'])
+    candidate = capture_candidate(scope, plan)
+    delegation._validate_operation_proof(scope, record, task, proof, current_candidate_digest=_digest(candidate))
+    execution = _read(scope, attempt['execution']) if attempt.get('execution') else None
+    observed = execution.get('result', {}) if execution else {}
+    definition = next(c for c in plan['checks'] if c['id'] == attempt['check_id'])
+    _require(not execution or execution['command'] == definition and
+        execution['tool'] == _read(scope, record['data']['candidate'])['tools'][attempt['check_id']] and
+        observed.get('id') == attempt['id'] and observed.get('candidate_digest') == attempt['candidate_digest'],
+        'Observed check execution differs from the exact prepared command/candidate')
+    status = observed.get('observed_status', 'cancelled')
+    if status == 'passed':
+        _require(observed.get('exit_code') == 0, 'Passing check requires actual observed exit zero')
+        status = 'passed' if not observed.get('inputs_changed') and _digest(candidate) == attempt['candidate_digest'] else 'changed-inputs'
+    elif status == 'uncertain':
+        status = 'cancelled'
+    _require(status in {'passed', 'failed', 'timed-out', 'changed-inputs', 'not-run', 'cancelled'}, 'Unknown check result')
+    retained = _artifact(scope, dict(version=2, proof=proof, source_digest=request['host_proof']['sha256'],
+        request_digest=_digest(delegation._semantic(request)), current_candidate=_artifact(scope, candidate)))
+    attempt.update(status=status, reconciliation=retained)
+    with delegation._reservation_write(scope) as db:
+        current = delegation._assignment_task(scope, db, request)
+        records = delegation._ledger(scope, db)
+        _require({r['id']: _digest(r['data']) for r in records} == reservations and
+            db.execute('select generation from checkouts where scope_id=?', (state._scope_id(scope),)).fetchone()[0] == generation,
+            'Check reservation ownership or candidate generation changed; recapture proof')
+        index = next(n for n, a in enumerate(current['evidence']['attempts']) if a['id'] == attempt['id'])
+        linked = delegation._linked_check(scope, state._scope_id(scope), current, current['evidence']['attempts'][index], records)
+        _require(linked['data'] == record['data'], 'Check ownership changed during reconciliation')
+        current['evidence']['attempts'][index] = attempt
+        current['revision'] += 1
+        linked['data'].update(status='settled', reconciliation=retained,
+            result=dict(outcome='completed' if status == 'passed' else 'cancelled' if status == 'cancelled' else 'failed'))
+        db.execute('update assignments set data=? where id=?', (_raw(linked['data']).decode(), linked['id']))
+        state._save(db, state._scope_id(scope), current)
+    return dict(ok=True, task=current, attempt=attempt, attempt_id=attempt['id'], scope_id=state._scope_id(scope), replayed=False)
+
+
+def _review_admission(scope, task, plan, request):
     _strings(request['coverage'], 'review coverage', COVERAGE)
     _require(request['coverage'], 'Review coverage is empty')
-    plan = _load_plan(scope, request)
     _strings(request['criteria'], 'covered criteria', {c['id'] for c in plan['criteria']})
     assignment = request['assignment']
     _require(isinstance(assignment, str) and 0 < len(assignment) <= 65536 and '\x00' not in assignment,
              'Invalid review assignment')
-    _, _, attempt, revision = _reserve(scope, request, 'review', dict(coverage=request['coverage'], criteria=request['criteria'],
-        assignment=_artifact(scope, dict(prompt=assignment)), assignment_digest=hashlib.sha256(assignment.encode()).hexdigest()))
-    return dict(ok=True, attempt_id=attempt['id'], assignment_digest=attempt['assignment_digest'],
-                candidate_digest=attempt['candidate_digest'], task_name=attempt['task_name'], revision=revision)
+    evidence = task['evidence']
+    _require(len(evidence['attempts']) < MAX_ATTEMPTS, 'Evidence attempt bound reached')
+    limits = [plan['review_limit']] + [_read(scope, entry['plan'])['review_limit'] for entry in evidence.get('history', [])]
+    _require(sum(a['kind'] == 'review' for a in evidence['attempts']) < min(limits),
+             'Original review round limit reached; preserve limits and seek a scoped decision')
+
+
+def _review_attempt(scope, record):
+    data, review = record['data'], record['body']['review']
+    return dict(id=record['id'], kind='review', status='reserved', candidate=data['candidate'],
+        candidate_digest=data['candidate']['digest'], plan_digest=review['d5_plan']['digest'],
+        task_name=data['binding']['task_name'], assignment=_artifact(scope, dict(prompt=record['body']['request']['assignment'])),
+        assignment_digest=review['assignment_digest'], coverage=review['coverage'], criteria=review['criteria'],
+        job_id=data['job_id'], dispatch_id=record['owner']['dispatch_id'],
+        ledger_assignment_digest=data['assignment']['digest'], ledger_claims_digest=_digest(data['claims']))
+
+
+def _review_response(scope, db, request, record, admitted=False):
+    from runtime import delegation
+    task = delegation._assignment_task(scope, db, request, revision=False)
+    attempt = next((a for a in task['evidence']['attempts'] if a['id'] == record['id']), None)
+    _require(attempt is not None and delegation._linked_review(scope, state._scope_id(scope), task, attempt, [record]) is not None,
+             'Review replay has no exact linked attempt')
+    review = record['body']['review']
+    prompt = _raw(dict(assignment=record['body']['request']['assignment'], ledger_assignment_digest=record['data']['assignment']['digest'],
+        report_contract=record['body']['report_contract'] | dict(attempt_id=record['id'],
+            candidate_digest=attempt['candidate_digest'], coverage=attempt['coverage']), ownership=record['body'])).decode()
+    return delegation._reply(record, admitted=admitted) | dict(attempt=attempt, task=task, prompt=prompt,
+        assignment_digest=attempt['assignment_digest'], ledger_assignment_digest=record['data']['assignment']['digest'])
+
+
+def prepare_review(scope, request):
+    """The sole native review admission path: one D5 round and one D6 launch permit."""
+    from runtime import delegation
+    return delegation._prepare_native(scope, request, role='review')
 
 
 def prepared_native_review(scope, attempt_id):
@@ -603,6 +792,9 @@ def prepared_native_review(scope, attempt_id):
         _require(binding['task_id'] == task['task_id'] and task['state'] != 'cancelled' and attempt['kind'] == 'review'
                  and attempt['status'] == 'reserved', 'Native review binding is no longer collectable')
         state._compatible(scope, task)
+        if 'ledger_assignment_digest' in attempt:
+            from runtime import delegation
+            delegation._linked_review(scope, state._scope_id(scope), task, attempt, delegation._ledger(scope, db))
         plan = _read(scope, task['evidence']['plan'])
         assignment = _read(scope, attempt['assignment'])['prompt']
     _require(_digest(capture_candidate(scope, plan)) == attempt['candidate_digest'], 'Native review candidate is stale')
@@ -631,6 +823,34 @@ def _report(value, attempt):
     return value
 
 
+def _review_quality_matches(scope, attempt, record, collected=None):
+    """Positive quality belongs to the exact latest native result, not just its assignment."""
+    from runtime import delegation
+    if record is None or collected is None and 'collected' not in attempt:
+        return False
+    history = delegation._worker_history(scope, record['data']['observation'])
+    latest = history[0][1] if history else None
+    if latest is None or latest['status'] != 'observed' or latest['error'] is not None or latest['conflict'] is not None:
+        return False
+    collected = _read(scope, attempt['collected']) if collected is None else collected
+    try:
+        actual, receipt = latest['receipt'], collected['receipt']
+        if actual is None or actual['turn_status'] != 'completed' or not isinstance(latest['result'], str):
+            return False
+        correspondence = dict(reviewer_id='worker_id', review_turn_id='worker_turn_id', report_item_id='result_item_id',
+            report_digest='result_digest', requested_model='spawn_observed_model', requested_effort='spawn_observed_effort')
+        _report(collected['report'], attempt)
+        return (receipt['assignment_digest'] == attempt['assignment_digest'] and
+            receipt['candidate_digest'] == attempt['candidate_digest'] and
+            all(receipt[key] == actual[key] for key in ('parent_session_id', 'parent_turn_id', 'spawn_item_id', 'native_version')) and
+            all(receipt[key] == actual[field] for key, field in correspondence.items()) and
+            receipt.get('task_name') == actual['task_name'] and receipt.get('agent_path') == actual['agent_path'] and
+            receipt['report_digest'] == hashlib.sha256(latest['result'].encode()).hexdigest() and
+            json_object(latest['result']) == collected['report'])
+    except (StartupError, state.StateError, ValueError, TypeError, KeyError, RecursionError):
+        return False
+
+
 def collect_review(scope, request):
     _request(request, ('attempt_id', 'parent_turn_id', 'spawn_item_id'))
     for key in ('attempt_id', 'parent_turn_id', 'spawn_item_id'):
@@ -639,6 +859,14 @@ def collect_review(scope, request):
         task = _task(db, scope, request)
         attempt = deepcopy(next((a for a in task.get('evidence', {}).get('attempts', []) if a['id'] == request['attempt_id']), None))
     _require(attempt is not None and attempt['kind'] == 'review' and attempt['status'] == 'reserved', 'Native review attempt is not pending')
+    from runtime import delegation
+    with state._database(scope) as db:
+        record = delegation._linked_review(scope, state._scope_id(scope), task, attempt, delegation._ledger(scope, db))
+        _require(record is not None, 'Native review collection requires an exact linked admission')
+    history = delegation._worker_history(scope, record['data']['observation'])
+    latest = history[0][1] if history else None
+    _require(latest is not None and latest['status'] == 'observed' and latest['error'] is None and latest['conflict'] is None and
+        latest['receipt'] is not None and latest['receipt']['turn_status'] == 'completed', 'Review lifecycle is not exactly observed and complete')
     from runtime.adapters.codex import collect_native_review
     observed = collect_native_review(scope, attempt['id'], request['parent_turn_id'], request['spawn_item_id'])
     state._fields(observed, ('receipt', 'report'))
@@ -656,6 +884,8 @@ def collect_review(scope, request):
                  and receipt['agent_path'].split('/')[-1] == attempt['task_name'], 'Native prepared task marker is unverified')
     for key in ('reviewer_id', 'review_turn_id', 'report_item_id', 'report_digest', 'native_version'):
         state._text(receipt[key], 'observed ' + key)
+    _require(_review_quality_matches(scope, attempt, record, observed),
+             'D5 review collection differs from the exact D6 lifecycle result')
     report = _report(observed['report'], attempt)
     _require(_digest(capture_candidate(scope, _load_plan(scope, request))) == attempt['candidate_digest'], 'Review candidate changed during collection')
     attempt.update(status='collected', collected=_artifact(scope, dict(receipt=receipt, report=report)))
@@ -668,6 +898,11 @@ def assess_review(scope, request):
         task = _task(db, scope, request)
         attempt = deepcopy(next((a for a in task.get('evidence', {}).get('attempts', []) if a['id'] == request['attempt_id']), None))
     _require(attempt is not None and attempt['status'] in {'collected', 'assessed'}, 'Assessment requires collected native evidence')
+    if 'ledger_assignment_digest' in attempt:
+        from runtime import delegation
+        with state._database(scope) as db:
+            record = delegation._linked_review(scope, state._scope_id(scope), task, attempt, delegation._ledger(scope, db))
+        _require(_review_quality_matches(scope, attempt, record), 'Review quality no longer matches the latest native result')
     collected = _read(scope, attempt['collected'])
     assessment = request['assessment']
     state._fields(assessment, ('coverage', 'criteria', 'qualification', 'independence', 'semantic_coverage', 'dispositions', 'decision_refs'),
@@ -747,7 +982,9 @@ def _current_attempt(scope, attempt, candidate, plan, reuse):
 
 def _checkout_attempt_blockers(db, scope, task):
     """Use the caller's transaction so another session cannot reserve between scan and commit."""
+    from runtime import delegation
     blockers = []
+    records = delegation._ledger(scope, db)
     rows = db.execute('select t.scope_id,t.client,t.session_id,t.task_id from tasks t join checkouts c on t.scope_id=c.scope_id '
                       'where c.repository_root=? and c.git_common_dir=?',
                       (str(scope.repository_root), str(scope.git_common_dir))).fetchall()
@@ -755,14 +992,17 @@ def _checkout_attempt_blockers(db, scope, task):
         record = state._task(db, scope_id, client, session, task_id)
         if record.get('retirement'):
             _read(scope, record['retirement']['proof'])
-        elif any(a['status'] in {'reserved', 'running', 'uncertain'} for a in record.get('evidence', {}).get('attempts', [])):
+        elif any(a['status'] in {'reserved', 'running', 'uncertain'} and
+                 delegation._linked_attempt(scope, scope_id, record, a, records) is None
+                 for a in record.get('evidence', {}).get('attempts', [])):
             own = (scope_id, client, session, task_id) == (state._scope_id(scope), task['client'], task['session_id'], task['task_id'])
             blockers.append('Evidence attempt or surviving writer remains unresolved' if own else
                             'Unreconciled evidence attempt remains in checkout history')
     return blockers
 
 
-def _blockers(scope, task, plan, candidate, purpose, reuse, security_impact=None):
+def _blockers(scope, task, plan, candidate, purpose, reuse, security_impact=None, *, resource_closure=None, barrier_id=None):
+    from runtime import delegation
     blockers = []
     evidence = task['evidence']
     if task['state'] == 'cancelled':
@@ -771,6 +1011,8 @@ def _blockers(scope, task, plan, candidate, purpose, reuse, security_impact=None
         blockers.append('Task conditions remain unresolved')
     with state._database(scope) as db:
         blockers.extend(_checkout_attempt_blockers(db, scope, task))
+        blockers.extend(_ledger_blockers(scope, db, resource_closure, barrier_id))
+        review_records = delegation._ledger(scope, db)
     if task['turn_uncertain'] and task['turn_id'] is not None:
         blockers.append('Native turn interruption/correlation remains unresolved')
     if ((security_impact or plan['security_impact'])['status'] != 'assessed' or
@@ -806,6 +1048,10 @@ def _blockers(scope, task, plan, candidate, purpose, reuse, security_impact=None
     for attempt in current:
         if attempt['kind'] != 'review' or attempt['status'] != 'assessed':
             continue
+        if 'ledger_assignment_digest' in attempt:
+            record = delegation._linked_review(scope, state._scope_id(scope), task, attempt, review_records)
+            if not _review_quality_matches(scope, attempt, record):
+                continue
         collected = _read(scope, attempt['collected'])
         assessed = _read(scope, attempt['assessment'])
         _require(assessed['collected_digest'] == attempt['collected']['digest'], 'Assessment receipt/report binding failed')
@@ -863,8 +1109,44 @@ def _reuse(value):
     return value
 
 
+def _verification_resources(scope, task, plan):
+    from runtime import delegation
+    git_directory = delegation._git_directory(scope)
+    resources = [dict(kind='path', key=str(scope.repository_root), mode='read'),
+                 dict(kind='path', key=str(scope.repository_root / '.git'), mode='read'),
+                 dict(kind='git', key=str(scope.git_common_dir), mode='read'),
+                 dict(kind='git', key=git_directory, mode='read')]
+    resources.extend(dict(kind='path', key=name, mode='read') for name in plan['instructions'])
+    resources.extend(dict(kind='path', key=_tool(check, scope.repository_root)['path'], mode='read') for check in plan['checks'])
+    for check in plan['checks']:
+        resources.extend(dict(item, mode='read') for item in check.get('resources', []))
+    if task.get('delegation'):
+        native_plan = _read(scope, task['delegation']['plan'])
+        resources.extend(dict(item, mode='read') for job in native_plan['jobs'] for item in job['claims'])
+    _require(len(resources) <= delegation.MAX_VERIFICATION_CLAIMS, 'Verifier resource aggregate exceeds accepted plan bounds')
+    canonical = list({_digest(claim): claim for item in resources for claim in delegation._claims([item])}.values())
+    resources = [dict(kind=claim['kind'], key=claim.get('path', claim['key']), mode='read',
+                      **({'host': claim['host']} if 'host' in claim else {})) for claim in canonical]
+    return resources, canonical, dict(git_directory=git_directory,
+        git_routing=delegation._git_routing(scope, git_directory))
+
+
+def _ledger_blockers(scope, db, claims, exclude=None):
+    from runtime import delegation
+    return ['Relevant assignment ownership remains unresolved: ' + record['id'] for record in delegation._ledger(scope, db)
+        if record['id'] != exclude and record['data']['status'] != 'settled' and
+        (claims is None or delegation._held_overlap(claims, record['data']['claims']))]
+
+
+def _verification_response(task, blockers, candidate=None):
+    return dict(ok=True, verified=not blockers, task=task, blockers=blockers,
+        candidate_digest=_digest(candidate) if candidate is not None else None, merge_authority=False,
+        limitations=['Local point-in-time evidence; no repository merge gate or filesystem security boundary'])
+
+
 def verify_completion(scope, request):
     _request(request, ('purpose',), ('reuse', 'security_impact'))
+    request = deepcopy(request)
     _require(request['purpose'] in {'completion', 'merge-evidence'}, 'Invalid evidence verification purpose')
     reuse = _reuse(request.get('reuse', []))
     security_impact = request.get('security_impact')
@@ -873,21 +1155,60 @@ def verify_completion(scope, request):
         _require(security_impact['status'] in {'assessed', 'unresolved'}, 'Invalid current security impact assessment')
         for key in ('reason', 'reference'):
             state._text(security_impact[key], 'current security impact ' + key)
+    from runtime import delegation
     with state._database(scope) as db:
         task = deepcopy(_task(db, scope, request))
         _require('evidence' in task, 'Evidence plan is missing')
         plan = _read(scope, task['evidence']['plan'])
         generation = db.execute('select generation from checkouts where scope_id=?', (state._scope_id(scope),)).fetchone()[0]
+    resources, closure, routing = _verification_resources(scope, task, plan)
+    def ownership_blockers():
+        with state._database(scope) as db:
+            current = _task(db, scope, request)
+            blockers = _checkout_attempt_blockers(db, scope, current) + _ledger_blockers(scope, db, closure)
+            records = delegation._ledger(scope, db)
+            try:
+                delegation._resources_available(scope, db, closure, records)
+            except state.StateError as error:
+                blockers.append(str(error))
+        return sorted(set(blockers))
+    blockers = ownership_blockers()
+    if blockers:
+        return _verification_response(task, blockers)
+    dispatch = 'verify:' + str(request['expected_revision']) + ':' + request['purpose']
+    barrier_request = {key: request[key] for key in IDENTITY} | dict(dispatch_id=dispatch, claims=resources,
+        operation=dict(id=dispatch, kind='completion-verification'), reason='Synchronous accepted D5 verification',
+        ownership_ref=task['decision_ref'], stop_conditions=['Return after this synchronous verification'],
+        verification=dict(purpose=request['purpose'], **routing))
+    try:
+        reserved = delegation._reserve_operation(scope, barrier_request, role='coordinator', _verification=True)
+    except state.StateError:
+        blockers = ownership_blockers()
+        if blockers:
+            return _verification_response(task, blockers)
+        raise
+    _require(reserved['reservation_admitted'], 'Existing verifier barrier requires exact operation recovery')
+    request['expected_revision'] = reserved['revision']
+    with state._database(scope) as db:
+        task = deepcopy(_task(db, scope, request))
+        barrier = next(record for record in delegation._ledger(scope, db) if record['id'] == reserved['attempt_id'])
+        _require(barrier['data']['claims'] == closure, 'Verifier resource closure changed before capture')
     candidate = capture_candidate(scope, plan)
-    blockers = _blockers(scope, task, plan, candidate, request['purpose'], reuse, security_impact)
+    blockers = _blockers(scope, task, plan, candidate, request['purpose'], reuse, security_impact,
+                         resource_closure=closure, barrier_id=barrier['id'])
     verification = dict(version=VERSION, candidate_digest=_digest(candidate), plan_digest=_digest(plan),
-                        purpose=request['purpose'], generation=generation, blockers=blockers, reuse=reuse, security_impact=security_impact)
+        purpose=request['purpose'], generation=generation, blockers=blockers, reuse=reuse, security_impact=security_impact,
+        resource_closure=closure, barrier_id=barrier['id'])
     verification_ref = _artifact(scope, verification)
-    with state._database(scope, write=True) as db:
+    with delegation._reservation_write(scope) as db:
         current = _task(db, scope, request)
         actual_generation = db.execute('select generation from checkouts where scope_id=?', (state._scope_id(scope),)).fetchone()[0]
-        _require(actual_generation == generation, 'Verification generation changed; recapture before completion')
-        final_blockers = sorted(set(blockers + _checkout_attempt_blockers(db, scope, current)))
+        active = next(record for record in delegation._ledger(scope, db) if record['id'] == barrier['id'])
+        _require(actual_generation == generation and active['data'] == barrier['data'] and
+            delegation._claims(resources, maximum=delegation.MAX_VERIFICATION_CLAIMS) == closure and delegation._git_routing(scope, routing['git_directory']) == routing['git_routing'],
+            'Verification generation, barrier or physical routing changed; reconcile the retained barrier')
+        final_blockers = sorted(set(blockers + _checkout_attempt_blockers(db, scope, current) +
+            _ledger_blockers(scope, db, closure, barrier['id'])))
         if final_blockers != blockers:
             blockers = final_blockers
             verification['blockers'] = blockers
@@ -901,13 +1222,17 @@ def verify_completion(scope, request):
         elif current['state'] == 'ready':
             current['state'] = 'verifying'
         current['revision'] += 1
+        reconciliation = _artifact(scope, dict(version=1, kind='synchronous-verification', barrier_id=barrier['id'],
+            verification=verification_ref, revision=current['revision']))
+        active['data'].update(status='settled', reconciliation=reconciliation, result=dict(outcome='failed' if blockers else 'completed'))
+        db.execute('update assignments set data=? where id=?', (_raw(active['data']).decode(), barrier['id']))
         state._save(db, state._scope_id(scope), current)
-    return dict(ok=True, verified=not blockers, task=current, blockers=blockers, candidate_digest=_digest(candidate),
-                merge_authority=False, limitations=['Local point-in-time evidence; no repository merge gate or filesystem security boundary'])
+    return _verification_response(current, blockers, candidate)
 
 
 def revalidate_ready(scope, client, session_id):
-    """Status is an actual freshness check; hook generation alone cannot prove change."""
+    """Status captures actual freshness and rechecks shared ownership before returning ready."""
+    from runtime import delegation
     with state._database(scope) as db:
         task = state._task(db, state._scope_id(scope), client, session_id) if db else None
         if task is None or task['state'] != 'ready':
@@ -915,19 +1240,24 @@ def revalidate_ready(scope, client, session_id):
         state._compatible(scope, task)
         request = {key: task[key] for key in IDENTITY[:4]} | dict(expected_revision=task['revision'])
         evidence = task.get('evidence')
-        valid = False
         verification = _read(scope, evidence['verification']) if evidence and 'verification' in evidence else None
         plan = _read(scope, evidence['plan']) if evidence else None
+        closure = delegation._ready_closure(scope, task)
+    valid = False
     try:
-        candidate = capture_candidate(scope, plan) if plan else None
-        valid = bool(verification and verification['purpose'] == 'completion' and not verification['blockers'] and
-                     verification['candidate_digest'] == _digest(candidate) and not
-                     _blockers(scope, task, plan, candidate, 'completion', verification.get('reuse', []), verification.get('security_impact')))
+        candidate = capture_candidate(scope, plan) if plan and closure is not None else None
+        valid = bool(verification and closure is not None and verification['purpose'] == 'completion' and not verification['blockers'] and
+            verification['candidate_digest'] == _digest(candidate) and not _blockers(scope, task, plan, candidate, 'completion',
+                verification.get('reuse', []), verification.get('security_impact'), resource_closure=closure))
     except (StartupError, OSError):
         valid = False
-    if not valid:
-        with state._database(scope, write=True) as db:
-            current = _task(db, scope, request)
+    with delegation._reservation_write(scope) as db:
+        current = state._task(db, state._scope_id(scope), client, session_id)
+        if current['state'] != 'ready':
+            return
+        _require(current['revision'] == request['expected_revision'], 'Ready task revision changed during freshness capture')
+        valid = valid and not _ledger_blockers(scope, db, closure) and not _checkout_attempt_blockers(db, scope, current)
+        if not valid:
             current.update(state='verifying', reason='Completion evidence requires freshness verification', reference='evidence:status')
             current['revision'] += 1
             state._save(db, state._scope_id(scope), current)
@@ -943,8 +1273,10 @@ def evidence_status(scope, client, session_id):
             candidate = capture_candidate(scope, plan)
             verification = _read(scope, task['evidence']['verification']) if 'verification' in task['evidence'] else {}
             current = verification.get('candidate_digest') == _digest(candidate)
+            _, closure, _ = _verification_resources(scope, task, plan)
             result['evidence'] = dict(candidate_digest=_digest(candidate), blockers=_blockers(scope, task, plan, candidate, 'completion',
-                verification.get('reuse', []) if current else [], verification.get('security_impact') if current else None))
+                verification.get('reuse', []) if current else [], verification.get('security_impact') if current else None,
+                resource_closure=closure))
         except StartupError:
             result['evidence'] = dict(blockers=['Candidate capture is incomplete, unstable or unavailable'])
     else:

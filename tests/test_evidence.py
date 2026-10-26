@@ -13,7 +13,7 @@ import unittest
 from unittest.mock import patch
 
 from runtime import state
-from runtime.startup import ProjectScope, RuntimeSettings
+from runtime.startup import ProjectScope, RuntimeSettings, policy_digest
 
 
 class EvidenceTests(unittest.TestCase):
@@ -29,10 +29,14 @@ class EvidenceTests(unittest.TestCase):
         (self.repo / 'app.py').write_text('value = 1\n')
         self.git('add', '.')
         self.git('commit', '-qm', 'fixture')
-        self.scope = ProjectScope('fixture', self.repo, self.repo / '.git', 'policy', RuntimeSettings(1, self.root / 'state'))
+        self.scope = ProjectScope('fixture', self.repo, self.repo / '.git', policy_digest(state.PACKAGE), RuntimeSettings(2, self.root / 'state'))
         self.identity = dict(client='codex', session_id='parent', task_id='task', scope_ref='user:task')
         state.start_task(self.scope, self.identity | dict(mode='editable', decision_ref='user:accepted'))
         self.api = importlib.import_module('runtime.evidence')
+        from runtime import changes
+        guard_patch = patch.object(changes, 'LOCK_ROOT', self.root / 'authority-guards')
+        guard_patch.start()
+        self.addCleanup(guard_patch.stop)
 
     def git(self, *args):
         return subprocess.check_output(['git', '-C', str(self.repo), *args], stderr=subprocess.DEVNULL).decode().strip()
@@ -63,6 +67,12 @@ class EvidenceTests(unittest.TestCase):
             plan_digest=attempt['plan_digest'], execution_digest=attempt.get('execution', {}).get('digest'),
             stopped=True, descendants_stopped=True, observation_ref='fixture:explicit-host-lifecycle-observation',
             coordinator_ref='fixture:independently-checked') | proof_updates
+        if 'ledger_assignment_digest' in attempt:
+            from runtime import delegation
+            with state._database(self.scope) as db:
+                row = next(r for r in delegation._ledger(self.scope, db) if r['id'] == attempt['id'])
+            proof = proof | dict(version=2, dispatch_id=row['owner']['dispatch_id'],
+                assignment_digest=attempt['ledger_assignment_digest'], claims_digest=attempt['ledger_claims_digest']) | proof_updates
         raw = json.dumps(proof).encode()
         path = self.root / (attempt['id'] + '-host-' + str(time.time_ns()) + '.json')
         path.write_bytes(raw)
@@ -78,26 +88,502 @@ class EvidenceTests(unittest.TestCase):
             result = self.reconcile(result)
         return result
 
+    def native_review_request(self, *, coverage, criteria, assignment):
+        from runtime import delegation
+        if not hasattr(self, 'native_review_catalog'):
+            self.native_review_catalog = dict(version=1, client_surface='codex-cli', native_version='0.163.0',
+                parent_session_id='parent', originator='fixture-cli', parent_model_provider='native-provider',
+                catalog=[dict(model='fixture-review-model', supported_efforts=['high'], default_effort='high')],
+                dispatch_controls=dict(spawn=True, explicit_model=True, explicit_effort=True, fork_turns_none=True),
+                capability_digest='a' * 64, limitations=['Synthetic native fixture; no actual native call'])
+            self.native_review_cache = dict(client_surface='codex-cli', applicability=dict(client_version='0.163.0', capability_fingerprint='a' * 64))
+            claim = delegation.claim_guidance(self.scope, self.native_review_cache | dict(trigger=dict(kind='routine', id='fixture-review')))
+            if claim.get('token'):
+                guidance = dict(schema_version=1, client_surface='codex-cli', checked_at='2026-01-01T00:00:00Z',
+                    applicability=self.native_review_cache['applicability'], sources=[dict(id='official',
+                        url='https://example.org/official', sha256='b' * 64)], recommendations=[dict(id='review-fixture',
+                        work='Fixture native review', risk='Read-only fixture', models=[], conditions=['Independent review'],
+                        limitations=['Synthetic catalog'], source_ids=['official'])])
+                delegation.record_guidance(self.scope, self.native_review_cache | dict(token=claim['token'],
+                    generation=claim['generation'], coordinator_ref='fixture:verified', guidance=guidance))
+            discover = patch('runtime.adapters.codex.discover_native_workers', return_value=self.native_review_catalog)
+            discover.start(); self.addCleanup(discover.stop)
+        with state._database(self.scope) as db:
+            task = state._task(db, state._scope_id(self.scope), 'codex', 'parent')
+        if 'delegation' not in task:
+            plan = self.coordinator_resource_plan([dict(id='review', role='review', claims=[dict(kind='path',
+                key=str(self.repo), mode='read')], dependencies=[], max_attempts=3)])
+            plan['limits'].update(max_attempts=3, max_resource_units=3, max_parallel_workers=3, host_capacity=3)
+            delegation.plan_delegation(self.scope, self.request(plan=plan))
+        with state._database(self.scope) as db:
+            records = [r for r in delegation._ledger(self.scope, db) if r['owner']['session_id'] == 'parent' and
+                r['owner']['task_id'] == self.identity['task_id'] and r['data']['role'] == 'review']
+        guide = delegation.guidance_status(self.scope, self.native_review_cache)
+        request = self.request(coverage=coverage, criteria=criteria, assignment=assignment, job_id='review',
+            dispatch_id='review-' + str(len(records)), resource_units=1,
+            selection=dict(model='fixture-review-model', effort='high', rationale='Explicit qualified fixture model',
+                profile_ids=['review-fixture'], mode='explicit'),
+            control_observation={key:self.native_review_catalog[key] for key in ('version', 'client_surface',
+                'native_version', 'parent_session_id', 'dispatch_controls')},
+            discovery_expectation={key:self.native_review_catalog[key] for key in ('client_surface', 'native_version',
+                'parent_session_id', 'parent_model_provider', 'capability_digest')},
+            guidance={key:guide[key] for key in ('snapshot_ref', 'snapshot_digest', 'checked_at', 'freshness')})
+        if records:
+            previous = max(records, key=lambda r:r['data']['revision'])
+            request.update(retry_of=previous['id'], diagnostic=dict(prior_attempt_id=previous['id'],
+                cause='Review after previous independently settled round', change='Fresh bounded review',
+                evidence=['fixture:diagnosis-' + previous['id']]))
+        return request
+
+    def reconcile_review(self, prepared):
+        from runtime import delegation
+        task = state.task_status(self.scope, 'codex', 'parent')['task']
+        with state._database(self.scope) as db:
+            row = next(r for r in delegation._ledger(self.scope, db) if r['id'] == prepared['attempt_id'])
+        data, binding = row['data'], row['data']['binding']
+        receipt = self.api._read(self.scope, data['observation'])['receipt']
+        native = {key:binding[key] for key in ('client_surface', 'native_version', 'parent_session_id', 'task_name')}
+        native.update({key:receipt[key] for key in ('parent_turn_id', 'spawn_item_id', 'worker_id', 'worker_turn_id', 'result_item_id')})
+        proof = dict(version=2, kind='assignment-writer-reconciliation', identity=self.identity.copy(), expected_pins=task['pins'],
+            expected_revision=task['revision'], scope_id=state._scope_id(self.scope), attempt_id=row['id'],
+            dispatch_id=row['owner']['dispatch_id'], assignment_digest=data['assignment']['digest'], claims_digest=self.api._digest(data['claims']),
+            candidate_digest=data['candidate']['digest'], current_candidate_digest=self.api._digest(self.api.capture_candidate(self.scope,
+                self.api._read(self.scope, row['body']['review']['d5_plan']))), d6_plan_digest=data['plan_digest'],
+            observation_digest=data['observation']['digest'], result_digest=receipt['result_digest'], native_identity=native,
+            launch_state='observed', stopped=True, descendants_stopped=True, observation_ref='fixture:host-lifecycle-checked',
+            coordinator_ref='fixture:independent-host-inspection')
+        raw=json.dumps(proof).encode(); path=self.root/('review-proof-'+row['id']+'.json');path.write_bytes(raw);path.chmod(0o400)
+        return delegation.reconcile_assignment(self.scope, self.request(attempt_id=row['id'], host_proof=dict(path=str(path),
+            sha256=hashlib.sha256(raw).hexdigest()), assessment=dict(outcome='completed', changed_paths=[],
+            result_assessment='Fixture report independently checked', partial_change_assessment='No candidate/shared-resource effects',
+            evidence=['fixture:effect-inspection'], coordinator_ref='fixture:independent-assessment')))
+
     def review(self, findings=None, coverage=None):
+        from runtime import delegation
         coverage = coverage or ['general', 'security']
-        prepared = self.api.prepare_review(self.scope, self.request(coverage=coverage, criteria=['works'],
-            assignment='Review read-only; inspect app.py and callers. Return the bound report.'))
+        request = self.native_review_request(coverage=coverage, criteria=['works'],
+            assignment='Review read-only; inspect app.py and callers. Return the bound report.')
+        prepared = self.api.prepare_review(self.scope, request)
         attempt = prepared['attempt_id']
-        binding = self.api.prepared_native_review(self.scope, attempt)
-        report = dict(version=1, attempt_id=attempt, assignment_digest=binding['assignment_digest'],
-            candidate_digest=binding['candidate_digest'], coverage=coverage, findings=findings or [], limitations=[])
-        receipt = dict(version=1, mechanism='codex-persisted-history', native_version='0.163.0', parent_session_id='parent',
+        binding = delegation.prepared_native_review_assignment(self.scope, attempt)
+        report = dict(version=1, attempt_id=attempt, assignment_digest=prepared['assignment_digest'],
+            candidate_digest=prepared['candidate_digest'], coverage=coverage, findings=findings or [], limitations=[])
+        raw = json.dumps(report)
+        actual = dict(version=2, mechanism='codex-native-agent-path', **binding, agent_path='/root/'+binding['task_name'],
+            originator='codex_exec', parent_model_provider=None, worker_model_provider=None, parent_turn_id='turn', spawn_item_id='spawn',
+            worker_id='reviewer', worker_turn_id='child-turn', result_item_id='final', turn_status='completed', checkout=str(self.repo),
+            configured_model='fixture-review-model', configured_effort='high', spawn_observed_model='fixture-review-model',
+            spawn_observed_effort='high', execution_model=None, execution_effort=None, descendants_stopped=False,
+            prompt_delivery='unverified', result_digest=hashlib.sha256(raw.encode()).hexdigest())
+        with patch('runtime.adapters.codex.observe_native_review_assignment', return_value=dict(receipt=actual,result=raw)):
+            delegation.observe_assignment(self.scope, self.request(attempt_id=attempt,parent_turn_id='turn',spawn_item_id='spawn'))
+        receipt = dict(version=1, mechanism='codex-native-agent-path', native_version='0.163.0', parent_session_id='parent',
             parent_turn_id='turn', spawn_item_id='spawn', reviewer_id='reviewer', review_turn_id='child-turn',
-            report_item_id='final', assignment_digest=report['assignment_digest'], candidate_digest=report['candidate_digest'],
-            report_digest=hashlib.sha256(json.dumps(report).encode()).hexdigest(), requested_model=None, requested_effort=None)
+            report_item_id='final', assignment_digest=prepared['assignment_digest'], candidate_digest=prepared['candidate_digest'],
+            report_digest=actual['result_digest'], requested_model='fixture-review-model', requested_effort='high',
+            task_name=binding['task_name'],agent_path=actual['agent_path'])
         with patch('runtime.adapters.codex.collect_native_review', return_value={'receipt': receipt, 'report': report}, create=True):
             self.api.collect_review(self.scope, self.request(attempt_id=attempt, parent_turn_id='turn', spawn_item_id='spawn'))
-        return self.api.assess_review(self.scope, self.request(attempt_id=attempt, assessment=dict(coverage=coverage,
+        assessed = self.api.assess_review(self.scope, self.request(attempt_id=attempt, assessment=dict(coverage=coverage,
             criteria=['works'], qualification='Qualified in runtime/security review', independence='Different observed native child',
             semantic_coverage='Inspected requirements, code and failure paths', dispositions=[], decision_refs=['user:accepted'])))
+        self.reconcile_review(prepared)
+        return assessed
 
     def verify(self, **fields):
         return self.api.verify_completion(self.scope, self.request(purpose='completion', **fields))
+
+    def ready_proof_fixture(self):
+        reviews = {name:dict(applicability='inapplicable', reason='Trivial model-free fixture', independent=False)
+            for name in ('general', 'security')}
+        self.plan(nontrivial=False, reviews=reviews)
+        self.checked()
+
+    def readiness_owner(self, session='other-parent', claims=None, *, scope=None, identity=None, dispatch='operation-1'):
+        scope = scope or self.scope
+        identity = identity or self.identity | dict(session_id=session, task_id=session + '-task')
+        with state._database(scope) as db:
+            task = state._task(db, state._scope_id(scope), identity['client'], identity['session_id'])
+        if task is None:
+            state.start_task(scope, identity | dict(mode='editable', decision_ref='user:accepted'))
+            with state._database(scope) as db:
+                task = state._task(db, state._scope_id(scope), identity['client'], identity['session_id'])
+        return identity | dict(expected_revision=task['revision'], dispatch_id=dispatch,
+            claims=claims or [dict(kind='path', key=str(self.repo / 'app.py'), mode='write')],
+            operation=dict(id=dispatch, kind='coordinator-work'), reason='Explicit fixture work',
+            ownership_ref='fixture:independent-owner', stop_conditions=['Stop after fixture operation'])
+
+    def test_writer_first_prevents_verification_without_model_guidance(self):
+        from runtime import delegation
+        self.ready_proof_fixture()
+        writer = delegation._reserve_operation(self.scope, self.readiness_owner(), role='coordinator')
+        with patch.object(delegation, 'guidance_status', side_effect=AssertionError('model-free verify queried guidance')):
+            result = self.verify()
+        self.assertFalse(result['verified'])
+        self.assertNotEqual(result['task']['state'], 'ready')
+        with state._database(self.scope) as db:
+            self.assertEqual(next(r for r in delegation._ledger(self.scope, db) if r['id'] == writer['attempt_id'])['data']['status'], 'prepared')
+        self.assertNotIn('delegation', result['task'])
+
+    def test_verification_barrier_prevents_writer_during_capture(self):
+        from runtime import delegation
+        self.ready_proof_fixture()
+        writer = self.readiness_owner()
+        original = self.api.capture_candidate
+        attempts = []
+        def capture(scope, plan):
+            if not attempts:
+                attempts.append(True)
+                with self.assertRaises(state.StateError):
+                    delegation._reserve_operation(scope, writer, role='coordinator')
+            return original(scope, plan)
+        with patch.object(self.api, 'capture_candidate', side_effect=capture):
+            result = self.verify()
+        self.assertTrue(result['verified'])
+        with state._database(self.scope) as db:
+            records = [r for r in delegation._ledger(self.scope, db) if r['data']['role'] == 'coordinator']
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]['data']['status'], 'settled')
+        operation = self.api._read(self.scope, records[0]['body']['operation'])
+        self.assertEqual(operation['kind'], 'completion-verification')
+        self.assertTrue(all(c['mode'] == 'read' for c in records[0]['data']['claims']))
+        self.assertEqual(records[0]['data']['resource_units'], 0)
+        self.assertIsNone(records[0]['data']['binding'])
+        verification = self.api._read(self.scope, result['task']['evidence']['verification'])
+        self.assertEqual(verification['resource_closure'], records[0]['data']['claims'])
+
+    def test_reservation_atomically_invalidates_foreign_ready_once_and_replay_is_noop(self):
+        from runtime import delegation
+        self.ready_proof_fixture()
+        ready = self.verify()['task']
+        writer = self.readiness_owner()
+        first = delegation._reserve_operation(self.scope, writer, role='coordinator')
+        with state._database(self.scope) as db:
+            current = state._task(db, state._scope_id(self.scope), 'codex', 'parent')
+        self.assertEqual(current['state'], 'verifying')
+        self.assertEqual(current['revision'], ready['revision'] + 1)
+        self.assertTrue(delegation._reserve_operation(self.scope, writer, role='coordinator')['replayed'])
+        failed = self.readiness_owner(session='third-parent')
+        with self.assertRaises(state.StateError):
+            delegation._reserve_operation(self.scope, failed, role='coordinator')
+        with state._database(self.scope) as db:
+            self.assertEqual(state._task(db, state._scope_id(self.scope), 'codex', 'parent'), current)
+            owner = state._task(db, state._scope_id(self.scope), 'codex', 'other-parent')
+        self.assertEqual(owner['revision'], first['revision'])
+
+    def test_crashed_verifier_keeps_read_claim_and_cannot_be_bypassed_by_another_verifier(self):
+        from runtime import delegation
+        self.ready_proof_fixture()
+        with patch.object(self.api, 'capture_candidate', side_effect=RuntimeError('fixture crash after barrier')):
+            with self.assertRaises(RuntimeError):
+                self.verify()
+        with state._database(self.scope) as db:
+            retained = [r for r in delegation._ledger(self.scope, db) if r['data']['role'] == 'coordinator']
+        self.assertEqual(len(retained), 1)
+        self.assertNotEqual(retained[0]['data']['status'], 'settled')
+        before = retained[0]['data']
+        retry = self.verify()
+        self.assertFalse(retry['verified'])
+        self.assertNotEqual(retry['task']['state'], 'ready')
+        with state._database(self.scope) as db:
+            self.assertEqual(next(r for r in delegation._ledger(self.scope, db) if r['id'] == retained[0]['id'])['data'], before)
+        with self.assertRaises(state.StateError):
+            delegation._reserve_operation(self.scope, self.readiness_owner(), role='coordinator')
+        current = state.task_status(self.scope, 'codex', 'parent')['task']
+        with self.assertRaises(state.StateError):
+            state.start_task(self.scope, self.identity | dict(task_id='replacement', mode='editable', decision_ref='user:accepted',
+                replaces=dict(task_id='task', expected_revision=current['revision'])))
+
+    def test_known_failed_verification_settles_only_own_read_barrier_and_same_task_reader_blocks(self):
+        from runtime import delegation
+        self.plan()
+        unrelated = delegation._reserve_operation(self.scope, self.readiness_owner(claims=[
+            dict(kind='service', key='fixture:independent', host='local', mode='read')]), role='coordinator')
+        failed = self.verify()
+        self.assertFalse(failed['verified'])
+        with state._database(self.scope) as db:
+            records = delegation._ledger(self.scope, db)
+        self.assertEqual(next(r for r in records if r['id'] == unrelated['attempt_id'])['data']['status'], 'prepared')
+        verifier = next(r for r in records if r['id'] != unrelated['attempt_id'])
+        self.assertEqual(verifier['data']['status'], 'settled')
+        self.assertEqual(verifier['data']['result']['outcome'], 'failed')
+        reader = self.readiness_owner(identity=self.identity, dispatch='same-task-reader', claims=[
+            dict(kind='path', key=str(self.repo / 'app.py'), mode='read')])
+        delegation._reserve_operation(self.scope, reader, role='coordinator')
+        result = self.verify()
+        self.assertFalse(result['verified'])
+        self.assertTrue(any('ownership' in item for item in result['blockers']))
+        with state._database(self.scope) as db:
+            self.assertEqual(len(delegation._ledger(self.scope, db)), 3)
+        self.assertNotIn('delegation', result['task'])
+
+    def coordinator_resource_plan(self, jobs):
+        return dict(version=1, route=dict(mechanism='codex-native-subagent', client_surface='codex-cli', parent_session_id='parent',
+            authority_ref='fixture:accepted-route', controls_ref='fixture:known-controls'),
+            authority=dict(state_dir=str(self.scope.runtime.state_dir), participants_ref='fixture:shared-owners', ownership_known=True),
+            selection_constraints=dict(complexity='Fixture', risk='Bounded', rationale='Explicit fixture plan', required_controls=['spawn']),
+            limits=dict(max_attempts=1, max_resource_units=1, deadline=int(time.time()) + 600, max_parallel_workers=1,
+                host_capacity=1, capacity_ref='fixture:capacity'), fallback=dict(action='stop', reference='user:accepted'),
+            jobs=jobs)
+
+    def test_ready_shared_service_closure_preserves_independence_but_status_blocks_overlapping_reader(self):
+        from runtime import delegation
+        self.ready_proof_fixture()
+        service = dict(kind='service', key='fixture:used-db', host='local', mode='write')
+        plan = self.coordinator_resource_plan([dict(id='coordinator-service', role='coordinator', claims=[service], dependencies=[], max_attempts=1)])
+        delegation.plan_delegation(self.scope, self.request(plan=plan))
+        independent = self.readiness_owner(claims=[service | dict(key='fixture:independent-db')])
+        delegation._reserve_operation(self.scope, independent, role='coordinator')
+        ready = self.verify()['task']
+        self.assertEqual(ready['state'], 'ready')
+        verification = self.api._read(self.scope, ready['evidence']['verification'])
+        self.assertIn(service | dict(mode='read'), verification['resource_closure'])
+        self.assertFalse(self.api.evidence_status(self.scope, 'codex', 'parent')['evidence']['blockers'])
+        reader = self.readiness_owner(session='reader', claims=[service | dict(mode='read')])
+        delegation._reserve_operation(self.scope, reader, role='coordinator')
+        with state._database(self.scope) as db:
+            before_status = state._task(db, state._scope_id(self.scope), 'codex', 'parent')
+        self.assertEqual(before_status['state'], 'ready')
+        self.assertEqual(before_status['revision'], ready['revision'])
+        self.api.revalidate_ready(self.scope, 'codex', 'parent')
+        with state._database(self.scope) as db:
+            after = state._task(db, state._scope_id(self.scope), 'codex', 'parent')
+        self.assertEqual(after['state'], 'verifying')
+        self.assertEqual(after['revision'], ready['revision'] + 1)
+
+    def test_status_uses_newly_accepted_d6_resources_when_candidate_is_unchanged(self):
+        from runtime import delegation
+        self.ready_proof_fixture()
+        ready = self.verify()['task']
+        original = self.api._read(self.scope, ready['evidence']['verification'])
+        dependency = dict(kind='service', key='fixture:new-dependency', host='local', mode='read')
+        plan = self.coordinator_resource_plan([dict(id='new-dependency', role='coordinator', claims=[dependency],
+            dependencies=[], max_attempts=1)])
+        delegation.plan_delegation(self.scope, self.request(plan=plan))
+        owner = delegation._reserve_operation(self.scope, self.readiness_owner(claims=[dependency]), role='coordinator')
+        status = self.api.evidence_status(self.scope, 'codex', 'parent')
+        self.assertEqual(status['evidence']['candidate_digest'], original['candidate_digest'])
+        self.assertTrue(any(owner['attempt_id'] in blocker for blocker in status['evidence']['blockers']))
+        verified = self.verify()
+        self.assertFalse(verified['verified'])
+        self.assertEqual(status['evidence']['blockers'], verified['blockers'])
+
+    def test_first_delegation_plan_invalidates_ready_once_and_reuse_preserves_fresh_ready(self):
+        from runtime import delegation
+        self.ready_proof_fixture()
+        ready = self.verify()['task']
+        before = json.loads(json.dumps(ready))
+        dependency = dict(kind='service', key='fixture:first-plan-dependency', host='local', mode='read')
+        plan = self.coordinator_resource_plan([dict(id='dependency', role='coordinator', claims=[dependency],
+            dependencies=[], max_attempts=1)])
+        request = self.request(plan=plan)
+        accepted = delegation.plan_delegation(self.scope, request)
+        with state._database(self.scope) as db:
+            current = state._task(db, state._scope_id(self.scope), 'codex', 'parent')
+        self.assertEqual(current['state'], 'verifying')
+        self.assertEqual(current['revision'], before['revision'] + 1)
+        self.assertEqual(accepted['revision'], current['revision'])
+        self.assertEqual(current['pins'], before['pins'])
+        self.assertEqual(current['evidence'], before['evidence'])
+        self.assertEqual(current['delegation']['attempts_consumed'], 0)
+        self.assertEqual(current['delegation']['resource_units_consumed'], 0)
+        with self.assertRaisesRegex(state.StateError, 'revision conflict'):
+            delegation.plan_delegation(self.scope, request)
+        reuse = delegation.plan_delegation(self.scope, self.request(plan=plan))
+        self.assertEqual(reuse, accepted)
+        altered = json.loads(json.dumps(plan))
+        altered['limits']['max_attempts'] += 1
+        with self.assertRaisesRegex(state.StateError, 'immutable'):
+            delegation.plan_delegation(self.scope, self.request(plan=altered))
+        renewed = self.verify()
+        self.assertTrue(renewed['verified'])
+        fresh = renewed['task']
+        proof = self.api._read(self.scope, fresh['evidence']['verification'])
+        self.assertIn(dependency, proof['resource_closure'])
+        reuse = delegation.plan_delegation(self.scope, self.request(plan=plan))
+        self.assertEqual(reuse['revision'], fresh['revision'])
+        with state._database(self.scope) as db:
+            unchanged = state._task(db, state._scope_id(self.scope), 'codex', 'parent')
+        self.assertEqual(unchanged, fresh)
+        writer = delegation.reserve_coordinator(self.scope,
+            self.readiness_owner(claims=[dependency | dict(mode='write')]))
+        with state._database(self.scope) as db:
+            invalidated = state._task(db, state._scope_id(self.scope), 'codex', 'parent')
+        self.assertEqual(invalidated['state'], 'verifying')
+        self.assertEqual(invalidated['revision'], fresh['revision'] + 1)
+        self.assertEqual(writer['status'], 'prepared')
+
+    def test_first_plan_dependency_reader_blocks_status_after_fresh_verification(self):
+        from runtime import delegation
+        self.ready_proof_fixture()
+        self.assertTrue(self.verify()['verified'])
+        dependency = dict(kind='service', key='fixture:first-plan-reader', host='local', mode='read')
+        plan = self.coordinator_resource_plan([dict(id='dependency', role='coordinator', claims=[dependency],
+            dependencies=[], max_attempts=1)])
+        delegation.plan_delegation(self.scope, self.request(plan=plan))
+        with state._database(self.scope) as db:
+            current = state._task(db, state._scope_id(self.scope), 'codex', 'parent')
+        self.assertEqual(current['state'], 'verifying')
+        self.assertTrue(self.verify()['verified'])
+        owner = delegation.reserve_coordinator(self.scope, self.readiness_owner(claims=[dependency]))
+        status = state.task_status(self.scope, 'codex', 'parent')
+        self.assertEqual(status['task']['state'], 'verifying')
+        blockers = self.api.evidence_status(self.scope, 'codex', 'parent')['evidence']['blockers']
+        self.assertTrue(any(owner['attempt_id'] in item for item in blockers))
+
+    def test_linked_checkout_shared_git_reservation_invalidates_ready_in_same_transaction(self):
+        from runtime import delegation
+        self.ready_proof_fixture()
+        ready = self.verify()['task']
+        linked = self.root / 'linked'
+        self.git('worktree', 'add', '-q', '--detach', str(linked), 'HEAD')
+        foreign = replace(self.scope, project_id='linked', repository_root=linked)
+        request = self.readiness_owner(scope=foreign, claims=[dict(kind='git', key=str(self.scope.git_common_dir), mode='write')])
+        delegation._reserve_operation(foreign, request, role='coordinator')
+        with state._database(self.scope) as db:
+            current = state._task(db, state._scope_id(self.scope), 'codex', 'parent')
+        self.assertEqual(current['state'], 'verifying')
+        self.assertEqual(current['revision'], ready['revision'] + 1)
+
+    def test_stale_verification_generation_retains_exact_barrier_and_cannot_publish_ready(self):
+        from runtime import delegation
+        self.ready_proof_fixture()
+        original = self.api.capture_candidate
+        def capture(scope, plan):
+            candidate = original(scope, plan)
+            with state._database(scope, write=True) as db:
+                db.execute('update checkouts set generation=generation+1 where scope_id=?', (state._scope_id(scope),))
+            return candidate
+        with patch.object(self.api, 'capture_candidate', side_effect=capture), self.assertRaises(state.StateError):
+            self.verify()
+        with state._database(self.scope) as db:
+            task = state._task(db, state._scope_id(self.scope), 'codex', 'parent')
+            records = [r for r in delegation._ledger(self.scope, db) if r['data']['role'] == 'coordinator']
+        self.assertNotEqual(task['state'], 'ready')
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]['data']['status'], 'prepared')
+        self.assertIsNone(records[0]['data']['reconciliation'])
+
+    def test_ready_status_final_scan_sees_reader_admitted_after_analysis(self):
+        from runtime import delegation
+        self.ready_proof_fixture()
+        ready = self.verify()['task']
+        reader = self.readiness_owner(claims=[dict(kind='path', key=str(self.repo / 'app.py'), mode='read')])
+        original = self.api._blockers
+        admitted = []
+        def blockers(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if not admitted:
+                admitted.append(delegation._reserve_operation(self.scope, reader, role='coordinator'))
+            return result
+        with patch.object(self.api, '_blockers', side_effect=blockers):
+            self.api.revalidate_ready(self.scope, 'codex', 'parent')
+        with state._database(self.scope) as db:
+            current = state._task(db, state._scope_id(self.scope), 'codex', 'parent')
+        self.assertEqual(current['state'], 'verifying')
+        self.assertEqual(current['revision'], ready['revision'] + 1)
+
+    def test_missing_ready_resource_closure_cannot_establish_independence(self):
+        from runtime import delegation
+        self.ready_proof_fixture()
+        ready = self.verify()['task']
+        verification = self.api._read(self.scope, ready['evidence']['verification'])
+        verification.pop('resource_closure', None)
+        with state._database(self.scope, write=True) as db:
+            ready['evidence']['verification'] = self.api._artifact(self.scope, verification)
+            state._save(db, state._scope_id(self.scope), ready)
+        independent = self.readiness_owner(claims=[dict(kind='service', key='fixture:independent', host='local', mode='read')])
+        delegation._reserve_operation(self.scope, independent, role='coordinator')
+        with state._database(self.scope) as db:
+            current = state._task(db, state._scope_id(self.scope), 'codex', 'parent')
+        self.assertEqual(current['state'], 'verifying')
+        self.assertEqual(current['revision'], ready['revision'] + 1)
+
+    def test_outside_readonly_hardlink_owner_remains_relevant_to_directory_closure(self):
+        from runtime import delegation
+        self.ready_proof_fixture()
+        outside = self.root / 'outside-alias.py'
+        os.link(self.repo / 'app.py', outside)
+        reader = self.readiness_owner(claims=[dict(kind='path', key=str(outside), mode='read')])
+        delegation._reserve_operation(self.scope, reader, role='coordinator')
+        result = self.verify()
+        self.assertFalse(result['verified'])
+        self.assertNotEqual(result['task']['state'], 'ready')
+        self.assertTrue(any('ownership' in item for item in result['blockers']))
+
+    def test_verifier_deduplicates_accepted_root_alias_without_relaxing_external_claims(self):
+        from runtime import delegation
+        self.ready_proof_fixture()
+        root = dict(kind='path', key=str(self.repo), mode='read')
+        alias = root | dict(key=str(self.repo) + '/')
+        plan = self.coordinator_resource_plan([dict(id='coordinator-root', role='coordinator', claims=[alias], dependencies=[], max_attempts=1)])
+        delegation.plan_delegation(self.scope, self.request(plan=plan))
+        result = self.verify()
+        self.assertTrue(result['verified'])
+        verification = self.api._read(self.scope, result['task']['evidence']['verification'])
+        self.assertEqual(sum(c['kind'] == 'path' and c.get('path') == str(self.repo) for c in verification['resource_closure']), 1)
+        with self.assertRaises(state.StateError):
+            delegation._claims([root, alias])
+
+    def test_verifier_preserves_all_64_accepted_instruction_paths(self):
+        from runtime import delegation
+        paths = []
+        prefix = self.root
+        for depth in range(8):
+            prefix = prefix / ('layer-' + str(depth) + '-' + 'x' * 92)
+            prefix.mkdir()
+        for number in range(64):
+            directory = prefix / ('instruction-' + str(number))
+            directory.mkdir()
+            path = directory / 'AGENTS.md'
+            path.write_text('Fixture instruction input\n')
+            paths.append(str(path))
+        self.plan(instructions=paths)
+        result = self.verify()
+        self.assertFalse(result['verified'])
+        verification = self.api._read(self.scope, result['task']['evidence']['verification'])
+        self.assertTrue(set(paths) <= {c.get('path') for c in verification['resource_closure']})
+        self.assertGreater(len(verification['resource_closure']), 64)
+        with state._database(self.scope) as db:
+            self.assertEqual(delegation._ledger(self.scope, db)[0]['data']['status'], 'settled')
+            raw = db.execute('select data from assignments').fetchone()[0]
+            self.assertGreater(len(raw.encode()), 128 * 1024)
+
+    def test_verifier_preserves_maximum_accepted_d6_job_resource_union(self):
+        from runtime import delegation
+        self.ready_proof_fixture()
+        jobs = [dict(id='j' + str(job), role='coordinator', dependencies=[], max_attempts=1,
+            claims=[dict(kind='service', key='s' + format(job * 64 + item, 'x'), host='local', mode='read') for item in range(64)])
+            for job in range(32)]
+        plan = self.coordinator_resource_plan(jobs)
+        self.assertLessEqual(len(self.api._raw(plan)), 128 * 1024)
+        delegation.plan_delegation(self.scope, self.request(plan=plan))
+        result = self.verify()
+        self.assertTrue(result['verified'])
+        expected = {claim['key'] for job in jobs for claim in job['claims']}
+        verification = self.api._read(self.scope, result['task']['evidence']['verification'])
+        self.assertEqual({c['key'] for c in verification['resource_closure'] if c['kind'] == 'service'}, expected)
+        self.assertGreater(len(verification['resource_closure']), 32 * 64)
+        with state._database(self.scope) as db:
+            rows = [r for r in delegation._ledger(self.scope, db) if r['data']['role'] == 'coordinator']
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['data']['status'], 'settled')
+
+    def test_external_operations_keep_individual_claim_and_record_byte_limits(self):
+        from runtime import delegation
+        too_many = self.readiness_owner(claims=[dict(kind='service', key='s' + str(i), host='local', mode='read') for i in range(65)])
+        with self.assertRaises(state.StateError):
+            delegation._reserve_operation(self.scope, too_many, role='coordinator')
+        request = self.readiness_owner()
+        admitted = delegation._reserve_operation(self.scope, request, role='coordinator')
+        with state._database(self.scope) as db:
+            record = next(r for r in delegation._ledger(self.scope, db) if r['id'] == admitted['attempt_id'])
+        data = dict(record['data'], result=dict(padding='x' * (128 * 1024)))
+        owner = record['owner']
+        row = (record['id'], *(owner[k] for k in ('scope_id', 'client', 'session_id', 'task_id', 'dispatch_id')),
+               self.api._raw(data).decode())
+        with self.assertRaises(state.StateError):
+            delegation._record(self.scope, row)
 
     def test_final_commit_sees_another_session_reservation_after_blocker_scan(self):
         self.plan()
@@ -112,15 +598,16 @@ class EvidenceTests(unittest.TestCase):
         def blockers(*args, **kwargs):
             result = original(*args, **kwargs)
             if not inserted:
-                prepared = self.api.prepare_review(self.scope, other | dict(expected_revision=2, coverage=['general'],
-                    criteria=['works'], assignment='Read-only concurrent review.'))
+                from runtime import delegation
+                owner = self.readiness_owner(identity=other, claims=[dict(kind='path', key=str(self.repo / 'app.py'), mode='read')])
+                prepared = delegation.reserve_coordinator(self.scope, owner)
                 inserted.append(prepared['attempt_id'])
             return result
         with patch.object(self.api, '_blockers', side_effect=blockers):
             result = self.verify()
         self.assertFalse(result['verified'])
         self.assertNotEqual(result['task']['state'], 'ready')
-        self.assertTrue(any('history' in b for b in result['blockers']))
+        self.assertTrue(any(inserted[0] in b for b in result['blockers']))
 
     def test_detached_writer_cannot_pass_without_exact_current_host_reconciliation(self):
         applicability = dict(applicability='inapplicable', reason='Trivial local synthetic fixture', independent=False)
@@ -273,6 +760,65 @@ class EvidenceTests(unittest.TestCase):
         impact = dict(status='assessed', reason='Rechecked the changed runtime boundary', reference='code:new-impact')
         self.assertTrue(self.verify(security_impact=impact)['verified'])
 
+    def assert_interleaved_check_diagnostics(self, cancel):
+        from runtime import delegation
+        self.plan()
+        plan = self.api._load_plan(self.scope, self.identity)
+        plan['checks'][0]['argv'] = [sys.executable, '-c', "print('actual failure'); raise SystemExit(7)"]
+        self.api.plan_evidence(self.scope, self.request(plan=plan, change_decision_ref='user:failure-fixture'))
+        request = self.request(check_id='unit', dispatch_id='interleaved-check')
+        execute = self.api._execute
+        interleaved = []
+        def execute_with_operation(*args):
+            if cancel:
+                state.update_task(self.scope, self.request(state='cancelled', reason='User cancelled during check',
+                    reference='user:cancelled'))
+            else:
+                delegation.reserve_coordinator(self.scope, self.readiness_owner(identity=self.identity,
+                    claims=[dict(kind='path', key=str(self.repo / 'app.py'), mode='read')]))
+            with state._database(self.scope) as db:
+                interleaved.append(state._task(db, state._scope_id(self.scope), 'codex', 'parent'))
+            return execute(*args)
+        with patch.object(self.api, '_execute', side_effect=execute_with_operation):
+            result = self.api.run_check(self.scope, request)
+        attempt = result['attempt']
+        self.assertEqual(attempt['exit_code'], 7)
+        self.assertEqual(attempt['observed_status'], 'failed')
+        self.assertEqual(attempt['status'], 'uncertain')
+        execution = self.api._read(self.scope, attempt['execution'])
+        self.assertEqual(self.api._read(self.scope, execution['output'])['text'], 'actual failure')
+        self.assertEqual(execution['result']['exit_code'], 7)
+        with state._database(self.scope) as db:
+            record = next(r for r in delegation._ledger(self.scope, db) if r['id'] == attempt['id'])
+            current = state._task(db, state._scope_id(self.scope), 'codex', 'parent')
+        self.assertEqual(record['data']['observation'], attempt['execution'])
+        self.assertEqual(record['data']['status'], 'uncertain')
+        for field in ('state', 'reason', 'reference', 'pins', 'conditions'):
+            self.assertEqual(current[field], interleaved[0][field])
+        self.assertEqual(current['revision'], interleaved[0]['revision'] + 1)
+        with patch.object(self.api, '_execute', side_effect=AssertionError('stable replay reran command')):
+            replay = self.api.run_check(self.scope, request)
+        self.assertTrue(replay['replayed'])
+        self.assertEqual(replay['attempt'], attempt)
+        self.assertEqual(replay['task'], current)
+        if not cancel:
+            with self.assertRaisesRegex(state.StateError, 'revision conflict'):
+                delegation.reserve_coordinator(self.scope, self.readiness_owner(identity=self.identity,
+                    dispatch='stale', claims=[dict(kind='path', key=str(self.repo / 'app.py'), mode='read')]) |
+                    dict(expected_revision=request['expected_revision']))
+        with self.assertRaises(state.StateError):
+            self.reconcile(result, expected_revision=request['expected_revision'])
+        settled = self.reconcile(result)
+        self.assertEqual(settled['attempt']['status'], 'failed')
+        self.assertEqual(settled['attempt']['exit_code'], 7)
+        self.assertEqual(settled['task']['state'], current['state'])
+
+    def test_check_result_survives_compatible_same_task_reservation_during_execution(self):
+        self.assert_interleaved_check_diagnostics(cancel=False)
+
+    def test_check_result_survives_task_cancellation_during_execution(self):
+        self.assert_interleaved_check_diagnostics(cancel=True)
+
     def test_check_keeps_private_redacted_inspectable_output_and_unknown_failure_comparison(self):
         self.plan()
         plan = self.api._load_plan(self.scope, self.identity)
@@ -343,21 +889,16 @@ class EvidenceTests(unittest.TestCase):
         self.api._reserve(self.scope, self.request(), 'check', dict(check_id='unit'))
         result = state.update_task(self.scope, self.request(state='cancelled', reason='Interrupted parent', reference='user:cancel'))
         old_revision = result['task']['revision']
-        self.identity['task_id'] = 'replacement'
-        state.start_task(self.scope, self.identity | dict(mode='editable', decision_ref='user:accepted',
-            replaces=dict(task_id='task', expected_revision=old_revision)))
-        self.plan()
-        self.checked()
-        self.review()
-        result = self.verify()
-        self.assertFalse(result['verified'])
-        self.assertTrue(any('history' in b for b in result['blockers']))
+        with self.assertRaises(state.StateError):
+            state.start_task(self.scope, self.identity | dict(task_id='replacement', mode='editable', decision_ref='user:accepted',
+                replaces=dict(task_id='task', expected_revision=old_revision)))
+        self.assertEqual(state.task_status(self.scope, 'codex', 'parent')['task']['task_id'], 'task')
 
     def test_latest_unresolved_attempt_cannot_hide_behind_prior_pass(self):
         self.plan()
         self.checked()
         self.review()
-        prepared = self.api.prepare_review(self.scope, self.request(coverage=['general'], criteria=['works'],
+        prepared = self.api.prepare_review(self.scope, self.native_review_request(coverage=['general'], criteria=['works'],
             assignment='Review pending latest change read-only.'))
         result = self.verify()
         self.assertFalse(result['verified'])

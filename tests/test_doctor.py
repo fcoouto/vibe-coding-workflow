@@ -30,8 +30,8 @@ class DoctorTests(unittest.TestCase):
         self.repo = self.base / "project"
         self.repo.mkdir()
         self.scope = startup.ProjectScope("fixture", self.repo, self.repo / ".git",
-            startup.policy_digest(PACKAGE), startup.RuntimeSettings(1, self.base / "state"))
-        self.state = dict(configured=True, present=True, compatible=True, schema_version=1,
+            startup.policy_digest(PACKAGE), startup.RuntimeSettings(2, self.base / "state"))
+        self.state = dict(configured=True, present=True, compatible=True, schema_version=2,
                           runtime_digest="a" * 64, policy_digest=self.scope.policy_digest, tasks=[])
         self.hooks = []
         matchers = ("^(startup|resume|clear|compact|fork)$", "^apply_patch$", "*", None, None)

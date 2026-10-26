@@ -1,6 +1,6 @@
 # D5 checks and review validation
 
-26 October 2026. D5 implementation, independent review and disposable native acceptance are complete for Codex CLI 0.163.0 and local Codex Desktop 26.1021.31345 with bundled Codex 0.164.0-alpha.11.1. Desktop qualification covers automatic startup orientation and the D5 checks/review/completion lifecycle below. Repository merge enforcement remains unqualified under D7. Native operation remains the default; Superset controls/dispatch remain D6.
+26 October 2026. D5 implementation, independent review and disposable native acceptance are complete for Codex CLI 0.163.0 and local Codex Desktop 26.1021.31345 with bundled Codex 0.164.0-alpha.11.1. Desktop qualification covers automatic startup orientation and the D5 checks/review/completion lifecycle below. Repository merge enforcement remains unqualified under D7. Native operation remains the default; Superset controls/dispatch remain implementation suspended in the retained future design.
 
 ## Implemented behavior
 

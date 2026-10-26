@@ -46,7 +46,9 @@ class HookManifestTests(unittest.TestCase):
         self.assertEqual(validate(self.package)["validation"], "passed")
 
     def test_required_runtime_files_are_rejected_when_missing(self):
-        for relative in ("runtime/engine.py", "runtime/state.py", "runtime/doctor.py", "clients/runtime.md"):
+        for relative in ("runtime/engine.py", "runtime/state.py", "runtime/doctor.py", "clients/runtime.md",
+                         "runtime/delegation.py", "clients/delegation.md", "runtime/repository_gate.py",
+                         "scripts/repository_gate.py", "clients/repository-gate.md"):
             with self.subTest(path=relative):
                 path = self.package / relative
                 content = path.read_bytes()

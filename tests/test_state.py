@@ -26,7 +26,7 @@ class StateTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name).resolve()
         self.scope = ProjectScope("project", self.base / "repo", self.base / "repo/.git", "policy",
-                                  RuntimeSettings(1, self.base / "private"))
+                                  RuntimeSettings(2, self.base / "private"))
         self.request = dict(client="codex", session_id="session", task_id="task", scope_ref="request:1",
                             mode="editable", decision_ref="user:1")
 
@@ -93,6 +93,38 @@ class StateTests(unittest.TestCase):
         with self.assertRaises(self.api().StateError):
             self.api().retire_task(self.scope, request)
 
+    def test_schema_two_assignments_have_unique_dispatch_and_no_legacy_adoption(self):
+        self.start()
+        path = self.scope.runtime.state_dir / "runtime.sqlite3"
+        with closing(sqlite3.connect(path)) as db, db:
+            db.execute("insert into assignments values(?,?,?,?,?,?,?)",
+                       ("one", "scope", "codex", "session", "task", "dispatch", "{}"))
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.execute("insert into assignments values(?,?,?,?,?,?,?)",
+                           ("two", "scope", "codex", "session", "task", "dispatch", "{}"))
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.execute("insert into assignments values(?,?,?,?,?,?,?)",
+                           ("one", "other", "codex", "session", "task", "dispatch", "{}"))
+            db.execute("drop table assignments")
+            db.execute("pragma user_version=1")
+        original = path.read_bytes()
+        with self.assertRaises(self.api().StateError):
+            self.status()
+        with self.assertRaises(self.api().StateError):
+            self.start()
+        self.assertEqual(path.read_bytes(), original)
+        self.assertFalse(self.api().inspect_state(self.scope)["compatible"])
+
+    def test_same_columns_without_assignment_constraints_are_rejected(self):
+        self.start()
+        path = self.scope.runtime.state_dir / "runtime.sqlite3"
+        with closing(sqlite3.connect(path)) as db, db:
+            db.execute("drop table assignments")
+            db.execute("create table assignments(id TEXT,scope_id TEXT,client TEXT,session_id TEXT,"
+                       "task_id TEXT,dispatch_id TEXT,data TEXT)")
+        with self.assertRaises(self.api().StateError):
+            self.status()
+
     def test_start_restart_idempotence_and_pins(self):
         first = self.start()
         self.assertEqual(first["task"]["state"], "planned")
@@ -101,7 +133,7 @@ class StateTests(unittest.TestCase):
         result = subprocess.run([sys.executable, "-B", "-c",
             "from runtime.state import *; from runtime.startup import *; from pathlib import Path; import json; "
             f"s=ProjectScope('project',Path({str(self.scope.repository_root)!r}),Path({str(self.scope.git_common_dir)!r}),"
-            f"'policy',RuntimeSettings(1,Path({str(self.scope.runtime.state_dir)!r}))); "
+            f"'policy',RuntimeSettings(2,Path({str(self.scope.runtime.state_dir)!r}))); "
             "print(json.dumps(task_status(s,'codex','session')))"], cwd=PACKAGE, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["task"], first["task"])
@@ -336,7 +368,7 @@ class StateTests(unittest.TestCase):
                 self.assertEqual(self.event("Stop").action, "pass")
                 self.assertEqual(self.status()["task"]["state"], state)
                 # A separate fixture preserves terminal task identity and consumed history.
-                self.scope = replace(self.scope, runtime=RuntimeSettings(1, self.base / state))
+                self.scope = replace(self.scope, runtime=RuntimeSettings(2, self.base / state))
         self.arm()
         for kind in ("decision", "blocker"):
             self.update(conditions=[dict(id=kind, kind=kind, action="task", reason="Waiting", reference="external:1")])
@@ -426,7 +458,7 @@ class StateTests(unittest.TestCase):
     def test_unknown_or_missing_stop_persistently_suppresses_old_allowance(self):
         for observed in ("unseen-stop-turn", None):
             with self.subTest(observed=observed):
-                self.scope = replace(self.scope, runtime=RuntimeSettings(1, self.base / (observed or "missing-stop")))
+                self.scope = replace(self.scope, runtime=RuntimeSettings(2, self.base / (observed or "missing-stop")))
                 self.arm()
                 self.assertEqual(self.event("Stop", turn_id=observed).action, "pass")
                 task = self.status()["task"]
@@ -456,7 +488,7 @@ class StateTests(unittest.TestCase):
         code = ("from pathlib import Path; from runtime.startup import *; from runtime.state import *; "
                 "from runtime.engine import *; import json; "
                 f"s=ProjectScope('project',Path({str(self.scope.repository_root)!r}),Path({str(self.scope.git_common_dir)!r}),"
-                f"'policy',RuntimeSettings(1,Path({str(self.scope.runtime.state_dir)!r}))); "
+                f"'policy',RuntimeSettings(2,Path({str(self.scope.runtime.state_dir)!r}))); "
                 "r=process_event(s,RuntimeEvent('PostToolUse','codex','session',s.repository_root,'turn','call',"
                 "'apply_patch',False,'A')); print(json.dumps({'action':r.action,"
                 "'generation':task_status(s,'codex','session')['generation']}))")
@@ -498,7 +530,7 @@ class StateTests(unittest.TestCase):
         code = ("from pathlib import Path; from runtime.startup import *; from runtime.state import *; "
                 "from runtime.engine import *; import json; "
                 f"s=ProjectScope('project',Path({str(self.scope.repository_root)!r}),Path({str(self.scope.git_common_dir)!r}),"
-                f"'policy',RuntimeSettings(1,Path({str(self.scope.runtime.state_dir)!r}))); "
+                f"'policy',RuntimeSettings(2,Path({str(self.scope.runtime.state_dir)!r}))); "
                 "print(process_event(s, RuntimeEvent('Stop','codex','session',s.repository_root,'turn',"
                 "stop_hook_active=False)).action)")
         processes = [subprocess.Popen([sys.executable, "-B", "-c", code], cwd=PACKAGE,

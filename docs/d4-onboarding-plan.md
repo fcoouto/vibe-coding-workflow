@@ -4,6 +4,8 @@ Implementation plan · 26 October 2026 · **Original scope approved for implemen
 
 **Goal:** apply an explicitly approved, current D3 plan through recoverable, idempotent operations. Keep project enrollment inactive until all required adoption changes qualify. A successful apply records configuration and observations; it does not establish client execution or future task readiness.
 
+**Approved follow-up, not implemented here:** after D3 scope/identity support, D4 owns recoverable adoption in normal task-entry coordinator preflight before dependent writes, plus membership recovery in `runtime/changes.py` with `runtime/startup.py`/`runtime/state.py`, under the [canonical membership/update rules](onboard-my-project-plan.md#membership-updates-and-recovery). Carry into policies 01/10 and `skills/onboard-my-project/references/apply-and-recovery.md`. Reuse owned baselines; separate shared-policy from member runtime updates. Prove standing-scope adoption without repeated approval or startup mutation, removal preserving active/uncertain ownership, independent member recovery with shared dependencies, and rollback after later joins/user edits/active pins. Current checkout enrollment below does not implement this seam; preserve its transaction safety and accepted D6 upgrade behavior.
+
 **Basis:** [D3 plan](d3-onboarding-plan.md), [Project Onboarding policy](../policies/10-project-onboarding.md), [approved deliverable](onboard-my-project-plan.md#5-small-deliverables), [source coverage](policy-sources.md), and OpenAI's installed `skill-creator` standard. Keep the entry skill concise and load apply/recovery details only when needed. Runtime uses Python 3.11+ and the standard library.
 
 ## Scope and reuse
@@ -11,7 +13,7 @@ Implementation plan · 26 October 2026 · **Original scope approved for implemen
 - Add `runtime/changes.py`, focused tests in `tests/test_changes.py`, and extend `scripts/workflow.py` with only `onboard apply`, `onboard resume` and `onboard rollback`. Add narrow dispatcher cases to `tests/test_runtime.py`.
 - Reuse D3's private plan directory and plan identity, source/package pins, exact action proposal, input fingerprints and revision checks. The caller supplies `--plan-dir`; D4 does not provision a shared runtime data directory or alter startup/state contracts.
 - The coordinator must verify actual user/session authorization through trusted host evidence and record its reference. A bounded, versioned D4 apply input binds that reference to the exact D3 plan revision/digest, D4 manifest digest/content, target checkout and approved scope; runtime verifies the binding and freshness. A changed manifest invalidates approval for affected work. JSON cannot authenticate human intent, and D3 free-text authorization/evidence grants no authority. Add no authentication service. If required host/user evidence is unavailable, remain pending.
-- Keep native operation as the default. Do not add a Superset onboarding question. Superset enable/disable remains a separate D6 `manage-superset` control after qualification.
+- Keep native operation as the default. Do not add a Superset onboarding question. Superset enable/disable remains a separate optional integration in the retained future design, after qualification; implementation is suspended.
 - Do not add a generic installer catalog or arbitrary command rollback mechanism. Use Toolkit procedures and the exact actions from the approved plan.
 
 ## Transaction identity, locks and journal
