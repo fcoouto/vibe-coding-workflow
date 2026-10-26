@@ -6,7 +6,9 @@
   "hooks": "./hooks/codex.json",
   "interface": {
     "displayName": "Vibe Coding Workflow",
-    "shortDescription": "The Vibe Coding Toolkit, packaged as a plugin"
+    "shortDescription": "The Vibe Coding Toolkit, packaged as a plugin",
+    "logo": "./assets/logo.png",
+    "composerIcon": "./assets/logo.png"
   },
   "extensions": {
     "com.openai": {

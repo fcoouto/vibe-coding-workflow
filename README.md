@@ -1,5 +1,7 @@
 # Vibe Coding Workflow
 
+<img src="assets/logo.png" alt="Vibe Coding Workflow logo: a gold W on a dark rounded square" width="160" height="160">
+
 [Vibe Coding Toolkit](https://github.com/soumatheusgomes/vibe-coding-toolkit), packaged for your coding agent.
 
 **Early development.** Codex has opt-in task controls and read-only diagnostics, with bounded CLI and bundled app-server qualification, including a controlled Interrupt case. General turn correlation, desktop UI behavior, and Claude lifecycle remain unqualified. See the [client contracts](clients/index.md) for current scope and [D2 validation](docs/d2-validation.md).
