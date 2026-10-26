@@ -1,6 +1,6 @@
 # D4: Reversible project onboarding
 
-Implementation plan · 26 October 2026 · **Not implemented; D4 implementation is not authorized by this plan**
+Implementation plan · 26 October 2026 · **Original scope approved for implementation. See [validation](d4-validation.md) for implemented behavior, review and observed limits.**
 
 **Goal:** apply an explicitly approved, current D3 plan through recoverable, idempotent operations. Keep project enrollment inactive until all required adoption changes qualify. A successful apply records configuration and observations; it does not establish client execution or future task readiness.
 

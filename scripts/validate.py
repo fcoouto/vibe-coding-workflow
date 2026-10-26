@@ -89,9 +89,10 @@ def validate(root=ROOT):
                  "runtime/engine.py", "runtime/state.py", "runtime/doctor.py",
                  "runtime/adapters/__init__.py", "runtime/adapters/session_start.py",
                  "clients/index.md", "clients/startup.md", "clients/runtime.md", "policies/00-index.md",
-                 "runtime/onboarding.py",
+                 "runtime/onboarding.py", "runtime/changes.py",
                  "skills/onboard-my-project/SKILL.md",
                  "skills/onboard-my-project/references/procedure.md",
+                 "skills/onboard-my-project/references/apply-and-recovery.md",
                  "skills/onboard-my-project/agents/openai.yaml"):
         local_file(root, "./" + path)
     if manifest.get("skills") != "./skills/":

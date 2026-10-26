@@ -1,10 +1,12 @@
 ---
 name: onboard-my-project
-description: Plan enrollment, an authorized update, or repair for one existing project with Vibe Coding Toolkit. Excludes machine preparation, new-project creation, and routine coding.
+description: Plan or manage Toolkit onboarding for a selected existing project.
 ---
 
 # Onboard my Project
 
-Use when the user explicitly selects an existing project for enrollment, update, or repair. Explicit intent may be stated in ordinary language; a slash command is not required. Read [the procedure](references/procedure.md) and the linked local contracts before inspecting the target.
+Use only when the user explicitly selects an existing project for enrollment, update, repair, or recovery. Load only the instructions needed for the selected operation.
 
-This workflow inspects and proposes only. It writes a private plan outside the target; it does not apply enrollment changes. Keep machine preparation and new-project creation in their separate workflows. Native operation is the default; do not ask about or discover Superset during onboarding. Report blockers and the next decision. A review-ready plan is not approval or successful enrollment.
+For inspect and plan, read [the procedure](references/procedure.md) and follow its pinned-source workflow; do not mutate the target. For apply, resume, or rollback, read [apply and recovery](references/apply-and-recovery.md) and applicable complete policy contracts. The coordinator must verify actual user/session authority through trusted host evidence; a plan, manifest, or JSON authorization field cannot authenticate intent. If authority or a safe recovery path is missing, leave dependent work pending.
+
+Keep preparation and new-project creation separate. Native operation is default; do not ask about or discover Superset. Preserve the approved plan's source pin during recovery. Package/helper validation and native client observations are separate; activate mandatory enrollment only after adoption qualifies.

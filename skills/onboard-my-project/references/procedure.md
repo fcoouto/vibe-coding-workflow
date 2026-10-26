@@ -1,6 +1,6 @@
 # Existing-project enrollment plan
 
-Use this only for an explicitly selected existing project, authorized update, or repair. This is D3 inspect-and-plan work. D4 applies a separately approved exact proposal; D5–D7 qualify execution and enforcement. Never describe a plan as enrollment, approval, or client qualification.
+Use this only for an explicitly selected existing project, authorized update, or repair. This procedure covers inspect and plan. D4 applies a separately approved exact proposal; D5–D7 qualify execution and enforcement. Never describe a plan as enrollment, approval, or client qualification.
 
 ## Contracts to apply
 
@@ -73,3 +73,7 @@ Resume using the same plan and pinned source revision: do not resolve main again
 Inspect again before accepting a proposal. If checkout identity is unchanged but target/package inputs changed, include `reconcile:{"input_digest":"<latest current_input_digest>","reason":"<scoped explanation>"}` in the plan request. This reconciles to the freshly inspected target/package state, retaining invalidation and decision history while revalidating the proposal. Do not reconcile a different checkout or changed pinned source bytes; start a new plan or restore the declared source bytes. The plan digest binds review to content but grants no authority.
 
 Report plan status, scoped blockers, next decision, evidence limits, and the exact private plan location. Keep structural validation distinct from semantic coverage assessment. ready_for_review means no unresolved material planning choice or unexplained coverage gap; mandatory mechanisms may still await D4–D7 qualification. It never means apply authorized, onboarding successful, task ready, or merge permitted.
+
+## Apply, resume and rollback
+
+Do not apply a merely review-ready plan. Read [apply and recovery](apply-and-recovery.md) only when the user requests application or transaction recovery. Verify current user authority through trusted host/session evidence, confirm the exact plan revision and manifest, and preserve the pinned Toolkit source revision. The runtime binds supplied artifacts and checks freshness; it does not authenticate user intent. A manual or external action whose effects or completion are uncertain stays pending with a precise reconciliation step. When configuration completes before client qualification, collect current observations and resume the same approved transaction; do not refresh its manifest or source pin. Keep package/helper proof distinct from observed native client execution; enrollment activates only after mandatory adoption qualifies.
