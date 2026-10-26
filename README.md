@@ -16,8 +16,8 @@ For local plugin testing, run `codex plugin marketplace add .` from this checkou
 
 For Claude Code local testing, launch `claude --plugin-dir .` from this checkout. See the [Claude Code contract](clients/claude-code.md) for loading and qualification. Superset uses the underlying native adapter; its [host integration](clients/superset.md) requires separate launch qualification.
 
-## Plan project enrollment
+## Enroll a project
 
-For an explicitly selected existing project, use [onboard-my-project](skills/onboard-my-project/SKILL.md) to inspect and prepare a private enrollment plan. The local CLI records a reviewable plan; D3 does not change the target or qualify client execution. See its procedure for source requirements and safe use.
+For an explicitly selected existing project, use [onboard-my-project](skills/onboard-my-project/SKILL.md) to inspect and prepare a private enrollment plan. Planning does not change the target. After trusted approval binds the exact plan and application manifest, `onboard apply` makes recoverable changes and activates enrollment only after required adoption evidence qualifies. `onboard resume` reconciles interrupted work; `onboard rollback` restores transaction-owned changes. Each command uses `--plan-dir` and a bounded JSON request on stdin. See [application and recovery](skills/onboard-my-project/references/apply-and-recovery.md). Package validation and adoption evidence do not qualify client execution.
 
 [Development guide](AGENTS.md)

@@ -456,8 +456,80 @@ class OnboardingDispatcherTests(unittest.TestCase):
                 self.assertFalse(report["ok"])
                 self.assertNotIn("enrolled", report["error"])
 
+    def test_application_commands_reject_invalid_requests_without_private_errors(self):
+        from runtime.onboarding import MAX_REQUEST
+        for action in ("apply", "resume", "rollback"):
+            for raw in (b"{}", b"null", b'{"private-marker":NaN}', b"x" * (MAX_REQUEST + 1)):
+                with self.subTest(action=action, raw=raw[:40]):
+                    result = subprocess.run([sys.executable, "-I", "-B", str(PACKAGE / "scripts/workflow.py"),
+                        "onboard", action, "--plan-dir", "/private-marker"],
+                        input=raw, capture_output=True, timeout=5)
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual(result.stderr, b"")
+                    report = json.loads(result.stdout)
+                    if "ok" in report:
+                        self.assertFalse(report["ok"])
+                    else:
+                        self.assertEqual(report["exit_code"], 1)
+                        self.assertEqual(report["state"], "blocked")
+                    self.assertNotIn("private-marker", str(report))
+            result = subprocess.run([sys.executable, "-I", "-B", str(PACKAGE / "scripts/workflow.py"),
+                "onboard", action], input=b"{}", capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stderr, b"")
+            self.assertFalse(json.loads(result.stdout)["ok"])
+
+    def test_apply_resume_and_rollback_preserve_disposable_target_and_enrollment(self):
+        from tests.test_changes import ChangesTests
+        fixture = ChangesTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        (fixture.base / ".local/share").mkdir(parents=True)
+        request = fixture.request()
+        target = fixture.repo / "AGENTS.md"
+        original = target.read_bytes()
+        original_mode = target.stat().st_mode & 0o777
+        enrollment = fixture.repo / startup.PROJECT_FILE
+
+        def invoke(action):
+            result = subprocess.run([sys.executable, "-I", "-B", str(PACKAGE / "scripts/workflow.py"),
+                "onboard", action, "--plan-dir", str(fixture.directory)],
+                input=json.dumps(request).encode(), capture_output=True, timeout=5,
+                env={**os.environ, "HOME": str(fixture.base)})
+            self.assertEqual(result.stderr, b"")
+            report = json.loads(result.stdout)
+            self.assertEqual(result.returncode, report["exit_code"], report)
+            return report
+
+        request["approval"]["evidence"] = []
+        pending = invoke("apply")
+        self.assertEqual(pending["exit_code"], 2, pending)
+        self.assertEqual(target.read_bytes(), original)
+        self.assertFalse(enrollment.exists())
+        request = fixture.request()
+        pending = invoke("apply")
+        self.assertEqual(pending["exit_code"], 2, pending)
+        self.assertEqual(target.read_text(), "product rules\nnew process\n")
+        self.assertFalse(enrollment.exists())
+        for action in ("resume", "apply"):
+            request = fixture.observe(request)
+            report = invoke(action)
+            self.assertEqual(report["exit_code"], 0, report)
+            self.assertEqual(report["state"], "applied")
+            self.assertIn("write-rules", report["completed"])
+            self.assertEqual(target.read_text(), "product rules\nnew process\n")
+            self.assertEqual(json.loads(enrollment.read_text()), request["manifest"]["enrollment"]["record"])
+        for _ in range(2):
+            request = fixture.observe(request)
+            report = invoke("rollback")
+            self.assertEqual(report["exit_code"], 0, report)
+            self.assertEqual(report["state"], "rolled_back")
+            self.assertEqual(target.read_bytes(), original)
+            self.assertEqual(target.stat().st_mode & 0o777, original_mode)
+            self.assertFalse(enrollment.exists())
+
     def test_inspect_and_plan_work_without_enrollment_and_never_activate_runtime(self):
-        from test_onboarding import OnboardingTests
+        from tests.test_onboarding import OnboardingTests
         fixture = OnboardingTests()
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)

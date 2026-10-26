@@ -1,8 +1,8 @@
 # Onboard my Project
 
-Design and implementation plan · 26 October 2026 · **Stages, feature baseline, activation behavior, client scope and all eleven policy contracts approved; D1 startup, D2 Codex runtime and D3 private planning implemented; bounded native D2 qualification recorded**
+Design and implementation plan · 26 October 2026 · **Stages, feature baseline, activation behavior, client scope and all eleven policy contracts approved; D1 startup, D2 Codex runtime, D3 private planning and D4 transaction controls implemented; qualification remains scope-specific**
 
-Outcome: enroll a project once, then activate its agreed workflow during ordinary coding requests. Qualify each client's actual behavior. Codex startup, opt-in D2 task controls and the D3 private inspect/plan workflow exist. D3 does not enroll or modify projects; D4 application/recovery, qualification and merge enforcement remain outstanding.
+Outcome: enroll a project once, then activate its agreed workflow during ordinary coding requests. Qualify each client's actual behavior. Codex startup, opt-in D2 task controls, D3 private inspect/plan and D4 approved apply/resume/rollback exist. D3 does not modify projects; D4 keeps enrollment pending until mandatory adoption qualifies. Future-task evidence, dispatch and merge enforcement remain D5–D7 work.
 
 Contract loading: [policy index](../policies/00-index.md). The user approved all eleven contracts on 25 October 2026.
 
@@ -16,7 +16,7 @@ The [concrete D2 plan](d2-runtime-plan.md) scopes native state, guards, invalida
 
 The [D3 plan and validation record](d3-onboarding-plan.md) describe the implemented private inspect/plan workflow and its limits; D4 applies an approved plan. Native operation remains the default, with no Superset question during initial onboarding. The separate [Enable/Disable Superset skill](superset-feature-map.md#planned-project-control-skill) is planned with qualified Superset integration in D6; explicit disable restores native routing for new tasks.
 
-The [concrete D4 plan](d4-onboarding-plan.md) is prepared for review. It covers recoverable apply/resume/rollback and verified Toolkit adoption; D4 implementation has not started.
+The [approved D4 plan](d4-onboarding-plan.md) covers recoverable apply/resume/rollback and verified Toolkit adoption. Its [validation record](d4-validation.md) separates implementation checks, disposable adoption and actual native startup observations; none alone establishes complete project readiness.
 
 The user authorized the same startup layer for the next clients. Claude Code now reuses the shared startup protocol; Superset is documented as a host for native adapters. See [Claude and Superset validation](claude-and-superset-validation.md). This advances startup support only; D8's full lifecycle qualification still follows the required runtime/onboarding slices.
 
@@ -247,7 +247,7 @@ Each deliverable receives its own reviewable change and evidence. Unit/fixture v
 | **D8** | Claude Code adapter | Native manifest/config adapter and shared contract fixtures | The same scenarios pass in an actual Claude session; no duplicate handlers or policy fork; settings evidence remains truthful |
 | **D9** | PHIOON pilot | One Python and one Next.js repository, then one bounded cross-repository task | Ordinary requests activate workflow without skill mentions; shared-resource coordination and relevant upstream harness cases pass; overhead is measured |
 
-Sequence: **D1 → D2 → D3 → D4**, then **D5 → D6 → D7**. D3 planning is implemented; D4 adoption/application is the next onboarding stage. D8 can follow D4 independently; D9 follows the capabilities selected for the pilot. D7 includes a distinct review of the concrete repository settings before any live changes. Multi-repository rollout follows the pilot, not automatic enrollment of all nine repositories.
+Sequence: **D1 → D2 → D3 → D4**, then **D5 → D6 → D7**. D3 planning and D4 transaction controls are implemented; consult D4 validation before advancing qualification claims. D8 can follow D4 independently; D9 follows the capabilities selected for the pilot. D7 includes a distinct review of the concrete repository settings before any live changes. Multi-repository rollout follows the pilot, not automatic enrollment of all nine repositories.
 
 Scope Superset and Claude Desktop surfaces as separate follow-up slices after capability discovery; do not infer their qualification from D8. Qualify the implemented D1 startup slice before extending the runtime.
 

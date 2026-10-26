@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plugin hook entry point. No enrollment, settings changes or network calls."""
+"""Plugin hooks and local controls, including approved onboarding and recovery."""
 
 import argparse
 import json
@@ -37,7 +37,7 @@ def control_main():
         doctor.add_argument("--executable", required=True)
         onboard = commands.add_parser("onboard", add_help=False)
         onboarding = onboard.add_subparsers(dest="action", required=True)
-        for name in ("inspect", "plan"):
+        for name in ("inspect", "plan", "apply", "resume", "rollback"):
             action = onboarding.add_parser(name, add_help=False)
             action.add_argument("--plan-dir", required=True)
             if name == "inspect":
@@ -48,8 +48,12 @@ def control_main():
             request = read_request(sys.stdin.buffer.read(MAX_REQUEST + 1))
             if args.action == "inspect":
                 report = inspect_project(Path(args.cwd), Path(args.plan_dir), request)
-            else:
+            elif args.action == "plan":
                 report = record_plan(Path(args.plan_dir), request)
+            else:
+                from runtime.changes import apply_plan, resume_plan, rollback_plan
+                operation = {"apply": apply_plan, "resume": resume_plan, "rollback": rollback_plan}
+                report = operation[args.action](Path(args.plan_dir), request)
             print(json.dumps(report))
             return report["exit_code"]
         if args.command == "task" and args.action in ("start", "update"):
