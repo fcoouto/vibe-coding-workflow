@@ -1,6 +1,6 @@
 # D4 onboarding validation
 
-26 October 2026. Transaction implementation, independent review and bounded disposable adoption checks are complete. **Successful full project enrollment remains unqualified:** the disposable project has no qualified repository gate or complete client-operation evidence. Native operation remains the default; Superset stays separate in D6.
+26 October 2026. Transaction implementation, independent review and bounded disposable adoption checks are complete. **Successful full project enrollment remains unqualified:** the disposable project has no qualified repository gate or complete client-operation evidence. Native operation remains the default; Superset stays a separate optional integration in the retained future design, with implementation suspended.
 
 ## Implementation and review
 

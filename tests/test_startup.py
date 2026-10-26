@@ -20,6 +20,27 @@ from scripts.validate import validate
 PACKAGE = Path(__file__).resolve().parents[1]
 
 
+class JsonBoundaryTests(unittest.TestCase):
+    def test_internal_json_bound_preserves_external_cap_and_strict_parser(self):
+        import inspect
+        from runtime.startup import json_object, StartupError
+        from runtime.evidence import MAX_ARTIFACT
+        self.assertIn('limit', inspect.signature(json_object).parameters)
+        raw = b'{"value":"' + b'x' * MAX_INPUT + b'"}'
+        with self.assertRaises(StartupError):
+            json_object(raw)
+        self.assertEqual(len(json_object(raw, limit=MAX_ARTIFACT)['value']), MAX_INPUT)
+        unicode_raw = '{"value":"' + 'é' * (MAX_INPUT // 2) + '"}'
+        with self.assertRaises(StartupError):
+            json_object(unicode_raw)
+        with self.assertRaises(StartupError):
+            json_object(b'{"value":"' + b'x' * MAX_ARTIFACT + b'"}', limit=MAX_ARTIFACT)
+        for invalid in (b'{"a":1,"a":2}', b'{"a":{"b":1,"b":2}}', b'{"a":NaN}', b'{"a":Infinity}', b'{"a":-Infinity}'):
+            for bound in (MAX_INPUT, MAX_ARTIFACT):
+                with self.subTest(invalid=invalid, bound=bound), self.assertRaises(StartupError):
+                    json_object(invalid, limit=bound)
+
+
 class StartupTests(unittest.TestCase):
     client = "codex"
     adapter = codex

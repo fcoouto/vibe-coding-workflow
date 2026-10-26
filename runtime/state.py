@@ -12,13 +12,28 @@ from runtime.engine import HookResult, evaluate
 from runtime.startup import StartupError
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 APPLICATION_ID = 0x56494245
 PACKAGE = Path(__file__).resolve().parents[1]
 LIMITATIONS = ["Supported apply_patch guard only; shell and external edits remain possible",
-               "Hook execution and filesystem locality remain unverified; no workflow readiness claim"]
-STATES = {"planned", "active", "awaiting_user", "blocked", "verifying", "cancelled"}
-TABLES = {"checkouts", "tasks", "bindings", "turns", "receipts"}
+               "Hooks alone do not establish client execution, filesystem locality or current completion evidence"]
+STATES = {"planned", "active", "awaiting_user", "blocked", "verifying", "ready", "cancelled"}
+TABLE_SQL = {
+    "checkouts": """CREATE TABLE checkouts(scope_id TEXT PRIMARY KEY, project_id TEXT NOT NULL,
+        repository_root TEXT NOT NULL, git_common_dir TEXT NOT NULL, generation INTEGER NOT NULL)""",
+    "tasks": """CREATE TABLE tasks(scope_id TEXT, client TEXT, session_id TEXT, task_id TEXT, data TEXT NOT NULL,
+        PRIMARY KEY(scope_id,client,session_id,task_id))""",
+    "bindings": """CREATE TABLE bindings(scope_id TEXT, client TEXT, session_id TEXT, task_id TEXT NOT NULL,
+        PRIMARY KEY(scope_id,client,session_id))""",
+    "turns": """CREATE TABLE turns(scope_id TEXT, client TEXT, session_id TEXT, turn_id TEXT, task_id TEXT,
+        continuation_consumed INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(scope_id,client,session_id,turn_id))""",
+    "receipts": """CREATE TABLE receipts(scope_id TEXT, client TEXT, session_id TEXT, turn_id TEXT, tool_call_id TEXT,
+        kind TEXT, fingerprint TEXT NOT NULL, conflicted INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(scope_id,client,session_id,turn_id,tool_call_id,kind))""",
+    "assignments": """CREATE TABLE assignments(id TEXT PRIMARY KEY, scope_id TEXT NOT NULL, client TEXT NOT NULL,
+        session_id TEXT NOT NULL, task_id TEXT NOT NULL, dispatch_id TEXT NOT NULL, data TEXT NOT NULL,
+        UNIQUE(scope_id,client,session_id,task_id,dispatch_id))""",
+}
+TABLES = set(TABLE_SQL)
 
 
 class StateError(StartupError):
@@ -98,22 +113,22 @@ def _sidecars(path):
                 raise StateError("Unsupported runtime journal mode")
 
 
-def _schema(db):
-    if (db.execute("pragma application_id").fetchone()[0] != APPLICATION_ID or
-            db.execute("pragma user_version").fetchone()[0] != SCHEMA_VERSION or
-            {row[0] for row in db.execute("select name from sqlite_master where type='table'")} != TABLES or
+def _schema(db, *, version=SCHEMA_VERSION):
+    # Version 1 is accepted only by D4's private read-only transition inspector.
+    tables = TABLES - {"assignments"} if version == 1 else TABLES
+    objects = db.execute("select type,name,sql from sqlite_master").fetchall()
+    if (version not in (1, SCHEMA_VERSION) or
+            db.execute("pragma application_id").fetchone()[0] != APPLICATION_ID or
+            db.execute("pragma user_version").fetchone()[0] != version or
+            {name for kind, name, _ in objects if kind == "table"} != tables or
             db.execute("pragma journal_mode").fetchone()[0] != "delete"):
         raise StateError("Runtime database is unowned or has an incompatible schema")
-    expected = {"checkouts": ["scope_id", "project_id", "repository_root", "git_common_dir", "generation"],
-                "tasks": ["scope_id", "client", "session_id", "task_id", "data"],
-                "bindings": ["scope_id", "client", "session_id", "task_id"],
-                "turns": ["scope_id", "client", "session_id", "turn_id", "task_id", "continuation_consumed"],
-                "receipts": ["scope_id", "client", "session_id", "turn_id", "tool_call_id", "kind", "fingerprint", "conflicted"]}
-    for table, columns in expected.items():
-        if [row[1] for row in db.execute("pragma table_info(" + table + ")")] != columns:
-            raise StateError("Runtime database has an incompatible schema")
-    if db.execute("select count(*) from sqlite_master where type='trigger'").fetchone()[0]:
-        raise StateError("Runtime database contains unsupported triggers")
+    for kind, name, sql in objects:
+        if kind == "table":
+            if "".join(sql.split()).lower() != "".join(TABLE_SQL[name].split()).lower():
+                raise StateError("Runtime database has an incompatible schema")
+        elif kind != "index" or sql is not None:
+            raise StateError("Runtime database contains unsupported schema objects")
 
 
 def _initialize(path):
@@ -131,19 +146,7 @@ def _initialize(path):
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     os.close(descriptor)
     with closing(sqlite3.connect(path, timeout=0.1)) as db, db:
-        db.executescript("""
-            BEGIN IMMEDIATE;
-            CREATE TABLE checkouts(scope_id TEXT PRIMARY KEY, project_id TEXT NOT NULL,
-                repository_root TEXT NOT NULL, git_common_dir TEXT NOT NULL, generation INTEGER NOT NULL);
-            CREATE TABLE tasks(scope_id TEXT, client TEXT, session_id TEXT, task_id TEXT, data TEXT NOT NULL,
-                PRIMARY KEY(scope_id,client,session_id,task_id));
-            CREATE TABLE bindings(scope_id TEXT, client TEXT, session_id TEXT, task_id TEXT NOT NULL,
-                PRIMARY KEY(scope_id,client,session_id));
-            CREATE TABLE turns(scope_id TEXT, client TEXT, session_id TEXT, turn_id TEXT, task_id TEXT,
-                continuation_consumed INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(scope_id,client,session_id,turn_id));
-            CREATE TABLE receipts(scope_id TEXT, client TEXT, session_id TEXT, turn_id TEXT, tool_call_id TEXT,
-                kind TEXT, fingerprint TEXT NOT NULL, conflicted INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(scope_id,client,session_id,turn_id,tool_call_id,kind));
-        """)
+        db.executescript("BEGIN IMMEDIATE;\n" + ";\n".join(TABLE_SQL.values()) + ";")
         db.execute("pragma application_id=" + str(APPLICATION_ID))
         db.execute("pragma user_version=" + str(SCHEMA_VERSION))
 
@@ -194,7 +197,7 @@ def _task(db, scope_id, client, session, task_id=None):
         raise StateError("Runtime task binding is corrupt")
     task = json.loads(row[0])
     _fields(task, ("client", "session_id", "task_id", "scope_ref", "mode", "decision_ref", "state", "revision",
-                   "pins", "reason", "reference", "conditions", "turn_id", "turn_uncertain"), ("resolution_ref",))
+                   "pins", "reason", "reference", "conditions", "turn_id", "turn_uncertain"), ("resolution_ref", "evidence", "retirement", "delegation"))
     _identity(task)
     _integer(task["revision"], "stored revision", 1)
     for field in ("decision_ref", "reason", "reference", "resolution_ref"):
@@ -229,10 +232,30 @@ def _task(db, scope_id, client, session, task_id=None):
                     type(continuation[field]) is not int or continuation[field] not in (0, 1)
                     for field in ("budget", "consumed"))):
                 raise StateError("Runtime continuation record is corrupt")
+    if "evidence" in task:
+        from runtime.evidence import validate_evidence
+        validate_evidence(task["evidence"])
+    if "delegation" in task:
+        from runtime.delegation import validate_delegation
+        validate_delegation(task["delegation"])
+    if "retirement" in task:
+        retirement = task["retirement"]
+        _fields(retirement, ("proof_digest", "proof", "observation_ref", "coordinator_ref", "previous_revision"))
+        for field in ("proof_digest", "observation_ref", "coordinator_ref"):
+            _text(retirement[field], "stored retirement " + field)
+        _integer(retirement["previous_revision"], "stored retirement revision", 1)
+        if task["state"] != "cancelled" or retirement["previous_revision"] >= task["revision"]:
+            raise StateError("Retired task must remain terminal with original history")
     return task
 
 
 def _save(db, scope_id, task):
+    if "delegation" in task:
+        from runtime.delegation import validate_delegation
+        validate_delegation(task["delegation"])
+    if 'evidence' in task:
+        from runtime.evidence import validate_evidence
+        validate_evidence(task['evidence'])
     db.execute("insert or replace into tasks values(?,?,?,?,?)", (scope_id, task["client"], task["session_id"],
                task["task_id"], json.dumps(task, separators=(",", ":"))))
 
@@ -257,6 +280,8 @@ def task_status(scope, client, session_id):
     _text(session_id, "session_id")
     if client != "codex":
         raise StateError("Unsupported task client")
+    from runtime.evidence import revalidate_ready
+    revalidate_ready(scope, client, session_id)
     with _database(scope) as db:
         return _status(db, scope, client, session_id)
 
@@ -284,6 +309,14 @@ def inspect_state(scope):
     return report
 
 
+def _guard_assignments(db, scope, client, session):
+    from runtime.delegation import _ledger
+    if any(record['owner']['scope_id'] == _scope_id(scope) and record['owner']['client'] == client and
+           record['owner']['session_id'] == session and record['data']['status'] != 'settled'
+           for record in _ledger(scope, db)):
+        raise StateError('Unresolved assignments retain historical session ownership; reconcile exact attempts first')
+
+
 def start_task(scope, request):
     _fields(request, ("client", "session_id", "task_id", "scope_ref", "mode", "decision_ref"), ("replaces",))
     _identity(request)
@@ -307,6 +340,7 @@ def start_task(scope, request):
         if db.execute("select 1 from tasks where scope_id=? and client=? and session_id=? and task_id=?",
                       (scope_id, request["client"], request["session_id"], request["task_id"])).fetchone():
             raise StateError("Historical task identity cannot be rebound or replaced")
+        _guard_assignments(db, scope, request["client"], request["session_id"])
         if current:
             _compatible(scope, current)
             if replacement != dict(task_id=current["task_id"], expected_revision=current["revision"]):
@@ -367,8 +401,8 @@ def update_task(scope, request):
         _text(request[field], field)
     if "resolution_ref" in request:
         _text(request["resolution_ref"], "resolution_ref")
-    if not isinstance(request["state"], str) or request["state"] not in STATES:
-        raise StateError("Invalid task state; D2 cannot declare ready")
+    if not isinstance(request["state"], str) or request["state"] not in STATES - {"ready"}:
+        raise StateError("Only completion evidence verification can declare ready")
     for field in ("conditions", "resolutions"):
         if field in request and (not isinstance(request[field], list) or len(request[field]) > 64):
             raise StateError("Task conditions and resolutions must be bounded lists")
@@ -384,7 +418,7 @@ def update_task(scope, request):
             raise StateError("Task revision conflict")
         old_state, state = task["state"], request["state"]
         allowed = (old_state == state or state in {"awaiting_user", "blocked", "cancelled"} or
-                   (old_state, state) in {("planned", "active"), ("active", "verifying"), ("verifying", "active")} or
+                   (old_state, state) in {("planned", "active"), ("active", "verifying"), ("verifying", "active"), ("ready", "active"), ("ready", "verifying")} or
                    (old_state in {"blocked", "awaiting_user"} and state in {"planned", "active", "verifying"} and
                     "resolution_ref" in request))
         if old_state == "cancelled" or not allowed:
@@ -458,3 +492,66 @@ def process_event(scope, event):
         if event.kind == "Stop":
             return HookResult(event.kind)
         return HookResult(event.kind, "context", "Runtime state is unavailable; event processing and coverage are unverified")
+
+
+def retire_task(scope, request):
+    """Cancel one exact historical writer using retained host reconciliation evidence.
+
+    Like D4, this binds coordinator-verified host proof; local JSON cannot
+    authenticate host/operator authority or create success evidence.
+    """
+    _fields(request, ('client', 'session_id', 'task_id', 'scope_ref', 'expected_revision', 'expected_pins',
+                      'reason', 'reference', 'stop_proof'))
+    _identity(request)
+    _integer(request['expected_revision'], 'expected_revision', 1)
+    for field in ('reason', 'reference'):
+        _text(request[field], field)
+    _fields(request['expected_pins'], ('schema_version', 'policy_digest', 'runtime_digest'))
+    _fields(request['stop_proof'], ('path', 'sha256'))
+    _text(request['stop_proof']['path'], 'host proof path', 4096)
+    from runtime.onboarding import _no_links, _read_file
+    path = Path(request['stop_proof']['path'])
+    if (not path.is_absolute() or path.resolve() != path or path.is_relative_to(scope.repository_root) or
+            path.is_relative_to(PACKAGE) or '.git' in path.parts or 'plugins' in path.parts and 'cache' in path.parts):
+        raise StateError('Stopped-writer host proof must be private and outside repositories/caches')
+    try:
+        _no_links(path)
+        raw = _read_file(path, 128 * 1024, private=True)
+        if hashlib.sha256(raw).hexdigest() != request['stop_proof']['sha256']:
+            raise StateError('Stopped-writer proof integrity failed')
+        proof = json.loads(raw)
+    except (OSError, ValueError, TypeError):
+        raise StateError('Stopped-writer host reconciliation proof is unavailable') from None
+    _fields(proof, ('version', 'kind', 'identity', 'expected_revision', 'expected_pins', 'observed_turn_id',
+                    'stopped', 'descendants_stopped', 'attempt_ids', 'observation_ref', 'coordinator_ref'))
+    for field in ('observation_ref', 'coordinator_ref'):
+        _text(proof[field], 'host proof ' + field)
+    if (type(proof['version']) is not int or proof['version'] != 1 or proof['kind'] != 'stopped-writer-reconciliation' or
+            proof['stopped'] is not True or proof['descendants_stopped'] is not True):
+        raise StateError('Trusted stopped-writer and descendant reconciliation remains missing')
+    from runtime.evidence import _artifact
+    retained_proof = _artifact(scope, proof)
+    with _database(scope, write=True) as db:
+        if db is None:
+            raise StateError('Task state has not been initialized')
+        scope_id = _scope_id(scope)
+        task = _task(db, scope_id, request['client'], request['session_id'], request['task_id'])
+        identity = {key: task[key] for key in ('client', 'session_id', 'task_id', 'scope_ref')}
+        if (identity != {key: request[key] for key in identity} or task['revision'] != request['expected_revision'] or
+                task['pins'] != request['expected_pins'] or task['pins']['schema_version'] != SCHEMA_VERSION or
+                'retirement' in task):
+            raise StateError('Retirement requires exact supported stored identity, pins and revision')
+        _guard_assignments(db, scope, request['client'], request['session_id'])
+        attempts = [a['id'] for a in task.get('evidence', {}).get('attempts', []) if a['status'] in {'reserved', 'running', 'uncertain'}]
+        if (proof['identity'] != identity or proof['expected_revision'] != task['revision'] or proof['expected_pins'] != task['pins'] or
+                proof['observed_turn_id'] != task['turn_id'] or proof['attempt_ids'] != attempts):
+            raise StateError('Stopped-writer proof does not match exact historical task and attempts')
+        task.update(state='cancelled', reason=request['reason'], reference=request['reference'],
+                    retirement=dict(proof_digest=request['stop_proof']['sha256'], proof=retained_proof, observation_ref=proof['observation_ref'],
+                                    coordinator_ref=proof['coordinator_ref'], previous_revision=task['revision']))
+        for condition in task['conditions']:
+            if 'continuation' in condition:
+                condition['continuation']['revoked'] = True
+        task['revision'] += 1
+        _save(db, scope_id, task)
+    return dict(ok=True, task=task, limitations=['Cancellation only; host-proof authority is coordinator-verified, not authenticated by local JSON'])

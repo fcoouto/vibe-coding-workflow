@@ -6,6 +6,7 @@
 - Keep environment preparation, project enrollment, and routine development distinct.
 - When adding a client adapter, follow the [client interface layout](docs/onboard-my-project-plan.md#client-scope-and-adapter-organization).
 - Preserve the user's permissions, model choices, subscriptions, and customizations.
+- Preserve the user's chosen coordinator model and reasoning. Before delegating implementation or review, follow [worker selection](policies/03-agent-delegation.md#select-capability-and-dispatch), including cached official platform guidance and its refresh rules.
 - Validate with `python3 -B scripts/validate.py`.
 - Create release archives only when requested.
 - Report package validation and observed client execution separately.

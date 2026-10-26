@@ -4,8 +4,9 @@ A manifest declares an approved effect contract. It is not a command sandbox or
 an authentication mechanism. Receipts prove local file observations only.
 """
 
-from contextlib import contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from copy import deepcopy
+from dataclasses import replace
 import fcntl
 import hashlib
 import json
@@ -13,7 +14,10 @@ import os
 from pathlib import Path
 import re
 import stat
+import sqlite3
 import subprocess
+import threading
+import unicodedata
 import uuid
 
 from runtime import onboarding as d3
@@ -89,7 +93,12 @@ def _record(record, plan, current=True):
                 "Enrollment client selection changed")
     d3._hash(record["policy_digest"])
     d3._require(not current or record["policy_digest"] == policy_digest(d3.PACKAGE), "Enrollment policies are stale")
-    runtime = runtime_settings(record, d3.PACKAGE, Path(record["git_common_dir"]))
+    legacy = (not current and isinstance(record.get("runtime"), dict) and
+              type(record["runtime"].get("schema_version")) is int and record["runtime"]["schema_version"] == 1)
+    inspected = dict(record, runtime=dict(record["runtime"], schema_version=2)) if legacy else record
+    runtime = runtime_settings(inspected, d3.PACKAGE, Path(record["git_common_dir"]))
+    if legacy:
+        runtime = replace(runtime, schema_version=1)
     return ProjectScope(record["project_id"], Path(record["repository_root"]), Path(record["git_common_dir"]),
                         record["policy_digest"], runtime)
 
@@ -252,6 +261,99 @@ def _worktree_lock(git_dir):
         except FileExistsError:
             pass
     return _lock(location)
+
+
+_authority_context = threading.local()
+
+
+def _authority_locations(directories):
+    keys = set()
+    for directory in directories:
+        directory = Path(directory)
+        d3._require(directory.is_absolute() and directory.resolve() == directory, "Unsafe state authority identity")
+        keys.add("path:" + unicodedata.normalize("NFC", str(directory)).casefold())
+        if directory.exists():
+            task_state._private(directory, True)
+            info = directory.stat()
+            keys.add("inode:" + str(info.st_dev) + ":" + str(info.st_ino))
+    if not keys:
+        return []
+    try:
+        root = d3._plan_path(LOCK_ROOT)
+    except FileExistsError:
+        # A concurrent first user may create the root; re-run every ownership/path check.
+        root = d3._plan_path(LOCK_ROOT)
+    return [root / ("authority-" + hashlib.sha256(key.encode()).hexdigest()) for key in sorted(keys)]
+
+
+def _authority_owner(location):
+    try:
+        owner = d3.read_request(d3._read_file(Path(str(location) + ".json"), d3.MAX_REQUEST, private=True))
+    except FileNotFoundError:
+        return None
+    d3._object(owner, ("schema_version", "plan_dir", "transaction_id", "manifest_digest"))
+    d3._require(type(owner["schema_version"]) is int and owner["schema_version"] == 1 and
+                Path(owner["plan_dir"]).is_absolute() and str(Path(owner["plan_dir"]).resolve()) == owner["plan_dir"],
+                "Unsafe authority operation owner")
+    d3._text(owner["transaction_id"])
+    d3._hash(owner["manifest_digest"])
+    return owner
+
+
+@contextmanager
+def _authority_guards(directories, owner=None):
+    """Shared approved-authority exclusion; never locks or writes the old database."""
+    locations = _authority_locations(directories)
+    with ExitStack() as locks:
+        for location in locations:
+            lock = Path(str(location) + ".lock")
+            try:
+                descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                os.close(descriptor)
+            except FileExistsError:
+                pass
+            locks.enter_context(_lock(lock))
+            held = _authority_owner(location)
+            if held is not None and held != owner:
+                raise Pending("Shared state authority has an active or uncertain D4 operation; resume its bound journal")
+        yield locations
+
+
+@contextmanager
+def _authority_operation(path, root, journal, observation):
+    records = _writer_records(path, root, journal)
+    scopes = [_record(record, journal["plan"], current=False) for record in records]
+    directories = {scope.runtime.state_dir for scope in scopes if scope.runtime is not None}
+    owner = dict(schema_version=1, plan_dir=str(path), transaction_id=journal["transaction_id"],
+                 manifest_digest=journal["manifest_digest"])
+    with _authority_guards(directories, owner) as locations:
+        d3._require(_writer_records(path, root, journal) == records, "Enrollment authorities changed while acquiring shared guards")
+        if journal["state"] != "rolled_back":
+            for record, scope in zip(records, scopes):
+                _writers(journal["plan"], record, observation, scope=scope)
+        for location in locations:
+            _atomic(location.parent, location.name + ".json", json.dumps(owner, sort_keys=True).encode())
+    previous = getattr(_authority_context, "directories", None)
+    _authority_context.directories = directories
+    complete = False
+    try:
+        yield
+        complete = True
+    finally:
+        _authority_context.directories = previous
+        unsettled = any(receipt.get("command") and not receipt["command"]["stopped"]
+                        for receipt in journal["receipts"].values())
+        if complete and not unsettled:
+            with _authority_guards(directories, owner):
+                for location in locations:
+                    d3._require(_authority_owner(location) == owner, "D4 authority owner changed; preserve recovery evidence")
+                    os.unlink(Path(str(location) + ".json"))
+                if locations:
+                    descriptor = d3._open_path(locations[0].parent, os.O_RDONLY | os.O_DIRECTORY)
+                    try:
+                        os.fsync(descriptor)
+                    finally:
+                        os.close(descriptor)
 
 
 def _owner_path(git_dir):
@@ -586,12 +688,92 @@ def _action_blockers(plan, action, manifest, completed, observed):
     return None
 
 
-def _writers(plan, prior, observation):
-    scope = _record(prior, plan, current=False)
+def _legacy_writers(scope):
+    """Inspect schema-1 retirement only; never initialize, adopt pins or open writable state."""
+    from runtime.evidence import _read
+    from runtime.startup import json_object
+    # Current path/artifact safety checks apply without making the old DB runnable.
+    inspected = replace(scope, runtime=replace(scope.runtime, schema_version=task_state.SCHEMA_VERSION))
+    try:
+        path = task_state._path(inspected)
+        task_state._sidecars(path)
+        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=0.1)) as db:
+            db.execute("pragma trusted_schema=off")
+            db.execute("pragma query_only=on")
+            db.execute("begin")
+            task_state._schema(db, version=1)
+            checkouts = {}
+            for scope_id, project_id, root, common, generation in db.execute("select * from checkouts"):
+                d3._require(len(checkouts) < 1024, "Legacy checkout inspection exceeds its bound")
+                for value in (project_id, root, common):
+                    task_state._text(value, "legacy checkout identity", 4096)
+                d3._require(Path(root).is_absolute() and str(Path(root).resolve()) == root and
+                            Path(common).is_absolute() and str(Path(common).resolve()) == common,
+                            "Legacy checkout identity is not canonical")
+                task_state._integer(generation, "legacy checkout generation")
+                identity = ProjectScope(project_id, Path(root), Path(common), scope.policy_digest)
+                d3._require(scope_id == task_state._scope_id(identity), "Legacy checkout identity is corrupt")
+                checkouts[scope_id] = (root, common)
+            rows = db.execute("select scope_id,client,session_id,task_id,data from tasks limit 1025").fetchall()
+            d3._require(len(rows) <= 1024 and sum(len(row[4]) for row in rows) <= 4 * 1024 * 1024,
+                        "Legacy task inspection exceeds its bound")
+            active = False
+            identities = set()
+            for scope_id, client, session, task_id, raw in rows:
+                d3._require(scope_id in checkouts, "Legacy task has no checkout identity")
+                json_object(raw)
+                task = task_state._task(db, scope_id, client, session, task_id)
+                d3._require("delegation" not in task, "Legacy task contains unsupported delegation ownership state")
+                d3._require(task["pins"]["schema_version"] == 1, "Legacy task pins have an incompatible schema")
+                for field in ("policy_digest", "runtime_digest"):
+                    d3._hash(task["pins"][field])
+                identities.add((scope_id, client, session, task_id))
+                unresolved = [a["id"] for a in task.get("evidence", {}).get("attempts", [])
+                              if a["status"] in {"reserved", "running", "uncertain"}]
+                shared_git = checkouts[scope_id][1] == str(scope.git_common_dir)
+                if not unresolved and (task["mode"] != "editable" or not shared_git):
+                    continue
+                retirement = task.get("retirement")
+                if task["state"] != "cancelled" or not retirement:
+                    active = True
+                    continue
+                d3._hash(retirement["proof_digest"])
+                proof = _read(inspected, retirement["proof"])
+                task_state._fields(proof, ("version", "kind", "identity", "expected_revision", "expected_pins",
+                    "observed_turn_id", "stopped", "descendants_stopped", "attempt_ids", "observation_ref", "coordinator_ref"))
+                task_state._integer(proof["expected_revision"], "legacy stopped revision", 1)
+                task_state._fields(proof["expected_pins"], ("schema_version", "policy_digest", "runtime_digest"))
+                d3._require(type(proof["expected_pins"]["schema_version"]) is int,
+                            "Legacy stopped-writer proof pins are corrupt")
+                d3._require(type(proof["version"]) is int and proof["version"] == 1 and
+                    proof["kind"] == "stopped-writer-reconciliation" and proof["stopped"] is True and
+                    proof["descendants_stopped"] is True and proof["identity"] ==
+                    {key: task[key] for key in ("client", "session_id", "task_id", "scope_ref")} and
+                    proof["expected_pins"] == task["pins"] and proof["expected_revision"] == retirement["previous_revision"] and
+                    retirement["previous_revision"] == task["revision"] - 1 and proof["observed_turn_id"] == task["turn_id"] and
+                    proof["attempt_ids"] == unresolved and all(proof[key] == retirement[key]
+                    for key in ("observation_ref", "coordinator_ref")), "Legacy stopped-writer proof binding failed")
+            for identity in db.execute("select scope_id,client,session_id,task_id from bindings"):
+                d3._require(identity in identities, "Legacy task binding is corrupt")
+            for table in ("turns", "receipts"):
+                d3._require(not db.execute("select 1 from " + table +
+                    " where scope_id is null or scope_id not in (select scope_id from checkouts) limit 1").fetchone(),
+                    "Legacy event checkout binding is corrupt")
+            return active
+    except (StartupError, OSError, sqlite3.Error, ValueError, TypeError, KeyError, RecursionError):
+        raise Pending("Legacy runtime state or retained stopped-writer proof is unavailable, unsafe or incompatible") from None
+
+
+def _writers(plan, prior, observation, scope=None):
+    scope = scope or _record(prior, plan, current=False)
     if scope.runtime is None:
         return
     if not observation or not observation["task_reconciliation"]:
         raise Pending("Confirm stopped writers and reconcile their task/evidence records")
+    if scope.runtime.schema_version == 1:
+        if _legacy_writers(scope):
+            raise Pending("Affected legacy task writers remain active or unreconciled; use their old pinned runtime first")
+        return
     active = False
     with task_state._database(scope) as db:
         if db is None:
@@ -601,11 +783,24 @@ def _writers(plan, prior, observation):
         for scope_id, client, session, task_id in rows:
             task = task_state._task(db, scope_id, client, session, task_id)
             active |= task["mode"] == "editable" and task["state"] != "cancelled"
+        from runtime.delegation import _ledger, _held_conflict, _linked_attempt
+        affected = [dict(kind="path", key=str(scope.repository_root), mode="write"),
+                    dict(kind="git", key=str(scope.git_common_dir), mode="write")]
+        from runtime.delegation import _claims
+        records = _ledger(scope, db)
+        for record in records:
+            if record["data"]["status"] != "settled" and _held_conflict(_claims(affected), record["data"]["claims"]):
+                active = True
+        for scope_id, client, session, task_id in db.execute("select scope_id,client,session_id,task_id from tasks"):
+            task = task_state._task(db, scope_id, client, session, task_id)
+            active |= not task.get("retirement") and any(a["status"] in {"reserved", "running", "uncertain"} and
+                        _linked_attempt(scope, scope_id, task, a, records) is None
+                        for a in task.get("evidence", {}).get("attempts", []))
     if active:
         raise Pending("Affected task writers remain active or unreconciled; stop and reconcile them first")
 
 
-def _guard_writers(path, root, journal, observation):
+def _writer_records(path, root, journal):
     records = [journal["manifest"]["enrollment"]["record"]]
     actual = _fingerprint(root, str(PROJECT_FILE))
     if actual is not None:
@@ -618,10 +813,18 @@ def _guard_writers(path, root, journal, observation):
         records.append(d3.read_request(d3._read_file(root / PROJECT_FILE, d3.MAX_FILE)))
     if journal["enrollment"] and journal["enrollment"]["backup"]:
         records.append(d3.read_request(d3._read_file(path / journal["enrollment"]["backup"], d3.MAX_FILE, private=True)))
+    return records
+
+
+def _guard_writers(path, root, journal, observation):
+    records = _writer_records(path, root, journal)
+    covered = getattr(_authority_context, "directories", None)
+    if covered is not None:
+        d3._require({Path(record["runtime"]["state_dir"]) for record in records if record.get("runtime")} <= covered,
+                    "Enrollment authority changed outside the protected operation")
     seen = set()
     for record in records:
-        runtime = record.get("runtime")
-        key = d3._digest(runtime)
+        key = d3._digest(record.get("runtime"))
         if key not in seen:
             _writers(journal["plan"], record, observation)
             seen.add(key)
@@ -1027,83 +1230,92 @@ def _run(plan_dir, request, operation):
                     "receipts": {}, "enrollment": None, "blocked": [], "directories": {}, "observations": []}
                 _save(path, journal)
                 _checkpoint("state")
-            if journal["state"] == "rolled_back":
-                if owner is not None:
-                    _reconcile_command_lifecycles(path, journal)
-                if operation == "rollback":
-                    for action in journal["manifest"]["actions"]:
-                        for effect in action["effects"]:
-                            if effect["path"] != str(PROJECT_FILE) and _fingerprint(root, effect["path"]) != effect["before"]:
-                                return _report(journal, 2, "Previously restored content changed externally; preserve the current user edit")
-                    if journal["enrollment"] and _fingerprint(root, str(PROJECT_FILE)) != journal["enrollment"]["before"]:
-                        return _report(journal, 2, "Enrollment changed after rollback; preserve its external ownership")
-                return _report(journal, 0 if operation == "rollback" else 1,
-                               None if operation == "rollback" else "Rolled-back transactions cannot apply again; prepare a fresh approved transaction")
-            journal["blocked"] = []
-            if "observations" in request:
-                observation = request["observations"]
-                d3._require(observation["input_digest"] == observation_digest(request["manifest"]), "Observation input bindings are stale")
-                if observation not in journal["observations"]:
-                    journal["observations"].append(deepcopy(observation))
-                    _save(path, journal)
-            _reconcile_command_lifecycles(path, journal)
-            _recovery_files(path, root, journal)
-            writer_observation = _current_observation(journal)
-            try:
-                if operation == "rollback":
-                    _rollback(path, root, journal, writer_observation)
-                    journal["state"] = "rollback_partial" if journal["blocked"] else "rolled_back"
+            effective_observation = None
+            if journal["state"] != "rolled_back":
+                if "observations" in request:
+                    effective_observation = request["observations"]
+                    d3._require(effective_observation["input_digest"] == observation_digest(request["manifest"]),
+                                "Observation input bindings are stale")
                 else:
-                    if journal["state"] == "rollback_partial":
-                        raise Pending("Partial rollback must finish before any application can continue")
-                    _fresh(plan, journal)
-                    if "enrollment" not in journal["manifest"]["approved_scope"]:
-                        raise Pending("Enrollment activation and recovery need scoped approval before changing adoption configuration")
-                    _deactivate(path, root, journal, writer_observation)
-                    journal["state"] = "applying"
-                    _save(path, journal)
-                    completed = set()
-                    observed = d3._sources(plan["sources"]["declared"])
-                    originals = {a["id"]: a for a in plan["actions"]}
-                    for action in journal["manifest"]["actions"]:
-                        if any(r.get("command") and not r["command"]["stopped"] for r in journal["receipts"].values()):
-                            journal["blocked"].append({"id": action["id"], "reason": "An earlier command attempt needs stopped-descendant lifecycle proof before further mutation"})
-                            continue
-                        if originals[action["id"]]["target"] == str(PROJECT_FILE):
-                            continue
-                        reason = _action_blockers(plan, action, journal["manifest"], completed, observed)
-                        if not reason:
-                            try:
-                                _apply_action(path, root, journal, originals[action["id"]], action, writer_observation, checkout_lock)
-                                completed.add(action["id"])
-                            except Pending as error:
-                                reason = str(error)
-                        if reason:
-                            journal["blocked"].append({"id": action["id"], "reason": reason})
-                    required = set(journal["manifest"]["enrollment"]["requires"])
-                    enrollment_ids = {a["id"] for a in plan["actions"] if a["target"] == str(PROJECT_FILE)}
-                    unsettled = any(r.get("command") and not r["command"]["stopped"] for r in journal["receipts"].values())
-                    if unsettled or not required - enrollment_ids <= completed:
-                        journal["state"] = "blocked"
+                    effective_observation = _current_observation(journal)
+            with _authority_operation(path, root, journal, effective_observation):
+                if journal["state"] == "rolled_back":
+                    if owner is not None:
+                        _reconcile_command_lifecycles(path, journal)
+                    if operation == "rollback":
+                        for action in journal["manifest"]["actions"]:
+                            for effect in action["effects"]:
+                                if effect["path"] != str(PROJECT_FILE) and _fingerprint(root, effect["path"]) != effect["before"]:
+                                    return _report(journal, 2, "Previously restored content changed externally; preserve the current user edit")
+                        if journal["enrollment"] and _fingerprint(root, str(PROJECT_FILE)) != journal["enrollment"]["before"]:
+                            return _report(journal, 2, "Enrollment changed after rollback; preserve its external ownership")
+                    return _report(journal, 0 if operation == "rollback" else 1,
+                                   None if operation == "rollback" else "Rolled-back transactions cannot apply again; prepare a fresh approved transaction")
+                journal["blocked"] = []
+                if "observations" in request:
+                    observation = request["observations"]
+                    d3._require(observation["input_digest"] == observation_digest(request["manifest"]), "Observation input bindings are stale")
+                    if observation not in journal["observations"]:
+                        journal["observations"].append(deepcopy(observation))
+                        _save(path, journal)
+                _reconcile_command_lifecycles(path, journal)
+                _recovery_files(path, root, journal)
+                writer_observation = _current_observation(journal)
+                try:
+                    if operation == "rollback":
+                        _rollback(path, root, journal, writer_observation)
+                        journal["state"] = "rollback_partial" if journal["blocked"] else "rolled_back"
                     else:
-                        for action_id in enrollment_ids:
-                            original = originals[action_id]
-                            if action_id not in journal["manifest"]["approved_scope"] or not set(original["dependencies"]) <= completed:
-                                raise Pending("Final enrollment action/dependencies lack scoped approval or completion")
-                        _activate(path, root, journal, writer_observation)
-                        for action_id in enrollment_ids:
-                            journal["receipts"][action_id] = {"status": "completed", "files": [], "returncode": None}
-                        journal["state"] = "blocked" if journal["blocked"] else "applied"
-            except Pending as error:
-                journal["blocked"].append({"id": "enrollment" if operation == "rollback" else "transaction", "reason": str(error)})
-                journal["state"] = "rollback_partial" if operation == "rollback" else "blocked"
-            except StartupError:
-                journal["state"] = "interrupted"
+                        if journal["state"] == "rollback_partial":
+                            raise Pending("Partial rollback must finish before any application can continue")
+                        _fresh(plan, journal)
+                        if "enrollment" not in journal["manifest"]["approved_scope"]:
+                            raise Pending("Enrollment activation and recovery need scoped approval before changing adoption configuration")
+                        _deactivate(path, root, journal, writer_observation)
+                        journal["state"] = "applying"
+                        _save(path, journal)
+                        completed = set()
+                        observed = d3._sources(plan["sources"]["declared"])
+                        originals = {a["id"]: a for a in plan["actions"]}
+                        for action in journal["manifest"]["actions"]:
+                            if any(r.get("command") and not r["command"]["stopped"] for r in journal["receipts"].values()):
+                                journal["blocked"].append({"id": action["id"], "reason": "An earlier command attempt needs stopped-descendant lifecycle proof before further mutation"})
+                                continue
+                            if originals[action["id"]]["target"] == str(PROJECT_FILE):
+                                continue
+                            reason = _action_blockers(plan, action, journal["manifest"], completed, observed)
+                            if not reason:
+                                try:
+                                    _apply_action(path, root, journal, originals[action["id"]], action, writer_observation, checkout_lock)
+                                    completed.add(action["id"])
+                                except Pending as error:
+                                    reason = str(error)
+                            if reason:
+                                journal["blocked"].append({"id": action["id"], "reason": reason})
+                        required = set(journal["manifest"]["enrollment"]["requires"])
+                        enrollment_ids = {a["id"] for a in plan["actions"] if a["target"] == str(PROJECT_FILE)}
+                        unsettled = any(r.get("command") and not r["command"]["stopped"] for r in journal["receipts"].values())
+                        if unsettled or not required - enrollment_ids <= completed:
+                            journal["state"] = "blocked"
+                        else:
+                            for action_id in enrollment_ids:
+                                original = originals[action_id]
+                                if action_id not in journal["manifest"]["approved_scope"] or not set(original["dependencies"]) <= completed:
+                                    raise Pending("Final enrollment action/dependencies lack scoped approval or completion")
+                            _activate(path, root, journal, writer_observation)
+                            for action_id in enrollment_ids:
+                                journal["receipts"][action_id] = {"status": "completed", "files": [], "returncode": None}
+                            journal["state"] = "blocked" if journal["blocked"] else "applied"
+                except Pending as error:
+                    journal["blocked"].append({"id": "enrollment" if operation == "rollback" else "transaction", "reason": str(error)})
+                    journal["state"] = "rollback_partial" if operation == "rollback" else "blocked"
+                except StartupError:
+                    journal["state"] = "interrupted"
+                    _save(path, journal)
+                    raise
                 _save(path, journal)
-                raise
-            _save(path, journal)
-            _checkpoint("state")
-            return _report(journal, 0 if journal["state"] in ("applied", "rolled_back") else 2)
+                _checkpoint("state")
+                return _report(journal, 0 if journal["state"] in ("applied", "rolled_back") else 2)
     except Pending as error:
         return _report(journal, 2, str(error))
     except StartupError as error:

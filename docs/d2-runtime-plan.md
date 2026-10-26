@@ -10,7 +10,7 @@
 
 - Native operation is the default. D2 introduces no Superset dependency, discovery, onboarding question or backend framework. The later connection skill remains optional and project-scoped.
 - Keep Codex and Claude startup behavior. Qualify the new lifecycle on Codex first; Claude lifecycle follows D8. D2 does not require a Claude account.
-- D3–D4 own onboarding and recovery; D5 owns check/review verification and readiness; D6 owns dispatch, model selection and resource reservations; D7 owns repository enforcement. D2 does not grant these capabilities early.
+- D3–D4 own onboarding and recovery; D5 owns check/review verification and readiness; D6 owns worker model/effort selection, dispatch and resource reservations while preserving coordinator settings; D7 owns repository enforcement. D2 does not grant these capabilities early.
 - Use disposable enrollment fixtures until D4. Existing startup-only enrollment must not silently enable writes to runtime state or guards. No real project enrollment or settings changes belong to this slice.
 
 Repository inspection found reusable scope, strict JSON and safe record readers in `runtime/startup.py`. The dispatcher renders every failure as a startup diagnostic; the validator accepts only `SessionStart`. Both need event-specific changes. The existing 54 startup tests and package validation passed during planning.
