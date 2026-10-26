@@ -18,7 +18,7 @@ def control_main():
 
     class Parser(argparse.ArgumentParser):
         def error(self, message):
-            raise StartupError("Invalid task or doctor command arguments")
+            raise StartupError("Invalid task, doctor or onboard command arguments")
 
     try:
         parser = Parser(add_help=False)
@@ -35,7 +35,23 @@ def control_main():
         doctor.add_argument("--cwd", required=True)
         doctor.add_argument("--client", required=True, choices=("codex",))
         doctor.add_argument("--executable", required=True)
+        onboard = commands.add_parser("onboard", add_help=False)
+        onboarding = onboard.add_subparsers(dest="action", required=True)
+        for name in ("inspect", "plan"):
+            action = onboarding.add_parser(name, add_help=False)
+            action.add_argument("--plan-dir", required=True)
+            if name == "inspect":
+                action.add_argument("--cwd", required=True)
         args = parser.parse_args()
+        if args.command == "onboard":
+            from runtime.onboarding import MAX_REQUEST, inspect_project, read_request, record_plan
+            request = read_request(sys.stdin.buffer.read(MAX_REQUEST + 1))
+            if args.action == "inspect":
+                report = inspect_project(Path(args.cwd), Path(args.plan_dir), request)
+            else:
+                report = record_plan(Path(args.plan_dir), request)
+            print(json.dumps(report))
+            return report["exit_code"]
         if args.command == "task" and args.action in ("start", "update"):
             request = json_object(sys.stdin.buffer.read(MAX_INPUT + 1))
             client = request.get("client")
@@ -62,14 +78,14 @@ def control_main():
         return 0
     except StartupError as error:
         reason = str(error)
-    except (ImportError, ValueError, OSError, RecursionError, subprocess.TimeoutExpired):
+    except (ImportError, ValueError, TypeError, KeyError, OSError, RecursionError, subprocess.TimeoutExpired):
         reason = "Invalid task input, enrollment or local runtime"
     print(json.dumps({"ok": False, "error": reason}))
     return 1
 
 
 def main():
-    control = len(sys.argv) > 1 and sys.argv[1] in {"task", "doctor"}
+    control = len(sys.argv) > 1 and sys.argv[1] in {"task", "doctor", "onboard"}
     if sys.version_info < (3, 11):
         print(json.dumps({"ok": False, "error": "Vibe Coding Workflow requires Python 3.11+"} if control else
                          {"systemMessage": "Vibe Coding Workflow requires Python 3.11+ on the hook PATH."}))

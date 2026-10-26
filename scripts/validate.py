@@ -88,7 +88,11 @@ def validate(root=ROOT):
     for path in ("scripts/workflow.py", "runtime/__init__.py", "runtime/startup.py",
                  "runtime/engine.py", "runtime/state.py", "runtime/doctor.py",
                  "runtime/adapters/__init__.py", "runtime/adapters/session_start.py",
-                 "clients/index.md", "clients/startup.md", "clients/runtime.md", "policies/00-index.md"):
+                 "clients/index.md", "clients/startup.md", "clients/runtime.md", "policies/00-index.md",
+                 "runtime/onboarding.py",
+                 "skills/onboard-my-project/SKILL.md",
+                 "skills/onboard-my-project/references/procedure.md",
+                 "skills/onboard-my-project/agents/openai.yaml"):
         local_file(root, "./" + path)
     if manifest.get("skills") != "./skills/":
         raise ValueError("Discover the packaged skills directory")

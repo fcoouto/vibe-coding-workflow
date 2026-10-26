@@ -2,7 +2,7 @@
 
 25 October 2026. Compare the [approved policies](../policies/00-index.md) and [D1–D9 plan](onboard-my-project-plan.md#5-small-deliverables) with current Superset documentation and installed Superset 1.40.0.
 
-**Decision:** use native delegation by default. Leave initial onboarding unchanged; offer Superset later through a separate connection skill. One shared policy and evidence layer governs both. Codex-only users need neither Claude nor Superset; Claude-only users need neither Codex nor Superset.
+**Decision:** native operation is the default. Initial project onboarding contains no Superset questions. A separate **Enable/Disable Superset** skill (`manage-superset`) handles an explicitly selected, already-onboarded project. One shared policy and evidence layer governs both. Codex-only users need neither Claude nor Superset; Claude-only users need neither Codex nor Superset.
 
 This is design evidence, outside routine policy loading. “Reuse” identifies an implementation candidate, not qualified behavior. No live Superset agents or integrations were exercised during this mapping.
 
@@ -21,17 +21,17 @@ Configured agents, supported settings and account access are separate facts. Sup
 
 Local models are a future optional route. Assess reuse of the existing Local Model Delegation plugin, qualify the route and revise the current subscriptions-only contract before enabling it.
 
-## Planned connection skill
+## Planned project control skill
 
-Working name: **Connect Superset** (`connect-superset`). Plan the skill now; implement it with the qualified Superset integration.
+Working name: **Enable/Disable Superset** (`manage-superset`), as one skill. Plan its contract now; implement the skill alongside the qualified Superset integration in D6. This is planning only, not a runtime implementation.
 
-Do not ask about Superset during initial onboarding or enable it merely because it is installed. Describe it in optional integrations guidance, or mention it when the user requests a capability their native setup lacks.
+Do not ask about Superset during initial project onboarding or enable it merely because it is installed. Describe the skill in optional integrations guidance; it may also be mentioned when the user requests a capability their native setup lacks.
 
-**Recommended scope:** reuse environment-level installation, authentication and host configuration; enable delegation per explicitly selected project. Connecting one project does not change other projects or global defaults. Shared setup changes retain their own scope and authorization.
+**Scope:** reuse environment-level installation, authentication and host configuration; enable delegation per explicitly selected, already-onboarded project. Environment installation and authentication are shared setup, not project toggles. Shared setup changes retain their own scope and authorization. Changing one project's choice does not change other projects or global defaults.
 
-The skill discovers the selected host and workers, presents a short capability/permission summary, qualifies the requested routes and saves the project choice only after successful validation. Reuse valid setup evidence on later connections; do not repeat full onboarding or copy credentials.
+When enabling, discover the selected host and workers and present a short capability/permission summary. Validate qualified, supported routes before saving the project's Superset choice. Reuse valid setup evidence; do not repeat onboarding or copy credentials. Disable uses the saved project choice locally to set native routing for new tasks and must work when Superset is unreachable.
 
-Apply backend changes to new tasks; active tasks retain their backend and ownership until finished or explicitly reconciled. Disconnecting returns new tasks to native delegation without uninstalling shared tools. Unexpected Superset unavailability blocks dependent work rather than silently switching backends.
+Active tasks retain their backend and ownership until finished or explicitly reconciled. Do not migrate or cancel them automatically, and do not uninstall shared tools. If Superset is unavailable while the project remains enabled, dependent work blocks; it must not silently fall back to native routing.
 
 ## Feature mapping
 
@@ -40,9 +40,9 @@ Apply backend changes to new tasks; active tasks retain their backend and owners
 | **Installation and startup — D1, D8** | Superset runs native agents and installs its own status hooks. [Host model](https://docs.superset.sh/superset-model). | Keep our existing native startup adapters. Qualify coexisting hooks, launch arguments, trust and permissions in Superset; qualify Desktop surfaces separately. |
 | **Project scope — policy 01** | Project/workspace identities and Git worktrees. [Host model](https://docs.superset.sh/superset-model). | Explicit enrollment tied to checkout/client and accepted policy. Registering a Superset project cannot enroll its neighboring repositories or all clients. |
 | **Task planning — policy 02, D2** | Native tasks, issue links, statuses, descriptions and workspace assignment. [Tasks](https://docs.superset.sh/tasks). | Planning depth, acceptance criteria, applicability and decision provenance. Reference host task IDs; retain only missing workflow state. |
-| **Onboarding — policy 10, D3–D4** | Existing project tooling and Superset workspace setup/teardown commands. [Lifecycle scripts](https://docs.superset.sh/setup-teardown-scripts). | Complete Toolkit coverage, conflict modes, equivalents, reviewed changes, adoption evidence, recovery journal and safe resume/rollback. Workspace setup is not policy adoption. |
+| **Onboarding — policy 10, D3–D4** | Existing project tooling and Superset workspace setup/teardown commands. [Lifecycle scripts](https://docs.superset.sh/setup-teardown-scripts). | Complete Toolkit coverage, conflict modes, equivalents, reviewed changes, adoption evidence, recovery journal and safe resume/rollback. Workspace setup is not policy adoption. Initial project onboarding has no Superset questions. |
 | **Action guards and completion — D2** | Native Codex/Claude lifecycle hooks and permission mechanisms; Superset provides status observations. | Supported pre-action checks, evidence invalidation, bounded Stop handling and independent `doctor`. Measure actual blocking and failure behavior. |
-| **Agent dispatch — policy 03, D6** | `workspaces create`, `agents create`, terminal read/send/wait and existing orchestration. [Orchestration](https://docs.superset.sh/orchestration). | A small dispatch integration: approved route, bounded brief, recorded IDs, ownership and verified results. No new process launcher or workspace manager. |
+| **Agent dispatch — policy 03, D6** | `workspaces create`, `agents create`, terminal read/send/wait and existing orchestration. [Orchestration](https://docs.superset.sh/orchestration). | Qualify and implement native-first selection, budgets, reservations and result verification. Then qualify optional Superset dispatch and implement the planned Enable/Disable Superset skill: approved route, bounded brief, recorded IDs, ownership and verified results. No new process launcher or workspace manager. |
 | **Model and effort selection — policy 03, D6** | Installed agent launch accepts `--model` and `--effort`; configured agents can be discovered. [CLI reference source](https://github.com/superset-sh/superset/blob/main/apps/docs/content/docs/cli/cli-reference.mdx). | Selection policy and requested/configured/observed evidence. Validate supported values and final arguments before dispatch; installed code can silently omit selections. Then qualify actual execution. Preserve coordinator, provider, account and subscription choices. |
 | **Budgets and capacity — policy 03, D6** | Superset documents account quotas, token analytics and machine resources. [Usage](https://docs.superset.sh/usage). | Finite task/attempt/time/resource budgets and authorized concurrency. No suitable enforcement controls were found in installed dispatch schemas. Usage estimates are not spend authorization or hard limits. |
 | **Concurrent ownership — policy 03, D6** | Worktrees and parallel sessions. [Orchestration](https://docs.superset.sh/orchestration). | Atomic claims over overlapping paths and shared mutable resources, dependencies and confirmed stop/takeover. Worktrees do not isolate shared databases, services or every port. |
@@ -76,12 +76,11 @@ Official documentation and source establish reuse candidates. Installed command 
 
 ## Build scope after mapping
 
-1. **D2:** implement narrow policy state, guards and diagnostics over native hooks. Reference existing session/task IDs instead of mirroring host histories or building a task dashboard.
-2. **D3–D4:** implement explicit onboarding and recoverable adoption. Reuse existing tools and setup commands after verifying equivalence.
-3. **D5:** implement applicability and evidence freshness/provenance over project checks and reviewers. Preserve adopted/qualified, applicable and satisfied as separate facts. Include dirty-tree content, base, relevant environment/check definitions and accepted policy; HEAD alone is insufficient.
-4. **D6:** implement selection, budgets, reservations and result verification through the selected backend. Reuse qualified native or Superset dispatch/monitoring. Persist only missing workflow records and atomic claims; SQLite remains a proposed choice, not a second orchestration database.
-5. **D7–D9:** connect the trusted verifier to existing repository controls, complete native-client qualification and run the bounded pilot.
+1. **D3–D4:** implement guided onboarding and recoverable adoption. Reuse existing tools and setup commands after verifying equivalence; initial project onboarding contains no Superset questions.
+2. **D5:** implement applicability and evidence freshness/provenance over project checks and reviewers. Preserve adopted/qualified, applicable and satisfied as separate facts. Include dirty-tree content, base, relevant environment/check definitions and accepted policy; HEAD alone is insufficient.
+3. **D6:** implement selection, budgets, reservations and result verification through the selected backend. Reuse qualified native or Superset dispatch/monitoring. Persist only missing workflow records and atomic claims; SQLite remains a proposed choice, not a second orchestration database.
+4. **D7–D9:** connect the trusted verifier to existing repository controls, complete native-client qualification and run the bounded pilot.
 
 There is no current need for a Superset fork, generic SDK wrapper, orchestration daemon, workspace/session manager, dashboard, scheduler or credential proxy. Superset-specific code should appear only when an end-to-end slice needs it.
 
-**Next:** retain D2 as the next runtime slice. Prove a complete Codex-only task with delegation and review before adding Superset dispatch. Test standalone Codex and Claude with Superset absent. Then qualify Superset discovery and one mixed-vendor task, including final launch arguments, model/effort/account, startup, wait/blocked behavior, cancellation and stopped-writer evidence. Keep local-model integration for a later slice. These checks preserve the approved requirements; this document does not authorize application or repository settings changes.
+**Next:** D2 is merged and D3 planning is implemented; proceed with D4 adoption, application and recovery. Prove a complete Codex-only task with delegation and review, and test standalone Codex and Claude with Superset absent, before adding Superset dispatch. These checks do not establish that full delegation or review is already qualified. Then qualify Superset discovery and a mixed-vendor task, including final launch arguments, model/effort/account, startup, wait/blocked behavior, cancellation and stopped-writer evidence. Keep local-model integration for a later slice. These checks preserve the approved requirements; this document does not authorize application or repository settings changes.
