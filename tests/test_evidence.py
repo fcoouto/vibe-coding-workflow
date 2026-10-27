@@ -166,6 +166,8 @@ class EvidenceTests(unittest.TestCase):
         prepared = self.api.prepare_review(self.scope, request)
         attempt = prepared['attempt_id']
         binding = delegation.prepared_native_review_assignment(self.scope, attempt)
+        # Native receipts do not echo the internal historical runtime locator metadata.
+        binding = {key:value for key,value in binding.items() if key not in {'pins','accepted_identity','scope_id'}}
         report = dict(version=1, attempt_id=attempt, assignment_digest=prepared['assignment_digest'],
             candidate_digest=prepared['candidate_digest'], coverage=coverage, findings=findings or [], limitations=[])
         raw = json.dumps(report)
@@ -1225,3 +1227,449 @@ class RecoveryContextTests(unittest.TestCase):
                 for attempt in task['evidence']['attempts']:
                     delegation._linked_attempt(None,state._scope_id(self.scope),task,attempt,records,context=context,db=db)
         self.assertTrue(calls)
+
+
+class LinkedVerificationTests(unittest.TestCase):
+    """Synthetic trusted coordinator sources; actual disposable check receipts, no native qualification."""
+    def setUp(self):
+        from types import SimpleNamespace
+        from tests.test_state import canonical_scope
+        from tests.test_startup import CanonicalAcquisitionTests
+        from runtime import evidence
+        self.api = evidence
+        self.members = []
+        for number in range(2):
+            f = EvidenceTests(methodName='runTest'); f.setUp(); self.addCleanup(f.doCleanups)
+            f.scope = canonical_scope(f.scope)
+            state.start_task(f.scope, f.identity | dict(mode='editable', decision_ref='user:accepted'))
+            proxy = SimpleNamespace(repo=f.repo, base=f.root, assertIsNone=self.assertIsNone)
+            record, path = CanonicalAcquisitionTests.record(proxy)
+            identity = evidence._canonical_plain(f.scope.accepted_identity)
+            record['project_id'] = identity['project_id']
+            record['repositories'][0]['repository_id'] = identity['repository_id']
+            record['repositories'][0]['checkouts'][0]['checkout_id'] = identity['checkout_id']
+            config = record['repositories'][0]['checkouts'][0]['clients'][0]['configuration']
+            config.update(identity['configuration'])
+            path.write_text(json.dumps(record))
+            self.members.append(f)
+        self.selected = self.members[0]
+        self.establish()
+
+    def task(self, f):
+        with state._database(f.scope) as db:
+            return state._task(db, state._scope_id(f.scope), 'codex', 'parent')
+
+    def reference(self, f):
+        return self.api._canonical_plain(self.api._artifact_owner(f.scope, self.task(f)).task)
+
+    def establish(self, delivery=None):
+        review = dict(applicability='inapplicable', reason='Trivial fixed accepted unit command', independent=False)
+        for index, f in enumerate(self.members):
+            peers = [dict(task=self.reference(peer), delivery=delivery if peer is self.selected else None)
+                     for peer in self.members if peer is not f]
+            updates=dict(version=2, nontrivial=False, reviews=dict(general=review, security=review),
+                linked=dict(acceptance=[dict(id='together', text='Accepted changes work together')],
+                    delivery=delivery if f is self.selected else None, companions=peers))
+            task=self.task(f)
+            if 'evidence' in task:
+                plan=self.api._read(f.scope,task['evidence']['plan']);plan.update(updates)
+                self.api.plan_evidence(f.scope,f.request(plan=plan,change_decision_ref='fixture:approved-linked-revision'))
+            else:
+                f.plan(**updates)
+            result = f.checked()
+            self.assertEqual(result['attempt']['status'], 'passed')
+
+    def retained(self, f, value):
+        return dict(authority=self.reference(f)['authority'],
+            reference=self.api._artifact(f.scope, value, owner=self.api._artifact_owner(f.scope, self.task(f))))
+
+    def input_rows(self):
+        rows=[]
+        for f in self.members:
+            task=self.task(f); plan=self.api._read(f.scope,task['evidence']['plan'])
+            rows.append(dict(task=self.reference(f),pins=task['pins'],plan_digest=self.api._digest(plan),
+                candidate_digest=self.api._digest(self.api.capture_candidate(f.scope,plan))))
+        return sorted(rows,key=lambda row:self.api._raw(row['task']))
+
+    def observations(self, *, delivery=None, delivery_status='unknown', shared_status='passed'):
+        inputs=self.input_rows(); digest=self.api._digest(inputs)
+        plan=self.api._read(self.selected.scope,self.task(self.selected)['evidence']['plan'])
+        projection=self.api._linked_projection(self.reference(self.selected),plan)
+        decision=self.retained(self.selected,dict(version=1,kind='linked-scope-decision',
+            projection_digest=self.api._digest(projection),decision_ref='user:accepted',
+            reference='fixture:independently checked complete user scope',observed_at=100))
+        integration=self.retained(self.selected,dict(version=1,kind='linked-integration-observation',
+            inputs_digest=digest,criteria=dict(together=shared_status),observed_at=101,
+            reference='fixture:synthetic independently observed integration for exact versions'))
+        deliveries=[]
+        if delivery is not None:
+            candidate=self.api.capture_candidate(self.selected.scope,plan)
+            source=self.retained(self.selected,dict(version=1,kind='linked-delivery-observation',
+                delivery=delivery,status=delivery_status,revision=candidate['head'],observed_at=102,
+                reference='fixture:synthetic coordinator-verified provider observation'))
+            deliveries=[dict(delivery=delivery,status=delivery_status,source=source,
+                observed_at=102,revision=candidate['head'])]
+        def observe(facts):
+            self.assertEqual(facts['inputs_digest'],digest)
+            return dict(scope_decision=decision,shared=[dict(id='together',status=shared_status,
+                evidence=[integration],reference='fixture:semantic acceptance independently checked')],deliveries=deliveries)
+        return dict(members=[dict(scope=f.scope,request=f.request(purpose='completion')) for f in self.members],observe=observe)
+
+    def verify(self, observations=None):
+        return self.api.verify_linked(self.selected.scope,self.selected.request(purpose='completion'),
+            observations or self.observations())
+
+    def test_multi_member_current_proof_sets_only_selected_implementation_ready(self):
+        peer_before=self.task(self.members[1])
+        result=self.verify()
+        self.assertTrue(result['implementation_verified'])
+        self.assertTrue(result['delivery_complete'])
+        self.assertEqual(result['task']['state'],'ready')
+        self.assertIn('linked_verification',result['task']['evidence'])
+        peer_after=self.task(self.members[1])
+        self.assertNotIn('linked_verification',peer_after['evidence'])
+        self.assertNotEqual(peer_after['state'],'ready')
+        self.assertEqual(peer_before['pins'],peer_after['pins'])
+        self.assertEqual(state.task_status(self.selected.scope,'codex','parent')['task']['state'],'ready')
+
+    def test_open_delivery_does_not_block_current_implementation(self):
+        delivery=dict(provider='fixture',repository='owner/repo',target='main',pull_request='fixture:pull1')
+        self.establish(delivery)
+        result=self.verify(self.observations(delivery=delivery,delivery_status='open'))
+        self.assertTrue(result['implementation_verified'])
+        self.assertFalse(result['delivery_complete'])
+        self.assertFalse(result['merge_authority'])
+        self.assertEqual(result['task']['state'],'ready')
+
+    def test_raw_passing_flags_cannot_supply_trusted_acquisition(self):
+        observations=self.observations();observations['observe']=dict(complete=True,passed=True)
+        with self.assertRaises(state.StateError):self.verify(observations)
+
+    def test_missing_member_and_divergent_plan_reject(self):
+        observations=self.observations();observations['members'].pop()
+        with self.assertRaises(state.StateError):self.verify(observations)
+        peer=self.members[1]
+        plan=self.api._read(peer.scope,self.task(peer)['evidence']['plan'])
+        plan['linked']['acceptance'][0]['text']='A different shared agreement'
+        self.api.plan_evidence(peer.scope,peer.request(plan=plan,change_decision_ref='fixture:changed'))
+        with self.assertRaises(state.StateError):self.verify()
+
+    def test_peer_change_invalidates_selected_ready_without_mutating_peer(self):
+        self.verify()
+        peer=self.members[1];before=self.task(peer)
+        (peer.repo/'app.py').write_text('value = 2\n')
+        result=state.task_status(self.selected.scope,'codex','parent')
+        self.assertEqual(result['task']['state'],'verifying')
+        self.assertEqual(self.task(peer),before)
+
+
+    def test_foreign_retained_source_is_guarded_before_consumption(self):
+        from tests.test_state import canonical_scope
+        from runtime import delegation
+        extra=EvidenceTests(methodName='runTest');extra.setUp();self.addCleanup(extra.doCleanups)
+        extra.scope=canonical_scope(extra.scope)
+        state.start_task(extra.scope,extra.identity | dict(mode='editable',decision_ref='user:accepted'))
+        observations=self.observations();original_observe=observations['observe']
+        source=self.retained(extra,dict(version=1,kind='linked-integration-observation',
+            inputs_digest=self.api._digest(self.input_rows()),criteria=dict(together='passed'),observed_at=101,
+            reference='fixture:existing independent source authority'))
+        def observe(facts):
+            acquired=original_observe(facts);acquired['shared'][0]['evidence']=[source];return acquired
+        observations['observe']=observe
+        original=self.api._linked_source
+        def read(reference,**kwargs):
+            if reference==source:
+                with self.assertRaises(state.StateError):
+                    with delegation._reservation_write(extra.scope):pass
+            return original(reference,**kwargs)
+        with patch.object(self.api,'_linked_source',side_effect=read):result=self.verify(observations)
+        self.assertTrue(result['implementation_verified'])
+
+    def test_callback_result_is_snapshotted_before_retained_source_reads(self):
+        observations=self.observations();observe=observations['observe'];held=[]
+        def acquire(facts):
+            result=observe(facts);held.append(result);return result
+        observations['observe']=acquire;original=self.api._linked_source
+        def read(reference,**kwargs):
+            if held:held[0]['shared'][0]['status']='failed'
+            return original(reference,**kwargs)
+        with patch.object(self.api,'_linked_source',side_effect=read):result=self.verify(observations)
+        self.assertTrue(result['implementation_verified'])
+
+    def test_peer_generation_change_during_publication_rejects_without_aggregate(self):
+        from runtime.engine import RuntimeEvent
+        observations=self.observations();original=self.api._artifact;changed=[];peer=self.members[1]
+        def publish(scope,value,**kwargs):
+            if value.get('kind')=='linked-verification' and not changed:
+                changed.append(True)
+                event=RuntimeEvent('PostToolUse','codex','parent',peer.repo,'fixture-turn','fixture-call','apply_patch',False,'fixture')
+                state.process_event(peer.scope,event)
+            return original(scope,value,**kwargs)
+        with patch.object(self.api,'_artifact',side_effect=publish):
+            with self.assertRaises(state.StateError):self.verify(observations)
+        self.assertTrue(changed)
+        self.assertNotIn('linked_verification',self.task(self.selected)['evidence'])
+
+    def test_unknown_integration_source_cannot_pass_shared_criterion(self):
+        observations=self.observations();observe=observations['observe']
+        unknown=self.retained(self.selected,dict(version=1,kind='caller-passed-flags',passed=True))
+        def acquire(facts):
+            result=observe(facts);result['shared'][0]['evidence']=[unknown];return result
+        observations['observe']=acquire
+        result=self.verify(observations)
+        self.assertFalse(result['implementation_verified'])
+        self.assertEqual(result['task']['state'],'verifying')
+
+    def test_merged_and_unknown_delivery_keep_independent_phase_results(self):
+        delivery=dict(provider='fixture',repository='owner/repo',target='main',pull_request='fixture:pull1')
+        self.establish(delivery)
+        result=self.verify(self.observations(delivery=delivery,delivery_status='merged'))
+        self.assertTrue(result['implementation_verified']);self.assertTrue(result['delivery_complete'])
+        status=self.api.evidence_status(self.selected.scope,'codex','parent')['evidence']
+        self.assertTrue(status['implementation_verified']);self.assertTrue(status['delivery_complete'])
+
+    def test_failed_actual_member_check_blocks_implementation(self):
+        peer=self.members[1];plan=self.api._read(peer.scope,self.task(peer)['evidence']['plan'])
+        plan['checks'][0]['argv']=[sys.executable,'-c','raise SystemExit(1)']
+        self.api.plan_evidence(peer.scope,peer.request(plan=plan,change_decision_ref='fixture:accepted-failing-command'))
+        self.assertEqual(peer.checked()['attempt']['status'],'failed')
+        result=self.verify()
+        self.assertFalse(result['implementation_verified'])
+        self.assertEqual(result['task']['state'],'verifying')
+
+
+    def test_peer_generation_race_during_ready_publication_downgrades_claimant(self):
+        from contextlib import contextmanager
+        from runtime.engine import RuntimeEvent
+        self.verify();original=state._database;peer=self.members[1];changed=[]
+        @contextmanager
+        def database(scope,write=False,initialize=False):
+            if scope is self.selected.scope and write and not changed:
+                changed.append(True)
+                state.process_event(peer.scope,RuntimeEvent('PostToolUse','codex','parent',peer.repo,
+                    'status-race-turn','status-race-call','apply_patch',False,'status-race'))
+            with original(scope,write=write,initialize=initialize) as db:yield db
+        with patch.object(state,'_database',side_effect=database):
+            result=state.task_status(self.selected.scope,'codex','parent')
+        self.assertTrue(changed)
+        self.assertEqual(result['task']['state'],'verifying')
+
+    def test_same_authority_independent_members_need_no_nested_writer(self):
+        from tests.test_state import canonical_scope
+        from tests.test_startup import CanonicalAcquisitionTests
+        from types import SimpleNamespace
+        members=[]
+        for index in range(2):
+            f=EvidenceTests(methodName='runTest');f.setUp();self.addCleanup(f.doCleanups)
+            f.scope=canonical_scope(f.scope,repository_id='repo'+str(index),checkout_id='checkout'+str(index))
+            if members:
+                identity=self.api._canonical_plain(f.scope.accepted_identity)
+                runtime=members[0].scope.runtime
+                identity['configuration']['runtime']['state_dir']=str(runtime.state_dir)
+                f.scope=replace(f.scope,runtime=runtime,accepted_identity=self.api._canonical_freeze(identity),
+                    accepted_scope_digest=self.api._digest(identity))
+            state.start_task(f.scope,f.identity | dict(mode='editable',decision_ref='user:accepted'))
+            record,path=CanonicalAcquisitionTests.record(SimpleNamespace(repo=f.repo,base=f.root,assertIsNone=self.assertIsNone))
+            identity=self.api._canonical_plain(f.scope.accepted_identity)
+            record['project_id']=identity['project_id']
+            record['repositories'][0]['repository_id']=identity['repository_id']
+            record['repositories'][0]['checkouts'][0]['checkout_id']=identity['checkout_id']
+            record['repositories'][0]['checkouts'][0]['clients'][0]['configuration'].update(identity['configuration'])
+            path.write_text(json.dumps(record));members.append(f)
+        self.members=members;self.selected=members[0];self.establish()
+        self.assertEqual(members[0].scope.runtime.state_dir,members[1].scope.runtime.state_dir)
+        self.assertTrue(self.verify()['implementation_verified'])
+        self.assertEqual(state.task_status(self.selected.scope,'codex','parent')['task']['state'],'ready')
+
+
+    def test_missing_selected_local_proof_downgrades_without_passing_history(self):
+        self.verify();task=self.task(self.selected)
+        reference=task['evidence']['verification']
+        (self.selected.scope.runtime.state_dir/'evidence'/reference['name']).unlink()
+        result=state.task_status(self.selected.scope,'codex','parent')
+        self.assertEqual(result['task']['state'],'verifying')
+
+    def test_missing_delivery_source_changes_only_delivery_phase(self):
+        delivery=dict(provider='fixture',repository='owner/repo',target='main',pull_request='fixture:pull1')
+        self.establish(delivery)
+        observations=self.observations(delivery=delivery,delivery_status='merged')
+        held=[];original=observations['observe']
+        def observe(facts):
+            result=original(facts);held.append(result['deliveries'][0]['source']);return result
+        observations['observe']=observe
+        self.assertTrue(self.verify(observations)['delivery_complete'])
+        source=held[0]
+        (Path(source['authority']['directory'])/'evidence'/source['reference']['name']).unlink()
+        result=self.api.evidence_status(self.selected.scope,'codex','parent')
+        self.assertEqual(result['task']['state'],'ready')
+        self.assertTrue(result['evidence']['implementation_verified'])
+        self.assertFalse(result['evidence']['delivery_complete'])
+
+    def test_unpublished_relevant_change_cannot_be_delivered_by_an_old_merged_revision(self):
+        delivery=dict(provider='fixture',repository='owner/repo',target='main',pull_request='fixture:pull1')
+        (self.selected.repo/'app.py').write_text('value = 2\n')
+        self.establish(delivery)
+        result=self.verify(self.observations(delivery=delivery,delivery_status='merged'))
+        self.assertTrue(result['implementation_verified'])
+        self.assertFalse(result['delivery_complete'])
+
+
+    def test_actual_qualified_review_chains_revalidate_through_foreign_contexts(self):
+        review=dict(applicability='required',reason='Independent fixture review',independent=True)
+        for f in self.members:
+            plan=self.api._read(f.scope,self.task(f)['evidence']['plan'])
+            plan.update(nontrivial=True,reviews=dict(general=review,security=review))
+            self.api.plan_evidence(f.scope,f.request(plan=plan,change_decision_ref='fixture:required-qualified-review'))
+            self.assertEqual(f.checked()['attempt']['status'],'passed')
+            f.review()
+        result=self.verify()
+        self.assertTrue(result['implementation_verified'])
+        self.assertEqual(state.task_status(self.selected.scope,'codex','parent')['task']['state'],'ready')
+
+
+    def test_complete_scope_source_cannot_hide_an_omitted_third_member(self):
+        observations=self.observations();observe=observations['observe']
+        plan=self.api._read(self.selected.scope,self.task(self.selected)['evidence']['plan'])
+        projection=self.api._linked_projection(self.reference(self.selected),plan)
+        omitted=dict(self.reference(self.selected),task_id='approved-third-task')
+        projection['participants'].append(dict(task=omitted,delivery=None))
+        decision=self.retained(self.selected,dict(version=1,kind='linked-scope-decision',
+            projection_digest=self.api._digest(projection),decision_ref='user:accepted',observed_at=100,
+            reference='fixture:independent complete scope includes the omitted third task'))
+        def acquire(facts):
+            result=observe(facts);result['scope_decision']=decision;return result
+        observations['observe']=acquire
+        with self.assertRaises(state.StateError):self.verify(observations)
+        self.assertNotIn('linked_verification',self.task(self.selected)['evidence'])
+
+    def test_confirmed_foreign_security_finding_blocks_aggregate_implementation(self):
+        peer=self.members[1]
+        plan=self.api._read(peer.scope,self.task(peer)['evidence']['plan'])
+        review=dict(applicability='required',reason='Independent security fixture review',independent=True)
+        plan.update(nontrivial=True,reviews=dict(general=review,security=review))
+        self.api.plan_evidence(peer.scope,peer.request(plan=plan,change_decision_ref='fixture:security-required'))
+        self.assertEqual(peer.checked()['attempt']['status'],'passed')
+        peer.review(findings=[dict(id='linked-security',severity='high',scope='security',status='confirmed',
+            location='app.py:1',scenario='Reachable unsafe fixture path',evidence='Independent tracing',
+            counterevidence='No applicable guard')])
+        result=self.verify()
+        self.assertFalse(result['implementation_verified'])
+        self.assertTrue(any('security finding' in message for message in result['blockers']))
+
+
+    def test_legacy_evidence_cannot_adopt_a_canonical_aggregate_pointer(self):
+        legacy=EvidenceTests(methodName='runTest');legacy.setUp();self.addCleanup(legacy.doCleanups)
+        legacy.plan()
+        with state._database(legacy.scope,write=True) as db:
+            task=state._task(db,state._scope_id(legacy.scope),'codex','parent')
+            task['evidence']['linked_verification']=dict(authority=self.reference(self.selected)['authority'],
+                reference=task['evidence']['plan'])
+            with self.assertRaises(state.StateError):state._save(db,state._scope_id(legacy.scope),task)
+
+
+    def assert_final_source_loss_rejected(self, *, merge_evidence=False):
+        if merge_evidence:
+            for f in self.members:
+                f.review()
+        observations=self.observations();observe=observations['observe'];held=[]
+        def acquire(facts):
+            result=observe(facts);held.append(result['shared'][0]['evidence'][0]);return result
+        observations['observe']=acquire
+        if merge_evidence:
+            for row in observations['members']:row['request']['purpose']='merge-evidence'
+            result=self.api.verify_linked(self.selected.scope,self.selected.request(purpose='merge-evidence'),observations)
+        else:
+            result=self.verify(observations)
+        self.assertTrue(result['implementation_verified'])
+        before=self.task(self.selected)
+        if merge_evidence:self.assertNotEqual(before['state'],'ready')
+        original=self.api._linked_outcomes;changed=[]
+        def consume(*args,**kwargs):
+            result=original(*args,**kwargs)
+            if not changed:
+                source=held[0]
+                (Path(source['authority']['directory'])/'evidence'/source['reference']['name']).unlink()
+                changed.append(True)
+            return result
+        with patch.object(self.api,'_linked_outcomes',side_effect=consume):
+            if merge_evidence:
+                result=self.api.evidence_status(self.selected.scope,'codex','parent')['evidence']
+            else:
+                result=self.api._revalidate_linked(self.selected.scope,before,update_ready=False)
+        self.assertTrue(changed)
+        self.assertFalse(result['implementation_verified'])
+        self.assertEqual(self.task(self.selected),before)
+
+    def test_read_only_revalidation_rechecks_sources_after_consumption(self):
+        self.assert_final_source_loss_rejected()
+
+    def test_non_ready_merge_evidence_status_rechecks_sources_after_consumption(self):
+        self.assert_final_source_loss_rejected(merge_evidence=True)
+
+    def test_implementation_source_bytes_change_during_registration_rejects(self):
+        observations=self.observations();observe=observations['observe'];held=[]
+        def acquire(facts):
+            result=observe(facts);held.append(result['shared'][0]['evidence'][0]);return result
+        observations['observe']=acquire;original=self.api._artifact;changed=[]
+        def publish(scope,value,**kwargs):
+            result=original(scope,value,**kwargs)
+            if value.get('kind')=='linked-verification' and not changed:
+                source=held[0];path=Path(source['authority']['directory'])/'evidence'/source['reference']['name']
+                path.chmod(0o600);path.write_text('{"tampered":true}');path.chmod(0o400);changed.append(True)
+            return result
+        with patch.object(self.api,'_artifact',side_effect=publish):
+            with self.assertRaises(state.StateError):self.verify(observations)
+        self.assertTrue(changed);self.assertNotIn('linked_verification',self.task(self.selected)['evidence'])
+
+    def test_scope_source_metadata_change_during_registration_rejects(self):
+        observations=self.observations();observe=observations['observe'];held=[]
+        def acquire(facts):
+            result=observe(facts);held.append(result['scope_decision']);return result
+        observations['observe']=acquire;original=self.api._artifact;changed=[]
+        def publish(scope,value,**kwargs):
+            result=original(scope,value,**kwargs)
+            if value.get('kind')=='linked-verification' and not changed:
+                source=held[0];db=kwargs['db'];metadata=state._metadata(db,source['reference']['name'])
+                metadata['created_at']+=1
+                db.execute('update evidence_metadata set created_at=?,data=? where name=?',
+                    (metadata['created_at'],self.api._raw(metadata).decode(),source['reference']['name']))
+                changed.append(True)
+            return result
+        with patch.object(self.api,'_artifact',side_effect=publish):
+            with self.assertRaises(state.StateError):self.verify(observations)
+        self.assertTrue(changed);self.assertNotIn('linked_verification',self.task(self.selected)['evidence'])
+
+    def test_delivery_source_change_during_registration_is_only_delivery_unknown(self):
+        delivery=dict(provider='fixture',repository='owner/repo',target='main',pull_request='fixture:pull1')
+        self.establish(delivery)
+        observations=self.observations(delivery=delivery,delivery_status='merged');observe=observations['observe'];held=[]
+        def acquire(facts):
+            result=observe(facts);held.append(result['deliveries'][0]['source']);return result
+        observations['observe']=acquire;original=self.api._artifact;changed=[]
+        def publish(scope,value,**kwargs):
+            result=original(scope,value,**kwargs)
+            if value.get('kind')=='linked-verification' and not changed:
+                source=held[0];path=Path(source['authority']['directory'])/'evidence'/source['reference']['name']
+                path.chmod(0o600);path.write_text('{"tampered":true}');path.chmod(0o400);changed.append(True)
+            return result
+        with patch.object(self.api,'_artifact',side_effect=publish):result=self.verify(observations)
+        self.assertTrue(changed);self.assertTrue(result['implementation_verified'])
+        self.assertFalse(result['delivery_complete']);self.assertEqual(result['task']['state'],'ready')
+        content=self.api._linked_source(result['verification'])
+        self.assertFalse(content['delivery_complete'])
+        self.assertEqual(content['deliveries'][0]['status'],'unknown')
+
+
+    def test_d4_typed_closure_walk_preserves_foreign_aggregate_proof(self):
+        from runtime import changes
+        result=self.verify();pointer=result['verification']
+        contexts=tuple(self.api._evidence_context(f.scope) for f in self.members)
+        # Supply a known owner artifact root; actual typed traversal/physical readers are unmocked.
+        def roots(manifest,context,task_refs):
+            return [],[],[pointer['reference']] if context.directory==self.selected.scope.runtime.state_dir else []
+        with changes._authority_guards([context.directory for context in contexts]), \
+             patch.object(changes,'_recovery_owner_refs',side_effect=roots):
+            _,_,artifacts,foreign=changes._collect_recovery_references({'owners':[]},contexts)
+        peer=self.members[1];proof=self.task(peer)['evidence']['verification']
+        self.assertIn(dict(authority=self.reference(peer)['authority'],artifact=proof),artifacts)
+        self.assertEqual(foreign,[])

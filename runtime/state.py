@@ -806,7 +806,7 @@ def _task(db, scope_id, client, session, task_id=None):
                 raise StateError("Runtime continuation record is corrupt")
     if "evidence" in task:
         from runtime.evidence import validate_evidence
-        validate_evidence(task["evidence"])
+        validate_evidence(task["evidence"], canonical=version == 3)
     if "delegation" in task:
         from runtime.delegation import validate_delegation
         validate_delegation(task["delegation"])
@@ -845,7 +845,7 @@ def _save(db, scope_id, task):
         validate_delegation(task["delegation"])
     if 'evidence' in task:
         from runtime.evidence import validate_evidence
-        validate_evidence(task['evidence'])
+        validate_evidence(task['evidence'], canonical=task['pins']['schema_version'] == 3)
     db.execute("insert or replace into tasks values(?,?,?,?,?)", (scope_id, task["client"], task["session_id"],
                task["task_id"], json.dumps(task, separators=(",", ":"))))
 

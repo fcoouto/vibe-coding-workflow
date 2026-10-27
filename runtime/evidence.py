@@ -23,7 +23,7 @@ import time
 import uuid
 
 from runtime import state
-from runtime.startup import MAX_INPUT, StartupError, AcceptedScope, json_object, policy_digest, _canonical_freeze, _canonical_plain
+from runtime.startup import MAX_INPUT, StartupError, AcceptedScope, ProjectScope, RuntimeSettings, json_object, policy_digest, _canonical_freeze, _canonical_plain
 
 VERSION = 1
 MAX_ATTEMPTS = 32
@@ -312,6 +312,8 @@ def _guidance_artifact_owner(scope):
 
 
 def _registered_owner(scope, context, owner, db):
+    if isinstance(owner, _LinkedOwner):
+        return _registered_owner(scope, context, owner.task_owner, db)
     if isinstance(owner, _RecoveryOwner):
         from runtime import changes
         changes._check_recovery_source(owner.source, context, db)
@@ -407,7 +409,7 @@ def _artifact_registered(scope, value, context, owner, db):
     digest = hashlib.sha256(raw).hexdigest()
     recovery = isinstance(owner, _RecoveryOwner)
     if recovery: _require(value == _canonical_plain(owner.content), 'Recovery artifact differs from owner-derived content')
-    dependencies = [_canonical_plain(d) for d in owner.dependencies] if recovery else _artifact_dependencies(value)
+    dependencies = [_canonical_plain(d) for d in owner.dependencies] if recovery or isinstance(owner, _LinkedOwner) else _artifact_dependencies(value)
     if task_ref is not None:
         dependencies.insert(0, dict(kind='task', reference=task_ref))
     baseline = isinstance(owner, _BaselineOwner)
@@ -486,11 +488,14 @@ def _read(scope, reference, *, context=None, db=None):
         raise state.StateError('Evidence artifact unavailable, unsafe or corrupt') from None
 
 
-def validate_evidence(value):
+def validate_evidence(value, *, canonical=False):
     _bounded(value)
-    state._fields(value, ('version', 'plan', 'candidate', 'attempts'), ('verification', 'history'))
+    state._fields(value, ('version', 'plan', 'candidate', 'attempts'),
+        ('verification', 'history') + (('linked_verification',) if canonical else ()))
     _require(type(value['version']) is int and value['version'] == VERSION and isinstance(value['attempts'], list)
              and len(value['attempts']) <= MAX_ATTEMPTS, 'Unsupported or oversized task evidence')
+    if 'linked_verification' in value:
+        _authority_artifact(value['linked_verification'])
     seen = set()
     for attempt in value['attempts']:
         _require(isinstance(attempt, dict) and isinstance(attempt.get('id'), str) and
@@ -696,11 +701,15 @@ def _canonical_inputs(scope):
     """Reobserve accepted selected locations/dependencies; never adopt a new scope."""
     if not isinstance(scope, AcceptedScope):
         return None
-    from runtime.onboarding import _checkout_observation, _filesystem_binding, _fingerprint
     state._scope_version(scope)
     identity = state._accepted_identity(scope.accepted_identity)
-    observed, error = _checkout_observation(str(scope.repository_root), {'paths': 0})
-    _require(error is None and _filesystem_binding(scope.project_root) == identity['project_binding'] and
+    return _observe_pinned_identity(identity)
+
+
+def _observe_pinned_identity(identity):
+    from runtime.onboarding import _checkout_observation, _filesystem_binding, _fingerprint
+    observed, error = _checkout_observation(identity['repository_root'], {'paths': 0})
+    _require(error is None and _filesystem_binding(Path(identity['project_root'])) == identity['project_binding'] and
         observed['binding'] == identity['bindings'] and
         all(observed[key] == identity['repository_root' if key == 'root' else key]
             for key in ('root', 'primary_root', 'git_dir', 'git_common_dir')), 'Accepted checkout physical identity changed')
@@ -720,9 +729,9 @@ def _candidate_projection(candidate, task):
         _require(identity == task['accepted_identity'], 'Candidate accepted scope changed')
 
 
-def _capture(scope, plan):
+def _capture(scope, plan, *, pinned=None):
     from runtime.onboarding import _snapshot, _fingerprint
-    accepted = _canonical_inputs(scope)
+    accepted = _observe_pinned_identity(pinned[0]) if pinned is not None else _canonical_inputs(scope)
     snapshot = _snapshot(scope.repository_root)
     if accepted is not None:
         snapshot['accepted_identity'] = accepted
@@ -756,7 +765,7 @@ def _capture(scope, plan):
     snapshot['index_entries'] = dict((os.fsdecode(row.split(b'\t', 1)[1]), os.fsdecode(row.split(b'\t', 1)[0]))
                                     for row in index.split(b'\0') if row)
     snapshot.update(base=base, comparison_base=comparison_base, comparison=plan['comparison'],
-                    pins=state._pins(scope), actual_policy_digest=policy_digest(state.PACKAGE),
+                    pins=pinned[1] if pinned is not None else state._pins(scope), actual_policy_digest=policy_digest(state.PACKAGE),
                     definitions_digest=_digest(plan), tools={c['id']: _tool(c, scope.repository_root) for c in plan['checks']},
                     environment=dict(python=sys.version, platform=platform.platform(), git=_git(scope.repository_root, '--version').decode().strip()))
     return snapshot
@@ -1269,16 +1278,16 @@ def _report(value, attempt):
     return value
 
 
-def _review_quality_matches(scope, attempt, record, collected=None):
+def _review_quality_matches(scope, attempt, record, collected=None, *, context=None):
     """Positive quality belongs to the exact latest native result, not just its assignment."""
     from runtime import delegation
     if record is None or collected is None and 'collected' not in attempt:
         return False
-    history = delegation._worker_history(scope, record['data']['observation'])
+    history = delegation._worker_history(scope, record['data']['observation'], context=context)
     latest = history[0][1] if history else None
     if latest is None or latest['status'] != 'observed' or latest['error'] is not None or latest['conflict'] is not None:
         return False
-    collected = _read(scope, attempt['collected']) if collected is None else collected
+    collected = _read(None if context is not None else scope, attempt['collected'], context=context) if collected is None else collected
     try:
         actual, receipt = latest['receipt'], collected['receipt']
         if actual is None or actual['turn_status'] != 'completed' or not isinstance(latest['result'], str):
@@ -1397,10 +1406,10 @@ def assess_review(scope, request):
     return _finish(scope, request, attempt, request['expected_revision'])
 
 
-def _current_attempt(scope, attempt, candidate, plan, reuse):
+def _current_attempt(scope, attempt, candidate, plan, reuse, *, context=None):
     if attempt['plan_digest'] != _digest(plan):
         return False
-    previous = _read(scope, attempt['candidate'])
+    previous = _read(None if context is not None else scope, attempt['candidate'], context=context)
     if previous == candidate:
         return True
     entry = next((r for r in reuse if r['attempt_id'] == attempt['id']), None)
@@ -1426,28 +1435,28 @@ def _current_attempt(scope, attempt, candidate, plan, reuse):
     return True
 
 
-def _checkout_attempt_blockers(db, scope, task):
+def _checkout_attempt_blockers(db, scope, task, *, context=None):
     """Use the caller's transaction so another session cannot reserve between scan and commit."""
     from runtime import delegation
     blockers = []
-    records = delegation._ledger(scope, db)
+    records = delegation._ledger(scope, db, context=context)
     rows = db.execute('select t.scope_id,t.client,t.session_id,t.task_id from tasks t join checkouts c on t.scope_id=c.scope_id '
                       'where c.repository_root=? and c.git_common_dir=?',
                       (str(scope.repository_root), str(scope.git_common_dir))).fetchall()
     for scope_id, client, session, task_id in rows:
         record = state._task(db, scope_id, client, session, task_id)
         if record.get('retirement'):
-            _read(scope, record['retirement']['proof'])
+            _read(None if context is not None else scope, record['retirement']['proof'], context=context)
         elif any(a['status'] in {'reserved', 'running', 'uncertain'} and
-                 delegation._linked_attempt(scope, scope_id, record, a, records) is None
+                 delegation._linked_attempt(scope, scope_id, record, a, records, context=context, db=db) is None
                  for a in record.get('evidence', {}).get('attempts', [])):
-            own = (scope_id, client, session, task_id) == (state._scope_id(scope), task['client'], task['session_id'], task['task_id'])
+            own = (scope_id, client, session, task_id) == ((_task_scope_id(task) if context is not None else state._scope_id(scope)), task['client'], task['session_id'], task['task_id'])
             blockers.append('Evidence attempt or surviving writer remains unresolved' if own else
                             'Unreconciled evidence attempt remains in checkout history')
     return blockers
 
 
-def _blockers(scope, task, plan, candidate, purpose, reuse, security_impact=None, *, resource_closure=None, barrier_id=None):
+def _blockers(scope, task, plan, candidate, purpose, reuse, security_impact=None, *, resource_closure=None, barrier_id=None, context=None):
     from runtime import delegation
     blockers = []
     evidence = task['evidence']
@@ -1455,25 +1464,25 @@ def _blockers(scope, task, plan, candidate, purpose, reuse, security_impact=None
         blockers.append('Task is cancelled')
     if any(c['status'] == 'pending' and c['kind'] in {'blocker', 'decision'} for c in task['conditions']):
         blockers.append('Task conditions remain unresolved')
-    with state._database(scope) as db:
-        blockers.extend(_checkout_attempt_blockers(db, scope, task))
-        blockers.extend(_ledger_blockers(scope, db, resource_closure, barrier_id))
-        review_records = delegation._ledger(scope, db)
+    with (_context_database(context) if context is not None else state._database(scope)) as db:
+        blockers.extend(_checkout_attempt_blockers(db, scope, task, context=context))
+        blockers.extend(_ledger_blockers(scope, db, resource_closure, barrier_id, context=context))
+        review_records = delegation._ledger(scope, db, context=context)
     if task['turn_uncertain'] and task['turn_id'] is not None:
         blockers.append('Native turn interruption/correlation remains unresolved')
     if ((security_impact or plan['security_impact'])['status'] != 'assessed' or
-            security_impact is None and _read(scope, evidence['candidate']) != candidate):
+            security_impact is None and _read(None if context is not None else scope, evidence['candidate'], context=context) != candidate):
         blockers.append('Post-implementation security impact assessment is unresolved or stale')
     if any(a['status'] in {'reserved', 'running', 'uncertain'} for a in evidence['attempts']):
         blockers.append('Evidence attempt or surviving writer remains unresolved')
-    current = [a for a in evidence['attempts'] if _current_attempt(scope, a, candidate, plan, reuse)]
+    current = [a for a in evidence['attempts'] if _current_attempt(scope, a, candidate, plan, reuse, context=context)]
     for attempt in current:
         if attempt['kind'] == 'check' and attempt['status'] == 'passed':
             _require('execution' in attempt, 'Passing check lacks observed execution artifact')
-            execution = _read(scope, attempt['execution'])
-            _read(scope, execution['output'])
+            execution = _read(None if context is not None else scope, attempt['execution'], context=context)
+            _read(None if context is not None else scope, execution['output'], context=context)
             _require('reconciliation' in attempt, 'Passing check lacks independently inspected host lifecycle evidence')
-            reconciliation = _read(scope, attempt['reconciliation'])['proof']
+            reconciliation = _read(None if context is not None else scope, attempt['reconciliation'], context=context)['proof']
             _require(reconciliation['execution_digest'] == attempt['execution']['digest'] and
                      reconciliation['attempt_id'] == attempt['id'] and reconciliation['candidate_digest'] == attempt['candidate_digest']
                      and reconciliation['stopped'] is True and reconciliation['descendants_stopped'] is True,
@@ -1495,11 +1504,11 @@ def _blockers(scope, task, plan, candidate, purpose, reuse, security_impact=None
         if attempt['kind'] != 'review' or attempt['status'] != 'assessed':
             continue
         if 'ledger_assignment_digest' in attempt:
-            record = delegation._linked_review(scope, state._scope_id(scope), task, attempt, review_records)
-            if not _review_quality_matches(scope, attempt, record):
+            record = delegation._linked_review(scope, _task_scope_id(task) if context is not None else state._scope_id(scope), task, attempt, review_records, context=context)
+            if not _review_quality_matches(scope, attempt, record, context=context):
                 continue
-        collected = _read(scope, attempt['collected'])
-        assessed = _read(scope, attempt['assessment'])
+        collected = _read(None if context is not None else scope, attempt['collected'], context=context)
+        assessed = _read(None if context is not None else scope, attempt['assessment'], context=context)
         _require(assessed['collected_digest'] == attempt['collected']['digest'], 'Assessment receipt/report binding failed')
         assessment = assessed['assessment']
         _report(collected['report'], attempt)
@@ -1513,10 +1522,10 @@ def _blockers(scope, task, plan, candidate, purpose, reuse, security_impact=None
     for attempt in evidence['attempts']:
         if attempt['kind'] != 'review' or 'collected' not in attempt:
             continue
-        report = _read(scope, attempt['collected'])['report']
+        report = _read(None if context is not None else scope, attempt['collected'], context=context)['report']
         dispositions = {}
         if 'assessment' in attempt:
-            assessment = _read(scope, attempt['assessment'])['assessment']
+            assessment = _read(None if context is not None else scope, attempt['assessment'], context=context)['assessment']
             dispositions = {d['finding_id']: d for d in assessment['dispositions']}
         for finding in report['findings']:
             if finding['status'] == 'optional':
@@ -1577,9 +1586,9 @@ def _verification_resources(scope, task, plan):
         git_routing=delegation._git_routing(scope, git_directory))
 
 
-def _ledger_blockers(scope, db, claims, exclude=None):
+def _ledger_blockers(scope, db, claims, exclude=None, *, context=None):
     from runtime import delegation
-    return ['Relevant assignment ownership remains unresolved: ' + record['id'] for record in delegation._ledger(scope, db)
+    return ['Relevant assignment ownership remains unresolved: ' + record['id'] for record in delegation._ledger(scope, db, context=context)
         if record['id'] != exclude and record['data']['status'] != 'settled' and
         (claims is None or delegation._held_overlap(claims, record['data']['claims']))]
 
@@ -1591,6 +1600,10 @@ def _verification_response(task, blockers, candidate=None):
 
 
 def verify_completion(scope, request):
+    return _verify_member(scope, request)
+
+
+def _verify_member(scope, request, *, linked=False):
     _request(request, ('purpose',), ('reuse', 'security_impact'))
     request = deepcopy(request)
     _require(request['purpose'] in {'completion', 'merge-evidence'}, 'Invalid evidence verification purpose')
@@ -1606,7 +1619,7 @@ def verify_completion(scope, request):
         task = deepcopy(_task(db, scope, request))
         _require('evidence' in task, 'Evidence plan is missing')
         plan = _read(scope, task['evidence']['plan'])
-        _require(plan['version'] == 1, 'Linked acceptance requires linked verification owner integration')
+        _require(plan['version'] == 1 or linked and plan['version'] == 2, 'Linked acceptance requires linked verification owner integration')
         generation = db.execute('select generation from checkouts where scope_id=?', (state._scope_id(scope),)).fetchone()[0]
     resources, closure, routing = _verification_resources(scope, task, plan)
     def ownership_blockers():
@@ -1661,12 +1674,12 @@ def verify_completion(scope, request):
             verification['blockers'] = blockers
             verification_ref = _artifact(scope, verification, owner=_artifact_owner(scope, task), db=db)
         current['evidence']['verification'] = verification_ref
-        if not blockers and request['purpose'] == 'completion':
+        if not blockers and request['purpose'] == 'completion' and not linked:
             current['state'] = 'ready'
             for condition in current['conditions']:
                 if 'continuation' in condition:
                     condition['continuation']['revoked'] = True
-        elif current['state'] == 'ready':
+        elif current['state'] == 'ready' or linked:
             current['state'] = 'verifying'
         current['revision'] += 1
         reconciliation = _artifact(scope, dict(version=1, kind='synchronous-verification', barrier_id=barrier['id'],
@@ -1675,6 +1688,380 @@ def verify_completion(scope, request):
         db.execute('update assignments set data=? where id=?', (_raw(active['data']).decode(), barrier['id']))
         state._save(db, state._scope_id(scope), current)
     return _verification_response(current, blockers, candidate)
+
+
+
+def _task_scope_id(task):
+    identity = task['accepted_identity']
+    return state._digest([3, identity['project_id'], identity['repository_id'], identity['checkout_id']])
+
+
+def _authority_artifact(value):
+    state._fields(value, ('authority', 'reference'))
+    authority = value['authority']
+    state._fields(authority, ('directory','database','directory_binding','database_binding'))
+    directory=state._canonical_path(authority['directory'])
+    _require(state._canonical_path(authority['database'])==directory/'runtime.sqlite3','Artifact authority database differs')
+    state._canonical_binding(authority['directory_binding']);state._canonical_binding(authority['database_binding'])
+    state._artifact_reference(value['reference'])
+    return value
+
+
+def _reference_context(authority):
+    authority = _canonical_plain(_canonical_freeze(authority))
+    _authority_artifact(dict(authority=authority, reference=dict(name='a'*32+'.json', digest='a'*64)))
+    return EvidenceAuthorityContext(Path(authority['directory']), Path(authority['database']),
+        _canonical_freeze(authority['directory_binding']), _canonical_freeze(authority['database_binding']),
+        (_canonical_freeze(authority),), 'Existing approved linked task authority')
+
+
+def _linked_source(reference, *, observed=None, db=None):
+    _authority_artifact(reference)
+    context = _reference_context(reference['authority'])
+    def consume(connection):
+        _check_context(context,connection)
+        metadata=state._metadata(connection,reference['reference']['name'])
+        value=_read(None,reference['reference'],context=context,db=connection)
+        _require(state._metadata(connection,reference['reference']['name'])==metadata,'Linked source metadata changed during consumption')
+        if observed is not None:
+            key=_raw(reference)
+            _require(key not in observed or observed[key][1]==metadata,'Linked source metadata observations disagree')
+            observed[key]=(deepcopy(reference),metadata)
+        return value
+    if db is not None:return consume(db)
+    with _context_database(context) as connection:return consume(connection)
+
+
+def _pinned_locator(task, context):
+    identity = state._accepted_identity(task['accepted_identity'])
+    return ProjectScope(identity['project_id'], Path(identity['repository_root']), Path(identity['git_common_dir']),
+        task['pins']['policy_digest'], RuntimeSettings(2, context.directory))
+
+
+def _capture_pinned(context, task, plan):
+    """Compare current named inputs to history; this locator grants no active scope."""
+    from runtime import onboarding as d3
+    from runtime.startup import decode_project_record, canonical_scope_projection
+    identity = state._accepted_identity(task['accepted_identity'])
+    authority = d3._authority_observation(Path(identity['project_root']), {'paths': 0, 'bytes': 0}, canonical_only=True)
+    _require(not authority['error'] and authority['record'] is not None, 'Linked current Project authority is unavailable')
+    current = canonical_scope_projection(decode_project_record(authority['record']), repository_id=identity['repository_id'],
+        checkout_id=identity['checkout_id'], client=identity['client'])
+    _require(current is not None and _canonical_plain(current) == identity and identity['membership']['included'],
+        'Linked selected configuration or membership changed')
+    _require(identity['configuration']['runtime'] == dict(schema_version=3,state_dir=str(context.directory))
+        and task['pins']['runtime_digest'] == state.runtime_fingerprint()
+        and task['pins']['policy_digest'] == policy_digest(state.PACKAGE), 'Linked original installed pins changed')
+    locator = _pinned_locator(task, context)
+    first = _capture(locator, plan, pinned=(identity, task['pins']))
+    second = _capture(locator, plan, pinned=(identity, task['pins']))
+    _require(first == second, 'Linked candidate moved during capture')
+    _bounded(first, MAX_ARTIFACT)
+    return locator, first
+
+
+@dataclass(frozen=True)
+class _LinkedOwner:
+    task_owner: object
+    dependencies: tuple
+
+
+def _linked_members(scope, request, observations):
+    state._fields(observations, ('members', 'observe'))
+    _require(callable(observations['observe']), 'Linked observation acquisition requires the existing trusted coordinator owner')
+    rows = observations['members']
+    _require(isinstance(rows, list) and 1 <= len(rows) <= 65, 'Invalid bounded linked members')
+    with state._database(scope) as db:
+        selected = _task(db, scope, request)
+        plan = _read(scope, selected['evidence']['plan'], db=db)
+        selected_ref = _canonical_plain(_artifact_owner(scope, selected).task)
+        projection = _linked_projection(selected_ref, plan)
+    found = {}
+    for row in rows:
+        state._fields(row, ('scope', 'request'))
+        member_scope, member_request = row['scope'], deepcopy(row['request'])
+        _require(isinstance(member_scope, AcceptedScope) and member_scope.client == 'codex', 'Linked member requires its current supported scope')
+        _request(member_request, ('purpose',), ('reuse', 'security_impact'))
+        _require(member_request['purpose'] == request['purpose'], 'Linked verification purpose differs')
+        with state._database(member_scope) as db:
+            task = _task(db, member_scope, member_request)
+            _require('evidence' in task, 'Linked member approval is missing')
+            member_plan = _plan(_read(member_scope, task['evidence']['plan'], db=db))
+            reference = _canonical_plain(_artifact_owner(member_scope, task).task)
+            _require(_linked_projection(reference, member_plan) == projection, 'Linked approved participant contracts diverge')
+        key = _raw(reference)
+        _require(key not in found, 'Duplicate linked observation member')
+        found[key] = dict(scope=member_scope, request=member_request, reference=reference)
+    _require(set(found) == {_raw(row['task']) for row in projection['participants']}, 'Linked observation members do not match the complete approved set')
+    _require(found[_raw(selected_ref)]['request'] == request, 'Selected linked request differs from its observation')
+    return selected_ref, projection, [found[_raw(row['task'])] for row in projection['participants']]
+
+
+def _linked_snapshot(reference):
+    state._task_reference(reference)
+    context = _reference_context(reference['authority'])
+    with _context_database(context) as db:
+        task = state._task(db, reference['scope_id'], reference['client'], reference['session_id'], reference['task_id'])
+        _require(task is not None and task['client'] == 'codex' and 'evidence' in task, 'Linked member is unavailable')
+        plan = _read(None, task['evidence']['plan'], context=context, db=db)
+        _linked_projection(reference, plan)
+        verification_ref = task['evidence'].get('verification')
+        _require(verification_ref is not None, 'Linked member local verification is missing')
+        verification = _read(None, verification_ref, context=context, db=db)
+        generation = db.execute('select generation from checkouts where scope_id=?',(reference['scope_id'],)).fetchone()[0]
+    locator, candidate = _capture_pinned(context, task, plan)
+    _require(verification['purpose'] in {'completion','merge-evidence'} and verification['plan_digest'] == _digest(plan)
+        and verification['candidate_digest'] == _digest(candidate) and verification['generation'] == generation,
+        'Linked member local verification is stale')
+    blockers = list(verification['blockers']) + _blockers(locator, task, plan, candidate, verification['purpose'],
+        verification.get('reuse',[]), verification.get('security_impact'), resource_closure=verification['resource_closure'], context=context)
+    return dict(task=task,plan=plan,candidate=candidate,context=context,generation=generation,
+        verification=verification,verification_ref=verification_ref,blockers=sorted(set(blockers)),reference=reference)
+
+
+def _linked_inputs(snapshots):
+    return [dict(task=row['reference'], pins=row['task']['pins'], plan_digest=_digest(row['plan']),
+        candidate_digest=_digest(row['candidate'])) for row in snapshots]
+
+
+def _linked_outcomes(projection, inputs_digest, acquired, snapshots, selected_ref, *, observed=None):
+    """Validate retained source correspondence; trusted acquisition owns its provenance/semantics."""
+    state._fields(acquired, ('scope_decision','shared','deliveries'))
+    _bounded(acquired, MAX_ARTIFACT)
+    blockers=[]; sources=[]
+    decision=_linked_source(acquired['scope_decision'],observed=observed);sources.append(acquired['scope_decision'])
+    _require(decision.get('kind') == 'linked-scope-decision' and type(decision.get('version')) is int and decision['version'] == 1
+        and decision.get('projection_digest') == _digest(projection)
+        and decision.get('decision_ref') == next(s['plan']['decision_ref'] for s in snapshots if s['reference']==selected_ref), 'Linked complete scope decision is unsupported')
+    state._text(decision.get('reference'),'coordinator scope decision')
+    state._integer(decision.get('observed_at'),'original scope observation time')
+    _require(isinstance(acquired['shared'],list) and len(acquired['shared']) == len(projection['acceptance']), 'Shared criterion observations are incomplete')
+    seen=set()
+    for row in acquired['shared']:
+        state._fields(row,('id','status','evidence','reference'))
+        _require(row['id'] not in seen and row['id'] in {c['id'] for c in projection['acceptance']}, 'Shared criterion observation differs from approval')
+        seen.add(row['id']);state._text(row['reference'],'shared semantic assessment')
+        _require(row['status'] in {'passed','failed','unknown'} and isinstance(row['evidence'],list)
+            and 0 < len(row['evidence']) <= 64, 'Shared source support is unavailable')
+        supported=False
+        for reference in row['evidence']:
+            source=_linked_source(reference,observed=observed);sources.append(reference)
+            if (type(source.get('version')) is int and source['version'] == 1 and source.get('kind') == 'linked-integration-observation'
+                    and source.get('inputs_digest') == inputs_digest and isinstance(source.get('criteria'),dict)
+                    and source['criteria'].get(row['id']) == row['status']):
+                state._integer(source.get('observed_at'),'original shared observation time')
+                state._text(source.get('reference'),'observed integration source')
+                supported=True
+        if row['status'] != 'passed' or not supported:
+            blockers.append('Shared criterion is unresolved or unsupported: '+row['id'])
+    required={_raw(row['delivery']):row['delivery'] for row in projection['participants'] if row['delivery'] is not None}
+    _require(isinstance(acquired['deliveries'],list) and len(acquired['deliveries']) <= len(required), 'Invalid linked delivery observation set')
+    deliveries={};delivery_complete=True
+    for row in acquired['deliveries']:
+        state._fields(row,('delivery','status','source','observed_at','revision'))
+        key=_raw(row['delivery']);_require(key in required and key not in deliveries, 'Unapproved or duplicate delivery observation')
+        _require(row['status'] in {'merged','open','unknown'},'Invalid delivery observation status')
+        state._integer(row['observed_at'],'original delivery observation time');state._text(row['revision'],'observed delivery revision')
+        source={}
+        if row['source'] is not None:
+            try:source=_linked_source(row['source'],observed=observed)
+            except (StartupError,OSError):pass
+            sources.append(row['source'])
+        supported=(source.get('kind') == 'linked-delivery-observation' and type(source.get('version')) is int and source['version'] == 1
+            and all(source.get(field) == row[field] for field in ('delivery','status','observed_at','revision')))
+        owners=[s for s,p in zip(snapshots,projection['participants']) if p['delivery']==row['delivery']]
+        current=all(s['candidate']['head']==row['revision'] and not any(
+            entry[3:] != str(state.PROJECT_FILE) for entry in s['candidate']['dirty_inventory']) for s in owners)
+        deliveries[key]=dict(row, status=row['status'] if supported and current else 'unknown')
+    delivery_complete=all(key in deliveries and deliveries[key]['status']=='merged' for key in required)
+    return sorted(set(blockers)),delivery_complete,sources,list(deliveries.values())
+
+
+def _linked_source_refs(acquired):
+    state._fields(acquired, ('scope_decision','shared','deliveries'))
+    _require(isinstance(acquired['shared'],list) and len(acquired['shared']) <= 32
+        and isinstance(acquired['deliveries'],list) and len(acquired['deliveries']) <= 65, 'Linked observation bound exceeded')
+    sources=[acquired['scope_decision']]
+    for row in acquired['shared']:
+        state._fields(row,('id','status','evidence','reference'))
+        _require(isinstance(row['evidence'],list) and len(row['evidence']) <= 64, 'Shared source bound exceeded')
+        sources.extend(row['evidence'])
+    sources.extend(row['source'] for row in acquired['deliveries'] if row.get('source') is not None)
+    for source in sources:_authority_artifact(source)
+    return sources
+
+
+def _recheck_linked_sources(scope, db, acquired, snapshots, observed, *, aggregate=None):
+    """Revalidate bounded original source bytes/metadata at the publication boundary."""
+    strong={_raw(acquired['scope_decision'])}
+    strong.update(_raw(reference) for row in acquired['shared'] for reference in row['evidence'])
+    strong.update(_raw(dict(authority=row['reference']['authority'],reference=row['verification_ref'])) for row in snapshots)
+    if aggregate is not None:strong.add(_raw(aggregate))
+    delivery_changed=False
+    for key,(reference,metadata) in observed.items():
+        try:
+            current={}
+            connection=db if Path(reference['authority']['database'])==state._path(scope) else None
+            _linked_source(reference,observed=current,db=connection)
+            _require(current[key][1]==metadata,'Linked retained source metadata changed')
+        except (StartupError,OSError):
+            if key in strong:raise state.StateError('Linked implementation source changed before publication') from None
+            delivery_changed=True
+    return delivery_changed
+
+
+def _recheck_linked_rows(scope, db, snapshots):
+    for snapshot in snapshots:
+        reference=snapshot['reference'];context=snapshot['context']
+        def check(connection):
+            _check_context(context,connection)
+            current=state._task(connection,reference['scope_id'],reference['client'],reference['session_id'],reference['task_id'])
+            generation=connection.execute('select generation from checkouts where scope_id=?',(reference['scope_id'],)).fetchone()
+            _require(current==snapshot['task'] and generation is not None and generation[0]==snapshot['generation'],
+                'Linked member row or generation changed before publication')
+        if context.database==state._path(scope):check(db)
+        else:
+            with _context_database(context) as peer:check(peer)
+
+
+def verify_linked(scope, request, observations):
+    """Internal trusted-coordinator acquisition; a callable or JSON is not authentication.
+
+    The integration caller verifies original scope/source semantics independently.
+    The callback is bounded, local and read-only; no public JSON/CLI route exists.
+    """
+    _request(request, ('purpose',), ('reuse','security_impact'))
+    _require(request['purpose'] in {'completion','merge-evidence'}, 'Invalid linked verification purpose')
+    selected_ref,projection,members=_linked_members(scope,deepcopy(request),observations)
+    observe=observations['observe']
+    for row in members:
+        result=_verify_member(row['scope'],row['request'],linked=True)
+        row['revision']=result['task']['revision']
+    from runtime.changes import _authority_guards
+    directories={Path(row['reference']['authority']['directory']) for row in members}
+    acquired=None
+    while True:
+        with _authority_guards(directories):
+            snapshots=[_linked_snapshot(row['reference']) for row in members]
+            _require(all(s['task']['revision']==m['revision'] for s,m in zip(snapshots,members)), 'Linked member changed during verification')
+            inputs=_linked_inputs(snapshots)
+            facts=dict(projection=projection,projection_digest=_digest(projection),inputs=inputs,inputs_digest=_digest(inputs))
+            if acquired is None:
+                # Snapshot the owner's result; caller mutation cannot revise an acquired observation.
+                acquired=json_object(_raw(observe(_canonical_freeze(facts))),limit=MAX_ARTIFACT)
+            sources=_linked_source_refs(acquired)
+            expanded=directories | {Path(source['authority']['directory']) for source in sources}
+            if expanded!=directories:
+                directories=expanded
+                continue  # Release every partial guard before acquiring the complete sorted set.
+            observed_sources={}
+            shared_blockers,delivered,sources,deliveries=_linked_outcomes(projection,facts['inputs_digest'],acquired,snapshots,selected_ref,observed=observed_sources)
+            for row in snapshots:
+                _linked_source(dict(authority=row['reference']['authority'],reference=row['verification_ref']),observed=observed_sources)
+            blockers=sorted(set(shared_blockers+[message for row in snapshots for message in row['blockers']]))
+            final=[_linked_snapshot(row['reference']) for row in members]
+            _require(_linked_inputs(final)==inputs and all(a['task']==b['task'] and a['generation']==b['generation']
+                for a,b in zip(final,snapshots)), 'Linked inputs changed before publication')
+            selected=next(row for row in final if row['reference']==selected_ref)
+            content=dict(version=1,kind='linked-verification',purpose=request['purpose'],projection=projection,
+                inputs=inputs,inputs_digest=facts['inputs_digest'],observations=acquired,
+                members=[dict(task=s['reference'],revision=s['task']['revision'],generation=s['generation'],
+                    verification=s['verification_ref']) for s in final],selected=selected_ref,
+                publication_revision=selected['task']['revision']+1,implementation_verified=not blockers,
+                delivery_complete=delivered,deliveries=deliveries,blockers=blockers)
+            dependencies=[dict(kind='task',reference=s['reference']) for s in final if s['reference']!=selected_ref]
+            dependencies += [dict(kind='artifact',reference=dict(authority=s['reference']['authority'],artifact=s['verification_ref'])) for s in final]
+            dependencies += [dict(kind='artifact',reference=dict(authority=reference['authority'],artifact=reference['reference'])) for reference in sources]
+            with state._database(scope,write=True) as db:
+                current=_task(db,scope,dict(request,expected_revision=selected['task']['revision']))
+                _recheck_linked_rows(scope,db,final)
+                owner=_LinkedOwner(_artifact_owner(scope,current),tuple(_canonical_freeze(d) for d in dependencies))
+                db.execute('savepoint linked_publication')
+                reference=_artifact(scope,content,owner=owner,db=db)
+                if _recheck_linked_sources(scope,db,acquired,final,observed_sources):
+                    # One conservative correction; the first file remains a protected orphan.
+                    db.execute('rollback to linked_publication')
+                    delivered=False
+                    deliveries=[dict(row,status='unknown') for row in deliveries]
+                    content.update(delivery_complete=False,deliveries=deliveries)
+                    reference=_artifact(scope,content,owner=owner,db=db)
+                    _recheck_linked_sources(scope,db,acquired,final,observed_sources)
+                db.execute('release linked_publication')
+                _recheck_linked_rows(scope,db,final)
+                pointer=dict(authority=selected_ref['authority'],reference=reference)
+                _require(_linked_source(pointer,db=db)==content,'Linked aggregate changed before publication')
+                current['evidence']['linked_verification']=pointer
+                if not blockers and request['purpose']=='completion':
+                    current['state']='ready'
+                    for condition in current['conditions']:
+                        if 'continuation' in condition:condition['continuation']['revoked']=True
+                elif current['state']=='ready':current['state']='verifying'
+                current['revision']+=1
+                state._save(db,state._scope_id(scope),current)
+            break
+    return dict(ok=True,verified=not blockers,implementation_verified=not blockers,delivery_complete=delivered,
+        merge_authority=False,task=current,blockers=blockers,verification=pointer,deliveries=deliveries)
+
+
+def _downgrade_linked(scope, task, db):
+    current=state._task(db,state._scope_id(scope),task['client'],task['session_id'],task['task_id'])
+    _require(current is not None and current['revision']==task['revision'], 'Linked claimant changed during freshness verification')
+    if current['state']=='ready':
+        current.update(state='verifying',reason='Linked implementation proof requires freshness verification',reference='evidence:linked-status')
+        current['revision']+=1
+        state._save(db,state._scope_id(scope),current)
+
+
+def _revalidate_linked(scope, task, *, update_ready=False):
+    """Recheck retained source/full inputs and optionally downgrade only this claimant."""
+    pointer=task['evidence'].get('linked_verification')
+    try:
+        _require(pointer is not None,'Linked verification is missing')
+        observed_sources={}
+        content=_linked_source(pointer,observed=observed_sources)
+        state._fields(content,('version','kind','purpose','projection','inputs','inputs_digest','observations','members',
+            'selected','publication_revision','implementation_verified','delivery_complete','deliveries','blockers'))
+        _require(type(content['version']) is int and content['version']==1 and content['kind']=='linked-verification'
+            and content['selected']['scope_id']==state._scope_id(scope)
+            and content['selected']['authority']==_canonical_plain(_evidence_context(scope).authority_set[0])
+            and all(content['selected'][key]==task[key] for key in ('client','session_id','task_id')),
+            'Linked verification selected identity changed')
+        _require(isinstance(content['members'],list) and 1<=len(content['members'])<=65
+            and [row['task'] for row in content['members']]==[row['task'] for row in content['projection']['participants']],
+            'Linked retained participant set is incomplete')
+        from runtime.changes import _authority_guards
+        directories={Path(row['task']['authority']['directory']) for row in content['members']} | {
+            Path(source['authority']['directory']) for source in _linked_source_refs(content['observations'])}
+        with _authority_guards(directories):
+            _require(_linked_source(pointer,observed=observed_sources)==content,'Linked aggregate source changed')
+            snapshots=[_linked_snapshot(row['task']) for row in content['members']]
+            for captured,current in zip(content['members'],snapshots):
+                expected=content['publication_revision'] if captured['task']==content['selected'] else captured['revision']
+                _require(current['task']['revision']==expected and current['generation']==captured['generation']
+                    and current['verification_ref']==captured['verification'],'Linked member revision or generation changed')
+                _require(_linked_projection(current['reference'],current['plan'])==content['projection'],'Linked approved contract changed')
+            inputs=_linked_inputs(snapshots)
+            _require(inputs==content['inputs'] and _digest(inputs)==content['inputs_digest'],'Linked member inputs are stale')
+            blockers,delivered,_,deliveries=_linked_outcomes(content['projection'],content['inputs_digest'],content['observations'],snapshots,content['selected'],observed=observed_sources)
+            for row in snapshots:
+                _linked_source(dict(authority=row['reference']['authority'],reference=row['verification_ref']),observed=observed_sources)
+            blockers=sorted(set(content['blockers']+blockers+[message for row in snapshots for message in row['blockers']]))
+            result=dict(implementation_verified=not blockers,delivery_complete=delivered,deliveries=deliveries,blockers=blockers)
+            mutate_ready=update_ready and task['state']=='ready'
+            with state._database(scope,write=mutate_ready) as db:
+                _recheck_linked_rows(scope,db,snapshots)
+                if _recheck_linked_sources(scope,db,content['observations'],snapshots,observed_sources,aggregate=pointer):
+                    result['delivery_complete']=False
+                    result['deliveries']=[dict(row,status='unknown') for row in result['deliveries']]
+                if mutate_ready and blockers:_downgrade_linked(scope,task,db)
+            return result
+    except (StartupError,OSError,ValueError,KeyError,TypeError,RecursionError):
+        result=dict(implementation_verified=False,delivery_complete=False,deliveries=[],
+            blockers=['Linked verification is stale, unavailable or incompatible'])
+    if update_ready and task['state']=='ready':
+        from runtime import delegation
+        with delegation._reservation_write(scope) as db:_downgrade_linked(scope,task,db)
+    return result
 
 
 def revalidate_ready(scope, client, session_id):
@@ -1687,10 +2074,14 @@ def revalidate_ready(scope, client, session_id):
         state._compatible(scope, task)
         request = {key: task[key] for key in IDENTITY[:4]} | dict(expected_revision=task['revision'])
         evidence = task.get('evidence')
-        verification = _read(scope, evidence['verification']) if evidence and 'verification' in evidence else None
-        plan = _read(scope, evidence['plan']) if evidence else None
-        closure = delegation._ready_closure(scope, task)
+        linked = bool(evidence and 'linked_verification' in evidence)
+        verification = _read(scope, evidence['verification']) if not linked and evidence and 'verification' in evidence else None
+        plan = _read(scope, evidence['plan']) if not linked and evidence else None
+        closure = delegation._ready_closure(scope, task) if not linked else None
     valid = False
+    if linked or plan and plan.get('version') == 2:
+        _revalidate_linked(scope, task, update_ready=True)
+        return
     try:
         candidate = capture_candidate(scope, plan) if plan and closure is not None else None
         valid = bool(verification and closure is not None and verification['purpose'] == 'completion' and not verification['blockers'] and
@@ -1716,6 +2107,11 @@ def evidence_status(scope, client, session_id):
     task = result['task']
     if task and 'evidence' in task:
         plan = _read(scope, task['evidence']['plan'])
+        if plan.get('version') == 2:
+            result['evidence'] = _revalidate_linked(scope, task, update_ready=True)
+            with state._database(scope) as db:
+                result['task'] = state._task(db,state._scope_id(scope),client,session_id)
+            return result
         try:
             candidate = capture_candidate(scope, plan)
             verification = _read(scope, task['evidence']['verification']) if 'verification' in task['evidence'] else {}
