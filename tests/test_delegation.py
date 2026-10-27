@@ -2845,3 +2845,51 @@ class Stage4NativeReviewTests(unittest.TestCase):
         self.assertEqual(replay['attempt']['id'], committed[0]['evidence']['attempts'][0]['id'])
         self.assertEqual(replay['task']['delegation']['attempts_consumed'], 1)
         self.assertEqual(replay['task']['delegation']['resource_units_consumed'], 1)
+
+
+class CanonicalDelegationTests(unittest.TestCase):
+    def setUp(self):
+        from tests.test_state import canonical_scope
+        self.fixture = AdmissionTests(methodName='runTest')
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        f = self.fixture
+        cached = f.api.guidance_status(f.scope, f.cache_request)
+        guidance = evidence._read(f.scope, cached['snapshot_ref'])
+        f.scope = canonical_scope(f.scope)
+        f.fixture.scope = f.scope
+        state.start_task(f.scope, f.identity | dict(mode='editable', decision_ref='user:accepted'))
+        f.fixture.plan()
+        claim = f.api.claim_guidance(f.scope, f.cache_request | dict(trigger=dict(kind='routine', id='canonical-fixture')))
+        f.api.record_guidance(f.scope, f.cache_request | dict(token=claim['token'], generation=claim['generation'],
+            coordinator_ref='fixture:checked', guidance=guidance))
+        f.plan()
+
+    def test_canonical_worker_retains_original_snapshot_and_native_binding_pins(self):
+        f = self.fixture
+        prepared = f.prepare()
+        binding = f.api.prepared_native_assignment(f.scope, prepared['attempt_id'])
+        self.assertEqual(binding['pins']['schema_version'], 3)
+        self.assertEqual(binding['accepted_identity']['checkout_id'], 'checkout')
+        f.observe_worker(prepared)
+        request = f.worker_reconciliation_request(prepared)
+        result = f.api.reconcile_assignment(f.scope, request)
+        self.assertEqual(result['status'], 'settled')
+        self.assertTrue(f.api.reconcile_assignment(f.scope, request)['replayed'])
+
+    def test_canonical_ledger_rejects_rebound_original_snapshot(self):
+        f = self.fixture
+        prepared = f.prepare()
+        with state._database(f.scope, write=True) as db:
+            row = db.execute('select data from assignments where id=?', (prepared['attempt_id'],)).fetchone()
+            data = json.loads(row[0])
+            body = evidence._read(f.scope, data['assignment'])
+            body['accepted_identity']['membership']['authorization']['reference'] = 'fixture:rebound-authority'
+            body['pins']['accepted_scope_digest'] = evidence._digest(body['accepted_identity'])
+            data['assignment'] = evidence._artifact(f.scope, body)
+            db.execute('update assignments set data=? where id=?', (json.dumps(data), prepared['attempt_id']))
+        with state._database(f.scope) as db:
+            row = db.execute('select id,scope_id,client,session_id,task_id,dispatch_id,data from assignments where id=?',
+                             (prepared['attempt_id'],)).fetchone()
+            self.assertEqual(f.api._record(f.scope, row)['body']['pins'], body['pins'])
+            with self.assertRaises(state.StateError): f.api._ledger(f.scope, db)

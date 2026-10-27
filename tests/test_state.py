@@ -3,6 +3,7 @@
 from contextlib import closing
 from dataclasses import replace
 import importlib
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,34 @@ from runtime.startup import ProjectScope, RuntimeSettings
 
 
 PACKAGE = Path(__file__).resolve().parents[1]
+
+
+def canonical_scope(legacy, *, client="codex", repository_id="repository", checkout_id="checkout",
+                    primary_root=None, git_dir=None):
+    """Synthetic accepted scope for internal seam tests; no enrollment/transition proof."""
+    from runtime import state
+    from runtime.startup import AcceptedScope, _canonical_freeze, policy_digest
+    root, common = legacy.repository_root, legacy.git_common_dir
+    primary, private = primary_root or root, git_dir or common
+    for path in (root, common, primary, private): path.mkdir(parents=True, exist_ok=True)
+    def binding(path):
+        info = path.stat()
+        return dict(device=info.st_dev, inode=info.st_ino)
+    bindings = {"root": binding(root), "primary_root": binding(primary),
+                "git_dir": binding(private), "git_common_dir": binding(common)}
+    runtime = RuntimeSettings(3, legacy.runtime.state_dir.with_name(legacy.runtime.state_dir.name + "-canonical"))
+    policy, digest = policy_digest(state.PACKAGE), state.runtime_fingerprint()
+    identity = dict(version=1, project_id=legacy.project_id, repository_id=repository_id, checkout_id=checkout_id,
+        project_root=str(primary), project_binding=binding(primary), primary_root=str(primary), repository_root=str(root),
+        git_dir=str(private), git_common_dir=str(common), bindings=bindings, client=client,
+        membership=dict(included=True, authorization=dict(reference="fixture:standing", sha256="a"*64)),
+        configuration=dict(policy_digest=policy, runtime_digest=digest,
+                           runtime=dict(schema_version=3, state_dir=str(runtime.state_dir))), shared_policy=[])
+    scope_digest = hashlib.sha256(json.dumps(identity,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode()).hexdigest()
+    return AcceptedScope(legacy.project_id, repository_id, checkout_id, primary,
+        primary / ".vibe-coding-workflow/project.json", _canonical_freeze({}), 1, root, primary, private, common,
+        _canonical_freeze(bindings), client, policy, digest, runtime, _canonical_freeze(identity), scope_digest,
+        _canonical_freeze(dict(kind="trusted-coordinator", reference="fixture:synthetic", sha256="b"*64)))
 
 
 class StateTests(unittest.TestCase):
@@ -61,6 +90,175 @@ class StateTests(unittest.TestCase):
         self.update(state="active")
         self.event()
         self.update(conditions=[self.runnable()])
+
+    def test_canonical_schema_three_start_restart_immutable_snapshot_and_physical_row(self):
+        self.scope = canonical_scope(self.scope)
+        first = self.start()
+        api = self.api()
+        self.assertEqual(first["task"]["pins"]["schema_version"], 3)
+        self.assertEqual(first["task"]["accepted_identity"]["checkout_id"], "checkout")
+        self.assertEqual(self.start(), first)
+        with api._database(self.scope) as db:
+            self.assertEqual(db.execute("pragma user_version").fetchone()[0], 3)
+            physical = json.loads(db.execute("select physical_identity from checkouts").fetchone()[0])
+            self.assertNotIn("client", physical)
+            self.assertEqual(physical["checkout_id"], "checkout")
+        self.assertEqual(api.SCHEMA_VERSION, 2)
+
+    def test_canonical_scope_cannot_open_or_rewrite_legacy_database(self):
+        self.start()
+        path = self.scope.runtime.state_dir / "runtime.sqlite3"
+        before = path.read_bytes()
+        scope = canonical_scope(self.scope)
+        from runtime.startup import _canonical_plain, _canonical_freeze
+        identity = _canonical_plain(scope.accepted_identity)
+        identity["configuration"]["runtime"]["state_dir"] = str(self.scope.runtime.state_dir)
+        import hashlib
+        scope = replace(scope, runtime=RuntimeSettings(3, self.scope.runtime.state_dir),
+                        accepted_identity=_canonical_freeze(identity), accepted_scope_digest=hashlib.sha256(json.dumps(
+                            identity,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode()).hexdigest())
+        with self.assertRaises(self.api().StateError): self.api().start_task(scope, self.request)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_canonical_checkout_mismatch_rejects_start_and_event_without_generation_changes(self):
+        self.scope = canonical_scope(self.scope)
+        self.start()
+        path = self.scope.runtime.state_dir / "runtime.sqlite3"
+        with closing(sqlite3.connect(path)) as db, db:
+            physical = json.loads(db.execute("select physical_identity from checkouts").fetchone()[0])
+            physical["bindings"]["root"]["inode"] += 1
+            db.execute("update checkouts set physical_identity=?", (json.dumps(physical),))
+        before = path.read_bytes()
+        with self.assertRaises(self.api().StateError): self.start(session_id="other")
+        self.assertEqual(self.event().action, "deny")
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_canonical_save_rejects_rebound_identity_and_missing_digest(self):
+        self.scope = canonical_scope(self.scope)
+        task = self.start()["task"]
+        api = self.api()
+        with api._database(self.scope, write=True) as db:
+            del task["pins"]["accepted_scope_digest"]
+            with self.assertRaises(api.StateError): api._save(db, api._scope_id(self.scope), task)
+        self.assertIn("accepted_scope_digest", self.status()["task"]["pins"])
+
+
+    def test_canonical_client_projections_share_physical_row_and_generation(self):
+        original = self.scope
+        self.scope = canonical_scope(original)
+        self.start()
+        self.event("PostToolUse")
+        other = canonical_scope(original, client="claude-code")
+        api = self.api()
+        with api._database(self.scope, write=True) as db:
+            row = api._checkout_row(db, self.scope)
+            self.assertEqual(api._checkout_row(db, other, initialize=True), row)
+            self.assertEqual(db.execute("select count(*) from checkouts").fetchone()[0], 1)
+            self.assertEqual(row[4], 1)
+        self.assertNotEqual(self.scope.accepted_scope_digest, other.accepted_scope_digest)
+        self.assertEqual(api._scope_id(self.scope), api._scope_id(other))
+
+    def test_canonical_wrong_client_event_cannot_write_generation(self):
+        self.scope = canonical_scope(self.scope)
+        self.start()
+        path = self.scope.runtime.state_dir / "runtime.sqlite3"
+        before = path.read_bytes()
+        self.event("PostToolUse", client="claude-code")
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_canonical_event_can_admit_only_the_exact_physical_checkout(self):
+        self.scope = canonical_scope(self.scope)
+        api = self.api()
+        with api._database(self.scope, write=True, initialize=True): pass
+        self.event("PostToolUse")
+        with api._database(self.scope) as db:
+            row = api._checkout_row(db, self.scope)
+            self.assertEqual(row[4], 1)
+            self.assertEqual(json.loads(row[5])["checkout_id"], "checkout")
+            self.assertEqual(db.execute("select count(*) from tasks").fetchone()[0], 0)
+
+    def test_canonical_changed_configuration_preserves_historical_snapshot_and_cannot_repin(self):
+        import hashlib
+        from runtime.startup import _canonical_plain, _canonical_freeze
+        self.scope = canonical_scope(self.scope)
+        self.start()
+        path = self.scope.runtime.state_dir / "runtime.sqlite3"
+        before = path.read_bytes()
+        snapshot = _canonical_plain(self.scope.accepted_identity)
+        snapshot["shared_policy"] = [dict(path=str(self.base / "guide"), sha256="a"*64)]
+        digest = hashlib.sha256(json.dumps(snapshot,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode()).hexdigest()
+        changed = replace(self.scope, accepted_identity=_canonical_freeze(snapshot), accepted_scope_digest=digest)
+        with self.assertRaises(self.api().StateError): self.api().task_status(changed, "codex", "session")
+        self.assertEqual(path.read_bytes(), before)
+        with self.api()._database(changed) as db:
+            historical = self.api()._task(db, self.api()._scope_id(changed), "codex", "session", "task")
+            self.assertEqual(historical["accepted_identity"]["shared_policy"], [])
+        self.api().start_task(changed, self.request | dict(session_id="new-session", task_id="new-task"))
+        with self.api()._database(changed) as db:
+            self.assertEqual(self.api()._task(db, self.api()._scope_id(changed), "codex", "session", "task"), historical)
+
+    def test_canonical_raw_foreign_snapshot_cannot_claim_another_state_authority(self):
+        self.scope = canonical_scope(self.scope)
+        task = self.start()["task"]
+        task["accepted_identity"]["configuration"]["runtime"]["state_dir"] = str(self.base / "elsewhere")
+        task["pins"]["accepted_scope_digest"] = self.api()._digest(task["accepted_identity"])
+        with closing(sqlite3.connect(self.scope.runtime.state_dir / "runtime.sqlite3")) as db, db:
+            db.execute("update tasks set data=?", (json.dumps(task),))
+        with self.api()._database(self.scope) as db, self.assertRaises(self.api().StateError):
+            self.api()._task(db, self.api()._scope_id(self.scope), "codex", "session", "task")
+
+
+    def test_canonical_retirement_retains_exact_four_key_historical_pins(self):
+        self.scope = canonical_scope(self.scope)
+        self.test_historical_retirement_requires_exact_stopped_writer_proof_and_preserves_pins()
+
+
+    def test_canonical_entry_rejects_mutable_scope_snapshots_before_initialization(self):
+        from types import MappingProxyType
+        from runtime.startup import _canonical_plain
+        scope = canonical_scope(self.scope)
+        for snapshot in (_canonical_plain(scope.accepted_identity), MappingProxyType(_canonical_plain(scope.accepted_identity))):
+            with self.subTest(snapshot=type(snapshot).__name__), self.assertRaises(self.api().StateError):
+                self.api().start_task(replace(scope, accepted_identity=snapshot), self.request)
+        self.assertFalse(scope.runtime.state_dir.exists())
+
+    def test_legacy_schema_one_status_remains_a_read_only_incompatibility_report(self):
+        report = self.api().inspect_state(replace(self.scope, runtime=RuntimeSettings(1, self.scope.runtime.state_dir)))
+        self.assertFalse(report['compatible'])
+        self.assertIn('error', report)
+        self.assertFalse(self.scope.runtime.state_dir.exists())
+
+    def test_canonical_retirement_proof_cannot_be_stored_inside_bare_repository(self):
+        import hashlib
+        self.scope = canonical_scope(self.scope)
+        task = self.start()['task']
+        bare = self.base / 'bare'
+        env = {k:v for k,v in os.environ.items() if not k.startswith('GIT_')}
+        env.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull)
+        subprocess.run(['git', '-c', 'init.templateDir=', '-c', 'core.hooksPath='+os.devnull,
+                        'init', '--bare', '-q', str(bare)], check=True, env=env, capture_output=True)
+        identity = {k: task[k] for k in ('client','session_id','task_id','scope_ref')}
+        proof = dict(version=1, kind='stopped-writer-reconciliation', identity=identity,
+            expected_revision=task['revision'], expected_pins=task['pins'], observed_turn_id=task['turn_id'],
+            stopped=True, descendants_stopped=True, attempt_ids=[], observation_ref='fixture:stopped', coordinator_ref='fixture:checked')
+        raw = json.dumps(proof).encode()
+        path = bare / 'proof.json'; path.write_bytes(raw); path.chmod(0o400)
+        with self.assertRaises(self.api().StateError):
+            self.api().retire_task(self.scope, identity | dict(expected_revision=task['revision'], expected_pins=task['pins'],
+                reason='Stopped', reference='fixture:retire', stop_proof=dict(path=str(path), sha256=hashlib.sha256(raw).hexdigest())))
+        self.assertEqual(self.status()['task'], task)
+
+
+    def test_canonical_wrong_table_shape_is_rejected_without_rewriting(self):
+        self.scope = canonical_scope(self.scope)
+        self.start()
+        path = self.scope.runtime.state_dir / "runtime.sqlite3"
+        with closing(sqlite3.connect(path)) as db, db:
+            db.execute("alter table checkouts drop column physical_identity")
+        before = path.read_bytes()
+        with self.assertRaises(self.api().StateError): self.start()
+        self.assertEqual(path.read_bytes(), before)
+
 
     def test_historical_retirement_requires_exact_stopped_writer_proof_and_preserves_pins(self):
         import hashlib

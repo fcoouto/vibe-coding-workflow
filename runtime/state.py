@@ -4,12 +4,15 @@ from contextlib import closing, contextmanager
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import sqlite3
 import stat
+from types import MappingProxyType
 
 from runtime.engine import HookResult, evaluate
-from runtime.startup import StartupError
+from runtime.startup import (StartupError, AcceptedScope, RuntimeSettings, PROJECT_FILE, json_object, _canonical_plain,
+    _canonical_path, _canonical_binding, _canonical_ref, _canonical_hash)
 
 
 SCHEMA_VERSION = 2
@@ -33,6 +36,8 @@ TABLE_SQL = {
         session_id TEXT NOT NULL, task_id TEXT NOT NULL, dispatch_id TEXT NOT NULL, data TEXT NOT NULL,
         UNIQUE(scope_id,client,session_id,task_id,dispatch_id))""",
 }
+CANONICAL_SCHEMA_VERSION = 3
+CANONICAL_TABLE_SQL = TABLE_SQL | {"checkouts": TABLE_SQL["checkouts"][:-1] + ", physical_identity TEXT NOT NULL)"}
 TABLES = set(TABLE_SQL)
 
 
@@ -50,12 +55,167 @@ def runtime_fingerprint():
     return digest.hexdigest()
 
 
+def _validate_pins(pins, *, version=None):
+    _fields(pins, ("schema_version", "policy_digest", "runtime_digest"), ("accepted_scope_digest",))
+    actual = pins["schema_version"]
+    if type(actual) is not int or actual not in (1, 2, 3) or version is not None and actual != version:
+        raise StateError("Unsupported stored task pin schema")
+    _fields(pins, ("schema_version", "policy_digest", "runtime_digest", "accepted_scope_digest") if actual == 3
+            else ("schema_version", "policy_digest", "runtime_digest"))
+    for key in ("policy_digest", "runtime_digest"):
+        _text(pins[key], "stored " + key)
+    if actual == 3:
+        for key in ("policy_digest", "runtime_digest", "accepted_scope_digest"):
+            if not isinstance(pins[key], str) or not re.fullmatch(r"[0-9a-f]{64}", pins[key]):
+                raise StateError("Invalid canonical task pins")
+    return actual
+
+
+def _accepted_identity(value):
+    try:
+        identity = json_object(json.dumps(_canonical_plain(value), ensure_ascii=True))
+        _fields(identity, ("version", "project_id", "repository_id", "checkout_id", "project_root", "project_binding",
+            "primary_root", "repository_root", "git_dir", "git_common_dir", "bindings", "client", "membership", "configuration", "shared_policy"))
+        if type(identity["version"]) is not int or identity["version"] != 1:
+            raise StateError("Unsupported accepted identity")
+        for key in ("project_id", "repository_id", "checkout_id", "client"):
+            _text(identity[key], key, 128)
+        if (not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", identity["project_id"])
+                or identity["repository_id"] == identity["checkout_id"]):
+            raise StateError("Invalid canonical identities")
+        for key in ("project_root", "primary_root", "repository_root", "git_dir", "git_common_dir"):
+            _canonical_path(identity[key])
+        _canonical_binding(identity["project_binding"])
+        _fields(identity["bindings"], ("root", "primary_root", "git_dir", "git_common_dir"))
+        locations = {identity["project_root"]: identity["project_binding"]}
+        for key, binding in identity["bindings"].items():
+            _canonical_binding(binding)
+            path = identity["repository_root" if key == "root" else key]
+            if path in locations and locations[path] != binding:
+                raise StateError("Canonical directory bindings disagree")
+            locations[path] = binding
+        _fields(identity["membership"], ("included", "authorization"))
+        if identity["membership"]["included"] is not True:
+            raise StateError("Canonical task requires accepted membership")
+        _canonical_ref(identity["membership"]["authorization"])
+        config = identity["configuration"]
+        _fields(config, ("policy_digest", "runtime_digest", "runtime"))
+        for key in ("policy_digest", "runtime_digest"):
+            _canonical_hash(config[key])
+        _fields(config["runtime"], ("schema_version", "state_dir"))
+        if type(config["runtime"]["schema_version"]) is not int or config["runtime"]["schema_version"] != 3:
+            raise StateError("Canonical task requires schema 3")
+        _canonical_path(config["runtime"]["state_dir"])
+        shared = identity["shared_policy"]
+        if not isinstance(shared, list) or len(shared) > 4096:
+            raise StateError("Invalid accepted dependencies")
+        for item in shared:
+            _fields(item, ("path", "sha256"))
+            _canonical_path(item["path"]); _canonical_hash(item["sha256"])
+        paths = [item["path"] for item in shared]
+        if paths != sorted(set(paths)):
+            raise StateError("Accepted dependency paths must be unique and sorted")
+        return identity
+    except (StartupError, ValueError, TypeError, KeyError, RecursionError):
+        raise StateError("Canonical accepted identity is invalid") from None
+
+
+def _digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
+
+
+def _physical_identity(identity):
+    return {key: identity[key] for key in ("version", "project_id", "repository_id", "checkout_id", "project_root",
+        "project_binding", "primary_root", "repository_root", "git_dir", "git_common_dir", "bindings")}
+
+
+
+def _frozen_snapshot(value):
+    if isinstance(value, MappingProxyType):
+        return all(isinstance(key, str) and _frozen_snapshot(item) for key, item in value.items())
+    if isinstance(value, tuple):
+        return all(_frozen_snapshot(item) for item in value)
+    return value is None or isinstance(value, (str, int, bool))
+
+
+def _scope_version(scope):
+    if isinstance(scope, AcceptedScope):
+        if (not all(isinstance(getattr(scope, key), MappingProxyType) and _frozen_snapshot(getattr(scope, key))
+                    for key in ("accepted_identity", "bindings", "authority_target", "qualification_provenance"))
+                or not all(isinstance(getattr(scope, key), Path) for key in
+                    ("project_root", "repository_root", "primary_root", "git_dir", "git_common_dir", "authority_path"))
+                or not isinstance(scope.runtime, RuntimeSettings) or type(scope.runtime.schema_version) is not int):
+            raise StateError("Canonical scope requires immutable supported snapshots")
+        identity = _accepted_identity(scope.accepted_identity)
+        expected = dict(project_id=scope.project_id, repository_id=scope.repository_id, checkout_id=scope.checkout_id,
+            project_root=str(scope.project_root), primary_root=str(scope.primary_root), repository_root=str(scope.repository_root),
+            git_dir=str(scope.git_dir), git_common_dir=str(scope.git_common_dir), client=scope.client,
+            bindings=_canonical_plain(scope.bindings))
+        if (any(identity[key] != value for key, value in expected.items()) or scope.runtime is None
+                or scope.runtime.schema_version != 3 or identity["configuration"] != dict(policy_digest=scope.policy_digest,
+                    runtime_digest=scope.runtime_digest, runtime=dict(schema_version=3, state_dir=str(scope.runtime.state_dir)))
+                or _digest(identity) != scope.accepted_scope_digest
+                or scope.authority_path != scope.project_root / PROJECT_FILE):
+            raise StateError("Canonical scope differs from its accepted projection")
+        return 3
+    if scope.runtime is None or scope.runtime.schema_version != SCHEMA_VERSION:
+        raise StateError("Runtime state is not configured with a supported schema")
+    return SCHEMA_VERSION
+
+
 def _pins(scope):
-    return dict(schema_version=SCHEMA_VERSION, policy_digest=scope.policy_digest, runtime_digest=runtime_fingerprint())
+    version = _scope_version(scope) if isinstance(scope, AcceptedScope) else SCHEMA_VERSION
+    runtime = runtime_fingerprint()
+    if version == 3 and runtime != scope.runtime_digest:
+        raise StateError("Installed runtime differs from accepted canonical scope")
+    pins = dict(schema_version=version, policy_digest=scope.policy_digest, runtime_digest=runtime)
+    if version == 3:
+        pins["accepted_scope_digest"] = scope.accepted_scope_digest
+    return pins
 
 
 def _scope_id(scope):
+    if isinstance(scope, AcceptedScope):
+        _scope_version(scope)
+        return _digest([3, scope.project_id, scope.repository_id, scope.checkout_id])
     return hashlib.sha256(json.dumps([scope.project_id, str(scope.repository_root), str(scope.git_common_dir)]).encode()).hexdigest()
+
+
+def _checkout_row(db, scope, *, initialize=False):
+    version, scope_id = _scope_version(scope), _scope_id(scope)
+    row = db.execute("select * from checkouts where scope_id=?", (scope_id,)).fetchone()
+    expected = (scope_id, scope.project_id, str(scope.repository_root), str(scope.git_common_dir))
+    physical = _physical_identity(_accepted_identity(scope.accepted_identity)) if version == 3 else None
+    if row is not None:
+        if (row[:4] != expected or type(row[4]) is not int or row[4] < 0
+                or version == 3 and json_object(row[5]) != physical):
+            raise StateError("Checkout row differs from accepted physical identity")
+    elif initialize:
+        if version == 3:
+            db.execute("insert into checkouts values(?,?,?,?,0,?)", (*expected, json.dumps(physical, separators=(",", ":"))))
+        else:
+            db.execute("insert into checkouts values(?,?,?,?,0)", expected)
+        row = db.execute("select * from checkouts where scope_id=?", (scope_id,)).fetchone()
+    return row
+
+
+def _task_projection(db, scope_id, task):
+    version = db.execute("pragma user_version").fetchone()[0]
+    _validate_pins(task.get("pins"), version=version)
+    if version != 3:
+        if "accepted_identity" in task:
+            raise StateError("Legacy task cannot acquire canonical identity")
+        return
+    identity = _accepted_identity(task.get("accepted_identity"))
+    row = db.execute("select * from checkouts where scope_id=?", (scope_id,)).fetchone()
+    database_path = Path(db.execute("pragma database_list").fetchone()[2])
+    if (identity["configuration"]["runtime"]["state_dir"] != str(database_path.parent)
+            or identity["client"] != task["client"] or _digest(identity) != task["pins"]["accepted_scope_digest"]
+            or any(identity["configuration"][k] != task["pins"][k] for k in ("policy_digest", "runtime_digest"))
+            or _digest([3, identity["project_id"], identity["repository_id"], identity["checkout_id"]]) != scope_id
+            or row is None or row[:4] != (scope_id, identity["project_id"], identity["repository_root"], identity["git_common_dir"])
+            or json_object(row[5]) != _physical_identity(identity)):
+        raise StateError("Task snapshot, pins and physical checkout differ")
 
 
 def _text(value, field, limit=1024):
@@ -90,8 +250,7 @@ def _private(path, directory=False):
 
 
 def _path(scope):
-    if scope.runtime is None or scope.runtime.schema_version != SCHEMA_VERSION:
-        raise StateError("Runtime state is not configured with a supported schema")
+    _scope_version(scope)
     directory = scope.runtime.state_dir
     if not directory.is_absolute() or directory.resolve() != directory:
         raise StateError("Runtime state path must be canonical and have no symlinks")
@@ -117,7 +276,7 @@ def _schema(db, *, version=SCHEMA_VERSION):
     # Version 1 is accepted only by D4's private read-only transition inspector.
     tables = TABLES - {"assignments"} if version == 1 else TABLES
     objects = db.execute("select type,name,sql from sqlite_master").fetchall()
-    if (version not in (1, SCHEMA_VERSION) or
+    if (version not in (1, SCHEMA_VERSION, CANONICAL_SCHEMA_VERSION) or
             db.execute("pragma application_id").fetchone()[0] != APPLICATION_ID or
             db.execute("pragma user_version").fetchone()[0] != version or
             {name for kind, name, _ in objects if kind == "table"} != tables or
@@ -125,13 +284,13 @@ def _schema(db, *, version=SCHEMA_VERSION):
         raise StateError("Runtime database is unowned or has an incompatible schema")
     for kind, name, sql in objects:
         if kind == "table":
-            if "".join(sql.split()).lower() != "".join(TABLE_SQL[name].split()).lower():
+            if "".join(sql.split()).lower() != "".join((CANONICAL_TABLE_SQL if version == 3 else TABLE_SQL)[name].split()).lower():
                 raise StateError("Runtime database has an incompatible schema")
         elif kind != "index" or sql is not None:
             raise StateError("Runtime database contains unsupported schema objects")
 
 
-def _initialize(path):
+def _initialize(path, *, version=SCHEMA_VERSION):
     missing = []
     directory = path.parent
     while not directory.exists():
@@ -146,9 +305,9 @@ def _initialize(path):
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     os.close(descriptor)
     with closing(sqlite3.connect(path, timeout=0.1)) as db, db:
-        db.executescript("BEGIN IMMEDIATE;\n" + ";\n".join(TABLE_SQL.values()) + ";")
+        db.executescript("BEGIN IMMEDIATE;\n" + ";\n".join((CANONICAL_TABLE_SQL if version == 3 else TABLE_SQL).values()) + ";")
         db.execute("pragma application_id=" + str(APPLICATION_ID))
-        db.execute("pragma user_version=" + str(SCHEMA_VERSION))
+        db.execute("pragma user_version=" + str(version))
 
 
 @contextmanager
@@ -159,7 +318,7 @@ def _database(scope, write=False, initialize=False):
         if not os.path.lexists(path):
             if initialize:
                 try:
-                    _initialize(path)
+                    _initialize(path, version=_scope_version(scope))
                 except FileExistsError:
                     pass
             else:
@@ -169,7 +328,7 @@ def _database(scope, write=False, initialize=False):
         db = sqlite3.connect(path.as_uri() + ("?mode=rw" if write else "?mode=ro"), uri=True, timeout=0.1)
         db.execute("pragma busy_timeout=100")
         db.execute("pragma trusted_schema=off")
-        _schema(db)
+        _schema(db, version=_scope_version(scope))
         db.execute("begin immediate" if write else "begin")
         yield db
         if write:
@@ -195,9 +354,10 @@ def _task(db, scope_id, client, session, task_id=None):
                      (scope_id, client, session, task_id)).fetchone()
     if row is None:
         raise StateError("Runtime task binding is corrupt")
-    task = json.loads(row[0])
+    version = db.execute("pragma user_version").fetchone()[0]
+    task = json_object(row[0], limit=4 * 1024 * 1024) if version == 3 else json.loads(row[0])
     _fields(task, ("client", "session_id", "task_id", "scope_ref", "mode", "decision_ref", "state", "revision",
-                   "pins", "reason", "reference", "conditions", "turn_id", "turn_uncertain"), ("resolution_ref", "evidence", "retirement", "delegation"))
+                   "pins", "reason", "reference", "conditions", "turn_id", "turn_uncertain", *(["accepted_identity"] if version == 3 else [])), ("resolution_ref", "evidence", "retirement", "delegation"))
     _identity(task)
     _integer(task["revision"], "stored revision", 1)
     for field in ("decision_ref", "reason", "reference", "resolution_ref"):
@@ -210,9 +370,7 @@ def _task(db, scope_id, client, session, task_id=None):
         raise StateError("Runtime task record is corrupt")
     if task["turn_id"] is not None:
         _text(task["turn_id"], "stored turn_id", 4096)
-    _fields(task["pins"], ("schema_version", "policy_digest", "runtime_digest"))
-    if type(task["pins"]["schema_version"]) is not int:
-        raise StateError("Runtime task pins are corrupt")
+    _task_projection(db, scope_id, task)
     seen = set()
     for condition in task["conditions"]:
         _fields(condition, ("id", "kind", "action", "reason", "reference", "status"), ("resolution_ref", "continuation"))
@@ -250,6 +408,14 @@ def _task(db, scope_id, client, session, task_id=None):
 
 
 def _save(db, scope_id, task):
+    _task_projection(db, scope_id, task)
+    if task["pins"]["schema_version"] == 3:
+        previous = db.execute("select data from tasks where scope_id=? and client=? and session_id=? and task_id=?",
+            (scope_id, task["client"], task["session_id"], task["task_id"])).fetchone()
+        if previous:
+            old = json_object(previous[0], limit=4 * 1024 * 1024)
+            if old["accepted_identity"] != task["accepted_identity"] or old["pins"] != task["pins"]:
+                raise StateError("Stored task identity and pins are immutable")
     if "delegation" in task:
         from runtime.delegation import validate_delegation
         validate_delegation(task["delegation"])
@@ -261,7 +427,8 @@ def _save(db, scope_id, task):
 
 
 def _compatible(scope, task):
-    if task is not None and task["pins"] != _pins(scope):
+    if task is not None and (task["pins"] != _pins(scope) or isinstance(scope, AcceptedScope)
+                            and task["accepted_identity"] != _canonical_plain(scope.accepted_identity)):
         raise StateError("Task policy, runtime or schema pins differ; explicit migration is required")
 
 
@@ -269,8 +436,8 @@ def _status(db, scope, client, session):
     scope_id = _scope_id(scope)
     task = _task(db, scope_id, client, session) if db else None
     _compatible(scope, task)
-    row = db.execute("select generation from checkouts where scope_id=?", (scope_id,)).fetchone() if db else None
-    return dict(ok=True, task=task, generation=row[0] if row else 0,
+    row = _checkout_row(db, scope) if db else None
+    return dict(ok=True, task=task, generation=row[4] if row else 0,
                 blockers=[condition for condition in task["conditions"] if condition["status"] == "pending" and
                           condition["kind"] in {"blocker", "decision"}] if task else [], limitations=LIMITATIONS)
 
@@ -289,7 +456,7 @@ def task_status(scope, client, session_id):
 def inspect_state(scope):
     """Inspect ownership/schema/pins without creating files or requiring a session."""
     report = dict(configured=scope.runtime is not None, present=False, compatible=False,
-                  schema_version=SCHEMA_VERSION, policy_digest=scope.policy_digest,
+                  schema_version=3 if isinstance(scope, AcceptedScope) else SCHEMA_VERSION, policy_digest=scope.policy_digest,
                   runtime_digest=runtime_fingerprint(), tasks=[])
     if scope.runtime is None:
         report["compatible"] = True
@@ -298,6 +465,7 @@ def inspect_state(scope):
     try:
         with _database(scope) as db:
             if db:
+                _checkout_row(db, scope)
                 for client, session, task_id in db.execute("select client,session_id,task_id from tasks where scope_id=?", (_scope_id(scope),)):
                     task = _task(db, _scope_id(scope), client, session, task_id)
                     report["tasks"].append(dict(task_id=task_id, pins=task["pins"], compatible=task["pins"] == _pins(scope)))
@@ -328,9 +496,12 @@ def start_task(scope, request):
         _fields(replacement, ("task_id", "expected_revision"))
         _text(replacement["task_id"], "replaced task_id", 128)
         _integer(replacement["expected_revision"], "expected_revision", 1)
+    if isinstance(scope, AcceptedScope) and request["client"] != scope.client:
+        raise StateError("Task client differs from accepted scope")
     pins = _pins(scope)
     with _database(scope, write=True, initialize=True) as db:
         scope_id = _scope_id(scope)
+        _checkout_row(db, scope, initialize=True)
         current = _task(db, scope_id, request["client"], request["session_id"])
         if current and current["task_id"] == request["task_id"]:
             _compatible(scope, current)
@@ -352,11 +523,11 @@ def start_task(scope, request):
             _save(db, scope_id, current)
         elif replacement is not None:
             raise StateError("No bound task matches the requested replacement")
-        db.execute("insert or ignore into checkouts values(?,?,?,?,0)",
-                   (scope_id, scope.project_id, str(scope.repository_root), str(scope.git_common_dir)))
         task = {field: request[field] for field in ("client", "session_id", "task_id", "scope_ref", "mode", "decision_ref")}
         task.update(state="planned", revision=1, pins=pins, reason="Task started", reference=request["decision_ref"],
                     conditions=[], turn_id=None, turn_uncertain=True)
+        if isinstance(scope, AcceptedScope):
+            task["accepted_identity"] = _accepted_identity(scope.accepted_identity)
         _save(db, scope_id, task)
         db.execute("insert or replace into bindings values(?,?,?,?)", (scope_id, request["client"], request["session_id"], request["task_id"]))
         return _status(db, scope, request["client"], request["session_id"])
@@ -460,10 +631,13 @@ def process_event(scope, event):
     if scope.runtime is None:
         return HookResult(event.kind)
     try:
+        if isinstance(scope, AcceptedScope) and event.client != scope.client:
+            raise StateError("Event client differs from accepted scope")
         with _database(scope, write=True) as db:
             if db is None:
                 raise StateError("Task state has not been initialized")
             scope_id = _scope_id(scope)
+            _checkout_row(db, scope)
             task = _task(db, scope_id, event.client, event.session_id)
             _compatible(scope, task)
             identity = (scope_id, event.client, event.session_id, event.turn_id)
@@ -473,7 +647,7 @@ def process_event(scope, event):
             result, changes = evaluate(event, dict(task=task, turn={"task_id": row[0], "continuation_consumed": row[1]} if row else None,
                                                    receipt={"fingerprint": receipt[0], "conflicted": receipt[1]} if receipt else None))
             if changes["generation_delta"]:
-                db.execute("insert or ignore into checkouts values(?,?,?,?,0)", (scope_id, scope.project_id, str(scope.repository_root), str(scope.git_common_dir)))
+                _checkout_row(db, scope, initialize=True)
                 db.execute("update checkouts set generation=generation+? where scope_id=?", (changes["generation_delta"], scope_id))
             if "receipt" in changes:
                 db.execute("insert into receipts values(?,?,?,?,?,?,?,0)", (*receipt_identity, changes["receipt"]))
@@ -506,22 +680,9 @@ def retire_task(scope, request):
     _integer(request['expected_revision'], 'expected_revision', 1)
     for field in ('reason', 'reference'):
         _text(request[field], field)
-    _fields(request['expected_pins'], ('schema_version', 'policy_digest', 'runtime_digest'))
-    _fields(request['stop_proof'], ('path', 'sha256'))
-    _text(request['stop_proof']['path'], 'host proof path', 4096)
-    from runtime.onboarding import _no_links, _read_file
-    path = Path(request['stop_proof']['path'])
-    if (not path.is_absolute() or path.resolve() != path or path.is_relative_to(scope.repository_root) or
-            path.is_relative_to(PACKAGE) or '.git' in path.parts or 'plugins' in path.parts and 'cache' in path.parts):
-        raise StateError('Stopped-writer host proof must be private and outside repositories/caches')
-    try:
-        _no_links(path)
-        raw = _read_file(path, 128 * 1024, private=True)
-        if hashlib.sha256(raw).hexdigest() != request['stop_proof']['sha256']:
-            raise StateError('Stopped-writer proof integrity failed')
-        proof = json.loads(raw)
-    except (OSError, ValueError, TypeError):
-        raise StateError('Stopped-writer host reconciliation proof is unavailable') from None
+    _validate_pins(request['expected_pins'])
+    from runtime.evidence import _artifact, _read_host_proof
+    proof = _read_host_proof(scope, request['stop_proof'])
     _fields(proof, ('version', 'kind', 'identity', 'expected_revision', 'expected_pins', 'observed_turn_id',
                     'stopped', 'descendants_stopped', 'attempt_ids', 'observation_ref', 'coordinator_ref'))
     for field in ('observation_ref', 'coordinator_ref'):
@@ -529,7 +690,6 @@ def retire_task(scope, request):
     if (type(proof['version']) is not int or proof['version'] != 1 or proof['kind'] != 'stopped-writer-reconciliation' or
             proof['stopped'] is not True or proof['descendants_stopped'] is not True):
         raise StateError('Trusted stopped-writer and descendant reconciliation remains missing')
-    from runtime.evidence import _artifact
     retained_proof = _artifact(scope, proof)
     with _database(scope, write=True) as db:
         if db is None:
@@ -538,7 +698,7 @@ def retire_task(scope, request):
         task = _task(db, scope_id, request['client'], request['session_id'], request['task_id'])
         identity = {key: task[key] for key in ('client', 'session_id', 'task_id', 'scope_ref')}
         if (identity != {key: request[key] for key in identity} or task['revision'] != request['expected_revision'] or
-                task['pins'] != request['expected_pins'] or task['pins']['schema_version'] != SCHEMA_VERSION or
+                task['pins'] != request['expected_pins'] or task['pins']['schema_version'] != _scope_version(scope) or
                 'retirement' in task):
             raise StateError('Retirement requires exact supported stored identity, pins and revision')
         _guard_assignments(db, scope, request['client'], request['session_id'])

@@ -753,9 +753,16 @@ def _record(scope, row):
             body['candidate'] == data['candidate'] and evidence._digest(body['request']) == data['request_digest'],
             'Assignment immutable binding differs from its ledger record')
         state._identity(body['request'])
-        state._fields(body['pins'], ('schema_version', 'policy_digest', 'runtime_digest'))
+        pin_version = state._validate_pins(body['pins'])
+        canonical_fields = ('accepted_identity',) if pin_version == 3 else ()
+        if pin_version == 3:
+            accepted = state._accepted_identity(body.get('accepted_identity'))
+            _require(state._digest(accepted) == body['pins']['accepted_scope_digest'] and
+                state._digest([3, accepted['project_id'], accepted['repository_id'], accepted['checkout_id']]) == scope_id and
+                accepted['client'] == client and all(accepted['configuration'][k] == body['pins'][k]
+                    for k in ('policy_digest', 'runtime_digest')), 'Assignment accepted scope changed')
         _require(type(body['version']) is int and body['version'] == ADMISSION_VERSION and
-            type(body['pins']['schema_version']) is int and body['pins']['schema_version'] == state.SCHEMA_VERSION and
+            type(body['pins']['schema_version']) is int and pin_version in (2, 3) and
             all(_hex(body['pins'][key]) for key in ('policy_digest', 'runtime_digest')) and
             all(body['request'][key] == owner[key] for key in ('client', 'session_id', 'task_id', 'dispatch_id')),
             'Assignment original owner or pins are corrupt')
@@ -766,7 +773,7 @@ def _record(scope, row):
         policy = evidence._read(scope, body['policy'])
         _require(policy['policy_digest'] == body['pins']['policy_digest'], 'Immutable assignment policy binding changed')
         if data['role'] in NATIVE_ROLES:
-            state._fields(body, ('version', 'owner', 'pins', 'request', 'job_id', 'role', 'claims', 'resource_units',
+            state._fields(body, ('version', 'owner', 'pins', *canonical_fields, 'request', 'job_id', 'role', 'claims', 'resource_units',
                 'revision', 'plan', 'plan_digest', 'git_routing', 'host_capacity', 'binding', 'candidate',
                 'discovery', 'policy', 'report_contract', 'guidance', 'retry_of', 'diagnostic'), ('review',))
             _reference(body['plan'])
@@ -794,7 +801,7 @@ def _record(scope, row):
                 binding['task_name'] == ('worker_' if data['role'] == 'worker' else 'review_') + identity and
                 binding['candidate_digest'] == data['candidate']['digest'], 'Native assignment locator binding is corrupt')
         else:
-            state._fields(body, ('version', 'owner', 'pins', 'scope_ref', 'decision_ref', 'request', 'operation',
+            state._fields(body, ('version', 'owner', 'pins', *canonical_fields, 'scope_ref', 'decision_ref', 'request', 'operation',
                 'job_id', 'role', 'claims', 'resource_units', 'revision', 'plan_digest', 'candidate', 'd5_plan',
                 'd6_plan', 'host_capacity', 'binding', 'retry_of', 'diagnostic', 'policy'))
             _require(type(data['resource_units']) is int and data['resource_units'] == 0 and
@@ -855,7 +862,16 @@ def _ledger(scope, db):
     rows = db.execute('select id,scope_id,client,session_id,task_id,dispatch_id,data from assignments limit ?',
                       (MAX_ASSIGNMENTS + 1,)).fetchall()
     _require(len(rows) <= MAX_ASSIGNMENTS, 'Shared assignment history exceeds its inspection bound')
-    return [_record(scope, row) for row in rows]
+    records = [_record(scope, row) for row in rows]
+    for record in records:
+        owner, body = record['owner'], record['body']
+        original = state._task(db, owner['scope_id'], owner['client'], owner['session_id'], owner['task_id'])
+        _require(original is not None and original['pins'] == body['pins'] and
+            (body['pins']['schema_version'] != 3 or original['accepted_identity'] == body['accepted_identity']),
+            'Assignment no longer matches its immutable original task')
+        if record['data']['candidate'] is not None:
+            evidence._candidate_projection(evidence._read(scope, record['data']['candidate']), original)
+    return records
 
 
 def _ready_closure(scope, task):
@@ -1160,6 +1176,8 @@ def _operation_record(scope, task, request, role, claims, identity, candidate, o
         claims=claims, resource_units=0, revision=request['expected_revision'] + 1, plan_digest=d5_plan['digest'] if d5_plan else None,
         candidate=candidate, d5_plan=d5_plan, d6_plan=d6_plan, host_capacity=None, binding=None, retry_of=None, diagnostic=None,
         policy=evidence._artifact(scope, dict(policy_digest=task['pins']['policy_digest'], **(routing or {}))))
+    if task['pins']['schema_version'] == 3:
+        body['accepted_identity'] = task['accepted_identity']
     evidence._bounded(body, byte_limit)
     reference = evidence._artifact(scope, body)
     data = {key: body[key] for key in ('version', 'job_id', 'role', 'claims', 'resource_units', 'revision', 'plan_digest',
@@ -1287,7 +1305,7 @@ def _validate_operation_proof(scope, record, task, proof, *, current_candidate_d
         kind = 'assignment-writer-reconciliation'
     state._fields(proof, required)
     state._integer(proof['expected_revision'], 'proof task revision', 1)
-    state._fields(proof['expected_pins'], ('schema_version', 'policy_digest', 'runtime_digest'))
+    state._validate_pins(proof['expected_pins'])
     state._integer(proof['expected_pins']['schema_version'], 'proof schema version', 1)
     _require(all(task[key] == owner[key] == body['request'][key] for key in ('client', 'session_id', 'task_id')) and
         task['scope_ref'] == body['request']['scope_ref'], 'Proof task differs from the original reservation')
@@ -1404,6 +1422,8 @@ def _prepare_native(scope, request, *, role):
             required=['version', 'attempt_id', 'assignment_digest', 'candidate_digest', 'status', 'changed_paths', 'evidence', 'limitations']),
         guidance={key: guidance[key] for key in ('snapshot_ref', 'snapshot_digest', 'checked_at', 'freshness')},
         retry_of=request.get('retry_of'), diagnostic=diagnostic)
+    if task['pins']['schema_version'] == 3:
+        body['accepted_identity'] = task['accepted_identity']
     if role == 'review':
         body['review'] = dict(assignment_digest=hashlib.sha256(request['assignment'].encode()).hexdigest(),
             coverage=request['coverage'], criteria=request['criteria'], d5_plan=task['evidence']['plan'])
@@ -1715,6 +1735,15 @@ def reconcile_assignment(scope, request):
     return _reconciliation_reply(record, artifact)
 
 
+
+def _native_binding(record):
+    binding = dict(record['data']['binding'], assignment_digest=record['data']['assignment']['digest'])
+    if record['body']['pins']['schema_version'] == 3:
+        binding.update(pins=record['body']['pins'], accepted_identity=record['body']['accepted_identity'],
+                       scope_id=record['owner']['scope_id'])
+    return binding
+
+
 def prepared_native_assignment(scope, attempt_id):
     """Read the immutable prepared identity used by the actual native worker observer."""
     _require(isinstance(attempt_id, str) and re.fullmatch(r'[0-9a-f]{32}', attempt_id), 'Invalid native assignment id')
@@ -1722,7 +1751,7 @@ def prepared_native_assignment(scope, attempt_id):
         _require(db is not None, 'Missing native assignment state')
         found = next((r for r in _ledger(scope, db) if r['id'] == attempt_id and r['owner']['scope_id'] == state._scope_id(scope)), None)
         _require(found is not None and found['data']['role'] == 'worker', 'Native worker assignment is absent or unqualified')
-        return dict(found['data']['binding'], assignment_digest=found['data']['assignment']['digest'])
+        return _native_binding(found)
 
 
 def prepared_native_review_assignment(scope, attempt_id):
@@ -1737,7 +1766,7 @@ def prepared_native_review_assignment(scope, attempt_id):
         attempt = next((a for a in task['evidence']['attempts'] if a['id'] == attempt_id), None)
         _require(attempt is not None, 'Exact D5 review attempt is absent')
         _linked_review(scope, owner['scope_id'], task, attempt, [record])
-        return dict(record['data']['binding'], assignment_digest=record['data']['assignment']['digest'])
+        return _native_binding(record)
 
 
 def delegation_status(scope, client, session_id):

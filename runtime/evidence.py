@@ -20,7 +20,7 @@ import time
 import uuid
 
 from runtime import state
-from runtime.startup import MAX_INPUT, StartupError, json_object, policy_digest
+from runtime.startup import MAX_INPUT, StartupError, AcceptedScope, json_object, policy_digest
 
 VERSION = 1
 MAX_ATTEMPTS = 32
@@ -281,9 +281,41 @@ def _tool(check, root):
         raise state.StateError('Accepted check executable is unavailable') from None
 
 
+
+def _canonical_inputs(scope):
+    """Reobserve accepted selected locations/dependencies; never adopt a new scope."""
+    if not isinstance(scope, AcceptedScope):
+        return None
+    from runtime.onboarding import _checkout_observation, _filesystem_binding, _fingerprint
+    state._scope_version(scope)
+    identity = state._accepted_identity(scope.accepted_identity)
+    observed, error = _checkout_observation(str(scope.repository_root), {'paths': 0})
+    _require(error is None and _filesystem_binding(scope.project_root) == identity['project_binding'] and
+        observed['binding'] == identity['bindings'] and
+        all(observed[key] == identity['repository_root' if key == 'root' else key]
+            for key in ('root', 'primary_root', 'git_dir', 'git_common_dir')), 'Accepted checkout physical identity changed')
+    for shared in identity['shared_policy']:
+        path = Path(shared['path'])
+        actual = _fingerprint(path.parent, path.name)
+        _require(actual.get('status') == 'read' and actual.get('sha256') == shared['sha256'],
+                 'Accepted shared dependency changed or is unavailable')
+    return identity
+
+
+def _candidate_projection(candidate, task):
+    state._validate_pins(candidate['pins'])
+    _require(candidate['pins'] == task['pins'], 'Candidate task pins changed')
+    if task['pins']['schema_version'] == 3:
+        identity = state._accepted_identity(candidate.get('accepted_identity'))
+        _require(identity == task['accepted_identity'], 'Candidate accepted scope changed')
+
+
 def _capture(scope, plan):
     from runtime.onboarding import _snapshot, _fingerprint
+    accepted = _canonical_inputs(scope)
     snapshot = _snapshot(scope.repository_root)
+    if accepted is not None:
+        snapshot['accepted_identity'] = accepted
     _require(snapshot['git_common_dir'] == str(scope.git_common_dir), 'Checkout identity changed')
     _require(snapshot['head'] is not None, 'Candidate HEAD is unresolved')
     for name, value in snapshot['fingerprints'].items():
@@ -613,6 +645,7 @@ def _read_host_proof(scope, reference):
                  for p in (path, *path.parents)), 'Host proof must be canonical, private and outside repositories/caches')
     try:
         from runtime.startup import runtime_settings
+        # This legacy selector validates a proof location, not the task's database version.
         runtime_settings({'runtime': {'schema_version': state.SCHEMA_VERSION, 'state_dir': str(path.parent)}}, state.PACKAGE, scope.git_common_dir)
         _no_links(path)
         raw = _read_file(path, MAX_INPUT, private=True)

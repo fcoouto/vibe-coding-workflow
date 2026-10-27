@@ -977,3 +977,49 @@ class EvidenceTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class CanonicalEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        from tests.test_state import canonical_scope
+        self.fixture = EvidenceTests(methodName='runTest')
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.fixture.scope = canonical_scope(self.fixture.scope)
+        self.scope = self.fixture.scope
+        state.start_task(self.scope, self.fixture.identity | dict(mode='editable', decision_ref='user:accepted'))
+        self.fixture.plan()
+
+    def test_canonical_candidate_carries_immutable_selected_identity_and_rejects_replaced_git(self):
+        import shutil
+        plan = self.fixture.api._load_plan(self.scope, self.fixture.identity)
+        candidate = self.fixture.api.capture_candidate(self.scope, plan)
+        self.assertEqual(candidate['accepted_identity']['checkout_id'], self.scope.checkout_id)
+        self.assertEqual(candidate['pins']['accepted_scope_digest'], self.scope.accepted_scope_digest)
+        old = self.fixture.root / 'old-git'
+        self.scope.git_common_dir.rename(old)
+        shutil.copytree(old, self.scope.git_common_dir)
+        with self.assertRaises(state.StateError): self.fixture.api.capture_candidate(self.scope, plan)
+
+    def test_canonical_check_reconciliation_uses_original_four_key_pins(self):
+        result = self.fixture.checked()
+        self.assertEqual(result['attempt']['status'], 'passed')
+        with state._database(self.scope) as db:
+            from runtime import delegation
+            record = delegation._ledger(self.scope, db)[0]
+        self.assertEqual(record['body']['accepted_identity']['checkout_id'], 'checkout')
+        self.assertEqual(record['body']['pins']['schema_version'], 3)
+
+    def test_canonical_selected_dependency_is_reobserved_without_pinning_authority_revision(self):
+        from runtime.startup import _canonical_plain, _canonical_freeze
+        scope = self.scope
+        shared = self.fixture.root / 'shared-guide.md'
+        shared.write_text('accepted workflow\n')
+        identity = _canonical_plain(scope.accepted_identity)
+        identity['shared_policy'] = [dict(path=str(shared), sha256=hashlib.sha256(shared.read_bytes()).hexdigest())]
+        scope = replace(scope, accepted_identity=_canonical_freeze(identity), accepted_scope_digest=self.fixture.api._digest(identity))
+        plan = self.fixture.api._load_plan(self.scope, self.fixture.identity)
+        before = self.fixture.api.capture_candidate(scope, plan)
+        self.assertEqual(before, self.fixture.api.capture_candidate(replace(scope, authority_revision=scope.authority_revision+1), plan))
+        shared.write_text('changed workflow\n')
+        with self.assertRaises(state.StateError): self.fixture.api.capture_candidate(scope, plan)
