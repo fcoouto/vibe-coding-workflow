@@ -246,6 +246,65 @@ class OnboardingTests(unittest.TestCase):
             self.module().inspect_project(self.base, self.directory, request)
         self.assertFalse((self.directory / "plan.json").exists())
 
+    def test_checkout_observer_accepts_paths_only_and_preserves_used_budget_and_deadline(self):
+        from runtime import startup
+        import time
+        module = self.module()
+        empty = {"paths": 0}
+        observed, error = module._checkout_observation(str(self.repo), empty)
+        self.assertIsNone(error)
+        self.assertEqual(observed["root"], str(self.repo))
+        self.assertGreater(empty["bytes"], 0)
+        deadline = time.monotonic() + 60
+        used = {"paths": 3, "bytes": 123, "deadline": deadline}
+        with patch.object(startup, "read_git", wraps=startup.read_git) as reader:
+            _, error = module._checkout_observation(str(self.repo), used)
+        self.assertIsNone(error)
+        self.assertEqual(used["bytes"], empty["bytes"] + 123)
+        self.assertEqual(used["paths"], empty["paths"] + 3)
+        self.assertEqual(used["deadline"], deadline)
+        self.assertTrue(all(call.kwargs["deadline"] == deadline for call in reader.call_args_list))
+        expired = {"paths": 0, "bytes": 99, "deadline": time.monotonic() - 1}
+        retained = dict(expired)
+        _, error = module._checkout_observation(str(self.repo), expired)
+        self.assertIsNotNone(error)
+        self.assertEqual(expired, retained)
+
+    def test_canonical_deadline_stops_parent_observation_before_next_binding(self):
+        from runtime import startup
+        module = self.module()
+        path = self.repo / "deadline.txt"; path.write_text("observed")
+        fingerprint = module._fingerprint(self.repo, path.name)
+        clock = [100.0]; calls = []
+        original = module._filesystem_binding
+        def expire_after_binding(parent):
+            result = original(parent)
+            calls.append(parent); clock[0] = 104.0
+            return result
+        with patch.object(startup.time, "monotonic", side_effect=lambda: clock[0]),              patch.object(module, "_filesystem_binding", side_effect=expire_after_binding):
+            with self.assertRaises(StartupError):
+                module._physical_target(Path(path.anchor), path, fingerprint,
+                    {"paths": 0, "bytes": 0, "deadline": 104.0})
+        self.assertEqual(len(calls), 1)
+
+    def test_expected_binding_read_rejects_same_inode_change_during_descriptor_read(self):
+        module = self.module()
+        path = self.repo / "stable-read.txt"; path.write_text("original")
+        info = path.stat(); binding = dict(device=info.st_dev, inode=info.st_ino)
+        original = os.fstat
+        observed = []
+        def change_after_first_stat(descriptor):
+            metadata = original(descriptor)
+            if not observed:
+                path.write_text("changed during the same descriptor read")
+                observed.append(True)
+            return metadata
+        with patch.object(module.os, "fstat", side_effect=change_after_first_stat):
+            with self.assertRaises(StartupError):
+                module._read_file(path, 1024, expected_binding=binding)
+        self.assertTrue(observed)
+        self.assertEqual(path.stat().st_ino, info.st_ino)
+
     def test_canonical_reuse_authority_read_rechecks_physical_target(self):
         location, _ = self.canonical_authority()
         read = self.module()._read_file
@@ -489,8 +548,8 @@ class OnboardingTests(unittest.TestCase):
         authority.write_text('{"project_id": "first", "project_id": "second"}')
         record = self.project_record()
         original = self.module()._git
-        def broken_worktrees(root, *args):
-            return (0, b"not-porcelain\x00") if args[:2] == ("worktree", "list") else original(root, *args)
+        def broken_worktrees(root, *args, **kwargs):
+            return (0, b"not-porcelain\x00") if args[:2] == ("worktree", "list") else original(root, *args, **kwargs)
         with patch.object(self.module(), "_git", side_effect=broken_worktrees):
             report = self.module().inspect_project(self.repo, self.directory, record)
         reasons = " ".join(b["reason"] for b in report["blockers"])

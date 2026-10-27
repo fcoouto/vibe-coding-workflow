@@ -3,11 +3,14 @@
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
+import selectors
 import stat
 import subprocess
+import time
 from types import MappingProxyType
 
 
@@ -79,19 +82,68 @@ def repository_root(cwd):
     return next((p for p in (cwd, *cwd.parents) if os.path.lexists(p / ".git")), None)
 
 
-def checkout(cwd):
+def _check_observation_deadline(budget):
+    if budget.get("deadline") is not None and time.monotonic() >= budget["deadline"]:
+        raise StartupError("Canonical acquisition deadline exceeded")
+
+
+def read_git(root, *args, limit=1024 * 1024, discovery=False, timeout=5, with_stderr=False, deadline=None):
+    """Bounded local Git observation shared with onboarding; inherit no selectors."""
+    owner_deadline = deadline
+    if owner_deadline is not None and time.monotonic() >= owner_deadline:
+        raise subprocess.TimeoutExpired("read-only Git inventory", timeout)
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0")
+    if discovery:
+        env["GIT_DISCOVERY_ACROSS_FILESYSTEM"] = "1"
+    if with_stderr:
+        env.update(LC_ALL="C", LANG="C", LANGUAGE="C")
+    process = subprocess.Popen(["git", "--no-optional-locks", "-c", "core.fsmonitor=false", "-C", str(root),
+                                *args], env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE if with_stderr else subprocess.DEVNULL)
+    output, diagnostic = bytearray(), bytearray()
+    deadline = min(owner_deadline, time.monotonic() + timeout) if owner_deadline is not None else time.monotonic() + timeout
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ, output)
+            if with_stderr:
+                selector.register(process.stderr, selectors.EVENT_READ, diagnostic)
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                events = selector.select(max(0, remaining))
+                if remaining <= 0 or not events:
+                    raise subprocess.TimeoutExpired("read-only Git inventory", timeout)
+                for key, _ in events:
+                    raw = os.read(key.fd, min(65536, limit + 1 - len(output) - len(diagnostic)))
+                    if not raw:
+                        selector.unregister(key.fileobj)
+                    else:
+                        key.data.extend(raw)
+                        if len(output) + len(diagnostic) > limit:
+                            raise StartupError("Git inventory limit exceeded; narrow the checkout before planning")
+        remaining = deadline - time.monotonic()
+        if owner_deadline is not None and remaining <= 0:
+            raise subprocess.TimeoutExpired("read-only Git inventory", timeout)
+        code = process.wait(timeout=remaining if owner_deadline is not None else max(0.01, remaining))
+        return (code, bytes(output), bytes(diagnostic)) if with_stderr else (code, bytes(output))
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        process.stdout.close()
+        if with_stderr:
+            process.stderr.close()
+
+
+def checkout(cwd, *, limit=1024 * 1024, deadline=None):
     """Resolve checkout identity; never inherit a Git selector from the caller."""
     boundary = repository_root(cwd)
     if boundary is None:
         return None
-    result = subprocess.run(
-        ["git", "-C", str(cwd), "rev-parse", "--path-format=absolute",
-         "--show-toplevel", "--git-common-dir"],
-        env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
-        capture_output=True, text=True, timeout=2, check=False,
-    )
-    lines = result.stdout.splitlines()
-    if result.returncode or len(lines) != 2:
+    code, raw = read_git(cwd, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir",
+                         limit=limit, timeout=2, deadline=deadline)
+    lines = os.fsdecode(raw).splitlines()
+    if code or len(lines) != 2:
         raise StartupError("Cannot resolve checkout identity")
     root, common = (Path(line).resolve(strict=True) for line in lines)
     if root != boundary or not common.is_dir():
@@ -803,3 +855,183 @@ def preview_canonical_scope(proposed_record, *, authority, observation, client, 
     """
     return _compare_canonical_scope(proposed_record, authority=authority, observation=observation,
                                     client=client, installed=installed, preview=True)
+
+
+@dataclass(frozen=True)
+class CanonicalAcquisition:
+    resolution: ScopeResolution
+    authority_path: Path | None
+
+
+def _acquired_runtime_location(path, package, data, observed, budget):
+    from runtime import onboarding as d3
+    chain = []
+    for ancestor in (path, *path.parents):
+        _check_observation_deadline(budget)
+        if budget["paths"] >= d3.MAX_PATHS:
+            raise StartupError("Canonical observation limit exceeded")
+        budget["paths"] += 1
+        binding = None
+        try:
+            info = ancestor.lstat()
+            binding = dict(device=info.st_dev, inode=info.st_ino)
+            kind = "link" if stat.S_ISLNK(info.st_mode) else "directory" if stat.S_ISDIR(info.st_mode) else "other"
+        except FileNotFoundError:
+            kind = "absent"
+        except OSError:
+            kind = "unreadable"
+        chain.append(dict(path=str(ancestor), binding=binding, kind=kind))
+    existing = next((a["path"] for a in chain if a["kind"] == "directory"), "/")
+    result = "unknown"
+    if not any(a["kind"] in ("link", "other", "unreadable") for a in chain):
+        try:
+            code, raw, diagnostic = read_git(existing, "-c", "safe.bareRepository=all", "rev-parse",
+                                 "--absolute-git-dir", "--is-bare-repository", discovery=True, with_stderr=True,
+                                 deadline=budget.get("deadline"), limit=min(d3.MAX_FILE, max(0, d3.MAX_TOTAL - budget["bytes"])))
+            budget["bytes"] += len(raw) + len(diagnostic)
+            lines = raw.splitlines()
+            if code == 0 and len(lines) == 2 and lines[1] in (b"true", b"false"):
+                result = "bare" if lines[1] == b"true" else "repository"
+            elif code == 128 and not raw and diagnostic == b"fatal: not a git repository (or any of the parent directories): .git\n":
+                result = "outside"
+        except (OSError, subprocess.SubprocessError):
+            pass
+    _check_observation_deadline(budget)
+    # A .git marker with failed discovery is unsafe, not proof that this is outside Git.
+    if any(os.path.lexists(Path(a["path"]) / ".git") for a in chain):
+        result = "repository"
+    exclusions = dict(package_root=str(package),
+        software_roots=sorted({data["project_root"], observed["root"], observed["primary_root"]}),
+        git_roots=sorted({observed["git_dir"], observed["git_common_dir"]}),
+        plugin_cache_roots=[str(p) for p in (path, *path.parents)
+            if (p.name == "plugins" and p.parent.name in (".codex", ".claude"))
+            or (p.name == "cache" and p.parent.name == "plugins")])
+    facts = dict(path=str(path), existing_ancestors=chain, git_probe=dict(cwd=existing, result=result), exclusions=exclusions)
+    return facts | dict(provenance=dict(kind="runtime-location-observer", reference="local-runtime-location",
+                                        sha256=_canonical_digest(facts)))
+
+
+def _acquired_dependency(location, budget):
+    from runtime import onboarding as d3
+    root = Path(location.anchor)
+    fp = d3._inspection_fingerprint(root, str(location.relative_to(root)), budget)
+    target = d3._physical_target(root, location, fp, budget) if fp["status"] in ("read", "absent") else None
+    if fp["status"] == "read":
+        raw = d3._read_file(location, min(d3.MAX_FILE, max(0, d3.MAX_TOTAL - budget["bytes"])),
+                            expected_binding=target["binding"])
+        budget["bytes"] += len(raw)
+        fresh = d3._inspection_fingerprint(root, str(location.relative_to(root)), budget)
+        if (hashlib.sha256(raw).hexdigest() != fp["sha256"] or fresh != fp
+                or d3._physical_target(root, location, fresh, budget) != target):
+            raise StartupError("Dependency changed while reading")
+    return dict(path=str(location), status=fp["status"] if target else "unreadable", target=target)
+
+
+def acquire_canonical_project(event, package, *, authority_path=None, qualifier=None, deadline=None):
+    """Read named canonical authority and current facts; leave public startup gated.
+
+    qualifier is an internal trusted-owner, local read-only callback. Its verified
+    durable qualification/current facts are never inferred from enrollment JSON.
+    The trusted callback receives the shared monotonic deadline and must obey it.
+    """
+    from runtime import onboarding as d3
+    from runtime.state import runtime_fingerprint
+
+    pointer = None
+    def result(status, reason):
+        return CanonicalAcquisition(ScopeResolution(status, None, reason), pointer)
+    try:
+        now = time.monotonic()
+        if deadline is not None and (type(deadline) not in (int, float) or not math.isfinite(deadline)):
+            raise StartupError("Invalid acquisition deadline")
+        # Reserve one second of the native hook's five-second budget for adaptation.
+        budget = {"paths": 0, "bytes": 0, "deadline": min(deadline, now + 4) if deadline is not None else now + 4}
+        _check_observation_deadline(budget)
+        if qualifier is not None and not callable(qualifier):
+            raise StartupError("Invalid internal qualification owner")
+        if not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", event.client):
+            raise StartupError("Invalid client identity")
+        d3._no_links(event.cwd)
+        root = repository_root(event.cwd)
+        _check_observation_deadline(budget)
+        if root is None:
+            return result("outside", "not_enrolled")
+        _check_observation_deadline(budget)
+        observed, error = d3._checkout_observation(str(root), budget)
+        if error:
+            return result("conflict", "identity_changed")
+        candidates = {root, *root.parents, Path(observed["primary_root"]), *Path(observed["primary_root"]).parents}
+        if authority_path is not None:
+            explicit = _canonical_path(str(authority_path))
+            if explicit.name != PROJECT_FILE.name or explicit.parent.name != PROJECT_FILE.parent.name:
+                raise StartupError("Invalid explicit authority route")
+            d3._no_links(explicit)
+            candidates.add(explicit.parent.parent)
+        if len(candidates) > d3.MAX_PATHS:
+            raise StartupError("Canonical candidate limit exceeded")
+        budget["paths"] += len(candidates)
+        present = []
+        for candidate in sorted(candidates):
+            _check_observation_deadline(budget)
+            item = d3._authority_observation(candidate, budget, canonical_only=True)
+            if item["error"] or (item["fingerprint"].get("status") == "absent"
+                    and os.path.lexists(candidate / PROJECT_FILE.parent)):
+                return result("conflict", "authority_conflict")
+            if item["record"] is not None:
+                present.append(item)
+        if not present:
+            return result("outside", "not_enrolled")
+        if len(present) != 1:
+            return result("conflict", "authority_conflict")
+        item = present[0]
+        if item["record"].get("schema_version") != 2:
+            return result("conflict", "unsupported_enrollment_schema")
+        record = decode_project_record(item["record"])
+        data = _canonical_plain(record.data)
+        _check_observation_deadline(budget)
+        project = Path(data["project_root"])
+        pointer = Path(item["path"])
+        if pointer != project / PROJECT_FILE:
+            return result("conflict", "authority_conflict")
+        if data["kind"] == "standalone" and observed["primary_root"] != str(project):
+            pointer = None
+            return result("outside", "not_enrolled")
+        primary = Path(observed["primary_root"])
+        membership = data["membership"]
+        included = primary.is_relative_to(project) and any(primary.is_relative_to(project / p) for p in membership["include"])
+        excluded = any(primary.is_relative_to(project / p) for p in membership["exclude"])
+        observation = {k: observed[k] for k in ("root", "primary_root", "git_dir", "git_common_dir", "binding")}
+        observation.update(project_root=str(project), project_binding=d3._filesystem_binding(project),
+            membership="excluded" if excluded else "included" if included else "outside",
+            conflicting_authorities=[], dependencies=[], qualification=None, runtime_location=None)
+        selected = next((c for r in data["repositories"] if r["primary_root"] == observed["primary_root"]
+                         for c in r["checkouts"] if c["root"] == str(root)), None)
+        entry = next((e for e in selected["clients"] if e["client"] == event.client), None) if selected else None
+        config = entry["configuration"] if entry else None
+        if config:
+            for name in sorted(config["shared_dependencies"]):
+                observation["dependencies"].append(_acquired_dependency(Path(name), budget))
+            if config["runtime"]:
+                observation["runtime_location"] = _acquired_runtime_location(Path(config["runtime"]["state_dir"]),
+                    Path(package).resolve(strict=True), data, observation, budget)
+        package = Path(package).resolve(strict=True)
+        if package != Path(__file__).resolve().parents[1]:
+            return result("conflict", "installed_unavailable")
+        _check_observation_deadline(budget)
+        installed = dict(policy_digest=policy_digest(package), runtime_digest=runtime_fingerprint(),
+            clients=[event.client] if (package / "clients" / (event.client + ".md")).is_file() else [], package_root=str(package))
+        facts = dict(authority=dict(path=str(pointer), target=item["target"]), observation=observation,
+                     client=event.client, installed=installed)
+        _check_observation_deadline(budget)
+        resolution = resolve_canonical_scope(record, **facts)
+        if qualifier is not None and resolution.status == "configured" and resolution.reason == "qualification_unobserved":
+            observation["qualification"] = qualifier(record, _canonical_freeze(facts | {"deadline": budget["deadline"]}))
+            _check_observation_deadline(budget)
+            # The trusted callback may inspect facts, but it cannot normalize changed authority bytes.
+            if d3._authority_observation(project, budget, canonical_only=True) != item:
+                return result("conflict", "authority_conflict")
+            resolution = resolve_canonical_scope(record, **facts)
+        _check_observation_deadline(budget)
+        return CanonicalAcquisition(resolution, pointer)
+    except (StartupError, OSError, TypeError, KeyError, RecursionError, subprocess.SubprocessError):
+        return result("conflict", "observation_unavailable")

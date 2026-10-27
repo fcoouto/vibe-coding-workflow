@@ -673,7 +673,7 @@ class StartupTests(unittest.TestCase):
 
     def test_git_timeout_has_no_activation(self):
         self.enroll()
-        with patch("runtime.startup.subprocess.run", side_effect=subprocess.TimeoutExpired("git", 2)):
+        with patch("runtime.startup.read_git", side_effect=subprocess.TimeoutExpired("git", 2)):
             with self.assertRaises(subprocess.TimeoutExpired):
                 orient(self.adapter.normalize(self.payload), PACKAGE)
 
@@ -778,6 +778,364 @@ class ClaudeStartupTests(StartupTests):
         denied = claude_code.render_runtime(HookResult("PreToolUse", "deny", "Task must be active"))
         self.assertEqual(denied["hookSpecificOutput"]["permissionDecision"], "deny")
         self.assertIsNone(claude_code.render_runtime(HookResult("PreToolUse")))
+
+
+class CanonicalAcquisitionTests(unittest.TestCase):
+    setUp = StartupTests.setUp
+    git = StartupTests.git
+
+    def record(self, *, project=None, selected=None):
+        from runtime import onboarding, state
+        project, selected = project or self.repo, selected or self.repo
+        observed, error = onboarding._checkout_observation(str(selected), {"paths": 0, "bytes": 0})
+        self.assertIsNone(error)
+        ref = dict(reference="fixture:standing", sha256="a" * 64)
+        config = dict(policy_digest=policy_digest(PACKAGE), runtime_digest=state.runtime_fingerprint(),
+            runtime=dict(schema_version=3, state_dir=str(self.base / "private-state" if project == self.repo
+                else self.base.parent / (self.base.name + "-state"))),
+            shared_dependencies=[], evidence=[ref])
+        entry = dict(client="codex", configuration=config, activation=dict(status="configured", qualification="pending",
+            accepted_scope_digest=None, transaction_id=None, evidence=[], qualification_binding=None))
+        value = dict(schema_version=2, revision=1, project_id="project", project_root=str(project),
+            kind="standalone" if project == self.repo else "umbrella", project_binding=onboarding._filesystem_binding(project),
+            membership=dict(include=["."], exclude=[], future_join=True, authorization=ref), shared_policy=[],
+            repositories=[dict(repository_id="repository", primary_root=observed["primary_root"],
+                git_common_dir=observed["git_common_dir"], binding={k: observed["binding"][k] for k in ("primary_root", "git_common_dir")},
+                membership="joined", checkouts=[dict(checkout_id="checkout", root=str(selected), git_dir=observed["git_dir"],
+                    binding={k: observed["binding"][k] for k in ("root", "git_dir")}, clients=[entry])])])
+        path = project / PROJECT_FILE
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps(value))
+        return value, path
+
+    def acquire(self, *, cwd=None, **kwargs):
+        from runtime import startup
+        event = codex.normalize(dict(self.payload, cwd=str(cwd or self.repo)))
+        return startup.acquire_canonical_project(event, PACKAGE, **kwargs)
+
+    def test_actual_standalone_missing_qualification_is_configured_without_writes(self):
+        value, path = self.record()
+        before = path.read_bytes()
+        result = self.acquire()
+        self.assertEqual(result.resolution.status, "configured")
+        self.assertEqual(result.resolution.reason, "qualification_unobserved")
+        self.assertEqual(result.authority_path, path)
+        self.assertIsNone(result.resolution.scope)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertFalse((self.base / "private-state").exists())
+        with self.assertRaises(StartupError):
+            from runtime.startup import resolve_project
+            resolve_project(codex.normalize(self.payload), PACKAGE)
+
+    def test_actual_linked_checkout_routes_to_primary_umbrella(self):
+        (self.repo / "file").write_text("tracked")
+        self.git(self.repo, "add", "file")
+        self.git(self.repo, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture")
+        linked = self.base / "elsewhere" / "linked"
+        self.git(self.repo, "worktree", "add", "--detach", str(linked))
+        value, path = self.record(project=self.base, selected=linked)
+        seen = []
+        result = self.acquire(cwd=linked, qualifier=lambda record, facts: seen.append(facts) or None)
+        self.assertEqual(result.resolution.status, "configured")
+        self.assertEqual(result.authority_path, path)
+        self.assertEqual(seen[0]["observation"]["root"], str(linked))
+        self.assertEqual(seen[0]["observation"]["primary_root"], str(self.repo))
+
+    def test_future_member_pending_and_exclusion_outside_do_not_join(self):
+        value, path = self.record(project=self.base)
+        future = self.base / "future"; future.mkdir(); self.git(future, "init", "-q")
+        before = path.read_bytes()
+        self.assertEqual(self.acquire(cwd=future).resolution.status, "pending")
+        self.assertEqual(path.read_bytes(), before)
+        value["membership"]["exclude"] = ["future"]
+        path.write_text(json.dumps(value))
+        self.assertEqual(self.acquire(cwd=future).resolution.status, "outside")
+
+    def test_overlapping_malformed_and_missing_authorities_fail_closed(self):
+        self.record()
+        ancestor = self.base / PROJECT_FILE; ancestor.parent.mkdir()
+        ancestor.write_text('{"schema_version":2,"schema_version":2}')
+        self.assertEqual(self.acquire().resolution.status, "conflict")
+        ancestor.unlink()
+        self.assertEqual(self.acquire().resolution.status, "conflict")
+
+    def test_selected_dependency_and_runtime_location_are_observed(self):
+        import hashlib
+        value, path = self.record()
+        shared = self.repo / "guide.md"; shared.write_text("accepted guide")
+        value["shared_policy"] = [dict(path=str(shared), sha256=hashlib.sha256(shared.read_bytes()).hexdigest())]
+        config = value["repositories"][0]["checkouts"][0]["clients"][0]["configuration"]
+        config["shared_dependencies"] = [str(shared)]
+        path.write_text(json.dumps(value))
+        self.assertEqual(self.acquire().resolution.status, "configured")
+        shared.write_text("changed guide")
+        self.assertEqual(self.acquire().resolution.reason, "dependency_changed")
+        shared.write_text("accepted guide")
+        config["runtime"]["state_dir"] = str(self.repo / "unsafe")
+        path.write_text(json.dumps(value))
+        self.assertEqual(self.acquire().resolution.reason, "runtime_location_unsafe")
+
+    def activate(self, value, path):
+        import hashlib
+        from runtime.startup import canonical_scope_projection, decode_project_record, _canonical_plain
+        repo = value["repositories"][0]; selected = repo["checkouts"][0]
+        entry = selected["clients"][0]
+        digest = CanonicalScopeTests.digest(_canonical_plain(canonical_scope_projection(decode_project_record(value),
+            repository_id=repo["repository_id"], checkout_id=selected["checkout_id"], client="codex")))
+        source = PACKAGE / "hooks/codex.json"
+        info = PACKAGE.stat()
+        proof = dict(reference="fixture:independent-owner", sha256="e" * 64)
+        binding = dict(client="codex", surface="fixture-only", version="1", configuration_digest="f" * 64,
+            hook_owner=dict(root=str(PACKAGE), binding=dict(device=info.st_dev, inode=info.st_ino),
+                source=str(source), sha256=hashlib.sha256(source.read_bytes()).hexdigest()),
+            accepted_scope_digest=digest, receipt=proof)
+        entry["activation"].update(status="active", qualification="qualified", accepted_scope_digest=digest,
+            transaction_id="fixture", evidence=[proof], qualification_binding=binding)
+        path.write_text(json.dumps(value))
+        return dict(current={k: copy.deepcopy(binding[k]) for k in ("client", "surface", "version", "configuration_digest", "hook_owner")},
+            receipt=proof, binding=copy.deepcopy(binding), provenance=dict(kind="trusted-coordinator", **proof))
+
+    def test_qualification_requires_independent_internal_owner_and_current_match(self):
+        value, path = self.record()
+        proof = self.activate(value, path)
+        self.assertEqual(self.acquire().resolution.reason, "qualification_unobserved")
+        # This callback supplies synthetic trusted-owner fixtures, not native qualification.
+        result = self.acquire(qualifier=lambda record, facts: proof)
+        self.assertEqual(result.resolution.status, "active")
+        self.assertEqual(result.resolution.scope.repository_root, self.repo)
+        proof["current"]["surface"] = "changed-surface"
+        self.assertEqual(self.acquire(qualifier=lambda record, facts: proof).resolution.reason, "qualification_changed")
+        self.assertEqual(self.acquire(qualifier=proof).resolution.status, "conflict")
+
+    def test_authority_changed_during_same_byte_read_or_qualification_is_rejected(self):
+        from runtime import onboarding
+        value, path = self.record()
+        original = onboarding._read_file
+        def substitute(target, *args, **kwargs):
+            if Path(target) == path and kwargs.get("expected_binding") is not None:
+                replacement = path.with_suffix(".copy")
+                replacement.write_bytes(path.read_bytes()); replacement.replace(path)
+            return original(target, *args, **kwargs)
+        with patch.object(onboarding, "_read_file", side_effect=substitute):
+            self.assertEqual(self.acquire().resolution.status, "conflict")
+        def change(record, facts):
+            value["revision"] += 1; path.write_text(json.dumps(value))
+        self.assertEqual(self.acquire(qualifier=change).resolution.reason, "authority_conflict")
+
+    def test_no_enrollment_unrelated_explicit_route_and_schema_one_remain_ineligible(self):
+        self.assertEqual(self.acquire().resolution.status, "outside")
+        unrelated = self.base / "unrelated"; unrelated.mkdir(); self.git(unrelated, "init", "-q")
+        original_repo = self.repo
+        self.repo = unrelated
+        _, path = self.record()
+        self.repo = original_repo
+        result = self.acquire(authority_path=path)
+        self.assertEqual(result.resolution.status, "outside")
+        self.assertIsNone(result.authority_path)
+        path = self.repo / PROJECT_FILE; path.parent.mkdir()
+        path.write_text(json.dumps(dict(schema_version=1, project_id="old", repository_root=str(self.repo),
+            git_common_dir=str(self.repo / ".git"), clients=["codex"], policy_digest=policy_digest(PACKAGE))))
+        self.assertEqual(self.acquire().resolution.status, "conflict")
+
+    def test_runtime_bare_cache_link_and_unknown_probe_cannot_become_active(self):
+        from runtime import startup
+        value, path = self.record()
+        proof = self.activate(value, path)
+        config = value["repositories"][0]["checkouts"][0]["clients"][0]["configuration"]
+        initial = config["runtime"]["state_dir"]
+        bare = self.base / "bare"; self.git(self.base, "init", "--bare", "-q", str(bare))
+        cache = self.base / ".codex/plugins/cache/tasks"
+        link = self.base / "state-link"; link.symlink_to(self.base, target_is_directory=True)
+        for location in (bare / "tasks", cache, link / "tasks"):
+            with self.subTest(location=location):
+                config["runtime"]["state_dir"] = str(location)
+                path.write_text(json.dumps(value))
+                self.assertEqual(self.acquire().resolution.reason, "runtime_location_unsafe")
+        config["runtime"]["state_dir"] = initial; path.write_text(json.dumps(value))
+        original = startup.read_git
+        for exit_code in (1, 128):
+            def unknown(root, *args, **kwargs):
+                if kwargs.get("discovery"):
+                    return (exit_code, b"", b"fatal: invalid configuration\n") if kwargs.get("with_stderr") else (exit_code, b"")
+                return original(root, *args, **kwargs)
+            with self.subTest(exit_code=exit_code), patch.object(startup, "read_git", side_effect=unknown):
+                self.assertEqual(self.acquire(qualifier=lambda record, facts: proof).resolution.reason, "runtime_location_unobserved")
+
+    def test_copied_removed_missing_dependency_and_aggregate_limits_fail_closed(self):
+        from runtime import onboarding
+        value, path = self.record()
+        value["repositories"][0]["membership"] = "removed"; path.write_text(json.dumps(value))
+        self.assertEqual(self.acquire().resolution.status, "outside")
+        value["repositories"][0]["membership"] = "joined"
+        value["project_binding"]["inode"] += 1
+        path.write_text(json.dumps(value))
+        self.assertEqual(self.acquire().resolution.status, "conflict")
+        value["project_binding"]["inode"] -= 1
+        missing = str(self.repo / "missing-guide")
+        value["shared_policy"] = [dict(path=missing, sha256="a" * 64)]
+        value["repositories"][0]["checkouts"][0]["clients"][0]["configuration"]["shared_dependencies"] = [missing]
+        path.write_text(json.dumps(value))
+        self.assertEqual(self.acquire().resolution.reason, "dependency_unobserved")
+        for limit in ("MAX_PATHS", "MAX_TOTAL"):
+            with patch.object(onboarding, limit, 1):
+                self.assertEqual(self.acquire().resolution.status, "conflict")
+
+    def test_dependency_descriptor_bytes_cannot_be_rebound_to_replaced_target(self):
+        import hashlib
+        from runtime import onboarding
+        value, path = self.record()
+        shared = self.repo / "guide.md"; shared.write_text("accepted")
+        value["shared_policy"] = [dict(path=str(shared), sha256=hashlib.sha256(shared.read_bytes()).hexdigest())]
+        value["repositories"][0]["checkouts"][0]["clients"][0]["configuration"]["shared_dependencies"] = [str(shared)]
+        proof = self.activate(value, path)
+        original = onboarding._physical_target
+        changed = []
+        def replace_after_target(root, location, *args, **kwargs):
+            result = original(root, location, *args, **kwargs)
+            if location == shared and not changed:
+                replacement = shared.with_suffix(".copy"); replacement.write_text("external changed bytes")
+                replacement.replace(shared); changed.append(True)
+            return result
+        with patch.object(onboarding, "_physical_target", side_effect=replace_after_target):
+            self.assertNotEqual(self.acquire(qualifier=lambda record, facts: proof).resolution.status, "active")
+        self.assertTrue(changed)
+
+    def test_unrelated_join_preserves_selected_scope_without_sibling_inventory(self):
+        from runtime import onboarding
+        value, path = self.record(project=self.base)
+        proof = self.activate(value, path)
+        first = self.acquire(qualifier=lambda record, facts: proof).resolution.scope
+        other = self.base / "other"; other.mkdir(); self.git(other, "init", "-q")
+        observed, error = onboarding._checkout_observation(str(other), {"paths": 0, "bytes": 0})
+        self.assertIsNone(error)
+        sibling = copy.deepcopy(value["repositories"][0])
+        sibling.update(repository_id="other", primary_root=str(other), git_common_dir=observed["git_common_dir"],
+            binding={k: observed["binding"][k] for k in ("primary_root", "git_common_dir")})
+        selected = sibling["checkouts"][0]
+        selected.update(checkout_id="other-checkout", root=str(other), git_dir=observed["git_dir"],
+            binding={k: observed["binding"][k] for k in ("root", "git_dir")})
+        selected["clients"][0]["activation"] = dict(status="configured", qualification="pending",
+            accepted_scope_digest=None, transaction_id=None, evidence=[], qualification_binding=None)
+        value["repositories"].append(sibling); value["revision"] += 1; path.write_text(json.dumps(value))
+        with patch.object(onboarding, "_snapshot", side_effect=AssertionError("proposal inventory was loaded")),              patch.object(onboarding, "_locked", side_effect=AssertionError("startup wrote private plan state")):
+            second = self.acquire(qualifier=lambda record, facts: proof).resolution.scope
+        self.assertEqual(first.accepted_scope_digest, second.accepted_scope_digest)
+
+    def test_valid_overlapping_authorities_are_not_chosen_by_nearest_ancestry(self):
+        self.record(project=self.base)
+        self.record()
+        self.assertEqual(self.acquire().resolution.reason, "authority_conflict")
+
+    def test_git_diagnostics_are_bounded_and_locale_controlled_without_changing_default_shape(self):
+        from runtime import startup
+        original = startup.subprocess.Popen
+        with patch.object(startup.subprocess, "Popen", wraps=original) as process,              patch.dict(os.environ, {"LC_ALL": "invalid-fixture-locale", "GIT_DIR": "/invalid"}):
+            code, raw, diagnostic = startup.read_git(self.base, "rev-parse", "--absolute-git-dir",
+                discovery=True, with_stderr=True)
+        self.assertEqual(code, 128)
+        self.assertFalse(raw)
+        self.assertEqual(diagnostic, b"fatal: not a git repository (or any of the parent directories): .git\n")
+        environment = process.call_args.kwargs["env"]
+        self.assertEqual(environment["LC_ALL"], "C")
+        self.assertNotIn("GIT_DIR", environment)
+        self.assertIn("--no-optional-locks", process.call_args.args[0])
+        self.assertEqual(environment["GIT_OPTIONAL_LOCKS"], "0")
+        with self.assertRaisesRegex(StartupError, "Git inventory limit"):
+            startup.read_git(self.repo, "--invalid-fixture-option", with_stderr=True, limit=1)
+        self.assertEqual(len(startup.read_git(self.repo, "--version")), 2)
+
+    def test_dependency_same_inode_changed_after_descriptor_read_cannot_be_active(self):
+        import hashlib
+        from runtime import onboarding
+        value, path = self.record()
+        shared = self.repo / "guide.md"; shared.write_text("accepted")
+        value["shared_policy"] = [dict(path=str(shared), sha256=hashlib.sha256(shared.read_bytes()).hexdigest())]
+        value["repositories"][0]["checkouts"][0]["clients"][0]["configuration"]["shared_dependencies"] = [str(shared)]
+        proof = self.activate(value, path)
+        original = onboarding._read_file
+        inode = shared.stat().st_ino
+        def change_after_read(target, *args, **kwargs):
+            raw = original(target, *args, **kwargs)
+            if Path(target) == shared and kwargs.get("expected_binding") is not None:
+                shared.write_text("changed in place after read")
+            return raw
+        with patch.object(onboarding, "_read_file", side_effect=change_after_read):
+            self.assertNotEqual(self.acquire(qualifier=lambda record, facts: proof).resolution.status, "active")
+        self.assertEqual(shared.stat().st_ino, inode)
+
+    def test_unsupported_candidate_skips_legacy_runtime_probe_without_changing_d3_default(self):
+        from runtime import onboarding
+        path = self.repo / PROJECT_FILE; path.parent.mkdir()
+        legacy = dict(schema_version=1, project_id="legacy", repository_root=str(self.repo),
+            git_common_dir=str(self.repo / ".git"), clients=["codex"], policy_digest=policy_digest(PACKAGE),
+            runtime=dict(schema_version=2, state_dir=str(self.base / "legacy-state")))
+        path.write_text(json.dumps(legacy))
+        with patch.object(onboarding, "runtime_settings", side_effect=AssertionError("legacy probing loaded")):
+            self.assertEqual(self.acquire().resolution.status, "conflict")
+        with patch.object(onboarding, "runtime_settings", return_value=None) as probe:
+            self.assertIsNone(onboarding._authority_observation(self.repo, {"paths": 0, "bytes": 0})["error"])
+            probe.assert_called_once()
+
+    def test_ineligible_comparison_does_not_invoke_qualification(self):
+        value, path = self.record(project=self.base)
+        future = self.base / "future"; future.mkdir(); self.git(future, "init", "-q")
+        qualifier = unittest.mock.Mock(side_effect=AssertionError("qualification does not apply"))
+        self.assertEqual(self.acquire(cwd=future, qualifier=qualifier).resolution.status, "pending")
+        value["membership"]["exclude"] = ["project"]; path.write_text(json.dumps(value))
+        self.assertEqual(self.acquire(qualifier=qualifier).resolution.status, "outside")
+        value["membership"]["exclude"] = []
+        value["repositories"][0]["checkouts"][0]["clients"][0]["configuration"]["runtime_digest"] = "0" * 64
+        path.write_text(json.dumps(value))
+        self.assertEqual(self.acquire(qualifier=qualifier).resolution.status, "suspended")
+        qualifier.assert_not_called()
+
+    def test_expired_root_probe_cannot_report_proven_outside(self):
+        from runtime import startup
+        clock = [100.0]
+        def expired(cwd):
+            clock[0] = 104.0
+            return None
+        with patch.object(startup.time, "monotonic", side_effect=lambda: clock[0]),              patch.object(startup, "repository_root", side_effect=expired):
+            self.assertEqual(self.acquire().resolution.status, "conflict")
+
+    def test_one_monotonic_deadline_limits_total_git_and_rejects_late_qualification(self):
+        from runtime import startup
+        value, path = self.record()
+        clock = [100.0]
+        original = startup.read_git
+        calls = []
+        def delayed(root, *args, **kwargs):
+            remaining = kwargs.get("deadline", clock[0] + kwargs.get("timeout", 5)) - clock[0]
+            calls.append(remaining)
+            if remaining <= 1.5:
+                clock[0] += max(0, remaining)
+                raise subprocess.TimeoutExpired("bounded fixture", remaining)
+            result = original(root, *args, **kwargs)
+            clock[0] += 1.5
+            return result
+        with patch.object(startup.time, "monotonic", side_effect=lambda: clock[0]),              patch.object(startup, "read_git", side_effect=delayed):
+            self.assertEqual(self.acquire().resolution.status, "conflict")
+        self.assertLessEqual(clock[0] - 100, 4)
+        self.assertLessEqual(len(calls), 3)
+        proof = self.activate(value, path)
+        clock[0] = 100
+        def late(record, facts):
+            self.assertIn("deadline", facts)
+            clock[0] = facts["deadline"] + 0.1
+            return proof
+        with patch.object(startup.time, "monotonic", side_effect=lambda: clock[0]):
+            self.assertEqual(self.acquire(qualifier=late).resolution.status, "conflict")
+
+    def test_shared_git_reader_is_bounded_and_d3_uses_it(self):
+        from runtime import onboarding, startup
+        with self.assertRaisesRegex(StartupError, "Git inventory limit"):
+            startup.read_git(self.repo, "--version", limit=1)
+        with patch.object(startup, "read_git", return_value=(0, b"fixture")) as reader:
+            self.assertEqual(onboarding._git(self.repo, "status"), (0, b"fixture"))
+            reader.assert_called_once()
+        env = dict(GIT_DIR="/invalid", GIT_WORK_TREE="/invalid", GIT_COMMON_DIR="/invalid")
+        with patch.dict(os.environ, env):
+            self.assertEqual(checkout(self.repo)[0], self.repo)
 
 
 if __name__ == "__main__":

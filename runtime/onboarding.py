@@ -8,13 +8,11 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
-import selectors
 import stat
 import subprocess
-import time
 import uuid
 
-from runtime.startup import PROJECT_FILE, StartupError, checkout, decode_project_record, json_object, policy_digest, runtime_settings
+from runtime.startup import PROJECT_FILE, StartupError, checkout, decode_project_record, json_object, policy_digest, runtime_settings, _check_observation_deadline
 from runtime.state import runtime_fingerprint
 
 
@@ -121,31 +119,10 @@ def _private(st, directory=False):
              and st.st_uid == os.getuid() and st.st_mode & 0o077 == 0
              and (directory or st.st_nlink == 1), "Onboarding files must be private, owned, regular and unlinked")
 
-def _git(root, *args):
-    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
-    env.update(GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0")
-    process = subprocess.Popen(["git", "--no-optional-locks", "-c", "core.fsmonitor=false", "-C", str(root),
-                                *args], env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    output = bytearray()
-    deadline = time.monotonic() + 5
-    try:
-        with selectors.DefaultSelector() as selector:
-            selector.register(process.stdout, selectors.EVENT_READ)
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0 or not selector.select(remaining):
-                    raise subprocess.TimeoutExpired("read-only Git inventory", 5)
-                raw = os.read(process.stdout.fileno(), min(65536, MAX_FILE + 1 - len(output)))
-                if not raw:
-                    break
-                output.extend(raw)
-                _require(len(output) <= MAX_FILE, "Git inventory limit exceeded; narrow the checkout before planning")
-        return process.wait(timeout=max(0.01, deadline - time.monotonic())), bytes(output)
-    finally:
-        if process.poll() is None:
-            process.kill()
-        process.wait()
-        process.stdout.close()
+def _git(root, *args, limit=None, deadline=None):
+    from runtime.startup import read_git
+    return read_git(root, *args, limit=MAX_FILE if limit is None else min(MAX_FILE, limit), deadline=deadline)
+
 
 def _plan_path(value):
     _require(os.name == "posix", "Onboarding requires a qualified POSIX filesystem")
@@ -204,16 +181,23 @@ def _open_path(path, flags):
     finally:
         os.close(parent)
 
-def _read_file(path, limit, private=False):
+def _read_file(path, limit, private=False, *, expected_binding=None):
     descriptor = _open_path(path, os.O_RDONLY)
     with os.fdopen(descriptor, "rb") as stream:
         metadata = os.fstat(stream.fileno())
         if private:
             _private(metadata)
+        if expected_binding is not None:
+            _require({"device": metadata.st_dev, "inode": metadata.st_ino} == expected_binding
+                     and metadata.st_nlink == 1, "Observed input physical identity changed")
         _require(stat.S_ISREG(metadata.st_mode), "Expected a regular onboarding input file")
         _require(metadata.st_size <= limit, "Onboarding file size limit exceeded")
         raw = stream.read(limit + 1)
         _require(len(raw) <= limit, "Onboarding file size limit exceeded")
+        after = os.fstat(stream.fileno())
+        _require(all(getattr(metadata, field) == getattr(after, field) for field in
+                     ("st_dev", "st_ino", "st_size", "st_mode", "st_nlink", "st_mtime_ns", "st_ctime_ns")),
+                 "Onboarding input changed while reading")
         return raw
 
 def _load(path):
@@ -571,6 +555,7 @@ def inspect_project(cwd, plan_dir, source_record):
         return report
 
 def _inspection_fingerprint(root, relative, budget):
+    _check_observation_deadline(budget)
     _require(budget["paths"] < MAX_PATHS, "Project aggregate path limit exceeded; inventory remains incomplete")
     budget["paths"] += 1
     remaining = MAX_TOTAL - budget["bytes"]
@@ -579,6 +564,7 @@ def _inspection_fingerprint(root, relative, budget):
     _require(not (result["status"] == "oversized" and remaining < MAX_FILE),
              "Project aggregate byte limit exceeded; inventory remains incomplete")
     budget["bytes"] += result.get("bytes", 0)
+    _check_observation_deadline(budget)
     return result
 
 def _filesystem_binding(path):
@@ -621,25 +607,33 @@ def _project_scope(value):
     return deepcopy(value)
 
 def _checkout_observation(value, budget):
+    budget.setdefault("bytes", 0)
+    def git(root, *args):
+        code, raw = _git(root, *args, limit=max(0, MAX_TOTAL - budget["bytes"]), deadline=budget.get("deadline"))
+        budget["bytes"] += len(raw)
+        _require(budget["bytes"] <= MAX_TOTAL, "Project aggregate byte limit exceeded")
+        return code, raw
     root = Path(value)
     observed = {"root": str(root), "primary_root": None, "git_dir": None, "git_common_dir": None,
                 "binding": {}, "membership": "unknown", "snapshot": None}
     try:
+        _check_observation_deadline(budget)
         _require(str(root.resolve(strict=True)) == str(root), "Member boundary contains a link or noncanonical root")
         observed["binding"]["root"] = _filesystem_binding(root)
-        identity = checkout(root)
+        identity = checkout(root, limit=min(MAX_FILE, max(0, MAX_TOTAL - budget["bytes"])), deadline=budget.get("deadline"))
         _require(identity is not None and identity[0] == root, "Member must select an existing checkout root")
         common = identity[1]
+        budget["bytes"] += len(os.fsencode(str(root))) + len(os.fsencode(str(common))) + 2
         observed["git_common_dir"] = str(common)
         observed["binding"]["git_common_dir"] = _filesystem_binding(common)
-        code, raw = _git(root, "rev-parse", "--absolute-git-dir")
+        code, raw = git(root, "rev-parse", "--absolute-git-dir")
         _require(code == 0 and len(raw.splitlines()) == 1, "Cannot resolve selected worktree Git directory")
         git_dir = Path(os.fsdecode(raw.rstrip(b"\n")))
         _require(git_dir.is_absolute() and git_dir.resolve(strict=True) == git_dir,
                  "Noncanonical worktree Git directory")
         observed["git_dir"] = str(git_dir)
         observed["binding"]["git_dir"] = _filesystem_binding(git_dir)
-        code, raw = _git(root, "worktree", "list", "--porcelain", "-z")
+        code, raw = git(root, "worktree", "list", "--porcelain", "-z")
         _require(code == 0 and raw.endswith(b"\x00\x00"), "Unsupported worktree metadata")
         entries = []
         for block in raw[:-2].split(b"\x00\x00"):
@@ -660,17 +654,23 @@ def _checkout_observation(value, budget):
                 _require(not any(f == b"bare" or f.startswith(b"prunable") for f in fields)
                          and sum(f.startswith(b"HEAD ") for f in fields) == 1,
                          "Unsupported primary or selected worktree metadata")
-        primary_identity = checkout(primary)
-        code, raw = _git(primary, "rev-parse", "--absolute-git-dir")
+        primary_identity = checkout(primary, limit=min(MAX_FILE, max(0, MAX_TOTAL - budget["bytes"])), deadline=budget.get("deadline"))
+        if primary_identity:
+            budget["bytes"] += sum(len(os.fsencode(str(p))) + 1 for p in primary_identity)
+        _require(budget["bytes"] <= MAX_TOTAL, "Project aggregate byte limit exceeded")
+        code, raw = git(primary, "rev-parse", "--absolute-git-dir")
         _require(primary_identity == (primary, common) and code == 0
                  and os.fsdecode(raw.rstrip(b"\n")) == str(common), "Primary worktree identity is ambiguous")
         observed["binding"]["primary_root"] = _filesystem_binding(primary)
         observed["primary_root"] = str(primary)
+        _check_observation_deadline(budget)
         return observed, None
     except (StartupError, OSError, ValueError, subprocess.SubprocessError) as error:
+        if "Git inventory limit exceeded" in str(error) and MAX_TOTAL - budget["bytes"] < MAX_FILE:
+            error = StartupError("Project aggregate byte limit exceeded; inventory remains incomplete")
         return observed, "Checkout/worktree observation incomplete: " + str(error)
 
-def _authority_observation(root, budget):
+def _authority_observation(root, budget, *, canonical_only=False):
     location = root / PROJECT_FILE
     observed = {"path": str(location), "fingerprint": {}, "binding": None, "record": None, "error": None, "target": None}
     try:
@@ -682,7 +682,9 @@ def _authority_observation(root, budget):
         info = location.stat()
         _require(info.st_nlink == 1, "Authority record has physical aliases")
         observed["binding"] = {"device": info.st_dev, "inode": info.st_ino}
-        raw = _read_file(location, min(MAX_FILE, 128 * 1024))
+        raw = _read_file(location, min(MAX_FILE, 128 * 1024, max(0, MAX_TOTAL - budget["bytes"])), expected_binding=observed["binding"])
+        budget["bytes"] += len(raw)
+        _require(budget["bytes"] <= MAX_TOTAL, "Project aggregate byte limit exceeded")
         _require(hashlib.sha256(raw).hexdigest() == observed["fingerprint"]["sha256"], "Authority changed while reading")
         record = read_request(raw)
         _bounded(record)
@@ -691,7 +693,9 @@ def _authority_observation(root, budget):
         if record.get("schema_version") == 2:
             observed["record"] = record
             decode_project_record(record)
+            _check_observation_deadline(budget)
             return observed
+        _require(not canonical_only, "Unsupported canonical enrollment schema")
         _object(record, ("schema_version", "project_id", "repository_root", "git_common_dir", "clients", "policy_digest"), ("runtime",))
         _require(type(record["schema_version"]) is int and record["schema_version"] == 1,
                  "Unsupported existing authority schema")
@@ -838,9 +842,11 @@ def _project_files(root, names, repositories, budget, gap):
     return fingerprints
 
 def _physical_target(root, location, fingerprint, budget, *, directory=False):
+    _check_observation_deadline(budget)
     _no_links(location)
     parents = {}
     for parent in (location.parent, *location.parent.parents):
+        _check_observation_deadline(budget)
         if not parent.is_relative_to(root):
             break
         if parent.exists():
@@ -861,6 +867,7 @@ def _physical_target(root, location, fingerprint, budget, *, directory=False):
     if directory:
         _require(budget["paths"] < MAX_PATHS, "Project aggregate command-cwd limit exceeded")
         budget["paths"] += 1
+    _check_observation_deadline(budget)
     return {"path": str(location), "binding": physical, "parents": parents, "fingerprint": fingerprint}
 
 def _target_observations(assessment, fingerprints, repositories=(), *, budget):
