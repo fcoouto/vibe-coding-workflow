@@ -756,6 +756,230 @@ class AdmissionTests(unittest.TestCase):
             request = self.second_owner(1, [dict(kind='path', key=str(relocated / 'HEAD'), mode='write')], scope=scope)
             self.api.prepare_assignment(scope, request)
 
+    def test_worker_plans_reject_external_and_sibling_filesystem_writes(self):
+        sibling = self.root / 'sibling'
+        sibling.mkdir()
+        for number, (kind, target) in enumerate((
+                ('path', self.root / 'external.py'), ('path', sibling / 'app.py'),
+                ('build', self.root / 'build'), ('database', self.root / 'database'))):
+            with self.subTest(kind=kind, target=target):
+                with self.assertRaisesRegex(state.StateError, 'task checkout'):
+                    self.second_owner(number, [dict(kind=kind, key=str(target), mode='write')])
+                with state._database(self.scope) as db:
+                    task = state._task(db, state._scope_id(self.scope), 'codex', 'parent-' + str(number))
+                    self.assertNotIn('delegation', task)
+                    self.assertEqual(db.execute('select count(*) from assignments').fetchone()[0], 0)
+
+    def test_worker_plans_reject_ancestor_foreign_git_and_symlink_escape(self):
+        foreign = self.root / 'foreign'
+        subprocess.run(['git', 'init', '-q', str(foreign)], check=True)
+        (self.repo / 'escape.py').symlink_to(foreign / 'new.py')
+        for target in (self.root, foreign / '.git/HEAD', self.repo / 'escape.py'):
+            with self.subTest(target=target):
+                value = self.plan_value()
+                value['jobs'][0]['claims'] = [dict(kind='path', key=str(target), mode='write')]
+                with self.assertRaises(state.StateError):
+                    self.plan(value)
+        self.assertNotIn('delegation', state.task_status(self.scope, 'codex', 'parent')['task'])
+
+    def test_worker_plans_reject_nested_repository_and_submodule_writes(self):
+        (self.repo / '.git/info/exclude').write_text('nested/\nsubmodule/\n')
+        number = 0
+        for name, marker in (('nested', 'directory'), ('submodule', 'file')):
+            nested = self.repo / name
+            nested.mkdir()
+            if marker == 'directory':
+                subprocess.run(['git', 'init', '-q', str(nested)], check=True)
+            else:
+                (nested / '.git').write_text('gitdir: ../.git/modules/submodule\n')
+            for relative in (name, name + '/app.py', name + '/.git'):
+                with self.subTest(relative=relative):
+                    with self.assertRaisesRegex(state.StateError, 'separate repository'):
+                        self.second_owner(number, [self.path_claim(relative)])
+                number += 1
+
+    def test_worker_directory_claim_cannot_admit_named_nested_repository_file(self):
+        (self.repo / 'work/nested').mkdir(parents=True)
+        value = self.plan_value()
+        value['jobs'][0]['claims'] = [self.path_claim('work')]
+        self.plan(value)
+        (self.repo / 'work/nested/.git').mkdir()
+        request = self.prepare_request()
+        request['brief'].update(resources=value['jobs'][0]['claims'], files=['work/nested/app.py'])
+        with self.assertRaisesRegex(state.StateError, 'separate repository'):
+            self.api.prepare_assignment(self.scope, request)
+        self.assert_no_worker_reservation(request)
+
+    def test_worker_named_file_cannot_escape_through_exact_alias_coverage(self):
+        external = self.root / 'external.py'
+        os.link(self.repo / 'app.py', external)
+        (self.repo / 'alias.py').symlink_to(external)
+        self.plan()
+        request = self.prepare_request()
+        request['brief']['files'] = ['alias.py']
+        with self.assertRaisesRegex(state.StateError, 'task checkout'):
+            self.api.prepare_assignment(self.scope, request)
+        self.assert_no_worker_reservation(request)
+
+    def test_worker_plans_reject_declared_outside_and_nested_aliases_to_checkout(self):
+        nested = self.repo / 'nested'
+        nested.mkdir()
+        (nested / '.git').mkdir()
+        (self.repo / '.git/info/exclude').write_text('nested/\n')
+        for number, alias in enumerate((self.root / 'alias.py', nested / 'alias.py')):
+            alias.symlink_to(self.repo / 'app.py')
+            with self.subTest(alias=alias):
+                with self.assertRaises(state.StateError):
+                    self.second_owner(number, [dict(kind='path', key=str(alias), mode='write')])
+
+    def test_worker_named_nested_alias_cannot_write_parent_checkout(self):
+        nested = self.repo / 'nested'
+        nested.mkdir()
+        (nested / '.git').mkdir()
+        (nested / 'alias.py').symlink_to(self.repo / 'app.py')
+        (self.repo / '.git/info/exclude').write_text('nested/\n')
+        self.plan()
+        request = self.prepare_request()
+        request['brief']['files'] = ['nested/alias.py']
+        with self.assertRaisesRegex(state.StateError, 'separate repository'):
+            self.api.prepare_assignment(self.scope, request)
+        self.assert_no_worker_reservation(request)
+
+    def test_worker_symlink_escape_during_discovery_cannot_reserve(self):
+        self.plan()
+        request = self.prepare_request()
+        external = self.root / 'external.py'
+        original = self.discover.side_effect
+        def discover(scope, controls):
+            (self.repo / 'app.py').rename(external)
+            (self.repo / 'app.py').symlink_to(external)
+            return original(scope, controls)
+        with patch.object(self.discover, 'side_effect', discover):
+            with self.assertRaises(state.StateError):
+                self.api.prepare_assignment(self.scope, request)
+        self.assert_no_worker_reservation(request)
+
+    def test_worker_coarse_claim_rechecks_named_repository_boundary_after_discovery(self):
+        nested = self.repo / 'work/nested'
+        nested.mkdir(parents=True)
+        (self.repo / '.git/info/exclude').write_text('work/\n')
+        value = self.plan_value()
+        value['jobs'][0]['claims'] = [self.path_claim('work')]
+        self.plan(value)
+        request = self.prepare_request()
+        request['brief'].update(resources=value['jobs'][0]['claims'], files=['work/nested/app.py'])
+        original = self.discover.side_effect
+        def discover(scope, controls):
+            (nested / '.git').mkdir()
+            return original(scope, controls)
+        with patch.object(self.discover, 'side_effect', discover):
+            with self.assertRaisesRegex(state.StateError, 'separate repository'):
+                self.api.prepare_assignment(self.scope, request)
+        self.assert_no_worker_reservation(request)
+
+    def assert_no_worker_reservation(self, request):
+        with state._database(self.scope) as db:
+            task = state._task(db, state._scope_id(self.scope), request['client'], request['session_id'])
+            self.assertEqual(task['revision'], request['expected_revision'])
+            self.assertEqual(task['delegation']['attempts_consumed'], 0)
+            self.assertEqual(task['delegation']['resource_units_consumed'], 0)
+            self.assertEqual(db.execute('select count(*) from assignments').fetchone()[0], 0)
+
+    def assert_worker_scope_is_rechecked(self, timing):
+        work = self.repo / 'work'
+        work.mkdir()
+        (work / 'app.py').write_text('value = 1\n')
+        (self.repo / '.git/info/exclude').write_text('work/\n')
+        value = self.plan_value()
+        value['jobs'][0]['claims'] = [self.path_claim('work/app.py')]
+        self.plan(value)
+        request = self.prepare_request()
+        request['brief'].update(resources=value['jobs'][0]['claims'], files=['work/app.py'])
+        original = self.discover.side_effect
+        def discover(scope, controls):
+            if timing == 'during':
+                (work / '.git').mkdir()
+            return original(scope, controls)
+        publish = evidence._artifact
+        def artifact(scope, content):
+            if timing == 'after' and not (work / '.git').exists():
+                (work / '.git').mkdir()
+            return publish(scope, content)
+        if timing == 'before':
+            (work / '.git').mkdir()
+        with patch.object(self.discover, 'side_effect', discover), patch.object(evidence, '_artifact', side_effect=artifact):
+            with self.assertRaisesRegex(state.StateError, 'separate repository'):
+                self.api.prepare_assignment(self.scope, request)
+        self.assert_no_worker_reservation(request)
+
+    def test_worker_scope_is_rechecked_before_discovery(self):
+        self.assert_worker_scope_is_rechecked('before')
+
+    def test_worker_scope_is_rechecked_during_discovery(self):
+        self.assert_worker_scope_is_rechecked('during')
+
+    def test_worker_scope_is_rechecked_after_discovery(self):
+        self.assert_worker_scope_is_rechecked('after')
+
+    def test_worker_new_plan_rechecks_scope_before_pinning(self):
+        work = self.repo / 'work'
+        work.mkdir()
+        value = self.plan_value()
+        value['jobs'][0]['claims'] = [self.path_claim('work/app.py')]
+        original = evidence._artifact
+        def publish(scope, content):
+            (work / '.git').mkdir(exist_ok=True)
+            return original(scope, content)
+        with patch.object(evidence, '_artifact', side_effect=publish):
+            with self.assertRaisesRegex(state.StateError, 'separate repository'):
+                self.plan(value)
+        self.assertNotIn('delegation', state.task_status(self.scope, 'codex', 'parent')['task'])
+
+    def test_worker_external_reads_and_in_checkout_shared_resources_remain_supported(self):
+        claims = [self.path_claim(), dict(kind='path', key=str(self.root / 'external.py'), mode='read'),
+                  dict(kind='build', key=str(self.repo / 'build'), mode='write'),
+                  dict(kind='database', key=str(self.repo / 'database'), mode='write'),
+                  dict(kind='port', key='tcp:8123', mode='write', host='local')]
+        value = self.plan_value()
+        value['jobs'][0]['claims'] = claims
+        self.plan(value)
+        request = self.prepare_request()
+        request['brief']['resources'] = claims
+        self.assertTrue(self.api.prepare_assignment(self.scope, request)['launch_admitted'])
+        other = self.second_owner(1, [claims[-1]])
+        with self.assertRaisesRegex(state.StateError, 'Canonical resource ownership conflicts'):
+            self.api.prepare_assignment(self.scope, other)
+
+    def test_legacy_external_worker_keeps_status_replay_and_exact_recovery(self):
+        value = self.plan_value()
+        value['jobs'][0]['claims'] = [dict(kind='path', key=str(self.root / 'external.py'), mode='write')]
+        # Retained pre-guard admission, never authority for a new production launch.
+        with patch.object(self.api, '_worker_scope', create=True):
+            planned = self.plan(value)
+            request = self.prepare_request()
+            request['brief'].update(resources=value['jobs'][0]['claims'], files=[])
+            prepared = self.api.prepare_assignment(self.scope, request)
+        self.assertEqual(self.plan(value)['plan'], planned['plan'])
+        report = self.api.delegation_status(self.scope, 'codex', 'parent')
+        self.assertEqual(report['capacity']['unresolved_managed_workers'], 1)
+        self.assertEqual(report['budgets']['attempts_consumed'], 1)
+        self.assertFalse(self.api.prepare_assignment(self.scope, request)['launch_admitted'])
+        with self.assertRaisesRegex(state.StateError, 'task checkout'):
+            self.api.prepare_assignment(self.scope, request | dict(dispatch_id='fresh',
+                expected_revision=self.request()['expected_revision']))
+        self.observe_worker(prepared, self.lifecycle_observation(prepared, turn_status='interrupted'))
+        bad = self.worker_reconciliation_request(prepared, outcome='cancelled', proof_delta=dict(descendants_stopped=False))
+        with self.assertRaises(state.StateError):
+            self.api.reconcile_assignment(self.scope, bad)
+        self.assertNotEqual(self.raw_assignment(prepared['attempt_id'])['status'], 'settled')
+        recovered = self.api.reconcile_assignment(self.scope,
+            self.worker_reconciliation_request(prepared, outcome='cancelled'))
+        self.assertEqual(recovered['outcome'], 'cancelled')
+        report = self.api.delegation_status(self.scope, 'codex', 'parent')
+        self.assertEqual(report['plan'], planned['plan'])
+        self.assertEqual(report['budgets']['attempts_consumed'], 1)
+        self.assertEqual(report['capacity']['unresolved_managed_workers'], 0)
+
     def operation_request(self, identity=None, **fields):
         identity = identity or self.identity
         with state._database(self.scope) as db:
@@ -1554,7 +1778,7 @@ class AdmissionTests(unittest.TestCase):
         shutil.copytree(private, spare)
         (spare / 'commondir').write_text(str(self.scope.git_common_dir) + '\n')
         scope = replace(self.scope, project_id='routing-linked', repository_root=linked)
-        target = spare / 'HEAD'
+        target = linked / 'app.py'
         alias = self.root / 'routing-alias'
         if change == 'private-alias':
             alias.symlink_to(private, target_is_directory=True)
@@ -1564,7 +1788,6 @@ class AdmissionTests(unittest.TestCase):
             (private / 'commondir').write_text(str(alias) + '\n')
             spare_common = self.root / 'spare-common'
             shutil.copytree(self.scope.git_common_dir, spare_common)
-            target = spare_common / 'config'
         request = self.second_owner(1, [dict(kind='path', key=str(target), mode='write')], scope=scope)
         def mutate():
             if change == 'marker':

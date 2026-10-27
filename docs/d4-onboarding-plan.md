@@ -8,6 +8,8 @@ Implementation plan · 26 October 2026 · **Original scope approved for implemen
 
 **Basis:** [D3 plan](d3-onboarding-plan.md), [Project Onboarding policy](../policies/10-project-onboarding.md), [approved deliverable](onboard-my-project-plan.md#5-small-deliverables), [source coverage](policy-sources.md), and OpenAI's installed `skill-creator` standard. Keep the entry skill concise and load apply/recovery details only when needed. Runtime uses Python 3.11+ and the standard library.
 
+Current D4 explicitly rejects schema-2 private Project plans immediately after loading, before transaction validation, worktree locks or journal creation. This protects the existing schema-1 transaction path; it does not deliver Project adoption or schema-2 enrollment.
+
 ## Scope and reuse
 
 - Add `runtime/changes.py`, focused tests in `tests/test_changes.py`, and extend `scripts/workflow.py` with only `onboard apply`, `onboard resume` and `onboard rollback`. Add narrow dispatcher cases to `tests/test_runtime.py`.

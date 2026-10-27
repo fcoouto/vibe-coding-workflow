@@ -53,3 +53,9 @@ Evidence: `/Users/fcouto/.local/share/vcw-validation/d4-testing-_myp6ei2`, with 
 Private evidence: `/Users/fcouto/.local/share/vcw-validation/d4-implementation-ujrhepc9`. Final adoption is in `adoption-final/`; earlier evidence remains unchanged. Final adoption report SHA-256: `cca71c1b86098e055afa1ea9ec022035ff785d3e38b5cd8f6032b3b585d2e20c`. Native report SHA-256: `218b9d969697ab03611df6a7a08c2f20e479fc10371e5dce938c62e6642bc59f`.
 
 Package/helper tests, delegated instruction execution and fresh native startup are separate evidence categories. Missing mandatory project mechanisms must remain pending; a temporary qualification record or `applied` result cannot establish task or merge readiness. Validation performed no live project enrollment, global installation, Superset change or release publication.
+
+## Private Project-plan boundary — 27 October 2026
+
+Private D3 schema 2 is rejected before D4 validation, worktree locks or journal creation. The apply/resume/rollback gate regression passed in the 111-test D3A run, the 133-test D3B compatibility snapshot and the 525-test integration run. Its code remained unchanged through the final D3B fix.
+
+Historical apply/recovery/native observations above remain schema-1 fixture evidence. They do not establish canonical Project enrollment, umbrella startup, future-member joining or runtime/evidence identity integration.

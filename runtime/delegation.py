@@ -574,6 +574,32 @@ def _worker_claims(scope, claims, git_directory):
                      '.vibe-coding-workflow' not in path.parts, 'Lockfiles and tracking remain coordinator-owned')
 
 
+def _worker_scope(scope, claims, files=()):
+    """Check new filesystem admission against the checkout covered by D5/D6."""
+    from pathlib import Path
+    writes = [(claim, Path(source['key'])) for source, claim in zip(claims, _claims(claims))
+              if claim['mode'] == 'write' and 'path' in claim]
+    for name in files:
+        declared = scope.repository_root / name
+        file = _claims([dict(kind='path', key=str(declared), mode='write')])[0]
+        if any(_covers(claim, file) for claim, _ in writes):
+            writes.append((file, declared))
+    for claim, declared in writes:
+        for path in dict.fromkeys((declared, Path(claim['path']))):
+            _require(path.is_relative_to(scope.repository_root), 'Worker filesystem writes must stay within the task checkout')
+            # No descendant inventory: check declared paths and named files for repository boundaries.
+            for ancestor in (path, *path.parents):
+                if ancestor == scope.repository_root:
+                    break
+                try:
+                    (ancestor / '.git').lstat()
+                except (FileNotFoundError, NotADirectoryError):
+                    continue
+                except OSError:
+                    raise state.StateError('Worker repository boundary is unavailable') from None
+                raise state.StateError('Worker filesystem writes cannot enter a separate repository or submodule')
+
+
 def _delegation_plan(scope, plan):
     evidence._bounded(plan)
     state._fields(plan, (*PLAN_FIELDS, 'git_directory'))
@@ -664,10 +690,16 @@ def plan_delegation(scope, request):
             return dict(ok=True, revision=task['revision'], plan=task['delegation']['plan'],
                         plan_digest=task['delegation']['plan']['digest'], limitations=ADMISSION_LIMITATIONS)
     _require(plan['limits']['deadline'] > _now(), 'Delegation admission deadline has elapsed')
+    for job in plan['jobs']:
+        if job['role'] == 'worker':
+            _worker_scope(scope, job['claims'])
     reference = evidence._artifact(scope, plan)
     with state._database(scope, write=True) as db:
         task = evidence._task(db, scope, request)
         _require('delegation' not in task, 'Delegation plan was concurrently established')
+        for job in plan['jobs']:
+            if job['role'] == 'worker':
+                _worker_scope(scope, job['claims'])
         task['delegation'] = dict(version=ADMISSION_VERSION, plan=reference, attempts_consumed=0, resource_units_consumed=0)
         if task['state'] == 'ready':
             task['state'] = 'verifying'
@@ -968,6 +1000,8 @@ def _discovery(scope, plan, request):
 
 
 def _admission(scope, db, task, plan, job, claims, records, request):
+    if job['role'] == 'worker':
+        _worker_scope(scope, job['claims'], request['brief']['files'])
     limits = plan['limits']
     _require(task['state'] not in {'blocked', 'awaiting_user', 'cancelled'} and not any(
         c['kind'] in {'blocker', 'decision'} and c['status'] == 'pending' for c in task['conditions']),
@@ -1395,6 +1429,8 @@ def _prepare_native(scope, request, *, role):
                  'Prepared scope, policy, resources or checkout generation changed')
         if role == 'review':
             evidence._review_admission(scope, task, proof_plan, request)
+        else:
+            _require(_brief(scope, job, request['brief'], proof_plan) == claims, 'Prepared worker resources changed')
         _admission(scope, db, task, plan, job, claims, records, request)
         _insert_assignment(db, scope, task, dict(id=attempt_id, owner=owner, data=data, body=body))
         record = dict(id=attempt_id, owner=owner, data=data, body=body)

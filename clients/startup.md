@@ -8,6 +8,8 @@ The shared runtime resolves the nearest Git checkout and common Git directory. P
 
 Read `.vibe-coding-workflow/project.json` only at the checkout root. Startup tests use disposable fixtures; D4 will create this record through explicit onboarding. A fixture does not establish completed onboarding or qualified enforcement.
 
+Private Project-plan schema 2 is not an enrollment record. Startup still reads schema-1 checkout-root enrollment; private inspection/proposal support does not implement umbrella discovery/adoption or future-member activation. The nested runtime/SQLite schema is a separate version contract.
+
 | Field | Meaning |
 | --- | --- |
 | `schema_version` | Integer `1` |

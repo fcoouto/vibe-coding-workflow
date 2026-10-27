@@ -14,7 +14,7 @@ import subprocess
 import time
 import uuid
 
-from runtime.startup import StartupError, checkout, json_object, policy_digest
+from runtime.startup import PROJECT_FILE, StartupError, checkout, json_object, policy_digest, runtime_settings
 from runtime.state import runtime_fingerprint
 
 
@@ -30,22 +30,18 @@ LIMITS = ["Helpers do not authenticate source ownership, trust, catalog semantic
           "Structural checks do not qualify client execution, enrollment, approval, or merge readiness.",
           "No project commands run; missing baseline and client observations remain agent-recorded gaps."]
 
-
 def _require(condition, message):
     if not condition:
         raise StartupError(message)
-
 
 def _object(value, required, optional=()):
     _require(isinstance(value, dict) and set(required) <= value.keys()
              and value.keys() <= set(required) | set(optional), "Invalid onboarding object fields")
 
-
 def _text(value, empty=False):
     _require(isinstance(value, str) and (empty or bool(value.strip()))
              and len(value) <= 65536 and "\x00" not in value, "Invalid onboarding text")
     return value
-
 
 def _strings(value, empty=True):
     _require(isinstance(value, list) and len(value) <= MAX_PATHS
@@ -55,7 +51,6 @@ def _strings(value, empty=True):
     _require(len(value) == len(set(value)), "Duplicate onboarding reference")
     return value
 
-
 def _relative(value):
     _text(value)
     path = PurePosixPath(value)
@@ -63,20 +58,16 @@ def _relative(value):
              and value != "." and not any(ord(c) < 32 for c in value), "Invalid relative target/source path")
     return value
 
-
 def _hash(value):
     _require(isinstance(value, str) and HEX.fullmatch(value), "Invalid content hash")
     return value
-
 
 def _digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
                                      ensure_ascii=True).encode()).hexdigest()
 
-
 def _now():
     return datetime.now(timezone.utc).isoformat()
-
 
 def read_request(raw, limit=MAX_REQUEST):
     """Use startup's strict parser for small inputs; retain its rules for larger artifacts."""
@@ -97,7 +88,6 @@ def read_request(raw, limit=MAX_REQUEST):
     result = json.loads(raw, object_pairs_hook=unique, parse_constant=invalid_number)
     _require(isinstance(result, dict), "Expected a JSON object")
     return result
-
 
 def _bounded(value):
     """Bound direct Python callers as well as CLI input; reject private raw record categories."""
@@ -121,18 +111,15 @@ def _bounded(value):
         else:
             _require(item is None or type(item) in (bool, int, float), "Invalid onboarding value")
 
-
 def _no_links(path):
     for item in (path, *path.parents):
         if os.path.lexists(item):
             _require(not item.is_symlink(), "Onboarding paths must not contain links")
 
-
 def _private(st, directory=False):
     _require((stat.S_ISDIR(st.st_mode) if directory else stat.S_ISREG(st.st_mode))
              and st.st_uid == os.getuid() and st.st_mode & 0o077 == 0
              and (directory or st.st_nlink == 1), "Onboarding files must be private, owned, regular and unlinked")
-
 
 def _git(root, *args):
     env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
@@ -159,7 +146,6 @@ def _git(root, *args):
             process.kill()
         process.wait()
         process.stdout.close()
-
 
 def _plan_path(value):
     _require(os.name == "posix", "Onboarding requires a qualified POSIX filesystem")
@@ -204,7 +190,6 @@ def _locked(value):
             os.close(lock)
         os.close(directory)
 
-
 def _open_path(path, flags):
     """Resolve every component with no-follow descriptors, closing symlink-swap races."""
     path = Path(path)
@@ -219,7 +204,6 @@ def _open_path(path, flags):
     finally:
         os.close(parent)
 
-
 def _read_file(path, limit, private=False):
     descriptor = _open_path(path, os.O_RDONLY)
     with os.fdopen(descriptor, "rb") as stream:
@@ -232,7 +216,6 @@ def _read_file(path, limit, private=False):
         _require(len(raw) <= limit, "Onboarding file size limit exceeded")
         return raw
 
-
 def _load(path):
     if not os.path.lexists(path / "plan.json"):
         return None
@@ -240,6 +223,11 @@ def _load(path):
         plan = read_request(_read_file(path / "plan.json", MAX_PLAN, private=True), MAX_PLAN)
     except OSError:
         raise StartupError("Plan record must be a private regular file without links") from None
+    if plan.get("schema_version") == 2:
+        _project_plan_shape(plan)
+        for item in plan["sources"]["declared"]["toolkit"]["files"]:
+            _source_location(item["local_path"], path)
+        return plan
     _object(plan, ("schema_version", "plan_id", "revision", "created_at", "identity", "package_pins",
         "sources", "requirements", "inventory", "decisions", "coverage", "actions", "evidence",
         "semantic_assessment", "invalidations", "decision_history", "recovery_requirement", "status",
@@ -247,7 +235,6 @@ def _load(path):
     _require(plan.get("schema_version") == 1 and type(plan.get("revision")) is int
              and plan["revision"] >= 1, "Unsupported onboarding plan")
     return plan
-
 
 def _save(plan, path, directory):
     raw = json.dumps(plan, sort_keys=True, indent=2, ensure_ascii=True).encode() + b"\n"
@@ -267,6 +254,14 @@ def _save(plan, path, directory):
     finally:
         if os.path.lexists(path / name):
             os.unlink(name, dir_fd=directory)
+
+
+def _source_location(value, directory):
+    local = Path(_text(value))
+    _require(local.is_absolute() and local.is_relative_to(directory) and local != directory
+             and ".." not in local.parts and local.name not in {"plan.json", ".lock"}
+             and not local.name.startswith(".plan-"), "Retain source material inside the private plan directory")
+    return local
 
 
 def _source_record(record, path):
@@ -297,10 +292,8 @@ def _source_record(record, path):
         paths.add(item["path"])
         _hash(item["sha256"])
         _require(type(item["required"]) is bool, "Expected source requirement boolean")
-        local = Path(_text(item["local_path"]))
-        _require(local.is_absolute() and local.is_relative_to(path) and local != path
-                 and str(local.resolve()) == str(local) and local.name not in {"plan.json", ".lock"}
-                 and not local.name.startswith(".plan-"), "Retain source material inside the private plan directory")
+        local = _source_location(item["local_path"], path)
+        _require(str(local.resolve()) == str(local), "Retain source material inside the private plan directory")
     for name in _strings(record["required_sources"], empty=False):
         _relative(name)
     ids = set()
@@ -319,7 +312,6 @@ def _source_record(record, path):
         _strings(row["dependencies"])
     _dependencies(toolkit["catalog"], ids)
 
-
 def _dependencies(rows, ids):
     for row in rows:
         _strings(row["dependencies"])
@@ -330,7 +322,6 @@ def _dependencies(rows, ids):
         ready = {key for key, deps in remaining.items() if not deps}
         _require(bool(ready), "Cyclic onboarding dependencies")
         remaining = {key: deps - ready for key, deps in remaining.items() if key not in ready}
-
 
 def _sources(record):
     observed = {}
@@ -349,8 +340,7 @@ def _sources(record):
             observed[item["path"]] = {"status": "unavailable"}
     return observed
 
-
-def _fingerprint(root, relative):
+def _fingerprint(root, relative, limit=MAX_FILE):
     path = root / relative
     try:
         _no_links(path)
@@ -360,15 +350,14 @@ def _fingerprint(root, relative):
         if path.name == ".env" or path.name.startswith(".env.") or path.suffix in {
                 ".pem", ".key", ".p12", ".pfx"}:
             return {"status": "excluded", "reason": "potential secret file"}
-        if st.st_size > MAX_FILE:
+        if st.st_size > limit:
             return {"status": "oversized"}
-        raw = _read_file(path, MAX_FILE)
+        raw = _read_file(path, limit)
         return {"status": "read", "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}
     except FileNotFoundError:
         return {"status": "absent"}
     except (OSError, StartupError):
         return {"status": "unreadable_or_link"}
-
 
 def _file_targets(actions):
     _require(isinstance(actions, list) and len(actions) <= MAX_PATHS, "Invalid proposed actions")
@@ -379,8 +368,7 @@ def _file_targets(actions):
             targets.append(_relative(action.get("target")))
     return targets
 
-
-def _snapshot(root, targets=()):
+def _snapshot(root, targets=(), *, budget=None):
     identity = checkout(root)
     _require(identity is not None and identity[0] == root, "Selected checkout identity changed")
     code, raw = _git(root, "ls-files", "--cached", "--others", "--exclude-standard", "-z")
@@ -391,7 +379,8 @@ def _snapshot(root, targets=()):
     total = 0
     for name in names:
         _relative(name)
-        fingerprints[name] = _fingerprint(root, name)
+        fingerprints[name] = (_inspection_fingerprint(root, name, budget)
+                              if budget is not None else _fingerprint(root, name))
         total += fingerprints[name].get("bytes", 0)
         _require(total <= MAX_TOTAL, "Checkout byte limit exceeded; inventory remains incomplete")
     instructions = []
@@ -408,7 +397,8 @@ def _snapshot(root, targets=()):
         for name in ("AGENTS.md", "AGENTS.override.md", "CLAUDE.md", ".github/copilot-instructions.md"):
             location = directory / name
             key = "instruction:" + str(location)
-            fingerprints[key] = _fingerprint(directory, name)
+            fingerprints[key] = (_inspection_fingerprint(directory, name, budget)
+                                 if budget is not None else _fingerprint(directory, name))
             if fingerprints[key]["status"] != "absent":
                 instructions.append({"path": str(location), "scope": str(directory),
                                      "editable": location.is_relative_to(root)})
@@ -423,10 +413,8 @@ def _snapshot(root, targets=()):
             "dirty_inventory": [os.fsdecode(v) for v in status.split(b"\x00") if v],
             "paths": names, "fingerprints": fingerprints, "instructions": instructions}
 
-
 def _package_pins():
     return {"policy_digest": policy_digest(PACKAGE), "runtime_digest": runtime_fingerprint()}
-
 
 def _requirements(record):
     rows = [dict(row) for row in record["toolkit"]["catalog"]]
@@ -438,10 +426,8 @@ def _requirements(record):
                      "dependencies": []})
     return rows
 
-
 def _block(scope, reason, resumption):
     return {"scope": scope, "reason": reason, "resumption": resumption}
-
 
 def _source_blockers(plan, observed):
     record = plan["sources"]["declared"]
@@ -459,7 +445,6 @@ def _source_blockers(plan, observed):
     if not record["toolkit"]["catalog"]:
         blockers.append(_block("catalog", "Complete upstream catalog is missing", "Discover complete pinned catalog"))
     return blockers
-
 
 def _current(plan):
     root = Path(plan["identity"]["repository_root"])
@@ -488,12 +473,10 @@ def _current(plan):
                "sources": sources, "package_pins": package}
     return sorted(set(changes)), sources, current
 
-
 def _remember_decision(plan, decision):
     entry = {"revision": plan["revision"], "decision": deepcopy(decision)}
     if entry not in plan["decision_history"]:
         plan["decision_history"].append(entry)
-
 
 def _invalidate(plan, changes):
     if not changes:
@@ -511,16 +494,19 @@ def _invalidate(plan, changes):
     if not plan["invalidations"] or plan["invalidations"][-1].get("changed_inputs") != changes:
         plan["invalidations"].append(entry)
 
-
 def _review_digest(plan):
+    if plan["schema_version"] == 2:
+        return _digest({key: plan[key] for key in ("identity", "project_scope", "assessments",
+            "package_pins", "sources", "requirements", "current_observations")})
     return _digest({key: plan[key] for key in (
         "identity", "package_pins", "sources", "inventory", "decisions", "coverage", "actions", "evidence",
         "semantic_assessment")})
 
-
 def _finish(plan, sources, changes, blockers, draft=False, current=None):
     blockers = _source_blockers(plan, sources) + blockers
-    pending = [d for d in plan["decisions"] if d["disposition"] in ("pending", "proposed")]
+    decisions = ([d | {"id": key} for key, d in _project_decisions(plan).items()]
+                 if plan["schema_version"] == 2 else plan["decisions"])
+    pending = [d for d in decisions if d["disposition"] in ("pending", "proposed")]
     if changes:
         blockers = [_block(name, "Pinned input changed; dependent assessment is stale",
                            "Reinspect affected inputs and reconcile this plan with current_input_digest; restore changed sources to their pinned hashes")
@@ -534,6 +520,9 @@ def _finish(plan, sources, changes, blockers, draft=False, current=None):
         status = "draft"
     else:
         status = "ready_for_review"
+    if plan["schema_version"] == 2 and len(blockers) > MAX_PATHS:
+        blockers = blockers[:MAX_PATHS - 1] + [_block("limits", "Aggregate blocker limit reached; assessment remains incomplete",
+            "Resolve listed gaps, then reinspect for remaining bounded observations")]
     current = current or {"identity": plan["identity"], "sources": sources, "package_pins": plan["package_pins"]}
     plan.update(status=status, blockers=blockers, verified_at=_now(), review_digest=_review_digest(plan),
                 current_input_digest=_digest(current))
@@ -546,9 +535,10 @@ def _finish(plan, sources, changes, blockers, draft=False, current=None):
             "evidence_limits": limits, "review_digest": plan["review_digest"], "current_input_digest": plan["current_input_digest"],
             "exit_code": 0 if status == "ready_for_review" else 2}
 
-
 def inspect_project(cwd, plan_dir, source_record):
     """Pin one explicitly selected checkout and declared retained source bundle."""
+    if isinstance(source_record, dict) and "project_scope" in source_record:
+        return _inspect_project_scope(cwd, plan_dir, source_record)
     _require(Path(cwd).is_absolute(), "Select an absolute target checkout")
     identity = checkout(Path(cwd))
     _require(identity is not None, "Onboarding prerequisite: select an existing Git checkout; do not initialize one")
@@ -568,6 +558,7 @@ def inspect_project(cwd, plan_dir, source_record):
                     "invalidations": [], "decision_history": [], "recovery_requirement": "D4 must back up privately and journal before apply"}
             report = _finish(plan, sources, [], [], draft=True)
         else:
+            _require(plan["schema_version"] == 1, "Project scope is frozen; resume with the same explicit scope")
             _require(plan["identity"]["repository_root"] == str(root), "Plan belongs to another selected checkout")
             _require(plan["sources"]["declared"] == source_record,
                      "Pinned sources/clients cannot change on resume; start a new plan directory")
@@ -576,6 +567,640 @@ def inspect_project(cwd, plan_dir, source_record):
             plan["revision"] += 1
             blockers = _validate_proposal(plan) if plan["semantic_assessment"] else []
             report = _finish(plan, sources, changes, blockers, draft=not bool(plan["semantic_assessment"]), current=current)
+        _save(plan, path, directory)
+        return report
+
+def _inspection_fingerprint(root, relative, budget):
+    _require(budget["paths"] < MAX_PATHS, "Project aggregate path limit exceeded; inventory remains incomplete")
+    budget["paths"] += 1
+    remaining = MAX_TOTAL - budget["bytes"]
+    _require(remaining >= 0, "Project aggregate byte limit exceeded; inventory remains incomplete")
+    result = _fingerprint(root, relative, min(MAX_FILE, remaining))
+    _require(not (result["status"] == "oversized" and remaining < MAX_FILE),
+             "Project aggregate byte limit exceeded; inventory remains incomplete")
+    budget["bytes"] += result.get("bytes", 0)
+    return result
+
+def _filesystem_binding(path):
+    _no_links(path)
+    info = path.stat()
+    _require(stat.S_ISDIR(info.st_mode), "Project identity needs an existing directory")
+    return {"device": info.st_dev, "inode": info.st_ino}
+
+def _project_scope(value):
+    _object(value, ("kind", "project_root", "member_checkouts", "membership", "authority", "project_files"))
+    _require(value["kind"] in ("standalone", "umbrella"), "Invalid Project kind")
+    root = Path(_text(value["project_root"]))
+    _require(root.is_absolute(), "Select an absolute Project root")
+    _require(str(root.resolve(strict=True)) == str(root), "Project root must be canonical")
+    _filesystem_binding(root)
+    members = _strings(value["member_checkouts"], empty=False)
+    _require(all(Path(member).is_absolute() for member in members), "Select absolute member checkout roots")
+    _require(value["kind"] != "standalone" or len(members) == 1,
+             "Standalone inspection selects exactly one checkout")
+    membership = value["membership"]
+    _object(membership, ("include", "exclude", "future_join", "authorization"))
+    for name in ("include", "exclude"):
+        for boundary in _strings(membership[name], empty=name == "exclude"):
+            if boundary != ".":
+                _relative(boundary)
+    _require(type(membership["future_join"]) is bool, "Expected future-join boolean")
+    _text(membership["authorization"])
+    authority = value["authority"]
+    _object(authority, ("path", "sha256", "reference"))
+    _require(authority["path"] == str(root / PROJECT_FILE), "Project authority must use its canonical enrollment path")
+    if authority["sha256"] != "absent":
+        _hash(authority["sha256"])
+    _text(authority["reference"])
+    for name in _strings(value["project_files"]):
+        _relative(name)
+    _require(value["kind"] != "standalone" or not value["project_files"],
+             "Standalone named files belong to its selected Repository assessment")
+    _require(len(members) + len(value["project_files"]) + len(membership["include"])
+             + len(membership["exclude"]) <= MAX_PATHS, "Project scope aggregate path limit exceeded")
+    return deepcopy(value)
+
+def _checkout_observation(value, budget):
+    root = Path(value)
+    observed = {"root": str(root), "primary_root": None, "git_dir": None, "git_common_dir": None,
+                "binding": {}, "membership": "unknown", "snapshot": None}
+    try:
+        _require(str(root.resolve(strict=True)) == str(root), "Member boundary contains a link or noncanonical root")
+        observed["binding"]["root"] = _filesystem_binding(root)
+        identity = checkout(root)
+        _require(identity is not None and identity[0] == root, "Member must select an existing checkout root")
+        common = identity[1]
+        observed["git_common_dir"] = str(common)
+        observed["binding"]["git_common_dir"] = _filesystem_binding(common)
+        code, raw = _git(root, "rev-parse", "--absolute-git-dir")
+        _require(code == 0 and len(raw.splitlines()) == 1, "Cannot resolve selected worktree Git directory")
+        git_dir = Path(os.fsdecode(raw.rstrip(b"\n")))
+        _require(git_dir.is_absolute() and git_dir.resolve(strict=True) == git_dir,
+                 "Noncanonical worktree Git directory")
+        observed["git_dir"] = str(git_dir)
+        observed["binding"]["git_dir"] = _filesystem_binding(git_dir)
+        code, raw = _git(root, "worktree", "list", "--porcelain", "-z")
+        _require(code == 0 and raw.endswith(b"\x00\x00"), "Unsupported worktree metadata")
+        entries = []
+        for block in raw[:-2].split(b"\x00\x00"):
+            fields = block.split(b"\x00")
+            _require(fields[0].startswith(b"worktree ")
+                     and sum(field.startswith(b"worktree ") for field in fields) == 1,
+                     "Ambiguous worktree metadata")
+            location = Path(os.fsdecode(fields[0][9:]))
+            _require(location.is_absolute(), "Unsupported worktree path")
+            entries.append((location, fields[1:]))
+            _require(len(entries) + budget["paths"] <= MAX_PATHS, "Project aggregate worktree limit exceeded")
+        budget["paths"] += len(entries)
+        locations = [entry[0] for entry in entries]
+        _require(len(locations) == len(set(locations)) and root in locations, "Ambiguous selected worktree metadata")
+        primary = locations[0]
+        for location, fields in entries:
+            if location in (primary, root):
+                _require(not any(f == b"bare" or f.startswith(b"prunable") for f in fields)
+                         and sum(f.startswith(b"HEAD ") for f in fields) == 1,
+                         "Unsupported primary or selected worktree metadata")
+        primary_identity = checkout(primary)
+        code, raw = _git(primary, "rev-parse", "--absolute-git-dir")
+        _require(primary_identity == (primary, common) and code == 0
+                 and os.fsdecode(raw.rstrip(b"\n")) == str(common), "Primary worktree identity is ambiguous")
+        observed["binding"]["primary_root"] = _filesystem_binding(primary)
+        observed["primary_root"] = str(primary)
+        return observed, None
+    except (StartupError, OSError, ValueError, subprocess.SubprocessError) as error:
+        return observed, "Checkout/worktree observation incomplete: " + str(error)
+
+def _authority_observation(root, budget):
+    location = root / PROJECT_FILE
+    observed = {"path": str(location), "fingerprint": {}, "binding": None, "record": None, "error": None}
+    try:
+        observed["fingerprint"] = _inspection_fingerprint(root, str(PROJECT_FILE), budget)
+        if observed["fingerprint"]["status"] == "absent":
+            return observed
+        _require(observed["fingerprint"]["status"] == "read", "Unreadable authority preimage")
+        info = location.stat()
+        _require(info.st_nlink == 1, "Authority record has physical aliases")
+        observed["binding"] = {"device": info.st_dev, "inode": info.st_ino}
+        raw = _read_file(location, min(MAX_FILE, 128 * 1024))
+        _require(hashlib.sha256(raw).hexdigest() == observed["fingerprint"]["sha256"], "Authority changed while reading")
+        record = read_request(raw)
+        _bounded(record)
+        _object(record, ("schema_version", "project_id", "repository_root", "git_common_dir", "clients", "policy_digest"), ("runtime",))
+        _require(type(record["schema_version"]) is int and record["schema_version"] == 1,
+                 "Unsupported existing authority schema")
+        _require(isinstance(record["project_id"], str)
+                 and re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", record["project_id"]), "Invalid authority identity")
+        _strings(record["clients"], empty=False)
+        _hash(record["policy_digest"])
+        for key in ("repository_root", "git_common_dir"):
+            _text(record[key])
+        if "runtime" in record:
+            _object(record["runtime"], ("schema_version", "state_dir"))
+        runtime_settings(record, PACKAGE, Path(record["git_common_dir"]))
+        observed["record"] = record
+    except (StartupError, OSError, ValueError, TypeError, subprocess.SubprocessError):
+        observed["error"] = "Existing authority is malformed, unsupported, changed, aliased or unreadable"
+    return observed
+
+def _project_observations(scope, sources, assessments=None):
+    root = Path(scope["project_root"])
+    budget = {"paths": len(sources), "bytes": sum(value.get("bytes", 0) for value in sources.values())}
+    blockers = []
+    def gap(owner, reason):
+        blockers.append(_block(owner, reason, "Resolve the explicit scope/identity gap before proposing adoption"))
+    by_root = {a["owner"]["root"]: a for a in _assessments(assessments)}
+    repositories = []
+    for member in scope["member_checkouts"]:
+        observation, error = _checkout_observation(member, budget)
+        repositories.append(observation)
+        if error:
+            gap(member, error)
+    boundaries_valid = True
+    for boundary in scope["membership"]["include"] + scope["membership"]["exclude"]:
+        location = root / boundary
+        try:
+            _no_links(location)
+            _require(location.resolve().is_relative_to(root), "Membership boundary escapes Project root")
+        except (StartupError, OSError):
+            boundaries_valid = False
+            gap(boundary, "Membership boundary contains a link or canonical escape")
+    if scope["kind"] == "umbrella":
+        code, _ = _git(root, "-c", "safe.bareRepository=all", "rev-parse", "--absolute-git-dir")
+        if code == 0:
+            gap("project", "Umbrella inspection requires an explicitly selected non-Git root")
+    common_dirs = [r["git_common_dir"] for r in repositories if r["git_common_dir"]]
+    duplicate_repositories = {common for common in common_dirs if common_dirs.count(common) > 1}
+    for repository in repositories:
+        primary = Path(repository["primary_root"]) if repository["primary_root"] else None
+        if repository["git_common_dir"] in duplicate_repositories:
+            gap(repository["root"], "Multiple selected checkouts name the same Repository; select one action checkout")
+            continue
+        if primary is None:
+            continue
+        if scope["kind"] == "standalone" and primary != root:
+            gap(repository["root"], "Standalone Project root must match its observed primary checkout")
+            continue
+        excluded = any(primary.is_relative_to(root / p) for p in scope["membership"]["exclude"])
+        included = primary.is_relative_to(root) and any(
+            primary.is_relative_to(root / p) for p in scope["membership"]["include"])
+        repository["membership"] = "excluded" if excluded else "included" if included else "outside"
+        if not included or excluded:
+            gap(repository["root"], "Selected Repository is excluded or outside the literal membership boundary")
+            continue
+        if not boundaries_valid:
+            repository["membership"] = "unknown"
+            continue
+        try:
+            assessment = by_root.get(repository["root"], {})
+            targets = _observed_targets(assessment)
+            repository["snapshot"] = _snapshot(Path(repository["root"]), targets, budget=budget)
+            for name in targets:
+                if name not in repository["snapshot"]["fingerprints"]:
+                    repository["snapshot"]["fingerprints"][name] = _inspection_fingerprint(Path(repository["root"]), name, budget)
+            if assessment.get("actions") or assessment.get("identity", {}).get("targets"):
+                repository["targets"] = _target_observations(assessment, repository["snapshot"]["fingerprints"], budget=budget)
+            if any(value["status"] not in ("read", "absent") for value in repository["snapshot"]["fingerprints"].values()):
+                gap(repository["root"], "Repository inventory contains unreadable, excluded or over-limit files")
+        except (StartupError, OSError, ValueError, subprocess.SubprocessError) as error:
+            gap(repository["root"], "Repository inventory incomplete: " + str(error))
+    candidates = {root, *root.parents}
+    for repository in repositories:
+        for key in ("root", "primary_root"):
+            if repository[key]:
+                location = Path(repository[key])
+                candidates.update((location, *location.parents))
+    _require(len(candidates) <= MAX_PATHS, "Project authority path limit exceeded")
+    authority = [_authority_observation(candidate, budget) for candidate in sorted(candidates)]
+    present = [a for a in authority if a["fingerprint"].get("status") != "absent"]
+    selected = next(a for a in authority if a["path"] == scope["authority"]["path"])
+    actual = selected["fingerprint"].get("sha256", selected["fingerprint"].get("status"))
+    if actual != scope["authority"]["sha256"]:
+        gap("authority", "Selected authority preimage does not match the explicit scope")
+    for item in present:
+        if item["error"]:
+            gap(item["path"], item["error"])
+        if item is not selected or len(present) > 1:
+            gap(item["path"], "Overlapping or member authority requires explicit reconciliation; membership does not transfer identity")
+    project = None
+    if scope["kind"] == "umbrella":
+        assessment = by_root.get(str(root), {})
+        names = list(dict.fromkeys([*scope["project_files"], *_observed_targets(assessment)]))
+        fingerprints = _project_files(root, names, repositories, budget, gap)
+        project = {"project_root": str(root), "paths": names, "fingerprints": fingerprints}
+        if assessment.get("actions") or assessment.get("identity", {}).get("targets"):
+            project["targets"] = _target_observations(assessment, fingerprints, repositories, budget=budget)
+
+    return {"project_binding": _filesystem_binding(root), "authority": authority,
+            "project": project, "repositories": repositories}, blockers
+
+
+def _assessments(value):
+    if value is None:
+        return []
+    return ([value["project"]] if value["project"] is not None else []) + value["repositories"]
+
+def _observed_targets(assessment):
+    prior = assessment.get("identity", {}).get("targets", {})
+    return list(dict.fromkeys([*(name for name in prior if not name.startswith("cwd:/")),
+                              *_file_targets(assessment.get("actions", []))]))
+
+def _project_file_boundary(root, name, repositories):
+    target = root / name
+    _no_links(target)
+    protected = [Path(r[k]) for r in repositories for k in ("root", "primary_root", "git_dir", "git_common_dir") if r[k]]
+    _require(not any(target.is_relative_to(p) or p.is_relative_to(target) for p in protected)
+             and ".git" not in Path(name).parts, "Project file enters a member or Git tree")
+    for parent in (target.parent, *target.parent.parents):
+        if not parent.is_relative_to(root):
+            break
+        _require(not os.path.lexists(parent / ".git"), "Project file enters an unbound software tree")
+    existing = next(parent for parent in (target.parent, *target.parent.parents) if parent.is_dir())
+    code, _ = _git(existing, "-c", "safe.bareRepository=all", "rev-parse", "--absolute-git-dir")
+    _require(code != 0, "Project file enters an unbound Git tree or metadata")
+
+def _project_files(root, names, repositories, budget, gap):
+    fingerprints = {}
+    for name in names:
+        try:
+            _project_file_boundary(root, name, repositories)
+            fingerprints[name] = _inspection_fingerprint(root, name, budget)
+            _require(fingerprints[name]["status"] in ("read", "absent"), "Project file cannot be inspected safely")
+        except (StartupError, OSError, subprocess.SubprocessError) as error:
+            fingerprints[name] = {"status": "blocked"}
+            gap(name, "Project file inspection blocked: " + str(error))
+    return fingerprints
+
+def _target_observations(assessment, fingerprints, repositories=(), *, budget):
+    owner = assessment["owner"]
+    root = Path(owner["root"])
+    targets = {}
+    names = _observed_targets(assessment)
+    cwds = [action.get("cwd") for action in assessment["actions"] if action.get("kind") == "command"]
+    cwds += [name[4:] for name in assessment["identity"].get("targets", {}) if name.startswith("cwd:/")]
+    for name in [*names, *("cwd:" + _text(cwd) for cwd in dict.fromkeys(cwds))]:
+        directory = name.startswith("cwd:/")
+        location = Path(name[4:]) if directory else root / name
+        _require(location.is_absolute() and location.is_relative_to(root)
+                 and location.resolve() == location and ".git" not in location.relative_to(root).parts,
+                 "Action target/cwd escapes its selected owner or enters Git metadata")
+        _no_links(location)
+        if owner["kind"] == "project":
+            if location != root:
+                _project_file_boundary(root, str(location.relative_to(root)), repositories)
+        else:
+            parent = location if directory else location.parent
+            existing = next(p for p in (parent, *parent.parents) if p.is_dir())
+            _require(checkout(existing) == (root, Path(owner["git_common_dir"])),
+                     "Action target/cwd enters another checkout or Git tree")
+        parents = {}
+        for parent in (location.parent, *location.parent.parents):
+            if not parent.is_relative_to(root):
+                break
+            if parent.exists():
+                charged = budget.setdefault("target_directories", set())
+                if str(parent) not in charged:
+                    _require(budget["paths"] < MAX_PATHS, "Project aggregate target-parent limit exceeded")
+                    budget["paths"] += 1
+                    charged.add(str(parent))
+                parents[str(parent)] = _filesystem_binding(parent)
+        physical = None
+        if os.path.lexists(location):
+            info = location.stat()
+            _require(stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode),
+                     "Action target must be a regular file or command directory")
+            _require(directory or info.st_nlink == 1, "Action target has physical aliases")
+            physical = {"device": info.st_dev, "inode": info.st_ino}
+        _require(not directory or physical is not None, "Command cwd must be an observed existing directory")
+        if directory:
+            _require(budget["paths"] < MAX_PATHS, "Project aggregate command-cwd limit exceeded")
+            budget["paths"] += 1
+        targets[name] = {"path": str(location), "binding": physical, "parents": parents,
+                         "fingerprint": None if directory else fingerprints.get(name, {"status": "blocked"})}
+    return targets
+
+def _new_assessment(owner, identity):
+    return {"owner": owner, "identity": identity, "inventory": {}, "decisions": [], "coverage": [],
+            "actions": [], "evidence": [], "semantic_assessment": {}}
+
+def _project_plan_shape(plan):
+    def rows(value):
+        _require(isinstance(value, list) and len(value) <= MAX_PATHS
+                 and all(isinstance(row, dict) for row in value), "Invalid saved Project rows")
+        return value
+
+    def binding(value):
+        _object(value, ("device", "inode"))
+        _require(all(type(v) is int and v >= 0 for v in value.values()), "Invalid saved filesystem binding")
+
+    def fingerprint(value, incomplete=False):
+        if incomplete and value == {}:
+            return
+        _object(value, ("status",), ("sha256", "bytes", "reason"))
+        _require(value["status"] in ("read", "absent", "special", "excluded", "oversized",
+            "unreadable_or_link", "blocked", "unavailable", "source_total_limit"), "Invalid saved file observation")
+        if value["status"] == "read":
+            _require("sha256" in value and "bytes" in value, "Incomplete saved file fingerprint")
+        if "sha256" in value:
+            _hash(value["sha256"])
+        if "bytes" in value:
+            _require(type(value["bytes"]) is int and 0 <= value["bytes"] <= MAX_FILE, "Invalid saved file byte count")
+        if "reason" in value:
+            _text(value["reason"])
+
+    def fingerprints(value):
+        _require(isinstance(value, dict) and len(value) <= MAX_PATHS, "Invalid saved file observations")
+        for name, item in value.items():
+            _text(name)
+            fingerprint(item)
+
+    _object(plan, ("schema_version", "plan_id", "revision", "created_at", "project_scope", "identity",
+        "assessments", "current_observations", "package_pins", "sources", "requirements", "invalidations",
+        "decision_history", "recovery_requirement", "status", "blockers", "verified_at", "review_digest",
+        "current_input_digest", "evidence_limits"))
+    _require(type(plan["schema_version"]) is int and plan["schema_version"] == 2
+             and type(plan["revision"]) is int and plan["revision"] >= 1, "Unsupported Project inspection")
+    for key in ("plan_id", "created_at", "verified_at", "recovery_requirement"):
+        _text(plan[key])
+    for key in ("review_digest", "current_input_digest"):
+        _hash(plan[key])
+    _require(plan["status"] in ("blocked", "stale", "draft", "awaiting_decision", "ready_for_review"), "Invalid Project inspection status")
+    _object(plan["package_pins"], ("policy_digest", "runtime_digest"))
+    for value in plan["package_pins"].values():
+        _hash(value)
+    _strings(plan["evidence_limits"])
+    for item in rows(plan["blockers"]):
+        _object(item, ("scope", "reason", "resumption"))
+        for value in item.values():
+            _text(value)
+    for item in rows(plan["invalidations"]):
+        _object(item, ("revision", "input_digest", "reason"))
+        _require(type(item["revision"]) is int and 1 <= item["revision"] <= plan["revision"], "Invalid saved invalidation revision")
+        _hash(item["input_digest"])
+        _text(item["reason"])
+    for item in rows(plan["decision_history"]):
+        _object(item, ("revision", "decision"))
+        _require(type(item["revision"]) is int and 1 <= item["revision"] <= plan["revision"]
+                 and isinstance(item["decision"], dict), "Invalid saved decision history")
+        _decision_fields(item["decision"])
+    _object(plan["sources"], ("declared", "observed"))
+    declared = plan["sources"]["declared"]
+    _object(declared, ("schema_version", "clients", "toolkit", "required_sources"))
+    _require(type(declared["schema_version"]) is int and declared["schema_version"] == 1, "Invalid saved source schema")
+    _strings(declared["clients"], empty=False)
+    for name in _strings(declared["required_sources"], empty=False):
+        _relative(name)
+    toolkit = declared["toolkit"]
+    _object(toolkit, ("commit", "origin", "acquisition", "provenance", "trust", "files", "catalog"))
+    _require(isinstance(toolkit["commit"], str) and re.fullmatch(r"[0-9a-f]{40}", toolkit["commit"]), "Invalid saved Toolkit pin")
+    for key in ("origin", "provenance"):
+        _text(toolkit[key])
+    _require(toolkit["acquisition"] in ("online", "offline") and toolkit["trust"] in ("recorded", "pending"),
+             "Invalid saved source provenance")
+    source_paths = []
+    for item in rows(toolkit["files"]):
+        _object(item, ("path", "local_path", "sha256", "required"))
+        source_paths.append(_relative(item["path"]))
+        _require(Path(_text(item["local_path"])).is_absolute(), "Invalid saved source location")
+        _hash(item["sha256"])
+        _require(type(item["required"]) is bool, "Invalid saved source requirement")
+    _require(len(source_paths) == len(set(source_paths)), "Duplicate saved source path")
+    fingerprints(plan["sources"]["observed"])
+    _require(set(plan["sources"]["observed"]) == set(source_paths), "Saved source observations do not match their declaration")
+    for catalog in (toolkit["catalog"], plan["requirements"]):
+        for item in rows(catalog):
+            _object(item, ("id", "source", "section", "stage", "mandatory", "dependencies"))
+            for key in ("id", "source", "section"):
+                _text(item[key])
+            _require(item["stage"] in ("installation", "project_onboarding", "runtime")
+                     and type(item["mandatory"]) is bool, "Invalid saved requirement")
+            _strings(item["dependencies"])
+        ids = [item["id"] for item in catalog]
+        _require(len(ids) == len(set(ids)), "Duplicate saved requirement")
+        _dependencies(catalog, set(ids))
+    _require([r for r in plan["requirements"] if not r["id"].startswith("policy:")] == toolkit["catalog"],
+             "Saved requirements must retain the complete pinned catalog metadata")
+    _object(plan["identity"], ("project_id", "project_root", "kind", "binding", "authority", "id_origin"))
+    scope = plan["project_scope"]
+    _object(scope, ("kind", "project_root", "member_checkouts", "membership", "authority", "project_files"))
+    _object(scope["membership"], ("include", "exclude", "future_join", "authorization"))
+    _object(scope["authority"], ("path", "sha256", "reference"))
+    _strings(scope["member_checkouts"], empty=False)
+    for root in [scope["project_root"], *scope["member_checkouts"]]:
+        _require(Path(_text(root)).is_absolute(), "Invalid saved Project/checkout root")
+    for name in _strings(scope["project_files"]):
+        _relative(name)
+    for key in ("include", "exclude"):
+        for name in _strings(scope["membership"][key], empty=key == "exclude"):
+            if name != ".":
+                _relative(name)
+    _require(type(scope["membership"]["future_join"]) is bool, "Invalid saved future-join choice")
+    _text(scope["membership"]["authorization"])
+    _text(scope["authority"]["reference"])
+    _require(scope["authority"]["path"] == str(Path(scope["project_root"]) / PROJECT_FILE), "Invalid saved authority path")
+    if scope["authority"]["sha256"] != "absent":
+        _hash(scope["authority"]["sha256"])
+    identity = plan["identity"]
+    _require(identity["kind"] == scope["kind"] and identity["project_root"] == scope["project_root"]
+             and identity["kind"] in ("standalone", "umbrella")
+             and identity["id_origin"] in ("proposed", "legacy_binding"), "Invalid Project identity binding")
+    _text(identity["project_id"])
+    binding(identity["binding"])
+    _require(isinstance(identity["authority"], list) and len(identity["authority"]) <= MAX_PATHS,
+             "Invalid Project authority observations")
+    for authority in identity["authority"]:
+        _object(authority, ("path", "fingerprint", "binding", "record", "error"))
+        _require(Path(_text(authority["path"])).is_absolute(), "Invalid saved authority location")
+        fingerprint(authority["fingerprint"], incomplete=authority["error"] is not None)
+        if authority["binding"] is not None:
+            binding(authority["binding"])
+        _require(authority["record"] is None or isinstance(authority["record"], dict), "Invalid saved authority record")
+        if authority["error"] is not None:
+            _text(authority["error"])
+    current = plan["current_observations"]
+    _object(current, ("project_binding", "authority", "project", "repositories"))
+    _require(current["project_binding"] == identity["binding"] and current["authority"] == identity["authority"],
+             "Current Project authority binding differs from the frozen identity")
+    _object(plan["assessments"], ("project", "repositories"))
+    repositories = plan["assessments"]["repositories"]
+    _require(isinstance(repositories, list) and 0 < len(repositories) <= MAX_PATHS
+             and len(repositories) == len(scope["member_checkouts"])
+             and isinstance(current["repositories"], list) and len(current["repositories"]) == len(repositories),
+             "Invalid Repository assessments")
+    _require((plan["assessments"]["project"] is None) == (identity["kind"] == "standalone")
+             and (current["project"] is None) == (identity["kind"] == "standalone"), "Invalid Project assessment")
+    ids = set()
+    for kind, assessment, observed in zip(["project", *["repository"] * len(repositories)],
+            [plan["assessments"]["project"], *repositories], [current["project"], *current["repositories"]]):
+        if assessment is None:
+            _require(kind == "project", "Missing saved Repository assessment")
+            continue
+        _object(assessment, ("owner", "identity", "inventory", "decisions", "coverage", "actions", "evidence", "semantic_assessment"))
+        _require(isinstance(assessment["inventory"], dict) and isinstance(assessment["semantic_assessment"], dict),
+                 "Invalid saved assessment inventory/semantics")
+        for key in ("decisions", "coverage", "actions", "evidence"):
+            rows(assessment[key])
+        owner = assessment["owner"]
+        _require(isinstance(owner, dict) and owner.get("project_id") == identity["project_id"]
+                 and owner.get("kind") == kind, "Invalid assessment slot owner")
+        _object(observed, ("owner", "identity"))
+        _require(observed["owner"] == owner, "Current observation owner differs from its frozen assessment")
+        if kind == "project":
+            _object(owner, ("kind", "project_id", "root"))
+            _require(owner["root"] == identity["project_root"], "Invalid Project assessment root")
+            for value in (assessment["identity"], observed["identity"]):
+                _object(value, ("project_root", "paths", "fingerprints"), ("targets",))
+                _strings(value["paths"])
+                _require(value["project_root"] == owner["root"] and set(scope["project_files"]) <= set(value["paths"])
+                         and set(value["paths"]) <= set(scope["project_files"]) | set(_observed_targets(assessment)),
+                         "Invalid Project named-file observations")
+                fingerprints(value["fingerprints"])
+                _require(set(value["fingerprints"]) == set(value["paths"]), "Incomplete Project named-file observation map")
+        else:
+            _object(owner, ("kind", "project_id", "repository_id", "checkout_id", "root", "primary_root", "git_dir", "git_common_dir"))
+            _require(owner["kind"] == "repository", "Invalid assessment owner")
+            for key in ("repository_id", "checkout_id"):
+                _text(owner[key])
+                _require(owner[key] not in ids, "Duplicate Repository/checkout identity")
+                ids.add(owner[key])
+            for key in ("primary_root", "git_dir", "git_common_dir"):
+                _require(owner[key] is None or Path(_text(owner[key])).is_absolute(), "Invalid saved Repository location")
+            for value in (assessment["identity"], observed["identity"]):
+                _object(value, ("root", "primary_root", "git_dir", "git_common_dir", "binding", "membership", "snapshot"), ("targets",))
+                _object(value["binding"], (), ("root", "primary_root", "git_dir", "git_common_dir"))
+                for entry in value["binding"].values():
+                    binding(entry)
+                _require(all(value[key] == owner[key] for key in ("root", "primary_root", "git_dir", "git_common_dir"))
+                         and value["binding"] == assessment["identity"]["binding"]
+                         and value["membership"] in ("included", "excluded", "outside", "unknown"),
+                         "Invalid Repository observation binding")
+                if value["snapshot"] is not None:
+                    snapshot = value["snapshot"]
+                    _object(snapshot, (*CHECKOUT_INPUTS, "fingerprints", "instructions", "clients"))
+                    _require(snapshot["repository_root"] == owner["root"]
+                             and snapshot["git_common_dir"] == owner["git_common_dir"]
+                             and snapshot["clients"] == declared["clients"], "Invalid selected checkout snapshot")
+                    if snapshot["head"] is not None:
+                        _text(snapshot["head"])
+                    _hash(snapshot["index_digest"])
+                    for name in _strings(snapshot["paths"]):
+                        _relative(name)
+                    _require(isinstance(snapshot["dirty_inventory"], list)
+                             and len(snapshot["dirty_inventory"]) <= 2 * MAX_PATHS, "Invalid saved checkout changes")
+                    for item in snapshot["dirty_inventory"]:
+                        _text(item)
+                    fingerprints(snapshot["fingerprints"])
+                    for instruction in rows(snapshot["instructions"]):
+                        _object(instruction, ("path", "scope", "editable"))
+                        _require(Path(_text(instruction["path"])).is_absolute()
+                                 and Path(_text(instruction["scope"])).is_absolute()
+                                 and type(instruction["editable"]) is bool, "Invalid saved instruction observation")
+    _require([a["owner"]["root"] for a in repositories] == scope["member_checkouts"],
+             "Repository assessments do not match the explicit member selection")
+    for assessment, observed in zip(_assessments(plan["assessments"]), _assessments(current)):
+        root = Path(assessment["owner"]["root"])
+        for identity in (assessment["identity"], observed["identity"]):
+            targets = identity.get("targets", {})
+            _require(isinstance(targets, dict) and len(targets) <= MAX_PATHS, "Invalid saved target observations")
+            for name, target in targets.items():
+                directory = name.startswith("cwd:/")
+                location = Path(name[4:]) if directory else root / _relative(name)
+                _object(target, ("path", "binding", "parents", "fingerprint"))
+                _require(target["path"] == str(location) and location.is_relative_to(root), "Invalid saved target owner binding")
+                if target["binding"] is not None:
+                    binding(target["binding"])
+                _require(isinstance(target["parents"], dict) and len(target["parents"]) <= MAX_PATHS,
+                         "Invalid saved target parents")
+                for parent, value in target["parents"].items():
+                    _require(Path(parent).is_relative_to(root) and location.is_relative_to(Path(parent)),
+                             "Invalid saved target parent binding")
+                    binding(value)
+                if directory:
+                    _require(target["fingerprint"] is None and target["binding"] is not None, "Invalid saved command cwd")
+                else:
+                    fingerprint(target["fingerprint"])
+    _validate_project_proposal(plan)
+
+
+def _inspect_project_scope(cwd, plan_dir, request):
+    _bounded(request)
+    _require(Path(cwd).is_absolute(), "Select an absolute Project inspection cwd")
+    scope = _project_scope(request["project_scope"])
+    _require(str(Path(cwd).resolve(strict=True)) in {scope["project_root"], *scope["member_checkouts"]},
+             "Inspection cwd must select the Project or an explicit member checkout")
+    private_path = Path(plan_dir).resolve()
+    _require(not any(private_path.is_relative_to(Path(root).resolve())
+                     for root in [scope["project_root"], *scope["member_checkouts"]]),
+             "Project inspection plan directory must stay outside the Project and every selected checkout")
+    declared = {key: deepcopy(value) for key, value in request.items() if key != "project_scope"}
+    with _locked(plan_dir) as (path, directory):
+        _source_record(declared, path)
+        plan = _load(path)
+        if plan is not None:
+            _require(plan["schema_version"] == 2 and plan["project_scope"] == scope,
+                     "Project scope is frozen; start a new reviewed plan for changed scope")
+            _require(plan["sources"]["declared"] == declared, "Pinned sources/clients cannot change on resume")
+        sources = _sources(declared)
+        observed, blockers = _project_observations(scope, sources, plan["assessments"] if plan else None)
+        package = _package_pins()
+        reusable_id = None
+        present = [a for a in observed["authority"] if a["fingerprint"].get("status") != "absent"]
+        if scope["kind"] == "standalone" and len(present) == 1:
+            selected = present[0]
+            record = selected["record"]
+            repository = observed["repositories"][0]
+            if (record and selected["path"] == scope["authority"]["path"]
+                    and selected["fingerprint"].get("sha256") == scope["authority"]["sha256"]
+                    and record["repository_root"] == scope["project_root"] == repository["primary_root"]
+                    and record["git_common_dir"] == repository["git_common_dir"]
+                    and repository["membership"] == "included"
+                    and record["policy_digest"] == package["policy_digest"]
+                    and set(declared["clients"]) <= set(record["clients"])):
+                reusable_id = record["project_id"]
+            else:
+                blockers.append(_block("authority", "Existing authority identity/bindings do not cover this Project",
+                                       "Reconcile copied, moved or incompatible authority before adoption"))
+        elif scope["kind"] == "umbrella" and any(a["record"] for a in present):
+            blockers.append(_block("authority", "Existing standalone authority cannot become umbrella authority by discovery",
+                                   "Propose an explicit transfer after authority reconciliation"))
+        if plan is None:
+            project_id = reusable_id or uuid.uuid4().hex
+            origin = "legacy_binding" if reusable_id else "proposed"
+            identity = {"project_id": project_id, "project_root": scope["project_root"], "kind": scope["kind"],
+                        "binding": observed["project_binding"], "authority": observed["authority"], "id_origin": origin}
+            assessments = {"project": None, "repositories": []}
+            if observed["project"] is not None:
+                assessments["project"] = _new_assessment({"kind": "project", "project_id": project_id,
+                    "root": scope["project_root"]}, observed["project"])
+            for repository in observed["repositories"]:
+                owner = {"kind": "repository", "project_id": project_id, "repository_id": uuid.uuid4().hex,
+                         "checkout_id": uuid.uuid4().hex} | {key: repository[key] for key in (
+                             "root", "primary_root", "git_dir", "git_common_dir")}
+                if repository["snapshot"] is not None:
+                    repository["snapshot"]["clients"] = declared["clients"]
+                assessments["repositories"].append(_new_assessment(owner, deepcopy(repository)))
+            plan = {"schema_version": 2, "plan_id": uuid.uuid4().hex, "revision": 1, "created_at": _now(),
+                    "project_scope": scope, "identity": identity, "assessments": assessments,
+                    "package_pins": package, "sources": {"declared": declared, "observed": sources},
+                    "requirements": _requirements(declared), "invalidations": [], "decision_history": [],
+                    "recovery_requirement": "Schema 2 requires scoped D3 proposals and D4 adoption support before apply"}
+        else:
+            _require(plan["identity"]["binding"] == observed["project_binding"]
+                     and plan["identity"]["authority"] == observed["authority"],
+                     "Project authority/filesystem binding changed; start a new reviewed plan")
+            for prior, current in zip(plan["assessments"]["repositories"], observed["repositories"]):
+                _require(all(prior["identity"][key] == current[key] for key in (
+                    "root", "primary_root", "git_dir", "git_common_dir", "binding", "membership")),
+                    "Repository/checkout identity binding changed; start a new reviewed plan")
+                if current["snapshot"] is not None:
+                    current["snapshot"]["clients"] = declared["clients"]
+            plan["revision"] += 1
+        observed["repositories"] = [{"owner": deepcopy(assessment["owner"]), "identity": current}
+            for assessment, current in zip(plan["assessments"]["repositories"], observed["repositories"])]
+        if observed["project"] is not None:
+            observed["project"] = {"owner": deepcopy(plan["assessments"]["project"]["owner"]), "identity": observed["project"]}
+        current = {"observations": observed, "sources": sources, "package_pins": package}
+        report = _finish_project(plan, current, blockers)
+        _project_plan_shape(plan)
         _save(plan, path, directory)
         return report
 
@@ -591,21 +1216,41 @@ def _rows(value, fields):
     return ids
 
 
-def _validate_proposal(plan):
+def _decision_fields(decision):
+    _object(decision, ("id", "rule", "source", "scope", "options", "recommendation", "selected",
+        "disposition", "provenance", "evidence", "affected_actions", "invalidate_on", "conflict", "mode"))
+    _text(decision["id"])
+    for field in ("rule", "source", "scope", "recommendation", "provenance"):
+        _text(decision[field])
+    options = _strings(decision["options"], empty=False)
+    _require(decision["recommendation"] in options and decision["disposition"] in (
+        "confirmed", "inherited", "proposed", "pending"), "Invalid decision disposition/recommendation")
+    _require(decision["selected"] is None or decision["selected"] in options, "Unknown decision selection")
+    _require(decision["disposition"] not in ("confirmed", "inherited") or decision["selected"] is not None,
+             "Confirmed decisions need a selected value")
+    _require(type(decision["conflict"]) is bool and decision["mode"] in (None, "decide", "preserve", "replace"),
+             "Invalid scoped conflict mode")
+    _require(decision["conflict"] or decision["mode"] is None, "A mode requires an actual scoped conflict")
+    for key in ("evidence", "affected_actions", "invalidate_on"):
+        _strings(decision[key])
+
+
+def _validate_proposal(plan, *, shared=False, references=None):
     """Validate references and concrete review targets; semantic findings remain agent assertions."""
     inventory = plan["inventory"]
     names = ("product", "critical_flows", "stack", "documents", "quality_commands", "services",
              "client_capabilities", "merge_feasibility", "instructions", "integrations")
-    _object(inventory, names)
-    _require(isinstance(inventory["documents"], dict) and len(inventory["documents"]) == 9,
+    _object(inventory, () if shared else names, names if shared else ())
+    documents = inventory.get("documents", {})
+    _require(isinstance(documents, dict) and (shared or len(documents) == 9),
              "Map all nine canonical document destinations from the pinned manifest")
-    for document in inventory["documents"].values():
+    for document in documents.values():
         _object(document, ("path", "reason"))
         _text(document["reason"])
         if document["path"] is not None:
             _relative(document["path"])
     fact_records = []
-    for key in set(names) - {"documents"}:
+    for key in inventory.keys() - {"documents"}:
         _object(inventory[key], ("facts", "assumptions"))
         _require(isinstance(inventory[key]["facts"], list), "Inventory facts must be a list")
         _strings(inventory[key]["assumptions"])
@@ -614,10 +1259,13 @@ def _validate_proposal(plan):
             _text(fact["summary"])
             _strings(fact["evidence"])
             fact_records.append((key, fact))
-    evidence_ids = _rows(plan["evidence"], ("id", "kind", "summary", "scope", "inputs", "reference"))
+    evidence_ids = _rows(plan["evidence"], ("id", "kind", "summary", "scope", "inputs", "reference")
+                         + (("input_digest",) if references is not None else ()))
     fingerprints = plan["identity"]["fingerprints"]
-    input_keys = set(fingerprints) | {"checkout:" + key for key in CHECKOUT_INPUTS} | {"package"} | {
+    input_keys = set(fingerprints) | (set() if shared else {"checkout:" + key for key in CHECKOUT_INPUTS}) | {"package"} | {
         "source:" + name for name in plan["sources"]["observed"]}
+    if references is not None:
+        input_keys.update(_file_targets(plan["actions"]))
     evidence = {row["id"]: row for row in plan["evidence"]}
     for row in evidence.values():
         _require(row["kind"] in ("observation", "behavior", "configuration", "baseline", "authorization"),
@@ -626,40 +1274,50 @@ def _validate_proposal(plan):
             _text(row[field])
         _require(set(_strings(row["inputs"])) <= input_keys, "Unknown evidence input fingerprint")
     action_ids = _rows(plan["actions"], ("id", "dependencies", "kind", "target", "section", "before", "text",
-        "after", "scope", "authorization", "verification", "preservation_exceptions", "decision_ids", "backup_required"))
+        "after", "scope", "authorization", "verification", "preservation_exceptions", "decision_ids", "backup_required")
+        + (("owner", "cwd") if references is not None else ()))
     decision_ids = _rows(plan["decisions"], ("id", "rule", "source", "scope", "options", "recommendation",
         "selected", "disposition", "provenance", "evidence", "affected_actions", "invalidate_on", "conflict", "mode"))
     coverage_ids = _rows(plan["coverage"], ("id", "source", "section", "stage", "mandatory", "dependencies",
         "applicability", "reason", "current_adoption", "qualification_evidence", "outcome", "actions", "scope",
         "risk", "verification", "blocker", "resumption", "decision_ids"))
+    if references is not None:
+        evidence = references["evidence"]
+        evidence_ids = set(evidence)
+        action_ids = references["actions"]
+        decision_ids = set(references["decisions"])
     blockers = []
+    if references is not None:
+        for row in plan["evidence"]:
+            _hash(row["input_digest"])
+            context = references["context"] if row["kind"] in ("behavior", "baseline") else None
+            expected = _evidence_digest(references["owner"], plan["identity"], plan["package_pins"],
+                                        plan["sources"]["observed"], row["inputs"], context)
+            if row["input_digest"] != expected:
+                blockers.append(_block(row["id"], "Evidence does not match its owner/current input observations",
+                                       "Reassess these exact inputs and provide newly bound evidence"))
+            if row["kind"] in ("behavior", "baseline") and not any(
+                    name in fingerprints or name.startswith("checkout:") for name in row["inputs"]):
+                blockers.append(_block(row["id"], "Behavior evidence needs actual Repository/checkout inputs",
+                                       "Observe behavior against this selected checkout"))
     for key, fact in fact_records:
         _require(set(fact["evidence"]) <= evidence_ids, "Unknown inventory evidence reference")
         if not fact["evidence"]:
             blockers.append(_block("inventory:" + key, "Observed facts need evidence references",
                                    "Supply sanitized observation evidence on pinned inputs"))
     for decision in plan["decisions"]:
-        for field in ("rule", "source", "scope", "recommendation", "provenance"):
-            _text(decision[field])
-        options = _strings(decision["options"], empty=False)
-        _require(decision["recommendation"] in options and decision["disposition"] in (
-            "confirmed", "inherited", "proposed", "pending"), "Invalid decision disposition/recommendation")
-        _require(decision["selected"] is None or decision["selected"] in options, "Unknown decision selection")
-        _require(decision["disposition"] not in ("confirmed", "inherited") or decision["selected"] is not None,
-                 "Confirmed decisions need a selected value")
-        _require(type(decision["conflict"]) is bool and decision["mode"] in (None, "decide", "preserve", "replace"),
-                 "Invalid scoped conflict mode")
-        _require(decision["conflict"] or decision["mode"] is None, "A mode requires an actual scoped conflict")
+        _decision_fields(decision)
         for field, allowed in (("evidence", evidence_ids), ("affected_actions", action_ids), ("invalidate_on", input_keys)):
             _require(set(_strings(decision[field])) <= allowed, "Unknown decision reference")
         if decision["disposition"] == "inherited" and not decision["evidence"]:
             blockers.append(_block(decision["id"], "Inherited choice lacks evidence", "Record its scoped provenance evidence"))
         if decision["conflict"] and decision["mode"] is None:
             blockers.append(_block(decision["id"], "Conflict needs a scoped mode/resolution", "Obtain the missing material decision"))
-    decisions = {d["id"]: d for d in plan["decisions"]}
-    _dependencies(plan["actions"], action_ids)
+    decisions = references["decisions"] if references is not None else {d["id"]: d for d in plan["decisions"]}
+    if references is None:
+        _dependencies(plan["actions"], action_ids)
     seen = set()
-    completed = set()
+    completed = action_ids - {a["id"] for a in plan["actions"]} if references is not None else set()
     for action in plan["actions"]:
         _strings(action["dependencies"])
         _require(set(action["dependencies"]) <= completed, "Actions must be in dependency order")
@@ -678,7 +1336,8 @@ def _validate_proposal(plan):
                                    "Merge section edits into one full-postimage action per owned file/resource"))
         seen.add(location)
         if action["kind"] in ("write", "delete"):
-            _require(action["scope"] == "checkout", "External/shared file changes require a separately scoped external proposal")
+            _require(action["scope"] == ("shared" if shared else "checkout"),
+                     "File changes must use their assessed owner scope")
             _relative(action["target"])
             _require(action["before"] == "absent" or (isinstance(action["before"], str) and HEX.fullmatch(action["before"])),
                      "File actions need exact before hash/absence")
@@ -706,7 +1365,8 @@ def _validate_proposal(plan):
                        for e in evidence.values()):
                 blockers.append(_block(action["id"], "External action lacks scoped authorization evidence",
                                        "Record authorization for that resource; no execution occurs in D3"))
-    requirements = {r["id"]: r for r in plan["requirements"]}
+    _require(not shared or not plan["coverage"], "Project shared-file assessment must keep coverage empty")
+    requirements = {} if shared else {r["id"]: r for r in plan["requirements"]}
     _require(coverage_ids <= requirements.keys(), "Unknown coverage component/policy ID")
     for missing in sorted(requirements.keys() - coverage_ids):
         blockers.append(_block(missing, "Coverage assessment is missing", "Assess this pinned catalog/policy row"))
@@ -721,7 +1381,8 @@ def _validate_proposal(plan):
             _text(row[field], empty=True)
         for field in ("scope", "risk", "verification"):
             _text(row[field])
-        for field, allowed in (("actions", action_ids), ("qualification_evidence", evidence_ids), ("decision_ids", decision_ids)):
+        coverage_actions = references["coverage_actions"] if references is not None else action_ids
+        for field, allowed in (("actions", coverage_actions), ("qualification_evidence", evidence_ids), ("decision_ids", decision_ids)):
             _require(set(_strings(row[field])) <= allowed, "Unknown coverage reference")
         problem = None
         if not row["reason"]:
@@ -741,35 +1402,37 @@ def _validate_proposal(plan):
         if problem:
             blockers.append(_block(row["id"], problem, row["resumption"] or "Resolve assessment/decision and supply evidence"))
     assessment = plan["semantic_assessment"]
-    _object(assessment, ("complete", "catalog_complete", "conflicts_checked", "instructions_checked",
-                         "source_provenance_checked", "native_evaluation"))
+    _object(assessment, ("complete", "conflicts_checked", "instructions_checked", "source_provenance_checked")
+            + (() if shared else ("catalog_complete", "native_evaluation")))
     for field in set(assessment) - {"native_evaluation"}:
         _require(type(assessment[field]) is bool, "Semantic assessment fields must be booleans")
         if not assessment[field]:
             blockers.append(_block("semantic:" + field, "Agent semantic assessment remains incomplete",
                                    "Complete the scoped assessment; structural checks cannot replace it"))
-    native = assessment["native_evaluation"]
-    _object(native, ("method", "smoke_cases"))
-    _text(native["method"], empty=True)
-    _strings(native["smoke_cases"])
-    if not native["method"] or not native["smoke_cases"]:
-        blockers.append(_block("native_evaluation", "Native harness method/initial smoke cases missing",
-                               "Plan required native evaluation; keep optional paid labs separate"))
+    if not shared:
+        native = assessment["native_evaluation"]
+        _object(native, ("method", "smoke_cases"))
+        _text(native["method"], empty=True)
+        _strings(native["smoke_cases"])
+        if not native["method"] or not native["smoke_cases"]:
+            blockers.append(_block("native_evaluation", "Native harness method/initial smoke cases missing",
+                                   "Plan required native evaluation; keep optional paid labs separate"))
     for key, value in fingerprints.items():
         if value["status"] not in ("read", "absent"):
             blockers.append(_block(key, "File inventory has an explicit assessment gap: " + value["status"],
                                    "Resolve safely or record a scoped independent assessment prerequisite"))
     return blockers
 
-
 def record_plan(plan_dir, request):
     """Replace one agent-authored proposal using an expected revision; never execute it."""
     _bounded(request)
-    _object(request, ("expected_revision", "inventory", "decisions", "coverage", "actions", "evidence", "semantic_assessment"), ("reconcile",))
-    _require(type(request["expected_revision"]) is int, "Expected an integer plan revision")
     with _locked(plan_dir) as (path, directory):
         plan = _load(path)
         _require(plan is not None, "Inspect the selected checkout before recording a plan")
+        if plan["schema_version"] == 2:
+            return _record_project_plan(plan, request, path, directory)
+        _object(request, ("expected_revision", "inventory", "decisions", "coverage", "actions", "evidence", "semantic_assessment"), ("reconcile",))
+        _require(type(request["expected_revision"]) is int, "Expected an integer plan revision")
         _require(request["expected_revision"] == plan["revision"], "Onboarding revision conflict; inspect the current plan")
         previous = {d["id"]: deepcopy(d) for d in plan["decisions"]}
         _require(isinstance(request["decisions"], list), "Invalid decisions")
@@ -822,3 +1485,274 @@ def record_plan(plan_dir, request):
         report = _finish(plan, sources, changes, blockers, current=current)
         _save(plan, path, directory)
         return report
+
+
+def _evidence_digest(owner, identity, package, sources, inputs, context=None):
+    values = dict(identity["fingerprints"])
+    values.update({"checkout:" + key: identity[key] for key in CHECKOUT_INPUTS if key in identity})
+    values.update({"source:" + key: value for key, value in sources.items()})
+    values["package"] = package
+    value = {"owner": owner, "inputs": {name: values.get(name) for name in inputs}}
+    if context is not None:
+        value["context"] = context
+    return _digest(value)
+
+
+def _qualified(owner, local):
+    parts = (["project", owner["project_id"]] if owner["kind"] == "project" else
+             ["repository", owner["repository_id"], owner["checkout_id"]])
+    return "/".join(part.replace("~", "~0").replace("/", "~1") for part in [*parts, local])
+
+def _frozen_project(plan):
+    return {"project_binding": plan["identity"]["binding"], "authority": plan["identity"]["authority"],
+            "project": None if plan["assessments"]["project"] is None else {
+                key: plan["assessments"]["project"][key] for key in ("owner", "identity")},
+            "repositories": [{key: a[key] for key in ("owner", "identity")}
+                             for a in plan["assessments"]["repositories"]]}
+
+def _project_current(plan):
+    sources = _sources(plan["sources"]["declared"])
+    observed, blockers = _project_observations(plan["project_scope"], sources, plan["assessments"])
+    _require(observed["project_binding"] == plan["identity"]["binding"]
+             and observed["authority"] == plan["identity"]["authority"],
+             "Project authority/filesystem binding changed; start a new reviewed plan")
+    for prior, current in zip(plan["assessments"]["repositories"], observed["repositories"]):
+        _require(all(prior["identity"][key] == current[key] for key in (
+            "root", "primary_root", "git_dir", "git_common_dir", "binding", "membership")),
+            "Repository/checkout identity binding changed; start a new reviewed plan")
+        if current["snapshot"] is not None:
+            current["snapshot"]["clients"] = plan["sources"]["declared"]["clients"]
+    observed["repositories"] = [{"owner": deepcopy(a["owner"]), "identity": current}
+        for a, current in zip(plan["assessments"]["repositories"], observed["repositories"])]
+    if observed["project"] is not None:
+        observed["project"] = {"owner": deepcopy(plan["assessments"]["project"]["owner"]), "identity": observed["project"]}
+    return {"observations": observed, "sources": sources, "package_pins": _package_pins()}, blockers
+
+def _project_changes(plan, current):
+    changes = []
+    if current["observations"] != _frozen_project(plan):
+        changes.append("observations")
+    for name in ("package_pins", "sources"):
+        frozen = plan["sources"]["observed"] if name == "sources" else plan[name]
+        if current[name] != frozen:
+            changes.append(name)
+    for assessment, observed in zip(_assessments(plan["assessments"]), _assessments(current["observations"])):
+        for action in assessment["actions"]:
+            if action["kind"] in ("write", "delete"):
+                fingerprint = observed["identity"].get("targets", {}).get(action["target"], {}).get("fingerprint", {})
+                actual = fingerprint.get("sha256", fingerprint.get("status"))
+                if actual != action["before"]:
+                    changes.append(_qualified(assessment["owner"], action["id"]))
+    return sorted(set(changes))
+
+def _project_decisions(plan):
+    return {_qualified(a["owner"], d["id"]): d for a in _assessments(plan["assessments"]) for d in a["decisions"]}
+
+def _invalidate_project(plan, current, changes):
+    if not changes:
+        return
+    for identity, decision in _project_decisions(plan).items():
+        if decision["disposition"] != "pending":
+            _remember_decision(plan, decision | {"id": identity})
+            decision["disposition"] = "pending"
+    entry = {"revision": plan["revision"], "input_digest": _digest(current),
+             "reason": "Frozen Project proposal inputs changed: " + ", ".join(changes)}
+    if not plan["invalidations"] or plan["invalidations"][-1] != entry:
+        plan["invalidations"].append(entry)
+
+def _validate_project_proposal(plan):
+    assessments = _assessments(plan["assessments"])
+    count = 0
+    for assessment in assessments:
+        _require(isinstance(assessment["inventory"], dict) and isinstance(assessment["semantic_assessment"], dict),
+                 "Invalid scoped inventory/semantic assessment")
+        for key in ("actions", "evidence", "decisions", "coverage"):
+            _require(isinstance(assessment[key], list), "Invalid scoped proposal rows")
+            count += len(assessment[key])
+        for key, section in assessment["inventory"].items():
+            _require(isinstance(section, dict), "Invalid scoped inventory section")
+            if key == "documents":
+                count += len(section)
+            else:
+                _object(section, ("facts", "assumptions"))
+                _require(isinstance(section["facts"], list) and isinstance(section["assumptions"], list),
+                         "Invalid scoped inventory rows")
+                count += len(section["facts"]) + len(section["assumptions"])
+    _require(count <= MAX_PATHS, "Project aggregate proposal row limit exceeded")
+    views, evidence, decisions, actions = [], {}, {}, {}
+    for assessment in assessments:
+        owner = assessment["owner"]
+        view = {key: deepcopy(assessment[key]) for key in (
+            "inventory", "decisions", "coverage", "actions", "evidence", "semantic_assessment")}
+        view.update(requirements=plan["requirements"], sources=plan["sources"], package_pins=plan["package_pins"],
+                    identity=assessment["identity"] if owner["kind"] == "project" else
+                        assessment["identity"]["snapshot"] or {"fingerprints": {}})
+        for key, lookup in (("actions", actions), ("evidence", evidence), ("decisions", decisions)):
+            seen = set()
+            for row in view[key]:
+                _require(isinstance(row, dict) and isinstance(row.get("id"), str), "Every scoped row needs a string ID")
+                _text(row["id"])
+                _require(row["id"] not in seen, "Duplicate onboarding row ID")
+                seen.add(row["id"])
+                row["id"] = _qualified(owner, row["id"])
+                lookup[row["id"]] = row
+        views.append((assessment, view))
+    blockers, graph = [], []
+    project = plan["assessments"]["project"]
+    shared_evidence = {_qualified(project["owner"], row["id"]) for row in project["evidence"]} if project else set()
+    shared_actions = {_qualified(project["owner"], row["id"]) for row in project["actions"]} if project else set()
+    for assessment, view in views:
+        owner = assessment["owner"]
+        local_evidence = {row["id"] for row in view["evidence"]}
+        allowed = {key: row for key, row in evidence.items()
+                   if key in local_evidence or key in shared_evidence and row.get("kind") in ("configuration", "authorization")}
+        for action in view["actions"]:
+            _require(action.get("owner") == owner, "Action owner must match its frozen Repository/checkout or Project")
+            if action.get("kind") == "command":
+                _require(isinstance(action.get("cwd"), str) and Path(action["cwd"]).is_absolute()
+                         and Path(action["cwd"]).is_relative_to(Path(owner["root"])),
+                         "Command action requires its explicit actual cwd within its owner")
+            else:
+                _require("cwd" in action and action["cwd"] is None, "Only command actions declare cwd")
+        if owner["kind"] == "project":
+            _require(all(row.get("kind") not in ("behavior", "baseline") for row in view["evidence"]),
+                     "Project shared-file assessment cannot assert Repository behavior proof")
+        if not view["semantic_assessment"]:
+            _require(not any(view[k] for k in ("inventory", "decisions", "coverage", "actions", "evidence")),
+                     "Incomplete scoped proposal requires its semantic assessment")
+            blockers.append(_block(_qualified(owner, "proposal"), "Owner assessment is missing",
+                                   "Complete this owner's scoped proposal before review"))
+            continue
+        project = plan["assessments"]["project"]
+        context = {"checkout": view["identity"], "package_pins": plan["package_pins"],
+                   "sources": plan["sources"]["observed"],
+                   "project_files": project["identity"]["fingerprints"] if project else {}}
+        found = _validate_proposal(view, shared=owner["kind"] == "project",
+            references={"evidence": allowed, "decisions": decisions, "actions": set(actions),
+                        "owner": owner, "context": context,
+                        "coverage_actions": shared_actions | {a["id"] for a in view["actions"]}})
+        blockers.extend(b | {"scope": b["scope"] if b["scope"] in evidence.keys() | decisions.keys() | actions.keys()
+                            else _qualified(owner, b["scope"])} for b in found)
+        previous = None
+        for action in view["actions"]:
+            dependencies = list(action["dependencies"])
+            if previous is not None and previous not in dependencies:
+                dependencies.append(previous)
+            graph.append({"id": action["id"], "dependencies": dependencies})
+            previous = action["id"]
+    _dependencies(graph, set(actions))
+    project = plan["assessments"]["project"]
+    if project is not None:
+        for action in project["actions"]:
+            ref = _qualified(project["owner"], action["id"])
+            for repository in plan["assessments"]["repositories"]:
+                if not any(ref in row["actions"] for row in repository["coverage"]):
+                    blockers.append(_block(ref, "Shared change lacks affected Repository adoption/evaluation linkage",
+                                           "Reference this action in each selected Repository's assessed coverage"))
+    return blockers
+
+def _project_target_conflicts(plan, current):
+    seen = []
+    for assessment, observed in zip(_assessments(plan["assessments"]), _assessments(current["observations"])):
+        for action in assessment["actions"]:
+            if action["kind"] not in ("write", "delete"):
+                continue
+            target = observed["identity"].get("targets", {}).get(action["target"])
+            _require(target is not None and target["fingerprint"]["status"] in ("read", "absent"),
+                     "Action target observation is incomplete")
+            path = Path(target["path"])
+            for prior in seen:
+                other = Path(prior["path"])
+                _require(not (path.is_relative_to(other) or other.is_relative_to(path)
+                    or target["binding"] is not None and target["binding"] == prior["binding"]),
+                    "Proposed file targets overlap, alias or have an ancestor conflict")
+            seen.append(target)
+
+def _expand_project_inputs(plan, current):
+    for assessment, observed in zip(_assessments(plan["assessments"]), _assessments(current["observations"])):
+        old, new = assessment["identity"], observed["identity"]
+        if "targets" in new:
+            old.setdefault("targets", {}).update({key: value for key, value in new["targets"].items()
+                                                 if key not in old.get("targets", {})})
+        if assessment["owner"]["kind"] == "repository":
+            old, new = old["snapshot"], new["snapshot"]
+            if old is None or new is None:
+                continue
+            known = {row["path"] for row in old["instructions"]}
+            old["instructions"].extend(row for row in new["instructions"] if row["path"] not in known)
+        else:
+            old["paths"] = list(dict.fromkeys([*old["paths"], *new["paths"]]))
+        old["fingerprints"].update({key: value for key, value in new["fingerprints"].items()
+                                    if key not in old["fingerprints"]})
+
+def _finish_project(plan, current, blockers):
+    if current["package_pins"] == plan["package_pins"]:
+        _require(plan["requirements"] == _requirements(plan["sources"]["declared"]),
+                 "Current package requirements must retain the complete catalog and policy metadata")
+    changes = _project_changes(plan, current)
+    _invalidate_project(plan, current, changes)
+    blockers += _validate_project_proposal(plan)
+    plan["current_observations"] = current["observations"]
+    report = _finish(plan, current["sources"], changes, blockers, current=current,
+                     draft=any(not a["semantic_assessment"] for a in _assessments(plan["assessments"])))
+    plan["evidence_limits"].append("Private IDs and authority references do not authenticate adoption; schema 2 cannot apply.")
+    return report
+
+def _record_project_plan(plan, request, path, directory):
+    _object(request, ("expected_revision", "assessments"), ("reconcile",))
+    _require(type(request["expected_revision"]) is int and request["expected_revision"] == plan["revision"],
+             "Onboarding revision conflict; inspect the current plan")
+    _object(request["assessments"], ("project", "repositories"))
+    incoming = request["assessments"]
+    _require(isinstance(incoming["repositories"], list)
+             and len(incoming["repositories"]) == len(plan["assessments"]["repositories"])
+             and (incoming["project"] is None) == (plan["assessments"]["project"] is None),
+             "Every frozen owner assessment must be retained")
+    previous = deepcopy(_project_decisions(plan))
+    for old, new in zip(_assessments(plan["assessments"]), _assessments(incoming)):
+        _object(new, ("owner", "identity", "inventory", "decisions", "coverage", "actions", "evidence", "semantic_assessment"))
+        _require(new["owner"] == old["owner"] and new["identity"] == old["identity"],
+                 "Frozen owner/checkout identity cannot be rebound by a proposal")
+        _require(isinstance(new["decisions"], list) and all(isinstance(d, dict) and isinstance(d.get("id"), str)
+                 for d in new["decisions"]), "Every decision needs a string ID")
+        _require({d["id"] for d in old["decisions"]} <= {d["id"] for d in new["decisions"]},
+                 "Existing decision dispositions/history must be retained")
+    _validate_project_proposal(plan | {"assessments": incoming})
+    current, blockers = _project_current(plan)
+    changes = _project_changes(plan, current)
+    _invalidate_project(plan, current, changes)
+    if "reconcile" in request:
+        reconciliation = request["reconcile"]
+        _object(reconciliation, ("input_digest", "reason"))
+        _hash(reconciliation["input_digest"])
+        _text(reconciliation["reason"])
+        _require(reconciliation["input_digest"] == _digest(current), "Onboarding reconciliation inputs changed; inspect again")
+        for item in plan["sources"]["declared"]["toolkit"]["files"]:
+            observed = current["sources"][item["path"]]
+            _require(observed["status"] != "read" or observed["sha256"] == item["sha256"],
+                     "Changed source bytes cannot be reconciled to a pinned source")
+        for assessment, observed in zip(_assessments(plan["assessments"]), _assessments(current["observations"])):
+            assessment["identity"] = deepcopy(observed["identity"])
+        plan["package_pins"] = current["package_pins"]
+        plan["sources"]["observed"] = current["sources"]
+        plan["requirements"] = _requirements(plan["sources"]["declared"])
+        plan["invalidations"].append({"revision": plan["revision"], "input_digest": reconciliation["input_digest"],
+                                      "reason": reconciliation["reason"]})
+    for assessment, new in zip(_assessments(plan["assessments"]), _assessments(incoming)):
+        for key in ("inventory", "decisions", "coverage", "actions", "evidence", "semantic_assessment"):
+            assessment[key] = deepcopy(new[key])
+    for key, decision in _project_decisions(plan).items():
+        if key in previous and decision != previous[key]:
+            _remember_decision(plan, previous[key] | {"id": key})
+    _validate_project_proposal(plan)
+    expanded, observation_blockers = _project_current(plan)
+    _project_target_conflicts(plan, expanded)
+    _expand_project_inputs(plan, expanded)
+    # Reinspect the same named targets after structural and cross-owner checks.
+    final, final_blockers = _project_current(plan)
+    _require(expanded == final, "Project inputs changed during proposal validation; inspect again")
+    plan["revision"] += 1
+    report = _finish_project(plan, final, blockers + observation_blockers + final_blockers)
+    _project_plan_shape(plan)
+    _save(plan, path, directory)
+    return report

@@ -94,6 +94,7 @@ def validate(root=ROOT):
                  "scripts/repository_gate.py", "clients/repository-gate.md",
                  "skills/onboard-my-project/SKILL.md",
                  "skills/onboard-my-project/references/procedure.md",
+                 "skills/onboard-my-project/references/project-plan.md",
                  "skills/onboard-my-project/references/apply-and-recovery.md",
                  "skills/onboard-my-project/agents/openai.yaml"):
         local_file(root, "./" + path)

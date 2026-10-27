@@ -29,3 +29,18 @@ Native evidence is delegated instruction execution and actual inspect/plan CLI u
 ## Limits and handoff
 
 The helper checks structure, paths, hashes, revisions, references and declared coverage; it cannot authenticate upstream ownership or establish semantic completeness by itself. The reviewed replacement has a complete independent semantic assessment, but it remains blocked on user choices. D3 did not enroll a project, install tools, or test Superset. D4 separately owns authorized adoption, apply journaling and recovery; D5–D7 retain later task-evidence, dispatch and merge-enforcement work. A digest or `ready_for_review` state grants no authority or readiness.
+
+## Project-aware private planning — 27 October 2026
+
+This follow-up adds private planning only. Earlier package/native observations above retain their exact historical scope.
+
+| Evidence | Accepted result | Scope |
+| --- | --- | --- |
+| D3A inspection and fix re-review | Independent review accepted bounded inspection after fixing bare Git metadata detection and saved-plan owner/type validation. The final fix passed 24 focused tests; unchanged paths retain the preceding 111-test onboarding/recovery evidence. Exact scope and frozen package hashes were independently checked. | Bounded private Project/Repository/checkout observations, strict saved shape, named-file Git-metadata exclusion and early D4 rejection; no adoption |
+| D3B scoped proposal, trust/bounds proof and independent review | Independent review accepted scoped proposals after a blocker-limit fix. The full local suite passed 525 tests in 293.682 seconds before that fix; six focused checks passed afterward, preserving stale status, history and save/load. Earlier focused compatibility and boundary runs passed 133 and 10 tests respectively. | Complete per-Repository requirements, shared-file owner, qualified references/current evidence digests, target bindings/overlap checks, revision/history/reconciliation and aggregate limits |
+| D3C selective instruction paths | Static review covered ordinary unenrolled coding, legacy onboarding, umbrella/linked-checkout planning, pinned resume and apply/recovery. Explicit root/authority constraints and schema-specific file scope were clarified. No installed-client execution was used. | Legacy versus explicit Project loading, recovery-only loading and complete requirements; no native qualification inferred |
+| Final package/link/whitespace checks and candidate bindings | Package validator passed; skill-creator validation passed with the existing Python 3.11/PyYAML runtime. Entry remains 149 words (preparation skill 143); 127 relative Markdown link targets resolve; whitespace check passed. Runtime and test files are unchanged from accepted D3B fix 1. | Package/instruction structure for this exact accepted candidate, separate from client execution |
+
+Private schema 2 is inspection/proposal only. Even review-ready does not grant approval, enrollment, automatic joining, task readiness or merge authority. The old native semantic assessment does not qualify this format. No new native client or repository-enforcement result is claimed here.
+
+Validated code bindings: `runtime/onboarding.py` SHA-256 `9b441d6f7e27bf3d45a3bcf066e311d74787c30a23b0cbf3338702d162941df1`; `tests/test_onboarding.py` SHA-256 `10c486340b177297f403d474f3db7f213f74e70f27637813c7ba90683e093296`. The 525-test run preceded the narrow blocker-cap fix and documentation integration; the final fix has its six focused checks. No redundant full-suite run or new native qualification is claimed.

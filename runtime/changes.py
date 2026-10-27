@@ -1202,6 +1202,8 @@ def _run(plan_dir, request, operation):
         with d3._locked(path):
             plan = d3._load(path)
         d3._require(plan is not None, "Inspect and record a D3 plan before applying")
+        d3._require(plan["schema_version"] == 1,
+                    "D4 cannot apply, resume or roll back onboarding schema 2 Project inspections")
         root, git_dir = _validate(request, plan)
         with _worktree_lock(git_dir) as checkout_lock:
             owner = _command_owner(git_dir)

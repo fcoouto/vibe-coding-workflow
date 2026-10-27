@@ -37,6 +37,24 @@ class ChangesTests(d3_tests.OnboardingTests):
         return {"sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                 "mode": path.stat().st_mode & 0o777}
 
+    def test_project_inspection_rejects_all_d4_operations_before_validation_or_locks(self):
+        (self.directory / "plan.json").unlink()
+        onboarding.inspect_project(self.repo, self.directory, self.project_record())
+        before = (self.directory / "plan.json").read_bytes()
+        target = (self.repo / "AGENTS.md").read_bytes()
+        with patch.object(self.changes, "_validate", side_effect=AssertionError("D4 validation ran")), \
+                patch.object(self.changes, "_worktree_lock", side_effect=AssertionError("worktree lock acquired")):
+            for operation in (self.changes.apply_plan, self.changes.resume_plan, self.changes.rollback_plan):
+                with self.subTest(operation=operation.__name__):
+                    result = operation(self.directory, {})
+                    self.assertNotEqual(result["exit_code"], 0)
+                    self.assertIn("schema 2", str(result["blocked"]))
+                    self.assertFalse((self.directory / "transaction.json").exists())
+                    self.assertFalse((self.base / "locks").exists())
+        self.assertEqual((self.directory / "plan.json").read_bytes(), before)
+        self.assertEqual((self.repo / "AGENTS.md").read_bytes(), target)
+        self.assertFalse((self.repo / PROJECT_FILE).exists())
+
     def request(self):
         """Representative manifest/request fixture; evidence is disposable test data."""
         plan = self.plan()

@@ -206,7 +206,7 @@ Reuse explicit shared-guide pointers and established precedence instead of copie
 
 Applicable lint belongs to approved onboarding at the real dependency/package-workspace owner. Reuse equivalent tooling and current results; install missing applicable tools during approved onboarding at that owner. Run commands at the actual application directory, such as `admin/web`. Do not add universal ESLint/Pylint dependencies, duplicate file-size checks, redundant lint runs or an Actions dependency. D10 installations keep their separate approval boundary.
 
-**Implementation gap:** current startup reads checkout-root enrollment only; D3's `inspect_project` accepts one Git checkout and rejects a non-Git umbrella. Existing D4 enrollment does not implement automatic member joining. These limitations remain true until the following bounded follow-up is implemented and qualified; this plan changes no live behavior.
+**Implementation boundary:** D3 supports explicit Project-scope private inspection/proposals while legacy input keeps its one-checkout path. Private plan schema 2 is not schema-2 enrollment: D4 rejects it before transaction validation, worktree locks or journal creation, and startup still reads checkout-root schema-1 enrollment only. Canonical membership/adoption, automatic joining and runtime/evidence identity integration remain the bounded follow-up below. Package/private-plan proof does not qualify live adoption or client execution.
 
 | Owner / existing implementation seam | Required follow-up and loaded instruction owners |
 | --- | --- |
