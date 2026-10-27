@@ -56,6 +56,6 @@ Package/helper tests, delegated instruction execution and fresh native startup a
 
 ## Private Project-plan boundary — 27 October 2026
 
-Private D3 schema 2 is rejected before D4 validation, worktree locks or journal creation. The apply/resume/rollback gate regression passed in the 111-test D3A run, the 133-test D3B compatibility snapshot and the 525-test integration run. Its code remained unchanged through the final D3B fix.
+Private D3 schema 2 remains rejected before D4 transaction validation, worktree locks or journal creation. The D4 pure canonical decoder/resolver compatibility snapshot passed 122 tests before the parent-proof review fix; the final fix then passed all 24 canonical-scope tests. The production schema-2 gate remains closed, and synthetic observer facts prove comparisons only.
 
-Historical apply/recovery/native observations above remain schema-1 fixture evidence. They do not establish canonical Project enrollment, umbrella startup, future-member joining or runtime/evidence identity integration.
+Historical apply/recovery/native observations above remain schema-1 fixture evidence. They do not establish canonical Project enrollment, umbrella startup, future-member joining or runtime/evidence identity integration. D3 can now reuse exact canonical owner IDs after full authority and physical-parent comparisons; older valid plans without recorded authority-parent proof stay readable but stale until replaced by a newly reviewed plan.
