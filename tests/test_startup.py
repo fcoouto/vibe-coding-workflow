@@ -115,6 +115,51 @@ class CanonicalScopeTests(unittest.TestCase):
         from runtime.startup import decode_project_record, resolve_canonical_scope
         return resolve_canonical_scope(decode_project_record(record), **args)
 
+    def test_canonical_preview_absent_preimage_has_no_current_scope_and_unknown_facts_fail(self):
+        from runtime.startup import preview_canonical_scope, decode_project_record
+        record, args, _ = self.fixture()
+        args["authority"]["target"]["binding"] = None
+        args["authority"]["target"]["fingerprint"] = dict(status="absent")
+        preview = preview_canonical_scope(decode_project_record(record), **args)
+        self.assertTrue(preview.eligible)
+        self.assertEqual(preview.reason,"eligible")
+        self.assertFalse(hasattr(preview,"scope"))
+        self.assertFalse(hasattr(preview,"status"))
+        self.assertEqual(self.resolve(record,args).status,"conflict")
+        args["observation"]["qualification"] = None
+        self.assertFalse(preview_canonical_scope(decode_project_record(record), **args).eligible)
+
+    def test_canonical_projection_configured_historical_and_pending(self):
+        from runtime.startup import canonical_scope_projection, decode_project_record
+        record, _, identity = self.fixture()
+        project = lambda value: canonical_scope_projection(decode_project_record(value),
+            repository_id="repository", checkout_id="checkout", client="codex")
+        from runtime.startup import _canonical_plain
+        self.assertEqual(_canonical_plain(project(record)), identity)
+        entry = record["repositories"][0]["checkouts"][0]["clients"][0]
+        entry["configuration"]["runtime"] = None
+        entry["activation"].update(status="configured", qualification="pending", accepted_scope_digest=None,
+            transaction_id=None, evidence=[], qualification_binding=None)
+        self.assertIsNone(project(record)["configuration"]["runtime"])
+        entry["configuration"] = None
+        entry["activation"]["status"] = "pending"
+        self.assertIsNone(project(record))
+
+    def test_canonical_projection_removed_excluded_and_invalid_ids(self):
+        from runtime.startup import canonical_scope_projection, decode_project_record, StartupError
+        record, _, _ = self.fixture()
+        for field in ("removed", "excluded"):
+            value = copy.deepcopy(record)
+            if field == "removed": value["repositories"][0]["membership"] = "removed"
+            else: value["membership"]["exclude"] = ["."]
+            projection = canonical_scope_projection(decode_project_record(value),
+                repository_id="repository", checkout_id="checkout", client="codex")
+            self.assertFalse(projection["membership"]["included"])
+        for key in ("repository_id", "checkout_id", "client"):
+            selection = dict(repository_id="repository", checkout_id="checkout", client="codex")
+            selection[key] = "unknown"
+            with self.assertRaises(StartupError): canonical_scope_projection(decode_project_record(record), **selection)
+
     def test_canonical_active_identity_is_selected_and_no_io(self):
         from contextlib import ExitStack
         for umbrella, linked in ((False, False), (True, False), (True, True), (False, True)):

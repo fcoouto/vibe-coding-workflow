@@ -411,15 +411,18 @@ def _reconcile_command_lifecycles(path, journal):
         raise Pending("Unresolved checkout command marker has no matching receipt; preserve it for original-plan/manual recovery")
 
 
-def _atomic(directory, name, raw, mode=0o600, target=False, guard=None, temporary=None):
+def _atomic(directory, name, raw, mode=0o600, target=False, guard=None, temporary=None, prepared=None):
     """Replace one bounded regular file and durably publish its directory entry."""
     d3._require(len(raw) <= MAX_JOURNAL, "D4 artifact size limit exceeded")
     fd = d3._open_path(directory, os.O_RDONLY | os.O_DIRECTORY)
     temporary = temporary or ".d4-" + uuid.uuid4().hex
     created = False
+    created_identity = None
     try:
         output = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode, dir_fd=fd)
         created = True
+        created_info = os.fstat(output)
+        created_identity = (created_info.st_dev,created_info.st_ino)
         with os.fdopen(output, "wb") as stream:
             stream.write(raw)
             if target:
@@ -427,6 +430,9 @@ def _atomic(directory, name, raw, mode=0o600, target=False, guard=None, temporar
             stream.flush()
             os.fchmod(stream.fileno(), mode)
             os.fsync(stream.fileno())
+            if prepared is not None:
+                os.fsync(fd)
+                prepared(os.fstat(stream.fileno()))
             if target:
                 _checkpoint("temp_fsync")
         if guard is not None:
@@ -437,6 +443,15 @@ def _atomic(directory, name, raw, mode=0o600, target=False, guard=None, temporar
                         "Target directory changed during replacement")
         finally:
             os.close(current_parent)
+        if prepared is not None:
+            observed = os.stat(temporary,dir_fd=fd,follow_symlinks=False)
+            if (observed.st_dev,observed.st_ino) != created_identity or not stat.S_ISREG(observed.st_mode) or observed.st_nlink != 1:
+                raise Pending("Prepared temporary physical identity changed; preserve it")
+            descriptor=os.open(temporary,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=fd)
+            with os.fdopen(descriptor,"rb") as stream:
+                current=os.fstat(stream.fileno())
+                if ((current.st_dev,current.st_ino) != created_identity or stream.read(len(raw)+1) != raw or stat.S_IMODE(current.st_mode) != mode):
+                    raise Pending("Prepared temporary bytes or mode changed; preserve it")
         os.replace(temporary, name, src_dir_fd=fd, dst_dir_fd=fd)
         if target:
             _checkpoint("rename")
@@ -446,7 +461,15 @@ def _atomic(directory, name, raw, mode=0o600, target=False, guard=None, temporar
     finally:
         if created:
             try:
-                os.unlink(temporary, dir_fd=fd)
+                safe = True
+                if prepared is not None:
+                    info=os.stat(temporary,dir_fd=fd,follow_symlinks=False)
+                    safe = stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and (info.st_dev,info.st_ino) == created_identity
+                    if safe:
+                        descriptor=os.open(temporary,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=fd)
+                        with os.fdopen(descriptor,"rb") as stream:
+                            safe=raw.startswith(stream.read(len(raw)+1))
+                if safe: os.unlink(temporary, dir_fd=fd)
             except FileNotFoundError:
                 pass
         os.close(fd)
@@ -459,6 +482,8 @@ def _journal(path):
         return None
     result = d3.read_request(raw, limit=MAX_JOURNAL)
     d3._object(result, ("schema_version", "transaction_id", "manifest_digest", "manifest", "approval", "plan", "state", "receipts", "enrollment", "blocked", "directories", "observations"))
+    if result.get("schema_version") == 2:
+        return _scoped_journal_shape(result)
     d3._require(result["schema_version"] == 1 and result["state"] in
                 ("prepared", "applying", "interrupted", "applied", "blocked", "rollback_partial", "rolled_back"), "Invalid D4 journal")
     return result
@@ -537,6 +562,68 @@ def _replace(root, relative, raw, fingerprint, expected, temporary=None):
         _atomic(path.parent, path.name, raw, fingerprint["mode"], target=True, guard=unchanged, temporary=temporary)
     if _fingerprint(root, relative) != fingerprint:
         raise Pending("Observed operation result differs from the intended postimage")
+
+
+def _scoped_replace(path, root, relative, raw, before, after, receipt, journal):
+    """Keep physical ownership durable across schema-2 replacement crash boundaries."""
+    location = root / relative
+    def binding():
+        if not os.path.lexists(location):
+            return None
+        d3._no_links(location)
+        info = location.stat()
+        return dict(device=info.st_dev, inode=info.st_ino)
+    actual = _fingerprint(root, relative)
+    if actual is None and after is None and (before is None or receipt.get("delete_intent") is True):
+        receipt["result_binding"] = None
+        _save(path,journal)
+        return
+    if actual == after and after is not None:
+        owned = receipt.get("result_binding") or receipt["prepared_binding"]
+        if owned is None and before == after and receipt.get("before_binding") == binding():
+            owned = receipt["before_binding"]
+        if owned is None or binding() != owned:
+            raise Pending("Scoped output physical ownership is ambiguous; preserve the current file")
+        receipt["result_binding"] = owned
+        _save(path, journal)
+        return
+    if actual != before:
+        raise Pending("Scoped target changed outside this transaction")
+    if "before_binding" in receipt and binding() != receipt["before_binding"]:
+        raise Pending("Scoped preimage physical identity changed")
+    expected_binding = binding()
+    temporary = location.parent / receipt["temporary"]
+    if os.path.lexists(temporary):
+        info = temporary.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or
+                dict(device=info.st_dev, inode=info.st_ino) != receipt["prepared_binding"]):
+            raise Pending("Scoped temporary ownership is unverified; preserve it")
+        directory = d3._open_path(temporary.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.unlink(temporary.name, dir_fd=directory)
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    def unchanged():
+        if _fingerprint(root, relative) != before or binding() != expected_binding:
+            raise Pending("Scoped target physical identity changed before replacement")
+    def prepared(info):
+        receipt["prepared_binding"] = dict(device=info.st_dev, inode=info.st_ino)
+        _save(path, journal)
+        _checkpoint("scoped_temp_recorded")
+    if after is None:
+        unchanged()
+        receipt["delete_intent"] = True
+        _save(path,journal)
+        _replace(root, relative, raw, after, before, receipt["temporary"])
+        receipt["result_binding"] = None
+    else:
+        _atomic(location.parent, location.name, raw, after["mode"], target=True,
+                guard=unchanged, temporary=receipt["temporary"], prepared=prepared)
+        if _fingerprint(root, relative) != after or binding() != receipt["prepared_binding"]:
+            raise Pending("Scoped output differs from its prepared physical identity")
+        receipt["result_binding"] = receipt["prepared_binding"]
+    _save(path, journal)
 
 
 def _restore(path, root, relative, receipt, before, after):
@@ -835,6 +922,8 @@ def _ensure_parents(path, root, relative, journal):
     for number in range(1, len(parts) + 1):
         name = str(Path(*parts[:number]))
         location = root / name
+        if journal["schema_version"] == 2:
+            name = str(location)
         stored = journal["directories"].get(name)
         try:
             descriptor = d3._open_path(location, os.O_RDONLY | os.O_DIRECTORY)
@@ -1339,3 +1428,863 @@ def resume_plan(plan_dir, request):
 def rollback_plan(plan_dir, request):
     """Deactivate owned enrollment, restore effects backwards, then restore compatible prior enrollment."""
     return _run(plan_dir, request, "rollback")
+
+
+# Internal schema-2 path; public startup/transaction activation remains gated.
+def _scoped_entries(record):
+    if record is None or record.get("schema_version") != 2:
+        return {}
+    return {(r["repository_id"], c["checkout_id"], e["client"]): (r, c, e)
+            for r in record["repositories"] for c in r["checkouts"] for e in c["clients"]}
+
+
+def _scoped_projection(record, key):
+    from runtime.startup import canonical_scope_projection, decode_project_record, _canonical_plain
+    return _canonical_plain(canonical_scope_projection(decode_project_record(record),
+        repository_id=key[0], checkout_id=key[1], client=key[2]))
+
+
+def _canonical_record(record, plan, *, current):
+    from runtime.startup import decode_project_record
+    decode_project_record(record)
+    d3._require(all(record[k] == plan["identity"][k] for k in ("project_id", "project_root", "kind"))
+                and record["project_binding"] == plan["identity"]["binding"], "Canonical Project binding changed")
+    entries = _scoped_entries(record)
+    for assessment in plan["assessments"]["repositories"]:
+        owner, identity = assessment["owner"], assessment["identity"]
+        repo = next((r for r in record["repositories"] if r["repository_id"] == owner["repository_id"]), None)
+        selected = next((c for c in repo["checkouts"] if c["checkout_id"] == owner["checkout_id"]), None) if repo else None
+        d3._require(repo is not None and selected is not None and all(repo[k] == owner[k] for k in ("primary_root", "git_common_dir"))
+                    and selected["root"] == owner["root"] and selected["git_dir"] == owner["git_dir"]
+                    and repo["binding"] | selected["binding"] == identity["binding"], "Canonical selected owner changed")
+        if current:
+            for key, (_, _, entry) in entries.items():
+                if key[:2] == (owner["repository_id"], owner["checkout_id"]) and entry["configuration"] is not None:
+                    d3._require(all(entry["configuration"][k] == plan["package_pins"][k] for k in ("policy_digest", "runtime_digest")),
+                                "Canonical selected configuration pins are stale")
+    return record
+
+
+def _scoped_originals(plan):
+    originals, dependencies, order = {}, {}, []
+    for assessment in d3._assessments(plan["assessments"]):
+        previous = None
+        for original in assessment["actions"]:
+            identity = d3._qualified(assessment["owner"], original["id"])
+            originals[identity] = original
+            dependencies[identity] = set(original["dependencies"]) | ({previous} if previous else set())
+            order.append(identity)
+            previous = identity
+    result, done = [], set()
+    while len(done) != len(order):
+        identity = next((i for i in order if i not in done and dependencies[i] <= done), None)
+        d3._require(identity is not None, "Scoped action dependencies are incomplete or cyclic")
+        result.append(identity)
+        done.add(identity)
+    return originals, result, dependencies
+
+
+def _scoped_prior(plan):
+    authority = next(a for a in plan["identity"]["authority"] if a["path"] == plan["project_scope"]["authority"]["path"])
+    d3._require(authority.get("target") is not None and not authority["error"], "Complete authority parent observations are required")
+    return authority, authority["record"]
+
+
+def _validate_scoped(request, plan):
+    d3._bounded(request)
+    d3._project_plan_shape(plan)
+    d3._require(plan["schema_version"] == 2 and plan["review_digest"] == d3._review_digest(plan), "Frozen scoped proposal changed")
+    d3._object(request, ("schema_version", "manifest", "approval"), ("observations",))
+    m = request["manifest"]
+    d3._object(m, ("schema_version", "transaction_id", "plan", "pins", "authorization_reference", "approved_scope", "owners", "actions", "enrollment"))
+    d3._require(type(request["schema_version"]) is int and request["schema_version"] == 2 and type(m["schema_version"]) is int and m["schema_version"] == 2,
+                "Unsupported scoped transaction schema")
+    d3._require(isinstance(m["transaction_id"], str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", m["transaction_id"]), "Invalid transaction ID")
+    d3._require(m["plan"] == {k: plan[k] for k in ("plan_id", "revision", "review_digest", "current_input_digest")}
+        and m["pins"] == dict(package_pins=plan["package_pins"], toolkit_commit=plan["sources"]["declared"]["toolkit"]["commit"], sources_digest=d3._digest(plan["sources"]))
+        and plan["package_pins"] == d3._package_pins(), "Scoped plan/package/source pins changed")
+    d3._require(isinstance(m["actions"],list) and all(isinstance(a,dict) and isinstance(a.get("effects"),list) and isinstance(a.get("preconditions"),list) for a in m["actions"])
+                and sum(len(a["effects"])+len(a["preconditions"]) for a in m["actions"]) <= d3.MAX_PATHS, "Scoped effect/precondition limit exceeded")
+    expected_owners = [{k: a[k] for k in ("owner", "identity")} for a in d3._assessments(plan["assessments"])]
+    d3._require(m["owners"] == expected_owners, "Frozen scoped owners changed")
+    originals, order, dependencies = _scoped_originals(plan)
+    d3._strings(m["approved_scope"])
+    d3._require(set(m["approved_scope"]) <= set(order) | {"enrollment"} and "enrollment" in m["approved_scope"], "Unknown or missing scoped approval")
+    approval = request["approval"]
+    d3._object(approval, ("reference", "evidence", "manifest_digest"))
+    d3._text(m["authorization_reference"])
+    d3._require(approval["reference"] == m["authorization_reference"] and approval["manifest_digest"] == d3._digest(m), "Approval differs from exact scoped manifest")
+    d3._require(_evidence(approval["evidence"], many=True), "Trusted session approval evidence is required")
+    d3._require(isinstance(m["actions"], list) and [a.get("id") for a in m["actions"]] == order, "Scoped action order differs from stable dependency order")
+    physical, groups, last = [], set(), None
+    for action in m["actions"]:
+        d3._object(action, ("id", "owner", "group", "resources", "preconditions", "effects", "recovery", "execution"))
+        original, owner = originals[action["id"]], action["owner"]
+        d3._require(owner == original["owner"] and action["recovery"] in ("file-preimages", "manual"), "Scoped action owner/recovery changed")
+        d3._text(action["group"]); d3._strings(action["resources"])
+        if last != action["group"]:
+            d3._require(action["group"] not in groups, "Scoped action groups must be contiguous")
+            groups.add(action["group"]); last = action["group"]
+        for condition in action["preconditions"]:
+            d3._object(condition, ("path", "fingerprint")); _target(condition["path"]); _fp_schema(condition["fingerprint"])
+        for effect in action["effects"]:
+            d3._object(effect, ("path", "before", "after", "target") if original["kind"] == "command" else ("path", "before", "after"))
+            _fp_schema(effect["before"]); _fp_schema(effect["after"])
+            if not (original["kind"] == "write" and original["target"] == str(PROJECT_FILE) and effect["path"] == str(PROJECT_FILE)):
+                _target(effect["path"])
+            if original["kind"] == "command":
+                from runtime.startup import _canonical_target
+                _canonical_target(effect["target"])
+                d3._require(effect["target"]["path"] == str(Path(owner["root"])/effect["path"])
+                    and effect["target"]["parents"].get(owner["root"]) == next(a["identity"]["binding"]["root"] for a in m["owners"] if a["owner"] == owner)
+                    and all(Path(p).is_relative_to(Path(owner["root"])) for p in effect["target"]["parents"]), "Command effect target is outside its selected owner")
+            location = Path(owner["root"]) / effect["path"]
+            d3._require(all(not location.is_relative_to(p) and not p.is_relative_to(location) for p in physical), "Scoped effects overlap")
+            physical.append(location)
+        if original["kind"] in ("write", "delete"):
+            d3._require(len(action["effects"]) == 1 and action["execution"] is None, "Scoped file action needs one effect")
+            effect = action["effects"][0]
+            d3._require(effect["path"] == original["target"] and (effect["before"]["sha256"] if effect["before"] else "absent") == original["before"]
+                and (effect["after"]["sha256"] if effect["after"] else "absent") == original["after"], "Scoped file postimage differs from proposal")
+        elif original["kind"] == "command":
+            e = action["execution"]
+            d3._object(e, ("argv", "cwd", "cwd_target", "timeout_seconds", "qualification", "idempotency"))
+            assessment = next(a for a in d3._assessments(plan["assessments"]) if a["owner"] == owner)
+            d3._require(e["argv"] == original["text"] and e["cwd"] == original["cwd"]
+                and e["cwd_target"] == assessment["identity"]["targets"].get("cwd:" + original["cwd"])
+                and e["cwd_target"] is not None and type(e["timeout_seconds"]) is int and 1 <= e["timeout_seconds"] <= 300, "Scoped command cwd or execution changed")
+            _evidence(e["qualification"]); _evidence(e["idempotency"])
+        else:
+            d3._require(action["execution"] is None, "External actions require manual operation")
+    enrollment = m["enrollment"]
+    d3._object(enrollment, ("record", "before", "affected", "requires", "qualification"))
+    record = _canonical_record(enrollment["record"], plan, current=True)
+    d3._require(all(record["membership"][k] == plan["project_scope"]["membership"][k] for k in ("include","exclude","future_join")), "Canonical membership differs from frozen Project scope")
+    d3._require(all(isinstance(enrollment[k],list) and len(enrollment[k]) <= d3.MAX_PATHS for k in ("affected","requires","qualification")), "Scoped enrollment row limit exceeded")
+    for member in enrollment["affected"]: d3._object(member,("repository_id","checkout_id","client"))
+    authority, prior = _scoped_prior(plan)
+    expected_before = dict(revision=prior.get("revision") if prior else None,
+        raw_sha256=authority["fingerprint"].get("sha256"), target=authority["target"])
+    d3._require(enrollment["before"] == expected_before, "Scoped authority preimage changed")
+    old, new = _scoped_entries(prior), _scoped_entries(record)
+    d3._require(set(old) <= set(new), "Removed members must retain tombstone/history entries")
+    affected = {key for key in new if key not in old or _scoped_projection(prior, key) != _scoped_projection(record, key)
+                or old[key][2]["activation"] != new[key][2]["activation"]}
+    declared = [tuple(a[k] for k in ("repository_id", "checkout_id", "client")) for a in enrollment["affected"]]
+    d3._require(declared == sorted(affected), "Scoped affected set is incomplete or excessive")
+    selected = {(a["owner"]["repository_id"], a["owner"]["checkout_id"]) for a in plan["assessments"]["repositories"]}
+    d3._require(all(k[:2] in selected and k[2] in plan["sources"]["declared"]["clients"] for k in affected), "Shared dependency update lacks an affected member/client assessment")
+    if prior and prior.get("schema_version") == 2:
+        for previous in prior["repositories"]:
+            retained = next((r for r in record["repositories"] if r["repository_id"] == previous["repository_id"]),None)
+            d3._require(retained is not None and all(previous[k] == retained[k] for k in ("primary_root","git_common_dir","binding")), "Historical Repository identity/tombstone was discarded")
+            d3._require(previous["membership"] == retained["membership"] or previous["repository_id"] in {o[0] for o in selected}, "Unselected membership tombstone changed")
+            for checkout in previous["checkouts"]:
+                kept = next((c for c in retained["checkouts"] if c["checkout_id"] == checkout["checkout_id"]),None)
+                d3._require(kept is not None and all(checkout[k] == kept[k] for k in ("root","git_dir","binding")), "Historical checkout identity was discarded")
+    for key in set(old) - affected:
+        before_repo,before_checkout,before_entry = old[key]
+        after_repo,after_checkout,after_entry = new[key]
+        d3._require(before_entry == after_entry and {k:v for k,v in before_repo.items() if k != "checkouts"} == {k:v for k,v in after_repo.items() if k != "checkouts"}
+            and {k:v for k,v in before_checkout.items() if k != "clients"} == {k:v for k,v in after_checkout.items() if k != "clients"}, "Unrelated member identity/configuration/receipts changed")
+    suspend = bool(prior and (prior.get("schema_version") == 1 or any(old[k][2]["activation"]["status"] == "active" for k in affected if k in old)))
+    d3._require(record["revision"] == (prior.get("revision", 0) if prior else 0) + (2 if suspend else 1), "Scoped final revision must match frozen write sequence")
+    d3._strings(enrollment["requires"])
+    mandatory = set()
+    for assessment in plan["assessments"]["repositories"]:
+        for row in assessment["coverage"]:
+            if row["mandatory"] and row["applicability"] == "applicable": mandatory.update(row["actions"])
+    while True:
+        expanded = mandatory | {d for i in mandatory for d in dependencies[i]}
+        if expanded == mandatory: break
+        mandatory = expanded
+    d3._require(mandatory <= set(enrollment["requires"]) <= set(order), "Scoped enrollment omits mandatory dependencies")
+    for action in m["actions"]:
+        if originals[action["id"]]["target"] == str(PROJECT_FILE):
+            d3._require(Path(action["owner"]["root"]) == Path(record["project_root"]) and originals[action["id"]]["kind"] == "write"
+                and d3.read_request(originals[action["id"]]["text"].encode()) == record, "Canonical enrollment differs from exact proposal")
+    shared_before = {s["path"]:s["sha256"] for s in prior.get("shared_policy",[])} if prior else {}
+    shared_after = {s["path"]:s["sha256"] for s in record["shared_policy"]}
+    for action in m["actions"]:
+        for effect in action["effects"]:
+            location=str(Path(action["owner"]["root"])/effect["path"])
+            if location in shared_before or location in shared_after:
+                d3._require(shared_after.get(location) == (effect["after"]["sha256"] if effect["after"] else None), "Shared resource postimage is missing from selected dependency projections")
+    qkeys = []
+    for row in enrollment["qualification"]:
+        d3._object(row, ("repository_id", "checkout_id", "client", "requirements", "security_required"))
+        key = tuple(row[k] for k in ("repository_id", "checkout_id", "client")); qkeys.append(key)
+        assessment = next(a for a in plan["assessments"]["repositories"] if (a["owner"]["repository_id"],a["owner"]["checkout_id"]) == key[:2])
+        required = {r["id"] for r in assessment["coverage"] if r["mandatory"] and r["applicability"] == "applicable"}
+        d3._strings(row["requirements"])
+        d3._require(type(row["security_required"]) is bool and required <= set(row["requirements"]) <= {r["id"] for r in plan["requirements"]}, "Scoped qualification requirements incomplete")
+    d3._require(sorted(qkeys) == sorted(affected), "Scoped member/client qualification scope changed")
+    return originals, dependencies, affected, suspend
+
+
+def _scoped_target(root, relative):
+    return d3._physical_target(root, root / relative, d3._fingerprint(root, relative), {"paths": 0, "bytes": 0})
+
+
+def _scoped_runtime_locations(records, affected=None):
+    locations = {}
+    for record in records:
+        if not record: continue
+        if record.get("schema_version") == 1:
+            rows = [(record["project_id"], record["repository_root"], record["git_common_dir"], record["policy_digest"], record.get("runtime"))]
+        else:
+            rows = [(record["project_id"], c["root"], r["git_common_dir"], e["configuration"]["policy_digest"], e["configuration"]["runtime"])
+                    for key, (r, c, e) in _scoped_entries(record).items() if e["configuration"] and (affected is None or key in affected)]
+        for project, root, common, policy, runtime in rows:
+            if runtime is None: continue
+            # This is a historical storage locator, not a fabricated active canonical scope.
+            settings = runtime_settings({"runtime": dict(schema_version=2, state_dir=runtime["state_dir"])}, d3.PACKAGE, Path(common))
+            locations[settings.state_dir] = (ProjectScope(project, Path(root), Path(common), policy, settings), runtime["schema_version"])
+    return locations
+
+
+def _scoped_writers(locations, affected_roots, git_roots=()):
+    from runtime import delegation, evidence
+    claims = [dict(kind="path", key=str(root), mode="write") for root in affected_roots] + [dict(kind="git", key=str(root), mode="write") for root in git_roots]
+    for directory, (locator, version) in locations.items():
+        if version == 1:
+            if _legacy_writers(replace(locator, runtime=replace(locator.runtime, schema_version=1))):
+                raise Pending("Affected legacy writers remain unreconciled")
+            continue
+        path = task_state._path(locator)
+        if not os.path.lexists(path): continue
+        task_state._sidecars(path)
+        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=0.1)) as db:
+            db.execute("pragma trusted_schema=off"); db.execute("begin")
+            task_state._schema(db, version=version)
+            records = delegation._ledger(locator, db)
+            if any(r["data"]["status"] != "settled" and delegation._held_conflict(claims, r["data"]["claims"]) for r in records):
+                raise Pending("Affected foreign or uncertain assignment remains unreconciled")
+            rows = db.execute("select scope_id,client,session_id,task_id from tasks limit 4097").fetchall()
+            d3._require(len(rows) <= 4096, "Writer history exceeds safe inspection bound")
+            for scope_id, client, session, task_id in rows:
+                task = task_state._task(db, scope_id, client, session, task_id)
+                row = db.execute("select repository_root,git_common_dir from checkouts where scope_id=?", (scope_id,)).fetchone()
+                d3._require(row is not None, "Historical writer has no checkout")
+                unresolved = [a for a in task.get("evidence", {}).get("attempts", []) if a["status"] in {"reserved", "running", "uncertain"}]
+                retirement = task.get("retirement")
+                relevant = Path(row[0]) in affected_roots or any(Path(row[1]) == root or root.is_relative_to(Path(row[1])) for root in affected_roots)
+                if retirement:
+                    proof = evidence._read(locator, retirement["proof"])
+                    d3._require(task["state"] == "cancelled" and proof.get("kind") == "stopped-writer-reconciliation"
+                        and proof.get("stopped") is True and proof.get("descendants_stopped") is True
+                        and proof.get("identity") == {k: task[k] for k in ("client", "session_id", "task_id", "scope_ref")}
+                        and proof.get("expected_pins") == task["pins"] and proof.get("expected_revision") == retirement["previous_revision"] == task["revision"] - 1
+                        and proof.get("observed_turn_id") == task["turn_id"] and proof.get("attempt_ids") == [a["id"] for a in unresolved],
+                        "Historical stopped-writer proof does not match original pins/identity")
+                elif relevant and task["mode"] == "editable":
+                    raise Pending("Affected editable task lacks exact stopped-writer retirement proof")
+                elif any(delegation._linked_attempt(locator, scope_id, task, a, records) is None for a in unresolved):
+                    raise Pending("Unlinked or foreign task attempt retains unknown writer ownership")
+
+
+def _scoped_journal_shape(journal):
+    d3._object(journal, ("schema_version", "transaction_id", "manifest_digest", "manifest", "approval", "plan", "state", "receipts", "enrollment", "blocked", "directories", "observations"))
+    d3._require(type(journal["schema_version"]) is int and journal["schema_version"] == 2 and journal["manifest_digest"] == d3._digest(journal["manifest"])
+                and journal["state"] in ("prepared", "applying", "interrupted", "applied", "blocked", "rollback_partial", "rolled_back"), "Invalid scoped journal")
+    d3._require(isinstance(journal["receipts"], dict) and isinstance(journal["directories"], dict) and isinstance(journal["observations"], list), "Invalid scoped recovery containers")
+    actions = {a["id"]: a for a in journal["manifest"]["actions"]}
+    d3._require(set(journal["receipts"]) <= set(actions), "Unknown scoped receipt")
+    for observation in journal["observations"]: _scoped_observation_shape(observation,journal["manifest"])
+    for identity, receipt in journal["receipts"].items():
+        d3._object(receipt, ("owner", "status", "files", "returncode"), ("command",))
+        d3._require(receipt["owner"] == actions[identity]["owner"] and receipt["status"] in ("prepared", "started", "completed", "rolled_back"), "Invalid scoped receipt owner/status")
+        d3._require(len(receipt["files"]) == len(actions[identity]["effects"]), "Incomplete scoped backup coverage")
+        if "command" in receipt:
+            command=receipt["command"]
+            d3._object(command,("attempt_id","stopped"))
+            d3._require(actions[identity]["execution"] is not None and isinstance(command["attempt_id"],str) and re.fullmatch(r"[0-9a-f]{32}",command["attempt_id"])
+                and type(command["stopped"]) is bool,"Invalid durable scoped command identity")
+            if command["stopped"]:
+                d3._require(any(p["id"] == identity and p["attempt_id"] == command["attempt_id"] for o in journal["observations"] for p in o["command_reconciliation"]),
+                    "Stopped command lacks its retained exact lifecycle proof")
+        action_index = journal["manifest"]["actions"].index(actions[identity])
+        assessment = next(a for a in d3._assessments(journal["plan"]["assessments"]) if a["owner"] == actions[identity]["owner"])
+        for index, (file, effect) in enumerate(zip(receipt["files"], actions[identity]["effects"])):
+            d3._object(file, ("backup", "temporary", "target", "before_binding", "prepared_binding", "result_binding", "owned_target"), ("restore", "delete_intent"))
+            expected_temp = ".d4-" + journal["transaction_id"] + "-" + str(action_index) + "-" + str(index)
+            d3._require(file["backup"] == ("backup-" + str(action_index) + "-" + str(index) if effect["before"] else None)
+                and file["temporary"] == expected_temp and file["target"] == (effect["target"] if "target" in effect else assessment["identity"]["targets"].get(effect["path"]))
+                and file["before_binding"] == file["target"]["binding"], "Scoped recovery file reference changed")
+            for key in ("before_binding", "prepared_binding", "result_binding"):
+                if file[key] is not None:
+                    from runtime.startup import _canonical_binding
+                    _canonical_binding(file[key])
+            if file["owned_target"] is not None:
+                from runtime.startup import _canonical_target
+                _canonical_target(file["owned_target"])
+                d3._require(file["owned_target"]["path"] == file["target"]["path"] and file["owned_target"]["binding"] == file["result_binding"], "Scoped owned result changed")
+            if "restore" in file:
+                d3._object(file["restore"], ("temporary", "before_binding", "prepared_binding", "result_binding"), ("delete_intent",))
+                d3._require(file["restore"]["temporary"] == expected_temp + "-restore" and file["restore"]["before_binding"] == file["result_binding"], "Scoped restore ownership changed")
+    for location, receipt in journal["directories"].items():
+        d3._require(Path(location).is_absolute(), "Invalid scoped directory path")
+        d3._object(receipt, ("status", "device", "inode"))
+        allowed = {str(p) for action in actions.values() for effect in action["effects"] for p in (Path(action["owner"]["root"]) / effect["path"]).parents if p.is_relative_to(Path(action["owner"]["root"])) and p != Path(action["owner"]["root"])}
+        allowed.add(str(Path(journal["manifest"]["enrollment"]["record"]["project_root"]) / PROJECT_FILE.parent))
+        d3._require(location in allowed and receipt["status"] in ("prepared", "owned", "retained", "removed")
+                    and all(v is None or type(v) is int and v >= 0 for v in (receipt["device"],receipt["inode"])), "Scoped directory ownership invalid")
+    e = journal["enrollment"]
+    if e is not None:
+        d3._object(e, ("before", "backup", "status", "temporary", "postimages", "members"))
+        d3._require(e["before"] == journal["manifest"]["enrollment"]["before"] and e["backup"] == ("enrollment.backup" if e["before"]["raw_sha256"] is not None else None)
+            and e["temporary"] == ".d4-"+journal["transaction_id"]+"-enrollment" and e["status"] in ("prepared","inactive","activating","active","restoring","restored"), "Invalid canonical recovery preimage")
+        d3._require(isinstance(e["members"],list) and len(e["members"]) == len(journal["manifest"]["enrollment"]["affected"]), "Incomplete scoped member outcome coverage")
+        for member,accepted in zip(e["members"],journal["manifest"]["enrollment"]["affected"]):
+            d3._object(member,("repository_id","checkout_id","client","status","blocked"))
+            d3._require(all(member[k] == accepted[k] for k in accepted) and member["status"] in ("pending","configured","active","suspended","restored","blocked")
+                and (member["blocked"] is None or isinstance(member["blocked"],str)), "Invalid scoped member outcome")
+        d3._require(isinstance(e["postimages"], list) and len(e["postimages"]) <= 4, "Invalid canonical postimage sequence")
+        phases=[]
+        _,prior=_scoped_prior(journal["plan"])
+        for post in e["postimages"]:
+            d3._object(post, ("phase", "revision", "raw_sha256", "target", "backup", "temporary", "status", "before", "after", "before_binding", "prepared_binding", "result_binding"), ("delete_intent",))
+            d3._require(post["phase"] in ("suspended", "final", "rollback_suspended", "restore") and post["temporary"].startswith(".d4-" + journal["transaction_id"] + "-")
+                        and "/" not in post["temporary"], "Invalid canonical temporary scope")
+            _fp_schema(post["before"]); _fp_schema(post["after"])
+            phase=post["phase"]
+            ranks={"suspended":0,"final":1,"rollback_suspended":2,"restore":3}
+            d3._require(phase not in phases and (not phases or ranks[phase] > ranks[phases[-1]]) and (phase != "rollback_suspended" or "final" in phases), "Invalid canonical publication order")
+            phases.append(phase)
+            expected_record=journal["manifest"]["enrollment"]["record"] if phase == "final" else _scoped_suspended(journal,rollback=phase=="rollback_suspended") if phase in ("suspended","rollback_suspended") else prior
+            expected_sha=hashlib.sha256(json.dumps(expected_record,sort_keys=True,ensure_ascii=True).encode()+b"\n").hexdigest() if expected_record is not None else None
+            if phase == "restore": expected_sha=e["before"]["raw_sha256"]
+            d3._require(post["raw_sha256"] == expected_sha and post["revision"] == (expected_record.get("revision") if expected_record else None)
+                and post["temporary"] == ".d4-"+journal["transaction_id"]+"-"+phase and post["backup"] == e["backup"] and post["status"] in ("prepared","published")
+                and (post["after"]["sha256"] if post["after"] else None) == expected_sha, "Canonical postimage differs from its frozen approved bytes")
+            if post["after"] is not None and phase != "restore":
+                d3._require(post["after"]["mode"] == 0o600, "Canonical postimage mode changed")
+            for key in ("before_binding","prepared_binding","result_binding"):
+                if post[key] is not None:
+                    from runtime.startup import _canonical_binding
+                    _canonical_binding(post[key])
+            if post["target"] is not None:
+                from runtime.startup import _canonical_target
+                _canonical_target(post["target"])
+                d3._require(post["target"]["path"] == str(Path(journal["manifest"]["enrollment"]["record"]["project_root"])/PROJECT_FILE)
+                    and post["target"]["binding"] == post["result_binding"] and post["target"]["fingerprint"].get("sha256") == expected_sha,
+                    "Canonical observed target differs from its owned result")
+            d3._require(post["status"] != "published" or post["target"] is not None, "Published canonical target observation missing")
+    return journal
+
+
+def _scoped_owner_bindings(plan):
+    for assessment in d3._assessments(plan["assessments"]):
+        owner, identity = assessment["owner"], assessment["identity"]
+        root = Path(owner["root"])
+        d3._require(d3._filesystem_binding(root) == (plan["identity"]["binding"] if owner["kind"] == "project" else identity["binding"]["root"]), "Selected root physical identity changed")
+        if owner["kind"] == "repository":
+            current, error = d3._checkout_observation(str(root), {"paths":0,"bytes":0})
+            d3._require(error is None and all(current[k] == identity[k] for k in ("root","primary_root","git_dir","git_common_dir","binding")), "Selected Git physical identity changed")
+
+
+def _scoped_parent_guard(target, journal):
+    for name, binding in target["parents"].items():
+        d3._require(d3._filesystem_binding(Path(name)) == binding, "Scoped target parent physical identity changed")
+    for name, receipt in journal["directories"].items():
+        if Path(target["path"]).is_relative_to(Path(name)) and receipt["status"] == "owned":
+            d3._require(d3._filesystem_binding(Path(name)) == {k:receipt[k] for k in ("device","inode")}, "Owned parent directory changed")
+
+
+def _scoped_recovery_files(path, journal):
+    for action in journal["manifest"]["actions"]:
+        receipt = journal["receipts"].get(action["id"])
+        if receipt:
+            for effect, file in zip(action["effects"],receipt["files"]):
+                _scoped_parent_guard(file["target"],journal)
+                if file["backup"]:
+                    raw = d3._read_file(path / file["backup"],d3.MAX_FILE,private=True)
+                    d3._require(hashlib.sha256(raw).hexdigest() == effect["before"]["sha256"], "Scoped backup integrity failed")
+    if journal["enrollment"] and journal["enrollment"]["backup"]:
+        raw = d3._read_file(path / journal["enrollment"]["backup"],128*1024,private=True)
+        d3._require(hashlib.sha256(raw).hexdigest() == journal["manifest"]["enrollment"]["before"]["raw_sha256"], "Canonical backup integrity failed")
+
+
+def _scoped_fresh(plan, journal):
+    for assessment in d3._assessments(plan["assessments"]):
+        owner, identity = assessment["owner"], assessment["identity"]
+        root = Path(owner["root"])
+        d3._require(d3._filesystem_binding(root) == (plan["identity"]["binding"] if owner["kind"] == "project" else identity["binding"]["root"]), "Selected root physical identity changed")
+        owned = {e["path"] for a in journal["manifest"]["actions"] if a["owner"] == owner and a["id"] in journal["receipts"] for e in a["effects"]}
+        if root == Path(plan["identity"]["project_root"]) and journal["enrollment"] is not None: owned.add(str(PROJECT_FILE))
+        if owner["kind"] == "repository":
+            observed, error = d3._checkout_observation(str(root), {"paths": 0, "bytes": 0})
+            d3._require(error is None and all(observed[k] == identity[k] for k in ("root", "primary_root", "git_dir", "git_common_dir", "binding")), "Selected Git physical identity changed")
+            local_actions = [dict(a, id=d3._qualified(owner, a["id"])) for a in assessment["actions"]]
+            local = dict(plan, identity=identity["snapshot"], actions=local_actions, schema_version=1)
+            view = dict(journal, manifest=dict(journal["manifest"], actions=[a for a in journal["manifest"]["actions"] if a["owner"] == owner]),
+                        enrollment=journal["enrollment"] if str(PROJECT_FILE) in owned else None)
+            _fresh(local, view)
+        else:
+            for name, fingerprint in identity["fingerprints"].items():
+                if name not in owned: d3._require(d3._fingerprint(root, name) == fingerprint, "Unrelated Project file changed")
+    d3._require(plan["package_pins"] == d3._package_pins() and not d3._source_blockers(plan, d3._sources(plan["sources"]["declared"])), "Installed package or Toolkit sources changed")
+
+
+def _scoped_input_digest(manifest):
+    root = Path(manifest["enrollment"]["record"]["project_root"])
+    return d3._digest(dict(authority=_scoped_target(root, str(PROJECT_FILE)), package_pins=d3._package_pins(),
+        effects=[dict(id=a["id"], files=[_scoped_target(Path(a["owner"]["root"]), e["path"]) for e in a["effects"]]) for a in manifest["actions"]]))
+
+
+def _scoped_suspended(journal, *, rollback=False):
+    _,prior=_scoped_prior(journal["plan"])
+    final=journal["manifest"]["enrollment"]["record"]
+    record=deepcopy(final if rollback else prior if prior and prior.get("schema_version")==2 else final)
+    record["revision"]=final["revision"]+1 if rollback else final["revision"]-1
+    affected={tuple(m[k] for k in ("repository_id","checkout_id","client")) for m in journal["manifest"]["enrollment"]["affected"]}
+    for key,(_,_,entry) in _scoped_entries(record).items():
+        if key in affected and entry["configuration"] is not None and (not rollback or entry["activation"]["status"]=="active"):
+            entry["activation"]["status"]="suspended"
+    return record
+
+
+def _scoped_publish(path, journal, phase, record):
+    root = Path(journal["manifest"]["enrollment"]["record"]["project_root"])
+    receipt = journal["enrollment"]
+    raw = json.dumps(record, sort_keys=True, ensure_ascii=True).encode() + b"\n" if record else b""
+    mode = 0o600
+    if phase == "restore" and receipt["backup"]:
+        raw = d3._read_file(path / receipt["backup"],128*1024,private=True)
+        d3._require(hashlib.sha256(raw).hexdigest() == receipt["before"]["raw_sha256"] and d3.read_request(raw) == record, "Prior authority raw backup changed")
+        mode = next((p["before"]["mode"] for p in receipt["postimages"] if p["before"] is not None),0o600)
+    after = dict(sha256=hashlib.sha256(raw).hexdigest(), mode=mode) if record else None
+    post = next((p for p in receipt["postimages"] if p["phase"] == phase), None)
+    if post is None:
+        actual = _scoped_target(root, str(PROJECT_FILE))
+        post = dict(phase=phase, revision=record.get("revision") if record else None, raw_sha256=after["sha256"] if after else None,
+            target=None, backup=receipt["backup"], temporary=".d4-" + journal["transaction_id"] + "-" + phase,
+            status="prepared", before=_fingerprint(root, str(PROJECT_FILE)), after=after,
+            before_binding=actual["binding"], prepared_binding=None, result_binding=None)
+        receipt["postimages"].append(post); _save(path, journal)
+    d3._require(post["after"] == after, "Canonical prepared postimage changed")
+    _ensure_parents(path, root, str(PROJECT_FILE), journal)
+    _scoped_parent_guard(journal["manifest"]["enrollment"]["before"]["target"], journal)
+    _scoped_replace(path, root, str(PROJECT_FILE), raw, post["before"], after, post, journal)
+    post["target"] = _scoped_target(root, str(PROJECT_FILE)); post["status"] = "published"
+    receipt["status"] = "restored" if phase == "restore" else "active" if phase == "final" else "inactive"
+    if phase in ("suspended","rollback_suspended","restore"):
+        for member in receipt["members"]:
+            member["status"]="restored" if phase=="restore" else "suspended"
+            member["blocked"]=None
+    _save(path, journal)
+
+
+def _scoped_owned_authority(journal):
+    root = Path(journal["manifest"]["enrollment"]["record"]["project_root"])
+    current = _scoped_target(root, str(PROJECT_FILE))
+    enrollment = journal["enrollment"]
+    if enrollment is None: return current == journal["manifest"]["enrollment"]["before"]["target"]
+    for post in reversed(enrollment["postimages"]):
+        expected = post["result_binding"] or post["prepared_binding"]
+        if _fingerprint(root, str(PROJECT_FILE)) == post["after"] and current["binding"] == expected:
+            return post["target"] is None or current == post["target"]
+    return not any(p["status"] == "published" for p in enrollment["postimages"]) and current == enrollment["before"]["target"]
+
+
+def _scoped_apply_action(path, journal, action, original, observation, checkout_lock):
+    root = Path(action["owner"]["root"])
+    if action["recovery"] != "file-preimages" or not action["effects"]:
+        raise Pending("Scoped operation lacks complete bounded recoverable effects")
+    expected_resources = ["checkout"] if action["owner"]["kind"] == "repository" else ["project"]
+    if action["resources"] != expected_resources or original["kind"] == "external":
+        raise Pending("Shared/global or external effects require manual serialization")
+    receipt = journal["receipts"].get(action["id"])
+    for assessment in d3._assessments(journal["plan"]["assessments"]):
+        for decision in assessment["decisions"]:
+            if decision["disposition"] in ("pending","proposed") and (d3._qualified(assessment["owner"],decision["id"]) in original["decision_ids"] or action["id"] in decision["affected_actions"]):
+                raise Pending("An applicable scoped adoption decision remains unresolved")
+        if any(action["id"] in row["actions"] and (row["blocker"] or row["outcome"] == "blocked") for row in assessment["coverage"]):
+            raise Pending("Scoped adoption coverage remains blocked")
+    if receipt is None:
+        assessment = next(a for a in d3._assessments(journal["plan"]["assessments"]) if a["owner"] == action["owner"])
+        files = []
+        for index, effect in enumerate(action["effects"]):
+            target = effect["target"] if original["kind"] == "command" else assessment["identity"].get("targets", {}).get(effect["path"])
+            d3._require(target is not None and _scoped_target(root, effect["path"]) == target, "Scoped target/parent preimage changed")
+            backup = _backup(path, root, effect["path"], effect["before"], "backup-" + str(journal["manifest"]["actions"].index(action)) + "-" + str(index))
+            files.append(dict(backup=backup, temporary=".d4-" + journal["transaction_id"] + "-" + str(journal["manifest"]["actions"].index(action)) + "-" + str(index),
+                target=target, before_binding=target["binding"], prepared_binding=None, result_binding=None, owned_target=None))
+        receipt = dict(owner=action["owner"], status="prepared", files=files, returncode=None)
+        journal["receipts"][action["id"]] = receipt; _save(path, journal); _checkpoint("prepared")
+    for condition in action["preconditions"]:
+        d3._require(_fingerprint(root, condition["path"]) == condition["fingerprint"], "Scoped action precondition changed")
+    if original["kind"] == "command":
+        if action["owner"]["kind"] != "repository" or not action["execution"]["qualification"]:
+            raise Pending("Scoped command lacks qualified Repository-local effects")
+        if receipt.get("command") and not receipt["command"]["stopped"]:
+            proof = next((p for p in observation.get("command_reconciliation", []) if p["id"] == action["id"] and p["attempt_id"] == receipt["command"]["attempt_id"]), None) if observation else None
+            if not proof or proof.get("stopped") is not True or not _evidence(proof.get("evidence"), many=True):
+                raise Pending("Scoped command and writable descendants remain uncertain")
+            receipt["command"]["stopped"] = True; _save(path, journal)
+            marker = _command_owner(action["owner"]["git_dir"])
+            if marker is not None:
+                d3._require(marker == dict(schema_version=1,plan_dir=str(path),transaction_id=journal["transaction_id"],id=action["id"],attempt_id=receipt["command"]["attempt_id"]), "Command owner does not match the reconciled attempt")
+                location=_owner_path(action["owner"]["git_dir"]); os.unlink(location)
+                descriptor=d3._open_path(location.parent,os.O_RDONLY|os.O_DIRECTORY)
+                try: os.fsync(descriptor)
+                finally: os.close(descriptor)
+        actual = [_fingerprint(root, e["path"]) for e in action["effects"]]
+        if receipt.get("command"):
+            if actual == [e["after"] for e in action["effects"]] and receipt["returncode"] == 0:
+                receipt["status"] = "completed"
+                for effect, file in zip(action["effects"], receipt["files"]):
+                    d3._require(file["owned_target"] is not None and _scoped_target(root,effect["path"]) == file["owned_target"], "Command output physical ownership is unverified or changed")
+                _save(path, journal); return
+            if not action["execution"]["idempotency"] or actual != [e["before"] for e in action["effects"]]:
+                raise Pending("Scoped command outcome requires reviewed manual recovery")
+        cwd_target=d3._physical_target(root,Path(action["execution"]["cwd"]),None,{"paths":0,"bytes":0},directory=True)
+        d3._require(cwd_target == action["execution"]["cwd_target"], "Actual command cwd physical identity changed")
+        receipt["command"] = dict(attempt_id=uuid.uuid4().hex, stopped=False); receipt["status"] = "started"; _save(path, journal)
+        git_dir = action["owner"]["git_dir"]
+        d3._require(_command_owner(git_dir) is None, "Another command owns this checkout")
+        marker = dict(schema_version=1, plan_dir=str(path), transaction_id=journal["transaction_id"], id=action["id"], attempt_id=receipt["command"]["attempt_id"])
+        location = _owner_path(git_dir); _atomic(location.parent, location.name, json.dumps(marker, sort_keys=True).encode())
+        _checkpoint("command_started")
+        for effect in action["effects"]:
+            d3._require(_fingerprint(root, effect["path"]) == effect["before"] and
+                _scoped_target(root, effect["path"]) == effect["target"],
+                "Scoped command effect preimage or physical identity changed before launch")
+        d3._require(d3._physical_target(root,Path(action["execution"]["cwd"]),None,{"paths":0,"bytes":0},directory=True)
+            == action["execution"]["cwd_target"], "Actual command cwd physical identity changed before launch")
+        process = subprocess.Popen(action["execution"]["argv"], cwd=action["execution"]["cwd"], env={k:v for k,v in os.environ.items() if not k.startswith("GIT_")},
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True, pass_fds=(checkout_lock,))
+        try: receipt["returncode"] = process.wait(timeout=action["execution"]["timeout_seconds"])
+        except subprocess.TimeoutExpired:
+            process.kill(); process.wait(); receipt["returncode"] = process.returncode
+        if [_fingerprint(root,e["path"]) for e in action["effects"]] == [e["after"] for e in action["effects"]]:
+            for effect,file in zip(action["effects"],receipt["files"]):
+                file["owned_target"]=_scoped_target(root,effect["path"]); file["result_binding"]=file["owned_target"]["binding"]
+        _save(path, journal); _checkpoint("command_finished")
+        raise Pending("Scoped command direct process exited; exact descendant lifecycle proof is required")
+    for effect, file in zip(action["effects"], receipt["files"]):
+        _scoped_parent_guard(file["target"], journal)
+        _ensure_parents(path, root, effect["path"], journal)
+        raw = original["text"].encode() if original["kind"] == "write" else b""
+        _scoped_replace(path, root, effect["path"], raw, effect["before"], effect["after"], file, journal)
+        file["owned_target"] = _scoped_target(root, effect["path"])
+    receipt["status"] = "completed"; _save(path, journal); _checkpoint("outcome")
+
+
+def _scoped_restore(path, journal, current_record, authority_owned, observation):
+    m = journal["manifest"]
+    originals, _, dependencies = _scoped_originals(journal["plan"])
+    failed = set()
+    current_entries = _scoped_entries(current_record)
+    enrollment=journal["enrollment"]
+    affected={tuple(member[k] for k in ("repository_id","checkout_id","client")) for member in m["enrollment"]["affected"]}
+    supporting=any(receipt["files"] and receipt["status"] != "rolled_back" for receipt in journal["receipts"].values())
+    if authority_owned and enrollment and supporting and (any(p["phase"]=="rollback_suspended" for p in enrollment["postimages"]) or
+            any(entry["activation"]["status"]=="active" for key,(_,_,entry) in current_entries.items() if key in affected)):
+        _scoped_publish(path,journal,"rollback_suspended",_scoped_suspended(journal,rollback=True))
+    if not authority_owned:
+        _canonical_record(current_record,journal["plan"],current=False)
+    for action in reversed(m["actions"]):
+        receipt = journal["receipts"].get(action["id"])
+        if receipt is None: continue
+        try:
+            if any(action["id"] in dependencies[i] for i in failed):
+                raise Pending("A dependent member has not recovered safely")
+            if not authority_owned:
+                owner = action["owner"]
+                if owner["kind"] == "project" or any(action["id"] in dependencies[i] for i in originals if originals[i]["owner"] != owner):
+                    raise Pending("Newer authority blocks shared/dependent rollback")
+                entries = [e for key, (_, _, e) in current_entries.items() if key[:2] == (owner["repository_id"], owner["checkout_id"])]
+                if not entries or any(e["activation"]["status"] == "active" for e in entries):
+                    raise Pending("Newer authority has not suspended this member")
+                changed={str(Path(owner["root"])/effect["path"]) for effect in action["effects"]}
+                if any(set(entry["configuration"]["shared_dependencies"]) & changed for key,(_,_,entry) in current_entries.items()
+                       if key[:2] != (owner["repository_id"],owner["checkout_id"]) and entry["configuration"] is not None):
+                    raise Pending("A newer dependent member requires shared-resource reconciliation")
+            if receipt.get("command") and not receipt["command"]["stopped"]:
+                raise Pending("Command descendants remain unreconciled")
+            root = Path(action["owner"]["root"])
+            for effect, file in reversed(list(zip(action["effects"], receipt["files"]))):
+                actual = _scoped_target(root, effect["path"])
+                restore = file.get("restore")
+                if receipt["status"] == "rolled_back":
+                    d3._require(_fingerprint(root, effect["path"]) == effect["before"] and actual["binding"] == (restore["result_binding"] if restore else file["before_binding"]), "Restored member changed externally")
+                    if restore is None:
+                        d3._require(actual == file["target"], "Restored original parent identity changed")
+                    continue
+                if restore is None and _fingerprint(root, effect["path"]) == effect["before"] and actual == file["target"]:
+                    # A prepared receipt may precede any mutation; preserve the exact original inode.
+                    continue
+                if restore is None and file["owned_target"] is not None and actual != file["owned_target"]:
+                    raise Pending("Scoped output physical ownership changed before rollback")
+                if restore is None:
+                    restore = dict(temporary=file["temporary"] + "-restore", before_binding=file["result_binding"], prepared_binding=None, result_binding=None)
+                    file["restore"] = restore; _save(path, journal)
+                raw = d3._read_file(path / file["backup"], d3.MAX_FILE, private=True) if file["backup"] else b""
+                if effect["before"]:
+                    d3._require(hashlib.sha256(raw).hexdigest() == effect["before"]["sha256"], "Scoped recovery backup changed")
+                _scoped_replace(path, root, effect["path"], raw, effect["after"], effect["before"], restore, journal)
+            receipt["status"] = "rolled_back"; _save(path, journal)
+        except (Pending, StartupError) as error:
+            failed.add(action["id"]); journal["blocked"].append(dict(id=action["id"], reason=str(error)))
+    if journal["enrollment"]:
+        for member in journal["enrollment"]["members"]:
+            local=[a["id"] for a in m["actions"] if a["owner"]["kind"]=="repository" and (a["owner"]["repository_id"],a["owner"]["checkout_id"]) == (member["repository_id"],member["checkout_id"])]
+            if local and all(journal["receipts"].get(i,{}).get("status")=="rolled_back" for i in local):
+                member.update(status="restored",blocked="authority_recovery_pending")
+            elif any(i in failed for i in local): member.update(status="blocked",blocked="recovery_dependency_or_ownership")
+    if not authority_owned:
+        journal["blocked"].append(dict(id="enrollment", reason="Canonical record changed after this transaction; preserve it for scoped reconciliation"))
+    elif not failed and journal["enrollment"] is not None:
+        root = Path(m["enrollment"]["record"]["project_root"])
+        backup = journal["enrollment"]["backup"]
+        prior = d3.read_request(d3._read_file(path / backup, d3.MAX_FILE, private=True)) if backup else None
+        if prior and any(e[2]["activation"]["status"] == "active" for e in _scoped_entries(prior).values()):
+            if not observation or not observation["prior_compatibility"]:
+                raise Pending("Prior active configuration requires fresh trusted prior compatibility before restoration")
+            _scoped_qualification(journal,observation,prior)
+        _scoped_publish(path, journal, "restore", prior)
+        if prior and any(e[2]["activation"]["status"] == "active" for e in _scoped_entries(prior).values()):
+            _scoped_qualification(journal,observation,prior,published=True)
+        _restore_directories(path, root, journal)
+
+
+@contextmanager
+def _scoped_failure_guard(path, ownership, operation):
+    """Persist only validated owned failures before releasing transaction locks."""
+    try:
+        yield
+    except (StartupError,OSError,ValueError,TypeError,KeyError,sqlite3.Error) as error:
+        journal=ownership["journal"]
+        if journal is not None:
+            journal["state"]="rollback_partial" if operation=="rollback" else "blocked"
+            journal["blocked"].append(dict(id="transaction",reason=str(error) if isinstance(error,StartupError) else "Scoped state or recovery material is unavailable"))
+            if journal["enrollment"]:
+                for member in journal["enrollment"]["members"]:
+                    if member["status"] != "restored": member.update(status="blocked",blocked="transaction_incomplete")
+            _save(path,journal)
+        raise
+
+
+def _run_scoped(plan_dir, request, operation):
+    """Internal scoped transaction seam; public _run retains its schema-2 gate."""
+    journal = None
+    ownership={"journal":None}
+    try:
+        d3._require(operation in ("apply", "resume", "rollback"), "Unknown scoped operation")
+        path = d3._plan_path(plan_dir)
+        with d3._locked(path): plan = d3._load(path)
+        d3._require(plan is not None, "Scoped D3 proposal is required")
+        originals, dependencies, affected, suspend = _validate_scoped(request, plan)
+        m = request["manifest"]; root = Path(m["enrollment"]["record"]["project_root"])
+        authority, prior = _scoped_prior(plan)
+        locations = _scoped_runtime_locations([prior, m["enrollment"]["record"]], affected)
+        affected_roots = {Path(a["owner"]["root"]) for a in m["owners"]} | {
+            Path(a["owner"]["git_common_dir"]) for a in m["owners"] if a["owner"]["kind"] == "repository"}
+        affected_git = {Path(a["owner"]["git_common_dir"]) for a in m["owners"] if a["owner"]["kind"] == "repository"}
+        lock_root = d3._plan_path(LOCK_ROOT)
+        destination_keys = {"destination:" + str(root / PROJECT_FILE), "parent:" + str(root) + ":" + d3._digest(plan["identity"]["binding"])}
+        if authority["binding"]: destination_keys.add("inode:" + d3._digest(authority["binding"]))
+        canonical_location = lock_root / ("canonical-" + hashlib.sha256(("destination:" + str(root / PROJECT_FILE)).encode()).hexdigest() + ".lock")
+        operation_owner = dict(schema_version=1,plan_dir=str(path),transaction_id=m["transaction_id"],manifest_digest=d3._digest(m))
+        with ExitStack() as locks:
+            for key in sorted(destination_keys):
+                location = lock_root / ("canonical-" + hashlib.sha256(key.encode()).hexdigest() + ".lock")
+                if not location.exists():
+                    try:
+                        descriptor = os.open(location, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600); os.close(descriptor)
+                    except FileExistsError: pass
+                locks.enter_context(_lock(location))
+            held = _authority_owner(canonical_location)
+            if held is not None and held != operation_owner:
+                raise Pending("Canonical authority has an interrupted or uncertain operation; resume its exact journal")
+            git_dirs = {a["owner"]["git_dir"] for a in m["owners"] if a["owner"]["kind"] == "repository"}
+            if plan["identity"]["kind"] == "standalone":
+                git_dirs.update(a["owner"]["git_common_dir"] for a in m["owners"] if a["owner"]["kind"] == "repository")
+            descriptors = {git_dir: locks.enter_context(_worktree_lock(git_dir)) for git_dir in sorted(git_dirs)}
+            owner = dict(schema_version=1, plan_dir=str(path), transaction_id=m["transaction_id"], manifest_digest=d3._digest(m))
+            locks.enter_context(_scoped_failure_guard(path,ownership,operation))
+            journal = _load_journal(path)
+            if journal is not None:
+                d3._require(journal["schema_version"] == 2 and journal["manifest"] == m and journal["approval"] == request["approval"] and journal["plan"] == plan, "Scoped journal binding changed")
+                ownership["journal"]=journal
+            else:
+                d3._require(operation == "apply" and _scoped_target(root, str(PROJECT_FILE)) == m["enrollment"]["before"]["target"], "Scoped authority preimage changed or no journal to recover")
+                if prior:
+                    raw = d3._read_file(root / PROJECT_FILE, 128 * 1024)
+                    d3._require(hashlib.sha256(raw).hexdigest() == m["enrollment"]["before"]["raw_sha256"] and d3.read_request(raw) == prior, "Canonical approved bytes changed")
+            with _authority_guards(locations, owner) as authority_locations:
+                _scoped_writers(locations, affected_roots, affected_git)
+                for git_dir in git_dirs:
+                    marker = _command_owner(git_dir)
+                    d3._require(marker is None or marker["plan_dir"] == str(path) and marker["transaction_id"] == m["transaction_id"], "Unresolved command owns an affected checkout")
+                if journal is None:
+                    current, blockers = d3._project_current(plan)
+                    d3._require(not d3._project_changes(plan, current), "Scoped D3 inputs changed before journal")
+                    for action in m["actions"]:
+                        for effect in action["effects"]:
+                            d3._require(_fingerprint(Path(action["owner"]["root"]),effect["path"]) == effect["before"], "Scoped approved effect preimage changed")
+                            if "target" in effect:
+                                selected_root=Path(action["owner"]["root"])
+                                d3._require(_scoped_target(selected_root,effect["path"]) == effect["target"], "Approved command target/parent physical identity changed")
+                                existing=next(p for p in ((selected_root/effect["path"]).parent,*(selected_root/effect["path"]).parent.parents) if p.is_dir())
+                                d3._require(checkout(existing)==(selected_root,Path(action["owner"]["git_common_dir"])), "Command effect enters another checkout")
+                    journal = dict(schema_version=2, transaction_id=m["transaction_id"], manifest_digest=d3._digest(m), manifest=deepcopy(m), approval=deepcopy(request["approval"]), plan=deepcopy(plan),
+                        state="prepared", receipts={}, enrollment=None, blocked=[], directories={}, observations=[])
+                    _save(path, journal)
+                    ownership["journal"]=journal
+                for location in [canonical_location,*authority_locations]:
+                    _atomic(location.parent, location.name + ".json", json.dumps(owner, sort_keys=True).encode())
+            journal["blocked"] = []
+            observation = request.get("observations")
+            if observation:
+                _scoped_observation_shape(observation,m)
+                d3._require(observation["manifest_digest"] == journal["manifest_digest"] and observation["input_digest"] == _scoped_input_digest(m), "Scoped observations are stale")
+                journal["observations"].append(deepcopy(observation)); _save(path, journal)
+            _scoped_owner_bindings(plan)
+            _scoped_recovery_files(path, journal)
+            if journal["state"] == "rolled_back":
+                d3._require(operation == "rollback", "Rolled-back transaction cannot apply again")
+                for action in m["actions"]:
+                    for effect,file in zip(action["effects"],journal["receipts"].get(action["id"],{}).get("files",[])):
+                        expected = file.get("restore",{}).get("result_binding",file["before_binding"])
+                        d3._require(_fingerprint(Path(action["owner"]["root"]),effect["path"]) == effect["before"] and _scoped_target(Path(action["owner"]["root"]),effect["path"])["binding"] == expected, "Previously restored effect changed")
+                last=journal["enrollment"]["postimages"][-1]
+                d3._require(_fingerprint(root,str(PROJECT_FILE)) == last["after"] and (last["after"] is None or _scoped_target(root,str(PROJECT_FILE)) == last["target"]), "Restored authority changed")
+                return dict(state="rolled_back",exit_code=0,blocked=[],activation_status="configured",qualified=False)
+            authority_owned = _scoped_owned_authority(journal)
+            current_record = d3.read_request(d3._read_file(root / PROJECT_FILE, 128 * 1024)) if (root / PROJECT_FILE).exists() else None
+            current_locations = _scoped_runtime_locations([current_record], affected)
+            d3._require(set(current_locations) <= set(locations), "New authority needs separately reconciled state guards")
+            _scoped_writers(locations, affected_roots, affected_git)
+            if operation == "rollback":
+                _scoped_restore(path, journal, current_record, authority_owned, observation)
+                journal["state"] = "rollback_partial" if journal["blocked"] else "rolled_back"
+            else:
+                d3._require(journal["state"] not in ("rolled_back", "rollback_partial"), "Rolled back transaction cannot resume application")
+                if not authority_owned: raise Pending("Canonical authority changed outside owned postimages")
+                _scoped_fresh(plan, journal)
+                if journal["enrollment"] is None:
+                    before = _fingerprint(root, str(PROJECT_FILE))
+                    backup = _backup(path, root, str(PROJECT_FILE), before, "enrollment.backup")
+                    journal["enrollment"] = dict(before=deepcopy(m["enrollment"]["before"]), backup=backup, status="prepared", temporary=".d4-"+m["transaction_id"]+"-enrollment", postimages=[], members=[dict(member,status="pending",blocked=None) for member in deepcopy(m["enrollment"]["affected"])])
+                    _save(path, journal)
+                if suspend and not any(p["phase"] == "final" for p in journal["enrollment"]["postimages"]):
+                    suspended = _scoped_suspended(journal)
+                    _scoped_publish(path, journal, "suspended", suspended)
+                journal["state"] = "applying"; _save(path, journal)
+                completed = set()
+                for action in m["actions"]:
+                    if action["id"] not in m["approved_scope"] or not dependencies[action["id"]] <= completed:
+                        journal["blocked"].append(dict(id=action["id"], reason="Scoped action approval/dependency missing")); continue
+                    try:
+                        if originals[action["id"]]["target"] != str(PROJECT_FILE):
+                            _scoped_writers(locations, affected_roots, affected_git)
+                            _scoped_apply_action(path, journal, action, originals[action["id"]], observation, descriptors.get(action["owner"].get("git_dir")))
+                        completed.add(action["id"])
+                    except Pending as error:
+                        journal["blocked"].append(dict(id=action["id"], reason=str(error)))
+                if not set(m["enrollment"]["requires"]) <= completed:
+                    raise Pending("Required scoped adoption effects are incomplete")
+                activates = any(e[2]["activation"]["status"] == "active" for key, e in _scoped_entries(m["enrollment"]["record"]).items() if key in affected)
+                if activates: _scoped_qualification(journal,observation,m["enrollment"]["record"])
+                _scoped_writers(locations, affected_roots, affected_git)
+                if not _scoped_owned_authority(journal): raise Pending("Canonical preimage ownership changed before publication")
+                _scoped_publish(path, journal, "final", m["enrollment"]["record"])
+                if activates: _scoped_qualification(journal,observation,m["enrollment"]["record"],published=True)
+                entries=_scoped_entries(m["enrollment"]["record"])
+                for member in journal["enrollment"]["members"]:
+                    member["status"]=entries[tuple(member[k] for k in ("repository_id","checkout_id","client"))][2]["activation"]["status"]
+                    member["blocked"]=None
+                journal["state"] = "blocked" if journal["blocked"] else "applied"
+            _save(path, journal)
+            unsettled = any(r.get("command") and not r["command"]["stopped"] for r in journal["receipts"].values())
+            if not unsettled:
+                with _authority_guards(locations, owner):
+                    for location in [canonical_location,*authority_locations]:
+                        if _authority_owner(location) == owner: os.unlink(Path(str(location)+".json"))
+                    descriptor=d3._open_path(lock_root,os.O_RDONLY|os.O_DIRECTORY)
+                    try: os.fsync(descriptor)
+                    finally: os.close(descriptor)
+            return dict(transaction_id=journal["transaction_id"],state=journal["state"],exit_code=0 if journal["state"] in ("applied","rolled_back") else 2,
+                        blocked=deepcopy(journal["blocked"]),members=deepcopy(journal["enrollment"]["members"]),
+                        activation_status="active" if operation != "rollback" and journal["enrollment"]["members"] and all(m["status"]=="active" for m in journal["enrollment"]["members"]) else "configured",
+                        qualified=operation != "rollback" and bool(journal["enrollment"]["members"]) and all(m["status"]=="active" for m in journal["enrollment"]["members"]) and journal["state"] == "applied")
+    except (StartupError, OSError, ValueError, TypeError, KeyError, sqlite3.Error) as error:
+        owned=ownership["journal"]
+        reason=str(error) if isinstance(error,StartupError) else "Scoped input or state is unavailable"
+        return dict(state=owned["state"] if owned else "blocked",exit_code=2,
+                    blocked=deepcopy(owned["blocked"]) if owned else [dict(id="transaction",reason=reason)],
+                    activation_status="configured",qualified=False)
+
+
+def _scoped_qualification(journal, observation, record, *, published=False):
+    from runtime.startup import decode_project_record, preview_canonical_scope, resolve_canonical_scope
+    if not observation or observation["input_digest"] != _scoped_input_digest(journal["manifest"]) and not published:
+        raise Pending("Fresh scoped adoption qualification observations are required")
+    qualified = []
+    for key, (_, _, entry) in _scoped_entries(record).items():
+        if entry["activation"]["status"] != "active": continue
+        if key not in {tuple(m[k] for k in ("repository_id","checkout_id","client")) for m in journal["manifest"]["enrollment"]["affected"]}: continue
+        proof = next((p for p in observation["qualification"] if tuple(p[k] for k in ("repository_id","checkout_id","client")) == key), None)
+        if proof is None: raise Pending("Member/client qualification is missing")
+        d3._object(proof, ("repository_id","checkout_id","client","requirements","general_review","security_review","scope_observations"))
+        rule = next(r for r in journal["manifest"]["enrollment"]["qualification"] if tuple(r[k] for k in ("repository_id","checkout_id","client")) == key)
+        seen = set()
+        for row in proof["requirements"]:
+            d3._object(row,("id","evidence")); d3._require(row["id"] not in seen and row["id"] in rule["requirements"], "Unknown or duplicate qualification requirement")
+            seen.add(row["id"]); d3._require(_evidence(row["evidence"],many=True), "Empty mandatory qualification evidence")
+        if not set(rule["requirements"]) <= seen or not _evidence(proof["general_review"],many=True) or rule["security_required"] and not _evidence(proof["security_review"],many=True):
+            raise Pending("Mandatory general/security/member qualification is incomplete")
+        assessment = next(a for a in journal["plan"]["assessments"]["repositories"] if (a["owner"]["repository_id"],a["owner"]["checkout_id"]) == key[:2])
+        d3._require(all(assessment["semantic_assessment"].get(k) for k in ("complete","catalog_complete","conflicts_checked","instructions_checked","source_provenance_checked")), "Complete member semantic adoption assessment is required")
+        if any(d["disposition"] in ("pending","proposed") for d in assessment["decisions"]):
+            raise Pending("Unresolved member adoption decisions prevent activation")
+        facts = deepcopy(proof["scope_observations"])
+        d3._object(facts,("authority","observation","client","installed"))
+        d3._require(facts["client"] == key[2], "Qualification selected another client")
+        root = Path(record["project_root"])
+        actual = _scoped_target(root,str(PROJECT_FILE))
+        if published:
+            raw = d3._read_file(root / PROJECT_FILE,128*1024)
+            d3._require(d3.read_request(raw) == record and hashlib.sha256(raw).hexdigest() == actual["fingerprint"].get("sha256"), "Published authority reread differs from intended bytes")
+            facts["authority"] = dict(path=str(root / PROJECT_FILE),target=actual)
+            result = resolve_canonical_scope(decode_project_record(d3.read_request(raw)),**facts)
+            if result.status != "active": raise Pending("Published authority failed current qualification: " + result.reason)
+            qualified.append(result.scope)
+        else:
+            d3._require(facts["authority"] == dict(path=str(root / PROJECT_FILE),target=actual), "Preview authority preimage provenance changed")
+            result = preview_canonical_scope(decode_project_record(record),**facts)
+            if not result.eligible: raise Pending("Proposed authority is not eligible: " + result.reason)
+    return qualified
+
+
+def _scoped_observation_shape(observation, manifest):
+    d3._object(observation,("manifest_digest","input_digest","qualification","task_reconciliation","prior_compatibility","command_reconciliation"))
+    d3._require(observation["manifest_digest"] == d3._digest(manifest),"Scoped observation belongs to another manifest")
+    d3._hash(observation["input_digest"])
+    for key in ("qualification","task_reconciliation","prior_compatibility","command_reconciliation"):
+        d3._require(isinstance(observation[key],list) and len(observation[key]) <= d3.MAX_PATHS,"Invalid bounded scoped observation rows")
+    commands={a["id"] for a in manifest["actions"] if a["execution"] is not None}
+    seen=set()
+    for proof in observation["command_reconciliation"]:
+        d3._object(proof,("id","attempt_id","stopped","evidence"))
+        d3._require(proof["id"] in commands and proof["id"] not in seen and isinstance(proof["attempt_id"],str)
+            and re.fullmatch(r"[0-9a-f]{32}",proof["attempt_id"]) and proof["stopped"] is True
+            and _evidence(proof["evidence"],many=True),"Invalid exact command lifecycle proof")
+        seen.add(proof["id"])
+    members={tuple(row[k] for k in ("repository_id","checkout_id","client")) for row in manifest["enrollment"]["affected"]}
+    for collection in ("qualification","task_reconciliation","prior_compatibility"):
+        seen=set()
+        for proof in observation[collection]:
+            fields=("repository_id","checkout_id","client","requirements","general_review","security_review","scope_observations") if collection=="qualification" else ("repository_id","checkout_id","client","state_dir","evidence")
+            d3._object(proof,fields)
+            key=tuple(proof[k] for k in ("repository_id","checkout_id","client"))
+            identity=(key,proof.get("state_dir"))
+            d3._require(key in members and identity not in seen,"Unknown or duplicate scoped proof owner")
+            seen.add(identity)
+            if collection != "qualification":
+                if proof["state_dir"] is not None:
+                    from runtime.startup import _canonical_path
+                    _canonical_path(proof["state_dir"])
+                d3._require(_evidence(proof["evidence"],many=True),"Missing scoped authority reconciliation evidence")

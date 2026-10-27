@@ -1153,7 +1153,623 @@ class ChangesTests(d3_tests.OnboardingTests):
                 self.assertEqual((self.repo / "AGENTS.md").read_text(), "product rules\nlegacy process\n")
 
 
+class ScopedChangesTests(d3_tests.OnboardingTests):
+    def setUp(self):
+        super().setUp()
+        from runtime import changes
+        self.changes = changes
+        lock = patch.object(changes, "LOCK_ROOT", self.base / "locks")
+        lock.start()
+        self.addCleanup(lock.stop)
+
+    def scoped_request(self, *, umbrella=False, linked=False, existing=False, prepared=False):
+        if not existing and not prepared:
+            self.scoped_inspect(umbrella=umbrella, linked=linked)
+        if not prepared:
+            onboarding.record_plan(self.directory, self.scoped_proposal())
+        plan = self.plan()
+        ref = dict(reference="fixture:trusted-coordinator", sha256="a" * 64)
+        repositories, actions, affected, qualification = [], [], [], []
+        owners = [dict(owner=a["owner"], identity=a["identity"]) for a in onboarding._assessments(plan["assessments"])]
+        for assessment in onboarding._assessments(plan["assessments"]):
+            owner = assessment["owner"]
+            for original in assessment["actions"]:
+                file = Path(owner["root"]) / original["target"]
+                before = self.changes._fingerprint(Path(owner["root"]), original["target"])
+                actions.append(dict(id=onboarding._qualified(owner, original["id"]), owner=owner,
+                    group="configuration", resources=["checkout"] if owner["kind"] == "repository" else ["project"],
+                    preconditions=[], effects=[dict(path=original["target"], before=before,
+                        after=dict(sha256=original["after"], mode=0o644))], recovery="file-preimages", execution=None))
+            if owner["kind"] != "repository": continue
+            identity = assessment["identity"]
+            configuration = dict(policy_digest=plan["package_pins"]["policy_digest"],
+                runtime_digest=plan["package_pins"]["runtime_digest"], runtime=None, shared_dependencies=[], evidence=[ref])
+            entry = dict(client="codex", configuration=configuration, activation=dict(status="configured",
+                qualification="pending", accepted_scope_digest=None, transaction_id=None, evidence=[], qualification_binding=None))
+            repositories.append(dict(repository_id=owner["repository_id"], primary_root=owner["primary_root"],
+                git_common_dir=owner["git_common_dir"], binding={k:identity["binding"][k] for k in ("primary_root","git_common_dir")},
+                membership="joined", checkouts=[dict(checkout_id=owner["checkout_id"], root=owner["root"], git_dir=owner["git_dir"],
+                    binding={k:identity["binding"][k] for k in ("root","git_dir")}, clients=[entry])]))
+            member = dict(repository_id=owner["repository_id"], checkout_id=owner["checkout_id"], client="codex")
+            affected.append(member)
+            qualification.append(member | dict(requirements=[r["id"] for r in assessment["coverage"] if r["mandatory"] and r["applicability"] == "applicable"], security_required=True))
+        authority = next(a for a in plan["identity"]["authority"] if a["path"] == plan["project_scope"]["authority"]["path"])
+        record = dict(schema_version=2, revision=1, project_id=plan["identity"]["project_id"],
+            project_root=plan["identity"]["project_root"], kind=plan["identity"]["kind"], project_binding=plan["identity"]["binding"],
+            membership={k:plan["project_scope"]["membership"][k] for k in ("include","exclude","future_join")} | {"authorization":ref},
+            shared_policy=[], repositories=repositories)
+        prior=authority["record"]
+        if prior and prior.get("schema_version")==2:
+            retained=copy.deepcopy(prior)
+            for replacement in repositories:
+                previous=next(r for r in retained["repositories"] if r["repository_id"]==replacement["repository_id"])
+                selected_ids={c["checkout_id"] for c in replacement["checkouts"]}
+                previous["checkouts"]=[c for c in previous["checkouts"] if c["checkout_id"] not in selected_ids]+replacement["checkouts"]
+            retained["membership"].update({k:plan["project_scope"]["membership"][k] for k in ("include","exclude","future_join")})
+            retained["revision"] += 2 if any(e[2]["activation"]["status"]=="active" for k,e in self.changes._scoped_entries(prior).items() if k in {tuple(x.values()) for x in affected}) else 1
+            record=retained
+        manifest = dict(schema_version=2, transaction_id="scoped-fixture", plan={k:plan[k] for k in ("plan_id","revision","review_digest","current_input_digest")},
+            pins=dict(package_pins=plan["package_pins"],toolkit_commit=plan["sources"]["declared"]["toolkit"]["commit"],sources_digest=onboarding._digest(plan["sources"])),
+            authorization_reference=ref["reference"], approved_scope=[a["id"] for a in actions]+["enrollment"],
+            owners=owners, actions=actions, enrollment=dict(record=record,before=dict(revision=prior.get("revision") if prior else None,raw_sha256=authority["fingerprint"].get("sha256"),target=authority["target"]),
+                affected=sorted(affected,key=lambda x:tuple(x.values())),requires=[a["id"] for a in actions],qualification=qualification))
+        return dict(schema_version=2,manifest=manifest,approval=dict(reference=ref["reference"],evidence=[ref],manifest_digest=onboarding._digest(manifest)))
+
+    def test_scoped_configured_publication_and_rollback_keep_public_gate(self):
+        request = self.scoped_request()
+        rejected = self.changes.apply_plan(self.directory, request)
+        self.assertNotEqual(rejected["exit_code"],0)
+        result = self.changes._run_scoped(self.directory, request, "apply")
+        self.assertEqual(result["exit_code"],0,result)
+        self.assertEqual(result["activation_status"],"configured")
+        self.assertFalse(result["qualified"])
+        self.assertEqual(json.loads((self.repo / PROJECT_FILE).read_text()),request["manifest"]["enrollment"]["record"])
+        result = self.changes._run_scoped(self.directory,request,"rollback")
+        self.assertEqual(result["exit_code"],0,result)
+        self.assertFalse((self.repo / PROJECT_FILE).exists())
+        self.assertEqual((self.repo / "AGENTS.md").read_text(),"product rules\nlegacy process\n")
+
+    def test_scoped_umbrella_duplicate_local_ids_and_selected_worktree_are_preserved(self):
+        request = self.scoped_request(umbrella=True)
+        result = self.changes._run_scoped(self.directory,request,"apply")
+        self.assertEqual(result["exit_code"],0,result)
+        journal = self.changes._load_journal(self.directory)
+        self.assertEqual(len(journal["receipts"]),3)
+        self.assertEqual(len(set(journal["receipts"])),3)
+        for action in request["manifest"]["actions"]:
+            self.assertEqual(self.changes._fingerprint(Path(action["owner"]["root"]),action["effects"][0]["path"]),action["effects"][0]["after"])
+
+    def test_scoped_canonical_rename_crash_recovers_but_same_byte_replacement_blocks(self):
+        request = self.scoped_request()
+        def crash(stage):
+            if stage == "rename" and (self.repo / PROJECT_FILE).exists(): raise RuntimeError("canonical crash")
+        with patch.object(self.changes,"_checkpoint",side_effect=crash),self.assertRaises(RuntimeError):
+            self.changes._run_scoped(self.directory,request,"apply")
+        result = self.changes._run_scoped(self.directory,request,"resume")
+        self.assertEqual(result["exit_code"],0,result)
+        current = self.repo / PROJECT_FILE
+        raw = current.read_bytes()
+        replacement = current.with_name("external")
+        replacement.write_bytes(raw); replacement.chmod(0o600); replacement.replace(current)
+        result = self.changes._run_scoped(self.directory,request,"rollback")
+        self.assertEqual(result["state"],"rollback_partial")
+        self.assertEqual(current.read_bytes(),raw)
+
+    def test_scoped_postimage_user_join_preserved_and_independent_member_recovers(self):
+        request = self.scoped_request()
+        self.assertEqual(self.changes._run_scoped(self.directory,request,"apply")["exit_code"],0)
+        current = json.loads((self.repo / PROJECT_FILE).read_text())
+        current["revision"] += 1
+        (self.repo / PROJECT_FILE).write_text(json.dumps(current))
+        newer = (self.repo / PROJECT_FILE).read_bytes()
+        result = self.changes._run_scoped(self.directory,request,"rollback")
+        self.assertEqual(result["state"],"rollback_partial",result)
+        self.assertEqual((self.repo / PROJECT_FILE).read_bytes(),newer)
+        self.assertEqual((self.repo / "AGENTS.md").read_text(),"product rules\nlegacy process\n")
+
+    def test_scoped_corrupt_backup_and_target_parent_change_block_before_recovery(self):
+        request = self.scoped_request()
+        self.assertEqual(self.changes._run_scoped(self.directory,request,"apply")["exit_code"],0)
+        journal = self.changes._load_journal(self.directory)
+        file = next(iter(journal["receipts"].values()))["files"][0]
+        (self.directory / file["backup"]).write_text("untrusted backup")
+        after = (self.repo / "AGENTS.md").read_bytes()
+        self.assertNotEqual(self.changes._run_scoped(self.directory,request,"rollback")["exit_code"],0)
+        self.assertEqual((self.repo / "AGENTS.md").read_bytes(),after)
+
+    def activate_request(self,request):
+        from runtime.startup import canonical_scope_projection,decode_project_record,_canonical_plain
+        m = request["manifest"]; record=m["enrollment"]["record"]
+        repo=record["repositories"][0]; checkout=repo["checkouts"][0]; entry=checkout["clients"][0]
+        entry["configuration"]["runtime"] = dict(schema_version=3,state_dir=str(self.base / "state"))
+        identity=_canonical_plain(canonical_scope_projection(decode_project_record(record),repository_id=repo["repository_id"],checkout_id=checkout["checkout_id"],client="codex"))
+        ref=dict(reference="fixture:qualified-session",sha256="e"*64)
+        harness=self.base / "harness"; harness.mkdir(exist_ok=True); source=harness / "hook"; source.write_text("fixture hook")
+        binding=dict(client="codex",surface="fixture-codex",version="fixture-1",configuration_digest="f"*64,
+            hook_owner=dict(root=str(harness),binding=onboarding._filesystem_binding(harness),source=str(source),sha256=hashlib.sha256(source.read_bytes()).hexdigest()),
+            accepted_scope_digest=onboarding._digest(identity),receipt=ref)
+        entry["activation"].update(status="active",qualification="qualified",accepted_scope_digest=onboarding._digest(identity),transaction_id=m["transaction_id"],evidence=[ref],qualification_binding=binding)
+        request["approval"]["manifest_digest"]=onboarding._digest(m)
+        return request
+
+    def observe_active(self,request):
+        request=copy.deepcopy(request); m=request["manifest"]; record=m["enrollment"]["record"]
+        proofs=[]; ref=dict(reference="fixture:qualified-session",sha256="e"*64)
+        for rule in m["enrollment"]["qualification"]:
+            repo=next(r for r in record["repositories"] if r["repository_id"]==rule["repository_id"])
+            checkout=next(c for c in repo["checkouts"] if c["checkout_id"]==rule["checkout_id"])
+            entry=next(e for e in checkout["clients"] if e["client"]==rule["client"])
+            q=entry["activation"]["qualification_binding"]
+            state=Path(entry["configuration"]["runtime"]["state_dir"])
+            chain=[dict(path=str(p),binding=onboarding._filesystem_binding(p) if p.exists() else None,kind="directory" if p.exists() else "absent") for p in (state,*state.parents)]
+            observation=dict(project_root=record["project_root"],project_binding=record["project_binding"],root=checkout["root"],primary_root=repo["primary_root"],
+                git_dir=checkout["git_dir"],git_common_dir=repo["git_common_dir"],binding=repo["binding"]|checkout["binding"],membership="included",conflicting_authorities=[],dependencies=[],
+                qualification=dict(current={k:q[k] for k in ("client","surface","version","configuration_digest","hook_owner")},receipt=q["receipt"],binding=q,provenance=dict(kind="trusted-coordinator",**ref)),
+                runtime_location=dict(path=str(state),existing_ancestors=chain,git_probe=dict(cwd=next(a["path"] for a in chain if a["kind"]=="directory"),result="outside"),
+                    exclusions=dict(package_root=str(onboarding.PACKAGE),software_roots=sorted({record["project_root"],checkout["root"],repo["primary_root"]}),git_roots=sorted({checkout["git_dir"],repo["git_common_dir"]}),plugin_cache_roots=[]),provenance=dict(kind="runtime-location-observer",**ref)))
+            facts=dict(authority=dict(path=str(Path(record["project_root"])/PROJECT_FILE),target=self.changes._scoped_target(Path(record["project_root"]),str(PROJECT_FILE))),observation=observation,client="codex",
+                installed=dict(policy_digest=entry["configuration"]["policy_digest"],runtime_digest=entry["configuration"]["runtime_digest"],clients=["codex"],package_root=str(onboarding.PACKAGE)))
+            proofs.append({k:rule[k] for k in ("repository_id","checkout_id","client")} | dict(requirements=[dict(id=i,evidence=[ref]) for i in rule["requirements"]],general_review=[ref],security_review=[ref],scope_observations=facts))
+        request["observations"]=dict(manifest_digest=onboarding._digest(m),input_digest=self.changes._scoped_input_digest(m),qualification=proofs,task_reconciliation=[],prior_compatibility=[],command_reconciliation=[])
+        return request
+
+    def test_scoped_activation_requires_actual_qualified_observations_and_postread(self):
+        request=self.activate_request(self.scoped_request())
+        result=self.changes._run_scoped(self.directory,request,"apply")
+        self.assertFalse(result["qualified"])
+        self.assertFalse((self.repo/PROJECT_FILE).exists())
+        request=self.observe_active(request)
+        result=self.changes._run_scoped(self.directory,request,"resume")
+        self.assertEqual(result["exit_code"],0,result)
+        self.assertTrue(result["qualified"])
+        self.assertEqual(result["activation_status"],"active")
+
+    def test_scoped_activation_general_review_and_changed_preimage_cannot_pass(self):
+        request=self.activate_request(self.scoped_request())
+        self.changes._run_scoped(self.directory,request,"apply")
+        observed=self.observe_active(request)
+        observed["observations"]["qualification"][0]["general_review"]=[]
+        result=self.changes._run_scoped(self.directory,observed,"resume")
+        self.assertFalse(result["qualified"])
+        self.assertFalse((self.repo/PROJECT_FILE).exists())
+        observed=self.observe_active(request)
+        (self.repo/PROJECT_FILE.parent).mkdir(exist_ok=True)
+        (self.repo/PROJECT_FILE).write_text("external authority")
+        raw=(self.repo/PROJECT_FILE).read_bytes()
+        result=self.changes._run_scoped(self.directory,observed,"resume")
+        self.assertFalse(result["qualified"])
+        self.assertEqual((self.repo/PROJECT_FILE).read_bytes(),raw)
+
+    def test_scoped_raw_schema_three_unretired_writer_blocks_before_journal(self):
+        from runtime import state
+        from runtime.startup import ProjectScope,RuntimeSettings
+        from tests.test_state import canonical_scope
+        request=self.activate_request(self.scoped_request())
+        scope=canonical_scope(ProjectScope("historical-project",self.repo,self.repo/".git",policy_digest(onboarding.PACKAGE),RuntimeSettings(2,self.base/"state")))
+        entry=request["manifest"]["enrollment"]["record"]["repositories"][0]["checkouts"][0]["clients"][0]
+        entry["configuration"]["runtime"]["state_dir"]=str(scope.runtime.state_dir)
+        from runtime.startup import canonical_scope_projection,decode_project_record,_canonical_plain
+        repo=request["manifest"]["enrollment"]["record"]["repositories"][0]
+        digest=onboarding._digest(_canonical_plain(canonical_scope_projection(decode_project_record(request["manifest"]["enrollment"]["record"]),repository_id=repo["repository_id"],checkout_id=repo["checkouts"][0]["checkout_id"],client="codex")))
+        entry["activation"]["accepted_scope_digest"]=digest; entry["activation"]["qualification_binding"]["accepted_scope_digest"]=digest
+        request["approval"]["manifest_digest"]=onboarding._digest(request["manifest"])
+        state.start_task(scope,dict(client="codex",session_id="original-session",task_id="original-task",scope_ref="original",mode="editable",decision_ref="fixture"))
+        before=(self.repo/"AGENTS.md").read_bytes()
+        result=self.changes._run_scoped(self.directory,request,"apply")
+        self.assertNotEqual(result["exit_code"],0,result)
+        self.assertEqual((self.repo/"AGENTS.md").read_bytes(),before)
+        self.assertFalse((self.directory/"transaction.json").exists())
+
+    def test_scoped_published_qualification_requires_normal_resolver_postread(self):
+        from runtime.startup import ScopeResolution
+        request=self.activate_request(self.scoped_request())
+        self.changes._run_scoped(self.directory,request,"apply")
+        request=self.observe_active(request)
+        with patch("runtime.startup.resolve_canonical_scope",return_value=ScopeResolution("conflict",None,"identity_changed")) as resolver:
+            result=self.changes._run_scoped(self.directory,request,"resume")
+        self.assertTrue(resolver.called)
+        self.assertFalse(result["qualified"])
+        self.assertEqual(result["state"],"blocked")
+        self.assertTrue((self.repo/PROJECT_FILE).exists())
+
+    def test_scoped_suspension_preserves_other_member_active_pins(self):
+        from runtime.startup import canonical_scope_projection,decode_project_record,_canonical_plain
+        other=self.second_repository()
+        location,prior=self.canonical_authority(self.base,[self.repo,other],"umbrella")
+        ref=dict(reference="fixture:historical",sha256="a"*64)
+        for repo in prior["repositories"]:
+            checkout=repo["checkouts"][0]
+            checkout["clients"]=[dict(client="codex",configuration=dict(policy_digest=policy_digest(onboarding.PACKAGE),runtime_digest=onboarding.runtime_fingerprint(),runtime=None,shared_dependencies=[],evidence=[ref]),activation=dict(status="configured",qualification="pending",accepted_scope_digest=None,transaction_id=None,evidence=[],qualification_binding=None))]
+        for repo in prior["repositories"]:
+            checkout=repo["checkouts"][0]
+            digest=onboarding._digest(_canonical_plain(canonical_scope_projection(decode_project_record(prior),repository_id=repo["repository_id"],checkout_id=checkout["checkout_id"],client="codex")))
+            checkout["clients"][0]["activation"]=dict(status="active",qualification="qualified",accepted_scope_digest=digest,transaction_id="historical",evidence=[ref],qualification_binding=dict(client="codex",surface="historical",version="1",configuration_digest="f"*64,hook_owner=dict(root=str(self.base),binding=onboarding._filesystem_binding(self.base),source=str(self.base/"hook"),sha256="e"*64),accepted_scope_digest=digest,receipt=ref))
+        location.write_text(json.dumps(prior))
+        (self.base/"AGENTS.md").write_text("shared fixture rules\n")
+        record=self.project_record(self.base,[self.repo],"umbrella",["AGENTS.md"])
+        onboarding.inspect_project(self.base,self.directory,record)
+        request=self.scoped_request(existing=True)
+        untouched=copy.deepcopy(prior["repositories"][1])
+        snapshots=[]
+        def observe(stage):
+            if stage=="rename" and location.exists():
+                value=json.loads(location.read_text())
+                snapshots.append(value)
+        with patch.object(self.changes,"_checkpoint",side_effect=observe):
+            result=self.changes._run_scoped(self.directory,request,"apply")
+        self.assertEqual(result["exit_code"],0,result)
+        self.assertTrue(any(v["repositories"][0]["checkouts"][0]["clients"][0]["activation"]["status"]=="suspended" for v in snapshots))
+        self.assertTrue(all(v["repositories"][1]==untouched for v in snapshots))
+
+    def command_scoped_request(self, before=None):
+        import sys
+        cwd=self.repo/"app"; cwd.mkdir()
+        (cwd/"source.txt").write_text("source")
+        if before is not None: (cwd/"result.txt").write_bytes(before)
+        self.scoped_inspect()
+        proposal=self.scoped_proposal(); assessment=proposal["assessments"]["repositories"][0]
+        original=assessment["actions"][0]
+        original.update(kind="command",target="fixture-command",section=None,before=None,after=None,cwd=str(cwd),
+            text=[sys.executable,"-c","from pathlib import Path; Path('result.txt').write_text(str(Path.cwd()))"])
+        authority=copy.deepcopy(assessment["evidence"][0]); authority.update(id="authority",kind="authorization"); assessment["evidence"].append(authority)
+        onboarding.record_plan(self.directory,proposal)
+        request=self.scoped_request(prepared=True)
+        m=request["manifest"]; action=m["actions"][0]; ref=dict(reference="fixture:qualified-command",sha256="a"*64)
+        action["effects"]=[dict(path="app/result.txt",before=self.changes._fingerprint(self.repo,"app/result.txt"),after=dict(sha256=hashlib.sha256(str(cwd).encode()).hexdigest(),mode=0o644),target=self.changes._scoped_target(self.repo,"app/result.txt"))]
+        action["execution"]=dict(argv=original["text"],cwd=str(cwd),cwd_target=self.plan()["assessments"]["repositories"][0]["identity"]["targets"]["cwd:"+str(cwd)],timeout_seconds=5,qualification=ref,idempotency=None)
+        request["approval"]["manifest_digest"]=onboarding._digest(m)
+        return request,cwd
+
+    def test_scoped_command_launch_rechecks_prepared_effects(self):
+        cases=[(boundary,mutation) for boundary in ("prepared","command_started") for mutation in ("bytes","inode","parent")]
+        for index,(boundary,mutation) in enumerate(cases):
+            with self.subTest(boundary=boundary,mutation=mutation):
+                if index:
+                    self.tearDown(); self.setUp()
+                request,cwd=self.command_scoped_request(before=b"approved original")
+                def edit(stage):
+                    if stage != boundary: return
+                    if mutation=="bytes": (cwd/"result.txt").write_bytes(b"external edit")
+                    elif mutation=="inode":
+                        replacement=cwd/"external"; replacement.write_bytes(b"approved original"); replacement.replace(cwd/"result.txt")
+                    else:
+                        cwd.rename(cwd.with_name("old-app")); cwd.mkdir(); (cwd/"result.txt").write_bytes(b"approved original")
+                with patch.object(self.changes,"_checkpoint",side_effect=edit):
+                    result=self.changes._run_scoped(self.directory,request,"apply")
+                self.assertNotEqual(result["exit_code"],0,result)
+                self.assertEqual((cwd/"result.txt").read_bytes(),b"external edit" if mutation=="bytes" else b"approved original")
+
+    def test_scoped_command_relaunch_rechecks_original_physical_effect(self):
+        request,cwd=self.command_scoped_request(before=b"approved original")
+        request["manifest"]["actions"][0]["execution"]["idempotency"]=dict(reference="fixture:idempotent",sha256="f"*64)
+        request["approval"]["manifest_digest"]=onboarding._digest(request["manifest"])
+        def crash(stage):
+            if stage=="command_started": raise RuntimeError("interruption")
+        with patch.object(self.changes,"_checkpoint",side_effect=crash),self.assertRaises(RuntimeError):
+            self.changes._run_scoped(self.directory,request,"apply")
+        journal=self.changes._load_journal(self.directory); identity=next(iter(journal["receipts"])); command=journal["receipts"][identity]["command"]
+        replacement=cwd/"external"; replacement.write_bytes(b"approved original"); replacement.replace(cwd/"result.txt")
+        request["observations"]=dict(manifest_digest=onboarding._digest(request["manifest"]),input_digest=self.changes._scoped_input_digest(request["manifest"]),qualification=[],task_reconciliation=[],prior_compatibility=[],
+            command_reconciliation=[dict(id=identity,attempt_id=command["attempt_id"],stopped=True,evidence=[dict(reference="fixture:all-descendants",sha256="e"*64)])])
+        result=self.changes._run_scoped(self.directory,request,"resume")
+        self.assertNotEqual(result["exit_code"],0,result)
+        self.assertEqual((cwd/"result.txt").read_bytes(),b"approved original")
+
+    def test_scoped_prepared_only_rollback_preserves_original_and_replays(self):
+        request=self.scoped_request(); target=self.repo/"AGENTS.md"
+        original=target.read_bytes(); inode=target.stat().st_ino
+        def crash(stage):
+            if stage=="prepared": raise RuntimeError("interruption")
+        with patch.object(self.changes,"_checkpoint",side_effect=crash),self.assertRaises(RuntimeError):
+            self.changes._run_scoped(self.directory,request,"apply")
+        for _ in range(2):
+            result=self.changes._run_scoped(self.directory,request,"rollback")
+            self.assertEqual(result["exit_code"],0,result)
+            self.assertEqual(target.read_bytes(),original)
+            self.assertEqual(target.stat().st_ino,inode)
+
+    def test_scoped_prepared_only_rollback_rejects_same_byte_substitution(self):
+        request=self.scoped_request(); target=self.repo/"AGENTS.md"
+        original=target.read_bytes()
+        def crash(stage):
+            if stage=="prepared": raise RuntimeError("interruption")
+        with patch.object(self.changes,"_checkpoint",side_effect=crash),self.assertRaises(RuntimeError):
+            self.changes._run_scoped(self.directory,request,"apply")
+        replacement=target.with_name("external"); replacement.write_bytes(original); replacement.replace(target)
+        inode=target.stat().st_ino
+        result=self.changes._run_scoped(self.directory,request,"rollback")
+        self.assertNotEqual(result["exit_code"],0,result)
+        self.assertEqual(target.stat().st_ino,inode)
+
+    def test_scoped_command_uses_actual_cwd_and_requires_descendant_reconciliation(self):
+        request,cwd=self.command_scoped_request()
+        result=self.changes._run_scoped(self.directory,request,"apply")
+        self.assertNotEqual(result["exit_code"],0,result)
+        self.assertEqual((cwd/"result.txt").read_text(),str(cwd))
+        self.assertFalse((self.repo/"result.txt").exists())
+        journal=self.changes._load_journal(self.directory); identity=next(iter(journal["receipts"])); command=journal["receipts"][identity]["command"]
+        request["observations"]=dict(manifest_digest=onboarding._digest(request["manifest"]),input_digest=self.changes._scoped_input_digest(request["manifest"]),qualification=[],task_reconciliation=[],prior_compatibility=[],
+            command_reconciliation=[dict(id=identity,attempt_id=command["attempt_id"],stopped=True,evidence=[dict(reference="fixture:all-descendants",sha256="e"*64)])])
+        result=self.changes._run_scoped(self.directory,request,"resume")
+        self.assertEqual(result["exit_code"],0,result)
+        self.assertIsNone(self.changes._command_owner(request["manifest"]["actions"][0]["owner"]["git_dir"]))
+
+    def test_scoped_command_reviewed_target_parent_substitution_rejects_before_journal(self):
+        request,cwd=self.command_scoped_request()
+        cwd.rename(cwd.with_name("old-app")); cwd.mkdir()
+        result=self.changes._run_scoped(self.directory,request,"apply")
+        self.assertNotEqual(result["exit_code"],0,result)
+        self.assertFalse((self.directory/"transaction.json").exists())
+        self.assertFalse((cwd/"result.txt").exists())
+
+    def test_scoped_command_same_byte_target_substitution_rejects_before_journal(self):
+        request,cwd=self.command_scoped_request(before=b"original")
+        replacement=cwd/"replacement"; replacement.write_bytes(b"original"); replacement.replace(cwd/"result.txt")
+        result=self.changes._run_scoped(self.directory,request,"apply")
+        self.assertNotEqual(result["exit_code"],0,result)
+        self.assertFalse((self.directory/"transaction.json").exists())
+        self.assertEqual((cwd/"result.txt").read_bytes(),b"original")
+
+    def test_scoped_linked_primary_legacy_lock_blocks_without_primary_edit_permission(self):
+        request=self.scoped_request(linked=True)
+        original=(self.repo/"AGENTS.md").read_bytes()
+        common=request["manifest"]["owners"][0]["owner"]["git_common_dir"]
+        with self.changes._worktree_lock(common):
+            result=self.changes._run_scoped(self.directory,request,"apply")
+        self.assertNotEqual(result["exit_code"],0,result)
+        self.assertFalse((self.directory/"transaction.json").exists())
+        result=self.changes._run_scoped(self.directory,request,"apply")
+        self.assertEqual(result["exit_code"],0,result)
+        self.assertEqual((self.repo/"AGENTS.md").read_bytes(),original)
+        selected=Path(request["manifest"]["owners"][0]["owner"]["root"])
+        self.assertNotEqual((selected/"AGENTS.md").read_bytes(),original)
+
+    def test_scoped_configured_prior_raw_bytes_and_revision_restore_exactly(self):
+        location,prior=self.canonical_authority()
+        raw=(json.dumps(prior,indent=4)+"\n\n").encode(); location.write_bytes(raw)
+        onboarding.inspect_project(self.repo,self.directory,self.project_record())
+        request=self.scoped_request(existing=True)
+        self.assertEqual(self.changes._run_scoped(self.directory,request,"apply")["exit_code"],0)
+        result=self.changes._run_scoped(self.directory,request,"rollback")
+        self.assertEqual(result["exit_code"],0,result)
+        self.assertEqual(location.read_bytes(),raw)
+        self.assertEqual(json.loads(location.read_bytes())["revision"],prior["revision"])
+        self.assertEqual(self.changes._run_scoped(self.directory,request,"rollback")["exit_code"],0)
+
+    def test_scoped_delete_rename_crash_requires_durable_delete_intent(self):
+        relative,raw,before,after,receipt,journal=self.physical_write_fixture()
+        def crash(stage):
+            if stage=="rename": raise RuntimeError("delete crash")
+        with patch.object(self.changes,"_checkpoint",side_effect=crash),self.assertRaises(RuntimeError):
+            self.changes._scoped_replace(self.directory,self.repo,relative,b"",before,None,receipt,journal)
+        self.assertFalse((self.repo/relative).exists())
+        self.changes._scoped_replace(self.directory,self.repo,relative,b"",before,None,receipt,journal)
+        self.assertTrue(receipt["delete_intent"])
+
+    def test_scoped_forged_recovery_filename_rejects_before_read_or_write(self):
+        request=self.scoped_request()
+        self.assertEqual(self.changes._run_scoped(self.directory,request,"apply")["exit_code"],0)
+        journal=self.changes._load_journal(self.directory)
+        next(iter(journal["receipts"].values()))["files"][0]["backup"]="../outside"
+        (self.directory/"transaction.json").write_text(json.dumps(journal))
+        before=(self.repo/"AGENTS.md").read_bytes()
+        result=self.changes._run_scoped(self.directory,request,"rollback")
+        self.assertNotEqual(result["exit_code"],0,result)
+        self.assertEqual((self.repo/"AGENTS.md").read_bytes(),before)
+
+    def test_scoped_canonical_parent_substitution_with_owned_file_blocks(self):
+        request=self.scoped_request()
+        self.assertEqual(self.changes._run_scoped(self.directory,request,"apply")["exit_code"],0)
+        directory=self.repo/PROJECT_FILE.parent
+        directory.rename(directory.with_name("old-enrollment")); directory.mkdir()
+        (directory.with_name("old-enrollment")/"project.json").rename(directory/"project.json")
+        before=(directory/"project.json").read_bytes()
+        result=self.changes._run_scoped(self.directory,request,"rollback")
+        self.assertEqual(result["state"],"rollback_partial")
+        self.assertEqual((directory/"project.json").read_bytes(),before)
+
+    def test_scoped_interrupted_canonical_owner_blocks_another_plan_without_state_db(self):
+        request=self.scoped_request()
+        def crash(stage):
+            if stage=="prepared": raise RuntimeError("interruption")
+        with patch.object(self.changes,"_checkpoint",side_effect=crash),self.assertRaises(RuntimeError):
+            self.changes._run_scoped(self.directory,request,"apply")
+        first=self.directory
+        self.directory=self.base/"different-plan"; self.directory.mkdir(mode=0o700)
+        self.source=self.directory/"catalog.md"; self.source.write_bytes((first/"catalog.md").read_bytes()); self.source.chmod(0o600)
+        self.record["toolkit"]["files"][0]["local_path"]=str(self.source)
+        other=self.scoped_request()
+        result=self.changes._run_scoped(self.directory,other,"apply")
+        self.assertNotEqual(result["exit_code"],0,result)
+        self.assertFalse((self.directory/"transaction.json").exists())
+        self.assertEqual((self.repo/"AGENTS.md").read_text(),"product rules\nlegacy process\n")
+
+    def test_scoped_journal_rejects_substituted_canonical_postimage_metadata(self):
+        request=self.scoped_request()
+        self.assertEqual(self.changes._run_scoped(self.directory,request,"apply")["exit_code"],0)
+        journal=self.changes._load_journal(self.directory)
+        journal["enrollment"]["postimages"][0]["raw_sha256"]="0"*64
+        (self.directory/"transaction.json").write_text(json.dumps(journal))
+        with self.assertRaises(self.changes.StartupError): self.changes._load_journal(self.directory)
+
+    def test_scoped_prepared_temp_substitution_is_preserved_without_target_write(self):
+        relative,raw,before,after,receipt,journal=self.physical_write_fixture()
+        temporary=self.repo/receipt["temporary"]
+        def substitute(stage):
+            if stage=="scoped_temp_recorded":
+                replacement=self.repo/"user-temp"
+                replacement.write_text("external temporary")
+                replacement.replace(temporary)
+        with patch.object(self.changes,"_checkpoint",side_effect=substitute),self.assertRaises(self.changes.Pending):
+            self.changes._scoped_replace(self.directory,self.repo,relative,raw,before,after,receipt,journal)
+        self.assertEqual(self.changes._fingerprint(self.repo,relative),before)
+        self.assertEqual(temporary.read_text(),"external temporary")
+
+    def test_scoped_rejected_existing_approval_preserves_journal_bytes(self):
+        request=self.scoped_request()
+        self.assertEqual(self.changes._run_scoped(self.directory,request,"apply")["exit_code"],0)
+        before=(self.directory/"transaction.json").read_bytes()
+        rejected=copy.deepcopy(request)
+        rejected["approval"]["evidence"].append(dict(reference="different-session",sha256="f"*64))
+        result=self.changes._run_scoped(self.directory,rejected,"resume")
+        self.assertNotEqual(result["exit_code"],0)
+        self.assertEqual((self.directory/"transaction.json").read_bytes(),before)
+
+    def test_scoped_failure_journal_save_remains_under_transaction_locks(self):
+        import threading
+        request=self.scoped_request()
+        entered=threading.Event(); release=threading.Event(); first_result=[]
+        original_save=self.changes._save; original_publish=self.changes._scoped_publish
+        def publish(*args,**kwargs):
+            if threading.current_thread().name=="first-scoped-caller": raise self.changes.Pending("fixture operational failure")
+            return original_publish(*args,**kwargs)
+        def save(path,journal):
+            if threading.current_thread().name=="first-scoped-caller" and journal["state"]=="blocked" and not entered.is_set():
+                entered.set()
+                if not release.wait(5): raise AssertionError("fixture release missing")
+            return original_save(path,journal)
+        with patch.object(self.changes,"_save",side_effect=save),patch.object(self.changes,"_scoped_publish",side_effect=publish):
+            first=threading.Thread(name="first-scoped-caller",target=lambda:first_result.append(self.changes._run_scoped(self.directory,request,"apply")))
+            first.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                second=self.changes._run_scoped(self.directory,request,"resume")
+            finally:
+                release.set(); first.join(5)
+            self.assertFalse(first.is_alive())
+        self.assertNotEqual(second["exit_code"],0,second)
+        self.assertNotEqual(first_result[0]["exit_code"],0)
+        self.assertEqual(self.changes._run_scoped(self.directory,request,"resume")["exit_code"],0)
+
+    def test_scoped_command_stopped_boolean_without_retained_proof_cannot_complete(self):
+        request,cwd=self.command_scoped_request()
+        self.assertNotEqual(self.changes._run_scoped(self.directory,request,"apply")["exit_code"],0)
+        journal=self.changes._load_journal(self.directory)
+        next(iter(journal["receipts"].values()))["command"]["stopped"]=True
+        (self.directory/"transaction.json").write_text(json.dumps(journal))
+        result=self.changes._run_scoped(self.directory,request,"resume")
+        self.assertNotEqual(result["exit_code"],0,result)
+        self.assertFalse((self.repo/PROJECT_FILE).exists())
+
+    def test_scoped_newer_inactive_record_with_changed_binding_cannot_authorize_recovery(self):
+        request=self.scoped_request()
+        self.assertEqual(self.changes._run_scoped(self.directory,request,"apply")["exit_code"],0)
+        current=json.loads((self.repo/PROJECT_FILE).read_text())
+        current["revision"]+=1
+        current["project_binding"]["inode"]+=1
+        current["repositories"][0]["binding"]["primary_root"]["inode"]+=1
+        current["repositories"][0]["checkouts"][0]["binding"]["root"]["inode"]+=1
+        (self.repo/PROJECT_FILE).write_text(json.dumps(current))
+        before=(self.repo/"AGENTS.md").read_bytes()
+        result=self.changes._run_scoped(self.directory,request,"rollback")
+        self.assertEqual(result["state"],"rollback_partial")
+        self.assertEqual((self.repo/"AGENTS.md").read_bytes(),before)
+
+    def test_scoped_later_join_shared_dependency_blocks_only_its_required_recovery(self):
+        request=self.scoped_request(umbrella=True)
+        self.assertEqual(self.changes._run_scoped(self.directory,request,"apply")["exit_code"],0)
+        location=self.base/PROJECT_FILE; current=json.loads(location.read_text())
+        third=self.base/"third"; self.git("clone","-q","--no-hardlinks",str(self.repo),str(third))
+        identity,error=onboarding._checkout_observation(str(third),{"paths":0,"bytes":0}); self.assertIsNone(error)
+        path=str(self.repo/"AGENTS.md"); current["shared_policy"].append(dict(path=path,sha256=hashlib.sha256((self.repo/"AGENTS.md").read_bytes()).hexdigest()))
+        client=copy.deepcopy(current["repositories"][0]["checkouts"][0]["clients"][0]); client["configuration"]["shared_dependencies"]=[path]
+        current["repositories"].append(dict(repository_id="new-dependent",primary_root=identity["primary_root"],git_common_dir=identity["git_common_dir"],binding={k:identity["binding"][k] for k in ("primary_root","git_common_dir")},membership="joined",checkouts=[dict(checkout_id="new-dependent-checkout",root=identity["root"],git_dir=identity["git_dir"],binding={k:identity["binding"][k] for k in ("root","git_dir")},clients=[client])]))
+        current["revision"]+=1; location.write_text(json.dumps(current)); raw=location.read_bytes()
+        first=(self.repo/"AGENTS.md").read_bytes(); second=Path(current["repositories"][1]["primary_root"])/"AGENTS.md"
+        result=self.changes._run_scoped(self.directory,request,"rollback")
+        self.assertEqual(result["state"],"rollback_partial",result)
+        self.assertEqual(location.read_bytes(),raw)
+        self.assertEqual((self.repo/"AGENTS.md").read_bytes(),first)
+        self.assertFalse(second.exists())
+        second_id=current["repositories"][1]["repository_id"]
+        outcome=next(m for m in result["members"] if m["repository_id"]==second_id)
+        self.assertEqual(outcome["status"],"restored")
+        self.assertIsNotNone(outcome["blocked"])
+
+    def test_scoped_active_supporting_rollback_suspends_before_restoring_files(self):
+        request=self.activate_request(self.scoped_request())
+        self.changes._run_scoped(self.directory,request,"apply")
+        request=self.observe_active(request)
+        self.assertTrue(self.changes._run_scoped(self.directory,request,"resume")["qualified"])
+        request=self.observe_active(request)
+        seen=[]
+        def observe(stage):
+            if stage=="rename" and (self.repo/"AGENTS.md").read_text()=="product rules\nlegacy process\n" and (self.repo/PROJECT_FILE).exists():
+                seen.append(json.loads((self.repo/PROJECT_FILE).read_text())["repositories"][0]["checkouts"][0]["clients"][0]["activation"]["status"])
+        with patch.object(self.changes,"_checkpoint",side_effect=observe):
+            result=self.changes._run_scoped(self.directory,request,"rollback")
+        self.assertEqual(result["exit_code"],0,result)
+        self.assertTrue(seen)
+        self.assertNotIn("active",seen)
+
+    def test_scoped_rollback_suspension_rename_crash_resumes_exactly_once(self):
+        request=self.activate_request(self.scoped_request())
+        self.changes._run_scoped(self.directory,request,"apply")
+        request=self.observe_active(request)
+        self.assertTrue(self.changes._run_scoped(self.directory,request,"resume")["qualified"])
+        request.pop("observations")
+        def crash(stage):
+            if stage=="rename" and (self.repo/PROJECT_FILE).exists() and json.loads((self.repo/PROJECT_FILE).read_text())["repositories"][0]["checkouts"][0]["clients"][0]["activation"]["status"]=="suspended":
+                raise RuntimeError("rollback suspension crash")
+        with patch.object(self.changes,"_checkpoint",side_effect=crash),self.assertRaises(RuntimeError):
+            self.changes._run_scoped(self.directory,request,"rollback")
+        self.assertEqual((self.repo/"AGENTS.md").read_text(),"product rules\nnew process\n")
+        self.assertEqual(self.changes._run_scoped(self.directory,request,"rollback")["exit_code"],0)
+        journal=self.changes._load_journal(self.directory)
+        self.assertEqual(sum(p["phase"]=="rollback_suspended" for p in journal["enrollment"]["postimages"]),1)
+        self.assertEqual(self.changes._run_scoped(self.directory,request,"rollback")["exit_code"],0)
+
+    def physical_write_fixture(self):
+        self.changes._load_journal(self.directory)
+        relative = "README.md"
+        before = self.changes._fingerprint(self.repo, relative)
+        raw = b"scoped replacement\n"
+        after = dict(sha256=hashlib.sha256(raw).hexdigest(), mode=0o644)
+        receipt = dict(temporary=".d4-scoped-test", prepared_binding=None, result_binding=None)
+        journal = dict(schema_version=2, receipts={"action": receipt})
+        return relative, raw, before, after, receipt, journal
+
+    def test_scoped_replacement_rename_crash_recovers_only_prepared_inode(self):
+        relative, raw, before, after, receipt, journal = self.physical_write_fixture()
+        def crash(stage):
+            if stage == "rename": raise RuntimeError("fixture crash")
+        with patch.object(self.changes, "_checkpoint", side_effect=crash), self.assertRaises(RuntimeError):
+            self.changes._scoped_replace(self.directory, self.repo, relative, raw, before, after, receipt, journal)
+        self.assertIsNotNone(receipt["prepared_binding"])
+        self.assertIsNone(receipt["result_binding"])
+        self.changes._scoped_replace(self.directory, self.repo, relative, raw, before, after, receipt, journal)
+        self.assertEqual(receipt["result_binding"], receipt["prepared_binding"])
+
+    def test_scoped_replacement_same_bytes_new_inode_does_not_acquire_ownership(self):
+        relative, raw, before, after, receipt, journal = self.physical_write_fixture()
+        def crash(stage):
+            if stage == "rename": raise RuntimeError("fixture crash")
+        with patch.object(self.changes, "_checkpoint", side_effect=crash), self.assertRaises(RuntimeError):
+            self.changes._scoped_replace(self.directory, self.repo, relative, raw, before, after, receipt, journal)
+        replacement = self.repo / "replacement"
+        replacement.write_bytes(raw)
+        replacement.chmod(0o644)
+        replacement.replace(self.repo / relative)
+        with self.assertRaisesRegex(self.changes.Pending, "ownership|identity"):
+            self.changes._scoped_replace(self.directory, self.repo, relative, raw, before, after, receipt, journal)
+        self.assertEqual((self.repo / relative).read_bytes(), raw)
+
+    def test_scoped_replacement_prepared_temp_replays_without_content_inference(self):
+        relative, raw, before, after, receipt, journal = self.physical_write_fixture()
+        def crash(stage):
+            if stage == "scoped_temp_recorded": raise RuntimeError("fixture crash")
+        with patch.object(self.changes, "_checkpoint", side_effect=crash), self.assertRaises(RuntimeError):
+            self.changes._scoped_replace(self.directory, self.repo, relative, raw, before, after, receipt, journal)
+        self.assertEqual(self.changes._fingerprint(self.repo, relative), before)
+        self.changes._scoped_replace(self.directory, self.repo, relative, raw, before, after, receipt, journal)
+        self.assertEqual(self.changes._fingerprint(self.repo, relative), after)
+
+
 # Inherited D3 tests are already covered by test_onboarding.py.
 for _name in list(vars(d3_tests.OnboardingTests)):
     if _name.startswith("test_") and _name not in vars(ChangesTests):
         setattr(ChangesTests, _name, None)
+
+for _name in list(vars(d3_tests.OnboardingTests)):
+    if _name.startswith("test_") and _name not in vars(ScopedChangesTests):
+        setattr(ScopedChangesTests, _name, None)

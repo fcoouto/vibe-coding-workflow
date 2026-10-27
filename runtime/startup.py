@@ -267,6 +267,12 @@ class ScopeResolution:
     reason: str
 
 
+@dataclass(frozen=True)
+class ScopePreview:
+    eligible: bool
+    reason: str
+
+
 def _canonical_require(condition):
     if not condition:
         raise StartupError("Invalid canonical scope data")
@@ -476,6 +482,34 @@ def decode_project_record(record) -> CanonicalRecord:
     return CanonicalRecord(_canonical_freeze(value))
 
 
+def canonical_scope_projection(record, *, repository_id, checkout_id, client):
+    """Project proposed/historical configuration; never establish current eligibility."""
+    _canonical_require(isinstance(record, CanonicalRecord))
+    data = _canonical_plain(decode_project_record(_canonical_plain(record.data)).data)
+    repo = next((r for r in data["repositories"] if r["repository_id"] == repository_id), None)
+    _canonical_require(repo is not None)
+    selected = next((c for c in repo["checkouts"] if c["checkout_id"] == checkout_id), None)
+    _canonical_require(selected is not None)
+    entry = next((c for c in selected["clients"] if c["client"] == client), None)
+    _canonical_require(entry is not None)
+    config = entry["configuration"]
+    if config is None:
+        return None
+    membership = data["membership"]
+    primary, project = Path(repo["primary_root"]), Path(data["project_root"])
+    included = (repo["membership"] == "joined" and
+        any(primary.is_relative_to(project / p) for p in membership["include"]) and
+        not any(primary.is_relative_to(project / p) for p in membership["exclude"]))
+    identity = dict(version=1, project_id=data["project_id"], repository_id=repo["repository_id"],
+        checkout_id=selected["checkout_id"], project_root=data["project_root"], project_binding=data["project_binding"],
+        primary_root=repo["primary_root"], repository_root=selected["root"], git_dir=selected["git_dir"],
+        git_common_dir=repo["git_common_dir"], bindings=repo["binding"] | selected["binding"], client=client,
+        membership=dict(included=included, authorization=membership["authorization"]),
+        configuration={k: config[k] for k in ("policy_digest", "runtime_digest", "runtime")},
+        shared_policy=sorted((s for s in data["shared_policy"] if s["path"] in config["shared_dependencies"]), key=lambda s: s["path"]))
+    return _canonical_freeze(identity)
+
+
 def _canonical_target(value):
     _canonical_fields(value, "path binding parents fingerprint")
     path = _canonical_path(value["path"])
@@ -529,7 +563,7 @@ def _canonical_runtime_location(value):
         _canonical_provenance(value["provenance"], "runtime-location-observer")
 
 
-def resolve_canonical_scope(record, *, authority, observation, client, installed) -> ScopeResolution:
+def _compare_canonical_scope(record, *, authority, observation, client, installed, preview=False):
     """Compare internal observer facts; external JSON never authenticates scope.
 
     Authority targets are supplied freshness provenance. The future IO wrapper
@@ -586,7 +620,7 @@ def resolve_canonical_scope(record, *, authority, observation, client, installed
     _canonical_runtime_location(location)
 
     def result(status, reason):
-        return ScopeResolution(status, None, reason)
+        return ScopePreview(False, reason) if preview else ScopeResolution(status, None, reason)
 
     directories = {data["project_root"]: data["project_binding"]}
     for repo in data["repositories"]:
@@ -607,7 +641,7 @@ def resolve_canonical_scope(record, *, authority, observation, client, installed
     expected_authority = str(Path(data["project_root"]) / PROJECT_FILE)
     if (observation["conflicting_authorities"] or authority["path"] != expected_authority
             or authority["target"]["path"] != expected_authority
-            or authority["target"]["fingerprint"]["status"] != "read"
+            or authority["target"]["fingerprint"]["status"] not in (("read", "absent") if preview else ("read",))
             or authority["target"]["parents"].get(data["project_root"]) != data["project_binding"]):
         return result("conflict", "authority_conflict")
     if any(observation[k] != data[k] for k in ("project_root", "project_binding")):
@@ -721,12 +755,8 @@ def resolve_canonical_scope(record, *, authority, observation, client, installed
     if any(d["target"]["path"] != d["path"] or d["target"]["fingerprint"].get("sha256") != s["sha256"]
            for d, s in zip(dependencies, shared)):
         return result("suspended", "dependency_changed")
-    identity = dict(version=1, project_id=data["project_id"], repository_id=repo["repository_id"],
-        checkout_id=selected["checkout_id"], project_root=data["project_root"], project_binding=data["project_binding"],
-        primary_root=repo["primary_root"], repository_root=selected["root"], git_dir=selected["git_dir"],
-        git_common_dir=repo["git_common_dir"], bindings=bindings, client=client,
-        membership=dict(included=True, authorization=membership["authorization"]),
-        configuration={k: config[k] for k in ("policy_digest", "runtime_digest", "runtime")}, shared_policy=shared)
+    identity = _canonical_plain(canonical_scope_projection(CanonicalRecord(_canonical_freeze(data)),
+        repository_id=repo["repository_id"], checkout_id=selected["checkout_id"], client=client))
     digest = _canonical_digest(identity)
     if activation["accepted_scope_digest"] is not None and activation["accepted_scope_digest"] != digest:
         return result("suspended", "configuration_changed")
@@ -749,9 +779,27 @@ def resolve_canonical_scope(record, *, authority, observation, client, installed
         return result("configured", "activation_configured")
     if activation["status"] == "pending":
         return result("pending", "activation_pending")
+    if preview:
+        return ScopePreview(True, "eligible")
     scope = AcceptedScope(data["project_id"], repo["repository_id"], selected["checkout_id"], project,
         Path(authority["path"]), _canonical_freeze(authority["target"]), data["revision"], Path(selected["root"]),
         primary, Path(selected["git_dir"]), Path(repo["git_common_dir"]), _canonical_freeze(bindings), client,
         config["policy_digest"], config["runtime_digest"], RuntimeSettings(3, Path(config["runtime"]["state_dir"])),
         _canonical_freeze(identity), digest, _canonical_freeze(qualification["provenance"]))
     return ScopeResolution("active", scope, "active")
+
+
+def resolve_canonical_scope(record, *, authority, observation, client, installed) -> ScopeResolution:
+    """Compare a parsed current authority snapshot with internal observed facts."""
+    return _compare_canonical_scope(record, authority=authority, observation=observation, client=client, installed=installed)
+
+
+def preview_canonical_scope(proposed_record, *, authority, observation, client, installed) -> ScopePreview:
+    """Compare approved proposed bytes against facts and an actual transaction preimage.
+
+    Eligibility is neither a current-authority claim nor a task scope. The writer
+    must recheck ownership, publish, reread the same bytes, then use the resolver.
+    Only this comparison may use a completely observed absent authority preimage.
+    """
+    return _compare_canonical_scope(proposed_record, authority=authority, observation=observation,
+                                    client=client, installed=installed, preview=True)
