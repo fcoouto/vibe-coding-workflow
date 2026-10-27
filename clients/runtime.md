@@ -2,6 +2,8 @@
 
 Read this contract only when a Codex task needs explicit task controls, a `doctor` report, or lifecycle troubleshooting. Startup-only projects do not need it. For native delegated work only, also read [native delegation](delegation.md). For planned checks, review, completion, or local merge evidence, also read [task checks and review evidence](evidence.md). Shared policy remains in the [policy index](../policies/00-index.md); native qualification status and procedures are in [validation guidance](../docs/d2-validation.md).
 
+For code changes to canonical Project/Repository scope or state, also consult [the internal schema-3 boundary](#internal-canonical-schema-3). Routine task controls remain under the public contract below.
+
 This CLI and its evidence, delegation, doctor and retirement APIs remain Codex-only. Read the [Claude Code prepared guard](claude-code.md#prepared-file-guard) only when the task concerns Claude Code support.
 
 ## Opt in
@@ -63,3 +65,9 @@ Load this section only for an authorized runtime update or recovery. Follow [app
 Activate schema 2 through a fresh approved shared state directory after D4 verifies proposed, actual and backup authority coverage and all affected writers. Preserve schema-1 databases, artifacts and pins unchanged. Do not migrate in place, copy old successful evidence, silently repin tasks or roll back into active schema-1 runtime. A separate state directory does not clear old ownership. Unknown authority, an unsupported old runtime or unverified writer/descendant state blocks the affected transition.
 
 D4's shared authority guard protects relevant reservation scans through enrollment changes. A protected long operation keeps a durable owner reference while running; a crash or elapsed time does not clear it. Use supported resume/rollback to reconcile that exact operation and its descendants before continuing. Package checks and successful activation do not establish native client execution.
+
+## Internal canonical schema 3
+
+This section applies only when changing or diagnosing canonical Project/Repository scope and state internals. The public workflow still reads checkout-root enrollment schema 1 and nested runtime/SQLite schema 2. The private Project-record schema 2 decoder returns a `CanonicalRecord`; `resolve_canonical_scope` yields an internal `AcceptedScope` only after authority, checkout, client and qualification observations. Canonical task state uses schema 3. That scope binds immutable project, repository, checkout and client identity, accepted-scope digest, policy/runtime pins, and physical checkout identity. Stored task identity and pins cannot be silently replaced. Schema-3 writes require the accepted scope and checked physical authority; they do not authorize bypassing the existing transaction guards.
+
+These task/evidence/delegation handlers are not wired into production dispatch: task commands still resolve checkout-root enrollment schema 1 with nested runtime schema 2. Private Project-plan onboarding commands are separate. Internal schema support does not activate canonical runtime for routine tasks, verify aggregate membership completeness, implement lifecycle cleanup/retention, or qualify native execution.
