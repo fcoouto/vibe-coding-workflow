@@ -1431,6 +1431,254 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
             self.assertEqual(state._metadata(db,second['name'])['created_at'],original)
             self.assertEqual(evidence._read(None,dict(second),context=context,db=db)['previous'],dict(first))
 
+    def recovery_release_fixture(self, *, stopped=True):
+        from runtime import evidence,state
+        request,fixture,context=self.scoped_recovery_request()
+        self.assertEqual(self.changes._run_scoped(self.directory,request,'apply')['exit_code'],0)
+        with evidence._context_database(context,write=True) as db:
+            task=state._task(db,state._scope_id(fixture.scope),'codex','session','task')
+            if stopped:
+                proof=dict(version=1,kind='stopped-writer-reconciliation',identity={k:task[k] for k in ('client','session_id','task_id','scope_ref')},
+                    expected_revision=task['revision'],expected_pins=task['pins'],observed_turn_id=task['turn_id'],stopped=True,descendants_stopped=True,
+                    attempt_ids=[],observation_ref='fixture:stopped',coordinator_ref='fixture:owner')
+                ref=evidence._artifact(fixture.scope,proof,owner=evidence._artifact_owner(fixture.scope,task),db=db)
+                task.update(state='cancelled',revision=task['revision']+1,retirement=dict(proof_digest=ref['digest'],proof=ref,
+                    observation_ref=proof['observation_ref'],coordinator_ref=proof['coordinator_ref'],previous_revision=task['revision']))
+                state._save(db,state._scope_id(fixture.scope),task)
+        reference=dict(authority=evidence._canonical_plain(context.authority_set[0]),scope_id=state._scope_id(fixture.scope),client='codex',session_id='session',task_id='task')
+        journal=self.changes._load_journal(self.directory)
+        source=self.changes._observe_recovery_source(self.directory,journal,(context,),(reference,))
+        with evidence._context_database(context,write=True) as db:
+            old=evidence._register_recovery_source(None,db,source,context=context)
+        self.release_fixture_scope=fixture.scope
+        return request,context,reference,dict(source.content['identity']),dict(old)
+
+    def test_recovery_release_cuts_stopped_raw_route_and_preserves_age(self):
+        from runtime import evidence,state
+        request,context,task_ref,identity,old=self.recovery_release_fixture()
+        with evidence._context_database(context) as db: age=state._metadata(db,old['name'])['created_at']
+        observed=self.changes._observe_recovery_release(context.authority_set,identity)
+        result=self.changes._register_recovery_release(observed)
+        self.assertTrue(result['complete'],result)
+        _,sources=self.changes._recovery_sources(context); ref,content=sources[0]
+        self.assertEqual(content['version'],2); self.assertIsNone(content['previous'])
+        self.assertEqual(content['tasks'],[]); self.assertEqual(content['artifacts'],[])
+        self.assertEqual(content['stopped'][0]['reference'],task_ref)
+        self.assertEqual(content['stopped'][0]['proof']['expected_pins'],content['stopped'][0]['pins'])
+        with evidence._context_database(context) as db:
+            self.assertEqual(state._metadata(db,ref['name'])['created_at'],age)
+            self.assertEqual(evidence._recovery_source_history(context,db,ref,identity),[(ref,content)])
+        inspected=self.changes.inspect_lifecycle_recovery(context.authority_set,(task_ref,))
+        self.assertTrue(inspected['complete'],inspected)
+        self.assertTrue(any(r['kind']=='task' and r['need']=='identity' and r['reference']==task_ref for r in inspected['requirements']))
+        self.assertFalse(any(r['kind']=='task' and r['need']=='raw' and r['reference']==task_ref for r in inspected['requirements']))
+        replay=self.changes._register_recovery_release(self.changes._observe_recovery_release(context.authority_set,identity))
+        self.assertEqual(result['replacements'],replay['replacements'])
+
+    def test_recovery_release_refuses_unstopped_source_owner(self):
+        _,context,_,identity,old=self.recovery_release_fixture(stopped=False)
+        with self.assertRaisesRegex(Exception,'stopped|cancelled'):
+            self.changes._observe_recovery_release(context.authority_set,identity)
+        self.assertEqual(self.changes._recovery_sources(context)[1][0][0],old)
+
+    def test_recovery_release_rechecks_journal_and_raw_generation(self):
+        from runtime import evidence,state
+        _,context,task_ref,identity,old=self.recovery_release_fixture()
+        observed=self.changes._observe_recovery_release(context.authority_set,identity)
+        journal=self.changes._load_journal(self.directory);journal['blocked'].append(dict(id='external',reason='changed'))
+        self.changes._save(self.directory,journal)
+        result=self.changes._register_recovery_release(observed)
+        self.assertFalse(result['complete'],result)
+        self.assertEqual(self.changes._recovery_sources(context)[1][0][0],old)
+
+    def seed_recovery_task_marker(self,context,reference,certificate):
+        # Explicit future-owner fixture: the production closure/retirement writer remains gated.
+        from runtime import evidence,state
+        with evidence._context_database(context,write=True) as db:
+            identity={k:reference[k] for k in ('scope_id','client','session_id','task_id')}
+            marker=dict(version=1,identity=identity,pins_digest=state._digest(certificate['pins']),request_digest=None,
+                created_at=certificate['created_at'],retired_at=certificate['created_at'],outcome='cancelled',evidence_expired=False)
+            db.execute('insert into retired_identities values(?,?,?,NULL)',('task',state._retired_identity('task',identity),json.dumps(marker)))
+            db.execute('delete from tasks where scope_id=? and client=? and session_id=? and task_id=?',tuple(identity.values()))
+
+    def test_recovery_release_marker_and_later_rollback_keep_cut_without_old_bodies(self):
+        from runtime import evidence
+        request,context,task_ref,identity,old=self.recovery_release_fixture()
+        result=self.changes._register_recovery_release(self.changes._observe_recovery_release(context.authority_set,identity))
+        self.assertTrue(result['complete'],result)
+        _,sources=self.changes._recovery_sources(context);reference,content=sources[0]
+        certificate=content['stopped'][0]
+        self.seed_recovery_task_marker(context,task_ref,certificate)
+        # Superseded source/proof bodies are no longer required on this current-head route.
+        for ref in (old,certificate['retirement']['proof']):
+            (context.directory/'evidence'/ref['name']).unlink()
+        self.assertTrue(self.changes.inspect_lifecycle_recovery(context.authority_set,(task_ref,))['complete'])
+        resumed=self.changes._run_scoped(self.directory,request,'resume');self.assertEqual(resumed['exit_code'],0,resumed)
+        rolled=self.changes._run_scoped(self.directory,request,'rollback');self.assertEqual(rolled['exit_code'],0,rolled)
+        _,sources=self.changes._recovery_sources(context)
+        current=sources[0][1];self.assertEqual(current['version'],2);self.assertEqual(current['stopped'],content['stopped'])
+        self.assertIsNone(current['previous']);self.assertEqual(current['journal']['state'],'rolled_back')
+        self.assertTrue(self.changes.inspect_lifecycle_recovery(context.authority_set,(task_ref,))['complete'])
+
+    def test_recovery_release_mixed_store_heads_protect_raw_until_retry(self):
+        from runtime import evidence
+        _,first,task_ref,identity,old=self.recovery_release_fixture()
+        _,second=self.recovery_authority();contexts=(first,second)
+        journal=self.changes._load_journal(self.directory)
+        source=self.changes._observe_recovery_source(self.directory,journal,contexts,(task_ref,))
+        for context in contexts:
+            with evidence._context_database(context,write=True) as db:evidence._register_recovery_source(None,db,source,context=context)
+        observation=self.changes._observe_recovery_release(first.authority_set,identity)
+        original=evidence._register_recovery_source;calls=[]
+        def fail_second(*args,**kwargs):
+            calls.append(kwargs['context'].directory)
+            if len(calls)==2: raise OSError('fixture second-store fault')
+            return original(*args,**kwargs)
+        with patch.object(evidence,'_register_recovery_source',side_effect=fail_second):
+            result=self.changes._register_recovery_release(observation)
+        self.assertFalse(result['complete']);self.assertEqual(len(result['replacements']),1)
+        inspected=self.changes.inspect_lifecycle_recovery(first.authority_set,())
+        self.assertTrue(inspected['complete'],inspected)
+        raw=[r for r in inspected['requirements'] if r['kind']=='task' and r['reference']==task_ref and r['need']=='raw']
+        identity_only=[r for r in inspected['requirements'] if r['kind']=='task' and r['reference']==task_ref and r['need']=='identity']
+        self.assertTrue(raw);self.assertTrue(identity_only)
+        self.assertNotEqual(raw[0]['root'],identity_only[0]['root'])
+        retry=self.changes._register_recovery_release(self.changes._observe_recovery_release(first.authority_set,identity))
+        self.assertTrue(retry['complete'],retry)
+        inspected=self.changes.inspect_lifecycle_recovery(first.authority_set,())
+        self.assertFalse(any(r['kind']=='task' and r['reference']==task_ref and r['need']=='raw' for r in inspected['requirements']))
+
+    def test_recovery_release_rejects_same_byte_effect_substitution(self):
+        _,context,_,identity,old=self.recovery_release_fixture()
+        observed=self.changes._observe_recovery_release(context.authority_set,identity)
+        target=self.repo/'AGENTS.md';raw=target.read_bytes();mode=target.stat().st_mode&0o777
+        substitute=target.with_name('same-byte');substitute.write_bytes(raw);substitute.chmod(mode);substitute.replace(target)
+        result=self.changes._register_recovery_release(observed)
+        self.assertFalse(result['complete']);self.assertEqual(self.changes._recovery_sources(context)[1][0][0],old)
+
+    def test_recovery_release_independent_current_root_keeps_original_proof_route(self):
+        from runtime import evidence
+        _,context,task_ref,identity,old=self.recovery_release_fixture()
+        other=ScopedChangesTests(methodName='runTest');other.setUp();self.addCleanup(other.doCleanups)
+        request=other.scoped_request()
+        request['manifest']['enrollment']['record']['repositories'][0]['checkouts'][0]['clients'][0]['configuration']['runtime']=dict(schema_version=3,state_dir=str(context.directory))
+        request['approval']['manifest_digest']=onboarding._digest(request['manifest'])
+        applied=other.changes._run_scoped(other.directory,request,'apply');self.assertEqual(applied['exit_code'],0,applied)
+        journal=other.changes._load_journal(other.directory)
+        source=self.changes._observe_recovery_source(other.directory,journal,(context,),(task_ref,))
+        with evidence._context_database(context,write=True) as db:evidence._register_recovery_source(None,db,source,context=context)
+        released=self.changes._register_recovery_release(self.changes._observe_recovery_release(context.authority_set,identity))
+        self.assertTrue(released['complete'],released)
+        inspected=self.changes.inspect_lifecycle_recovery(context.authority_set,())
+        self.assertTrue(inspected['complete'],inspected)
+        routes=[r for r in inspected['requirements'] if r['kind']=='task' and r['reference']==task_ref]
+        self.assertTrue(any(r['need']=='identity' and r['root']['identity']==identity for r in routes))
+        self.assertTrue(any(r['need']=='raw' and r['root']['identity']==dict(source.content['identity']) for r in routes))
+        other_release=self.changes._register_recovery_release(self.changes._observe_recovery_release(context.authority_set,dict(source.content['identity'])))
+        self.assertTrue(other_release['complete'],other_release)
+        inspected=self.changes.inspect_lifecycle_recovery(context.authority_set,())
+        self.assertFalse(any(r['kind']=='task' and r['reference']==task_ref and r['need']=='raw' for r in inspected['requirements']))
+
+    def test_recovery_release_rechecks_selected_raw_row_not_just_stopped_fields(self):
+        from runtime import evidence,state
+        _,context,task_ref,identity,old=self.recovery_release_fixture()
+        observed=self.changes._observe_recovery_release(context.authority_set,identity)
+        with evidence._context_database(context,write=True) as db:
+            task=state._task(db,task_ref['scope_id'],task_ref['client'],task_ref['session_id'],task_ref['task_id'])
+            task['reason']='changed original generation';state._save(db,task_ref['scope_id'],task)
+        result=self.changes._register_recovery_release(observed)
+        self.assertFalse(result['complete']);self.assertEqual(self.changes._recovery_sources(context)[1][0][0],old)
+
+    def test_recovery_release_missing_retained_certificate_never_uses_marker_as_stop_proof(self):
+        from runtime import evidence
+        _,context,task_ref,identity,_=self.recovery_release_fixture()
+        released=self.changes._register_recovery_release(self.changes._observe_recovery_release(context.authority_set,identity))
+        self.assertTrue(released['complete'],released)
+        _,sources=self.changes._recovery_sources(context);reference,content=sources[0]
+        self.seed_recovery_task_marker(context,task_ref,content['stopped'][0])
+        (context.directory/'evidence'/reference['name']).unlink()
+        result=self.changes.inspect_lifecycle_recovery(context.authority_set,(task_ref,))
+        self.assertFalse(result['complete'],result)
+
+    def test_recovery_release_rejects_mapping_claim_and_changed_managed_certificate(self):
+        from runtime import evidence
+        _,context,task_ref,identity,old=self.recovery_release_fixture()
+        result=self.changes._register_recovery_release(dict(complete=True,identity=identity,stopped=True))
+        self.assertFalse(result['complete'])
+        released=self.changes._register_recovery_release(self.changes._observe_recovery_release(context.authority_set,identity))
+        self.assertTrue(released['complete'],released)
+        _,sources=self.changes._recovery_sources(context);reference,content=sources[0]
+        path=context.directory/'evidence'/reference['name'];replacement=path.with_name('substitute')
+        replacement.write_bytes(path.read_bytes());replacement.chmod(0o400);replacement.replace(path)
+        result=self.changes.inspect_lifecycle_recovery(context.authority_set,(task_ref,))
+        self.assertFalse(result['complete'],result)
+
+    def test_recovery_cut_preserves_independently_retained_proof_raw_task_edge(self):
+        from runtime import evidence
+        _,context,task_ref,identity,old=self.recovery_release_fixture()
+        observed=self.changes._observe_recovery_release(context.authority_set,identity)
+        certificate=evidence._canonical_plain(observed.content)['stopped'][0]
+        proof=certificate['retirement']['proof']
+        scope=self.release_fixture_scope
+        with evidence._context_database(context,write=True) as db:
+            independent=evidence._artifact(scope,dict(required_proof=proof),owner=evidence._guidance_artifact_owner(scope),db=db)
+            metadata,_=evidence._managed_artifact(None,proof,context=context,db=db)
+            self.assertIn(dict(kind='task',reference=task_ref),metadata['dependencies'])
+            original=evidence._read(None,old,context=context,db=db)
+        # Real registered A -> P -> T is an independent collected body route, not source issuance.
+        original['artifacts'].append(dict(authority=task_ref['authority'],artifact=independent))
+        cut=self.changes._cut_recovery_content(original,[certificate],(context,))
+        self.assertIn(dict(authority=task_ref['authority'],artifact=proof),cut['artifacts'])
+        self.assertTrue(any(t['reference']==task_ref for t in cut['tasks']))
+        self.assertTrue(self.changes._validate_recovery_references(cut,(context,)))
+        self.assertEqual(self.changes._cut_recovery_content(cut,[certificate],(context,)),cut)
+
+    def test_guarded_recovery_inspector_has_no_reentrant_locks(self):
+        request,_,context=self.scoped_recovery_request()
+        self.assertEqual(self.changes._run_scoped(self.directory,request,'apply')['exit_code'],0)
+        public=self.changes.inspect_lifecycle_recovery(context.authority_set,())
+        with self.changes._authority_guards([context.directory],observe=True):
+            with patch.object(self.changes,'_authority_guards',side_effect=AssertionError('reentrant authority guard')), \
+                 patch.object(self.changes,'_lock',side_effect=AssertionError('reentrant physical lock')):
+                guarded=self.changes._inspect_lifecycle_recovery_guarded(context.authority_set,())
+        self.assertTrue(guarded['complete'],guarded);self.assertEqual(guarded,public)
+        self.assertEqual(guarded['discovered_authorities'],())
+        from runtime import evidence
+        original=evidence._context_database
+        def readers_only(selected,**kwargs):
+            self.assertFalse(kwargs.get('write',False),'guarded inspector opened a second writer')
+            return original(selected,**kwargs)
+        with self.changes._authority_guards([context.directory],observe=True):
+            with original(context,write=True):
+                with patch.object(evidence,'_context_database',side_effect=readers_only), \
+                     patch.object(self.changes,'_authority_guards',side_effect=AssertionError('nested guard')):
+                    inside=self.changes._inspect_lifecycle_recovery_guarded(context.authority_set,())
+                    self.assertEqual(inside,public)
+
+    def test_guarded_recovery_inspector_reports_actual_missing_authority_closure(self):
+        from runtime import evidence
+        request,_,first=self.scoped_recovery_request();_,second=self.recovery_authority()
+        self.assertEqual(self.changes._run_scoped(self.directory,request,'apply')['exit_code'],0)
+        journal=self.changes._load_journal(self.directory)
+        source=self.changes._observe_recovery_source(self.directory,journal,(first,second),())
+        for context in (first,second):
+            with evidence._context_database(context,write=True) as db:evidence._register_recovery_source(None,db,source,context=context)
+        with self.changes._authority_guards([first.directory],observe=True):
+            with patch.object(self.changes,'_authority_guards',side_effect=AssertionError('must release then reacquire')):
+                incomplete=self.changes._inspect_lifecycle_recovery_guarded(first.authority_set,())
+        self.assertFalse(incomplete['complete']);self.assertEqual(incomplete['authorities'],first.authority_set)
+        self.assertEqual(incomplete['discovered_authorities'],second.authority_set)
+        public=self.changes.inspect_lifecycle_recovery(first.authority_set,())
+        self.assertTrue(public['complete'],public);self.assertEqual(len(public['authorities']),2)
+        self.assertEqual(public['discovered_authorities'],())
+        # A newer source can have a smaller head set while its exact v1 prior chain names another authority.
+        current=self.changes._observe_recovery_source(self.directory,journal,(first,),())
+        with evidence._context_database(first,write=True) as db:evidence._register_recovery_source(None,db,current,context=first)
+        with self.changes._authority_guards([first.directory],observe=True):
+            historical=self.changes._inspect_lifecycle_recovery_guarded(first.authority_set,())
+        self.assertFalse(historical['complete']);self.assertEqual(historical['discovered_authorities'],second.authority_set)
+        self.assertEqual(len(self.changes.inspect_lifecycle_recovery(first.authority_set,())['authorities']),2)
+
     def scoped_recovery_request(self, *, umbrella=False):
         request=self.scoped_request(umbrella=umbrella)
         fixture,context=self.recovery_authority()

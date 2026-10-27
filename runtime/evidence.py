@@ -128,6 +128,31 @@ class _RecoveryOwner:
     content: object
 
 
+def _recovery_source_shape(value, identity):
+    version=value.get('version')
+    state._fields(value,('version','kind','identity','journal','authorities','tasks','assignments','artifacts','previous',
+        *(['stopped','supersedes'] if version==2 else [])))
+    _require(type(version) is int and version in (1,2) and value['kind']=='d4-recovery-source'
+        and value['identity']==identity,'Recovery source history binding changed')
+    state._fields(identity,('plan_dir','transaction_id','manifest_digest'))
+    state._canonical_path(identity['plan_dir']); state._text(identity['transaction_id'],'recovery transaction'); state._canonical_hash(identity['manifest_digest'])
+    state._fields(value['journal'],('sha256','observed_at','state'))
+    state._canonical_hash(value['journal']['sha256']); state._integer(value['journal']['observed_at'],'journal observation time')
+    _require(value['journal']['state'] in ('prepared','applying','interrupted','applied','blocked','rollback_partial','rolled_back'),'Recovery journal state differs')
+    for key in ('authorities','tasks','assignments','artifacts',*(['stopped','supersedes'] if version==2 else [])):
+        _require(isinstance(value[key],list) and len(value[key])<=4096,'Recovery source reference bound exceeded')
+    if value['previous'] is not None: state._artifact_reference(value['previous'])
+    if version==2:
+        _require(value['previous'] is None,'Compact recovery cut cannot retain a previous raw route')
+        from runtime import changes
+        for certificate in value['stopped']: changes._stopped_certificate_shape(certificate)
+        for prior in value['supersedes']:
+            state._fields(prior,('authority','artifact','identity','journal_sha256'))
+            state._artifact_reference(prior['artifact']); state._canonical_hash(prior['journal_sha256'])
+            _require(prior['identity']==identity and prior['authority'] in value['authorities'],'Recovery supersession identity differs')
+    return value
+
+
 def _recovery_source_dependencies(content,authority):
     dependencies = [dict(kind='task',reference=t['reference']) for t in content['tasks']]
     dependencies += [dict(kind='assignment',reference=a) for a in content['assignments']]
@@ -147,9 +172,8 @@ def _recovery_source_history(context,db,reference,identity):
         seen.add(key)
         metadata,raw=_managed_artifact(None,reference,context=context,db=db)
         value=json.loads(raw)
-        state._fields(value,('version','kind','identity','journal','authorities','tasks','assignments','artifacts','previous'))
-        _require(type(value['version']) is int and value['version']==1 and value['kind']=='d4-recovery-source'
-            and value['identity']==identity and metadata['class']=='compact','Recovery source history binding changed')
+        _recovery_source_shape(value,identity)
+        _require(metadata['class']=='compact','Recovery source history binding changed')
         _require(metadata['dependencies']==_recovery_source_dependencies(value,_canonical_plain(context.authority_set[0])),
             'Recovery typed metadata dependencies differ from owner source')
         if age is None: age=metadata['created_at']; owner=metadata['owner']
@@ -189,7 +213,7 @@ def _register_recovery_source(scope, db, source, *, context=None):
         comparable['journal'] = dict(comparable['journal'], observed_at=prior['journal']['observed_at'])
         if comparable == prior:
             return _canonical_freeze(previous)
-    content['previous'] = previous
+    content['previous'] = previous if content['version']==1 else None
     dependencies = _recovery_source_dependencies(content,_canonical_plain(selected.authority_set[0]))
     owner = _RecoveryOwner(baseline['content']['project_id'], source, created, tuple(_canonical_freeze(d) for d in dependencies), _canonical_freeze(content))
     reference = _artifact(None, content, context=selected, owner=owner, db=db)

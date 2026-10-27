@@ -1719,6 +1719,97 @@ class _RecoverySourceObservation:
     generations: object
     created_at: int
     issuer: object
+    release: object = None
+
+
+def _stopped_certificate_shape(value):
+    task_state._fields(value,('reference','created_at','revision','pins','accepted_identity','scope_ref','turn_id','retirement','proof'))
+    task_state._task_reference(value['reference']); task_state._integer(value['created_at'],'original stopped task age')
+    task_state._integer(value['revision'],'stopped task revision',2); task_state._text(value['scope_ref'],'stopped scope')
+    d3._require(task_state._validate_pins(value['pins'])==3,'Stopped certificate requires canonical pins')
+    accepted=task_state._accepted_identity(value['accepted_identity'])
+    ref=value['reference']
+    d3._require(task_state._digest(accepted)==value['pins']['accepted_scope_digest'] and accepted['client']==ref['client']
+        and task_state._digest([3,accepted['project_id'],accepted['repository_id'],accepted['checkout_id']])==ref['scope_id'],
+        'Stopped certificate original accepted identity differs')
+    retirement=value['retirement']; proof=value['proof']
+    task_state._fields(retirement,('proof_digest','proof','observation_ref','coordinator_ref','previous_revision'))
+    task_state._artifact_reference(retirement['proof']); d3._hash(retirement['proof_digest'])
+    task_state._fields(proof,('version','kind','identity','expected_revision','expected_pins','observed_turn_id','stopped','descendants_stopped','attempt_ids','observation_ref','coordinator_ref'))
+    d3._require(type(proof['version']) is int and proof['version']==1 and proof['kind']=='stopped-writer-reconciliation'
+        and proof['stopped'] is True and proof['descendants_stopped'] is True
+        and proof['identity']=={k:(ref[k] if k!='scope_ref' else value[k]) for k in ('client','session_id','task_id','scope_ref')}
+        and proof['expected_pins']==value['pins'] and proof['expected_revision']==retirement['previous_revision']==value['revision']-1
+        and proof['observed_turn_id']==value['turn_id'] and all(proof[k]==retirement[k] for k in ('observation_ref','coordinator_ref')),
+        'Stopped certificate exact reconciliation differs')
+    d3._require(isinstance(proof['attempt_ids'],list) and len(proof['attempt_ids'])<=4096 and len(set(proof['attempt_ids']))==len(proof['attempt_ids']),
+        'Stopped certificate attempt set differs')
+    for attempt in proof['attempt_ids']: task_state._text(attempt,'stopped attempt ID')
+    for key in ('observation_ref','coordinator_ref'): task_state._text(proof[key],key)
+    return value
+
+
+def _stopped_certificate(context,db,item):
+    from runtime import evidence
+    ref=item['reference']; task=task_state._task(db,ref['scope_id'],ref['client'],ref['session_id'],ref['task_id'])
+    d3._require(task is not None and task['state']=='cancelled' and task.get('retirement') and task.get('lifecycle'),
+        'Recovery release requires a dated cancelled exact stopped owner')
+    d3._require(task['pins']==item['pins'],'Recovery stopped original pins changed')
+    proof=evidence._read(None,task['retirement']['proof'],context=context,db=db)
+    unresolved=[a['id'] for a in task.get('evidence',{}).get('attempts',[]) if a['status'] in {'reserved','running','uncertain'}]
+    d3._require(proof.get('attempt_ids')==unresolved,'Recovery stopped attempt ownership differs')
+    result=dict(reference=ref,created_at=task['lifecycle']['created_at'],**{k:task[k] for k in
+        ('revision','pins','accepted_identity','scope_ref','turn_id','retirement')},proof=proof)
+    return _stopped_certificate_shape(result)
+
+
+def _check_stopped_certificate(context,db,value):
+    _stopped_certificate_shape(value)
+    ref=value['reference']
+    identity=task_state._lifecycle_identity(db,'task',ref)
+    d3._require(identity['pins_digest']==task_state._digest(value['pins']) and identity['created_at']==value['created_at']
+        and identity['identity']=={k:ref[k] for k in ('scope_id','client','session_id','task_id')},'Recovery stopped identity support differs')
+    if identity['status']=='live':
+        task=task_state._task(db,ref['scope_id'],ref['client'],ref['session_id'],ref['task_id'])
+        d3._require(task['state']=='cancelled' and all(task[k]==value[k] for k in
+            ('revision','pins','accepted_identity','scope_ref','turn_id','retirement')),'Recovery live stopped owner changed')
+        attempts=[a['id'] for a in task.get('evidence',{}).get('attempts',[]) if a['status'] in {'reserved','running','uncertain'}]
+        d3._require(attempts==value['proof']['attempt_ids'],'Recovery live stopped attempts changed')
+    return identity
+
+
+def _cut_recovery_content(content,certificates,contexts):
+    # Preserve independent artifact/assignment raw routes; only the issued proof route is cut.
+    from runtime import evidence
+    content=deepcopy(content); certificates=sorted(certificates,key=d3._digest)
+    proofs={(d3._digest(c['reference']['authority']),d3._digest(c['retirement']['proof'])) for c in certificates}
+    raw_tasks=set();metadata_by_key={}
+    by_authority={d3._digest(_canonical_plain(c.authority_set[0])):c for c in contexts}
+    for artifact in content['artifacts']:
+        key=(d3._digest(artifact['authority']),d3._digest(artifact['artifact']))
+        with evidence._context_database(by_authority[key[0]]) as db:
+            metadata,_=evidence._managed_artifact(None,artifact['artifact'],context=by_authority[key[0]],db=db)
+        metadata_by_key[key]=(artifact['authority'],metadata)
+    # Discover retained routes first: a proof reached independently keeps all its raw edges.
+    retained=set();pending=set(metadata_by_key)-proofs
+    while pending:
+        key=pending.pop()
+        if key in retained: continue
+        d3._require(key in metadata_by_key,'Recovery retained artifact route is incomplete')
+        retained.add(key);authority,metadata=metadata_by_key[key]
+        for edge in metadata['dependencies']:
+            if edge['kind']=='task': raw_tasks.add(d3._digest(edge['reference']))
+            elif edge['kind'] in ('artifact','recovery'):
+                ref=edge['reference'];other=ref.get('authority',authority)
+                required=(d3._digest(other),d3._digest(ref.get('artifact',ref)))
+                if required not in retained: pending.add(required)
+    for assignment in content['assignments']:
+        owner=assignment['owner'];raw_tasks.add(d3._digest(dict(authority=assignment['authority'],**{k:owner[k] for k in ('scope_id','client','session_id','task_id')})))
+    cut={d3._digest(c['reference']) for c in certificates}-raw_tasks
+    content['tasks']=[t for t in content['tasks'] if d3._digest(t['reference']) not in cut]
+    content['artifacts']=[a for a in content['artifacts'] if (d3._digest(a['authority']),d3._digest(a['artifact'])) in retained]
+    content.update(version=2,stopped=certificates,previous=None)
+    return content
 
 
 def _recovery_generation(db,tasks,assignments):
@@ -1872,6 +1963,15 @@ def _observe_recovery_source(path, journal, contexts, task_refs):
         journal=dict(sha256=hashlib.sha256(raw).hexdigest(),observed_at=task_state._owner_time(),state=journal['state']),
         authorities=canonical([_canonical_plain(c.authority_set[0]) for c in contexts]),tasks=canonical(tasks),assignments=canonical(assignments),artifacts=canonical(artifacts),previous=None)
     from runtime import evidence
+    prior_cuts=[]; supersedes=[]
+    for context in contexts:
+        _,sources=_recovery_sources(context)
+        for _,prior in sources:
+            if prior['identity']==content['identity'] and prior['version']==2:
+                prior_cuts.extend(prior['stopped']); supersedes.extend(prior['supersedes'])
+    if prior_cuts or supersedes:
+        content=_cut_recovery_content(content,list({d3._digest(c):c for c in prior_cuts}.values()),contexts)
+        content['supersedes']=sorted({d3._digest(c):c for c in supersedes}.values(),key=d3._digest)
     generations={}
     for context in contexts:
         authority=_canonical_plain(context.authority_set[0])
@@ -1891,15 +1991,29 @@ def _check_recovery_source(source,context,db):
     from runtime import evidence
     d3._require(isinstance(source,_RecoverySourceObservation) and source.issuer is _RECOVERY_ISSUER,'D4 owner-observed recovery source is required')
     authority=_canonical_plain(context.authority_set[0]); content=_canonical_plain(source.content)
+    evidence._recovery_source_shape(content,content['identity'])
     d3._require(authority in content['authorities'],'Recovery registration physical authority differs')
     for observed in source.contexts: evidence._check_context(observed)
-    tasks=[t for t in content['tasks'] if t['reference']['authority']==authority]
-    assignments=[a for a in content['assignments'] if a['authority']==authority]
+    originals=_canonical_plain(source.release) if source.release is not None else content
+    tasks=[t for t in originals['tasks'] if t['reference']['authority']==authority]
+    assignments=[a for a in originals['assignments'] if a['authority']==authority]
     d3._require(_recovery_generation(db,tasks,assignments)==source.generations[d3._digest(authority)],
         'Recovery source selected owner generation changed')
     for item in content['artifacts']:
         if item['authority']==authority:
             evidence._managed_artifact(None,item['artifact'],context=context,db=db)
+    for certificate in content.get('stopped',[]):
+        if certificate['reference']['authority']==authority: _check_stopped_certificate(context,db,certificate)
+    if source.release is not None:
+        baseline=task_state._source_baseline(None,db,context=context)
+        matches=[edge for edge in baseline['dependencies'] if _canonical_plain(edge['reference']['identity'])==content['identity']]
+        d3._require(len(matches)==1,'Recovery release source head unavailable')
+        head=_canonical_plain(matches[0]['reference']['artifact'])
+        expected=next(row['artifact'] for row in originals['heads'] if row['authority']==authority)
+        if head!=expected:
+            current=evidence._read(None,head,context=context,db=db)
+            comparable=deepcopy(content); comparable['journal']['observed_at']=current['journal']['observed_at']
+            d3._require(current==comparable,'Recovery release source head changed')
     evidence._check_context(context,db)
     raw=d3._read_file(Path(content['identity']['plan_dir'])/'transaction.json',MAX_JOURNAL,private=True)
     d3._require(hashlib.sha256(raw).hexdigest()==content['journal']['sha256'],'Recovery journal changed before registration')
@@ -1937,13 +2051,7 @@ def _recovery_sources(context):
             d3._require(metadata['class']=='compact' and metadata['owner']==dict(kind='project',project_id=baseline['content']['project_id'],task=None)
                 and metadata['closed_at'] is None and not metadata['targets'] and metadata['export'] is None,'Recovery source metadata owner differs')
             evidence._recovery_source_history(context,db,reference,_canonical_plain(edge['reference']['identity']))
-            d3._object(content,('version','kind','identity','journal','authorities','tasks','assignments','artifacts','previous'))
-            d3._require(type(content['version']) is int and content['version']==1 and content['kind']=='d4-recovery-source' and content['identity']==_canonical_plain(edge['reference']['identity']), 'Recovery source edge binding differs')
-            d3._require(all(isinstance(content[k],list) and len(content[k])<=4096 for k in ('authorities','tasks','assignments','artifacts')),
-                'Recovery source reference bound or shape differs')
-            d3._object(content['journal'],('sha256','observed_at','state'))
-            d3._hash(content['journal']['sha256']); task_state._integer(content['journal']['observed_at'],'journal observation time')
-            if content['previous'] is not None: task_state._artifact_reference(content['previous'])
+            evidence._recovery_source_shape(content,_canonical_plain(edge['reference']['identity']))
             sources.append((reference,content))
         return baseline,sources
 
@@ -1979,6 +2087,8 @@ def _validate_recovery_references(content,contexts):
             for item in content['artifacts']:
                 if item['authority']==authority:
                     evidence._managed_artifact(None,item['artifact'],context=context,db=db)
+            for certificate in content.get('stopped',[]):
+                if certificate['reference']['authority']==authority: _check_stopped_certificate(context,db,certificate)
     for item in [*[t['reference'] for t in content['tasks']],*content['assignments'],*content['artifacts']]:
         d3._require(d3._digest(item['authority']) in by_authority,'Recovery reference physical authority unavailable')
     return generations
@@ -2037,70 +2147,246 @@ def _scoped_register_sources(path,journal,contexts):
             evidence._register_recovery_source(None,db,source,context=context)
 
 
-def inspect_lifecycle_recovery(authorities, task_refs):
-    """Finite D4-source coverage only; no lifecycle closure or cleanup authorization."""
+def _recovery_release_journal(identity):
+    path=d3._plan_path(identity['plan_dir']); journal=_load_journal(path)
+    d3._require(journal is not None and journal['schema_version']==2 and
+        all(journal[k]==identity[k] for k in ('transaction_id','manifest_digest')),'Recovery release journal identity differs')
+    d3._require(journal['state'] in ('applied','rolled_back'),'Recovery release requires a settled physical journal')
+    _validate_scoped(dict(schema_version=2,manifest=journal['manifest'],approval=journal['approval']),journal['plan'])
+    return path,journal
+
+
+@contextmanager
+def _recovery_release_guards(authorities,identity):
+    path,journal=_recovery_release_journal(identity)
+    manifest=journal['manifest']; plan=journal['plan']; root=Path(manifest['enrollment']['record']['project_root'])
+    before,prior=_scoped_prior(plan)
+    lock_root=d3._plan_path(LOCK_ROOT)
+    keys={'destination:'+str(root/PROJECT_FILE),'parent:'+str(root)+':'+d3._digest(plan['identity']['binding'])}
+    if before['binding']: keys.add('inode:'+d3._digest(before['binding']))
+    with ExitStack() as locks:
+        for key in sorted(keys):
+            location=lock_root/('canonical-'+hashlib.sha256(key.encode()).hexdigest()+'.lock')
+            try:
+                fd=os.open(location,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600);os.close(fd)
+            except FileExistsError: pass
+            locks.enter_context(_lock(location))
+            d3._require(_authority_owner(location) is None,'Recovery release has an active canonical operation')
+        git_dirs={a['owner']['git_dir'] for a in manifest['owners'] if a['owner']['kind']=='repository'}
+        if plan['identity']['kind']=='standalone':
+            git_dirs.update(a['owner']['git_common_dir'] for a in manifest['owners'] if a['owner']['kind']=='repository')
+        for git_dir in sorted(git_dirs):
+            locks.enter_context(_worktree_lock(git_dir))
+            d3._require(_command_owner(git_dir) is None,'Recovery release has an active command')
+        locations=_scoped_runtime_locations([prior,manifest['enrollment']['record']])
+        supplied={Path(a['directory']):a for a in _canonical_plain(authorities)}
+        d3._require(0<len(supplied)<=4096,'Recovery release authority set is empty or excessive')
+        for directory,authority in supplied.items():
+            d3._require(task_state._authority_identity(Path(authority['database']))==authority,'Recovery release physical authority differs')
+            locations[directory]=(_recovery_context(authority),3)
+        with _scoped_source_guards(locations,None,manifest) as (_,contexts):
+            d3._require(_load_journal(path)==journal,'Recovery release journal changed while acquiring guards')
+            _scoped_owner_bindings(plan);_scoped_recovery_files(path,journal)
+            d3._require(_scoped_owned_authority(journal),'Recovery release canonical physical ownership changed')
+            for action in manifest['actions']:
+                receipt=journal['receipts'].get(action['id'])
+                d3._require(receipt is not None,'Recovery release action receipt is missing')
+                if receipt.get('command'):
+                    d3._require(receipt['command']['stopped'] is True,'Recovery release command descendants remain uncertain')
+                for effect,file in zip(action['effects'],receipt['files']):
+                    root=Path(action['owner']['root']); current=_scoped_target(root,effect['path'])
+                    expected=effect['before'] if journal['state']=='rolled_back' else effect['after']
+                    binding=file['before_binding'] if journal['state']=='rolled_back' else file['result_binding']
+                    d3._require(_fingerprint(root,effect['path'])==expected and current['binding']==binding,
+                        'Recovery release effect physical ownership changed')
+            roots,git_roots=_scoped_writer_roots(manifest)
+            _scoped_writers(_scoped_writer_locations(locations,contexts),roots,git_roots,changed_paths=_scoped_changed_paths(manifest))
+            yield path,journal,contexts
+
+
+def _observe_recovery_release(authorities,identity):
+    """Private stopped-proof replacement; neither general closure nor public release."""
     from runtime import evidence
-    dependencies=[]; blockers=[]
+    identity=_canonical_plain(identity)
+    with _recovery_release_guards(authorities,identity) as (path,journal,contexts):
+        heads=[]; supersedes=[]; tasks={};assignments={};artifacts={};certificates={}; generations={};ages=set()
+        for context in contexts:
+            authority=_canonical_plain(context.authority_set[0])
+            baseline,sources=_recovery_sources(context)
+            d3._require(baseline is not None and baseline['content']['source_contract']==2,'Recovery release requires creation-time D4 coverage')
+            matches=[(ref,c) for ref,c in sources if c['identity']==identity]
+            d3._require(len(matches)==1,'Recovery release source head unavailable')
+            reference,current=matches[0];heads.append(dict(authority=authority,artifact=reference))
+            raw=d3._read_file(path/'transaction.json',MAX_JOURNAL,private=True)
+            d3._require(current['journal']['sha256']==hashlib.sha256(raw).hexdigest() and current['journal']['state']==journal['state'],
+                'Recovery release journal snapshot requires reconciliation')
+            with evidence._context_database(context) as db:
+                ages.add(task_state._metadata(db,reference['name'])['created_at'])
+                history=evidence._recovery_source_history(context,db,reference,identity)
+            for prior_ref,content in history:
+                _validate_recovery_references(content,contexts)
+                if content['version']==2:
+                    for row in content['supersedes']: supersedes.append(row)
+                    for c in content['stopped']:certificates[d3._digest(c['reference'])]=c
+                else:
+                    supersedes.append(dict(authority=authority,artifact=prior_ref,identity=identity,journal_sha256=content['journal']['sha256']))
+                for task in content['tasks']:tasks[d3._digest(task['reference'])]=task
+                for assignment in content['assignments']:assignments[d3._digest(assignment)]=assignment
+                for artifact in content['artifacts']:artifacts[d3._digest(artifact)]=artifact
+        d3._require(len(ages)==1,'Recovery release original source ages differ')
+        for context in contexts:
+            authority=_canonical_plain(context.authority_set[0])
+            with evidence._context_database(context) as db:
+                selected=[t for t in tasks.values() if t['reference']['authority']==authority]
+                associated=[a for a in assignments.values() if a['authority']==authority]
+                generations[d3._digest(authority)]=_recovery_generation(db,selected,associated)
+                for task in selected:
+                    cert=_stopped_certificate(context,db,task);certificates[d3._digest(cert['reference'])]=cert
+        canonical=lambda rows:sorted(rows,key=d3._digest)
+        content=dict(version=2,kind='d4-recovery-source',identity=identity,
+            journal=dict(sha256=hashlib.sha256(raw).hexdigest(),observed_at=task_state._owner_time(),state=journal['state']),
+            authorities=canonical([_canonical_plain(c.authority_set[0]) for c in contexts]),tasks=canonical(list(tasks.values())),
+            assignments=canonical(list(assignments.values())),artifacts=canonical(list(artifacts.values())),previous=None,
+            supersedes=canonical(list({d3._digest(row):row for row in supersedes}.values())))
+        content=_cut_recovery_content(content,list(certificates.values()),contexts)
+        original=dict(heads=heads,tasks=list(tasks.values()),assignments=list(assignments.values()))
+        return _RecoverySourceObservation(_canonical_freeze(content),tuple(contexts),_canonical_freeze(generations),next(iter(ages)),_RECOVERY_ISSUER,_canonical_freeze(original))
+
+
+def _register_recovery_release(observation):
+    """Sequential existing-store replacement; mixed heads retain old raw requirements."""
+    from runtime import evidence
+    replacements=[]
+    try:
+        d3._require(isinstance(observation,_RecoverySourceObservation) and observation.issuer is _RECOVERY_ISSUER
+            and observation.release is not None,'Recovery release requires owner-issued observation')
+        content=_canonical_plain(observation.content)
+        with _recovery_release_guards(content['authorities'],content['identity']) as (_,_,contexts):
+            d3._require(sorted([_canonical_plain(c.authority_set[0]) for c in contexts],key=d3._digest)==sorted([_canonical_plain(c.authority_set[0]) for c in observation.contexts],key=d3._digest),
+                'Recovery release complete authority set changed')
+            for context in contexts:
+                _check_recovery_source_global(observation)
+                with evidence._context_database(context,write=True) as db:
+                    reference=evidence._register_recovery_source(None,db,observation,context=context)
+                    replacements.append(dict(authority=_canonical_plain(context.authority_set[0]),artifact=_canonical_plain(reference)))
+            _check_recovery_source_global(observation)
+        return _canonical_freeze(dict(complete=True,replacements=replacements,blockers=[]))
+    except (StartupError,task_state.StateError,OSError,sqlite3.Error,ValueError,TypeError,KeyError) as error:
+        return _canonical_freeze(dict(complete=False,replacements=replacements,blockers=[str(error)]))
+
+
+def _recovery_current_requirements(root,history):
+    """Origin-qualified edges; a cut never exempts another root's old source route."""
+    from runtime import evidence
+    requirements=[];authority=root['authority']
+    for reference,content in history:
+        owner=dict(authority=authority,artifact=reference)
+        requirements.append(dict(root=root,owner=owner,kind='artifact',reference=owner,need='content'))
+        for edge in evidence._recovery_source_dependencies(content,authority):
+            kind=edge['kind'];ref=edge['reference']
+            requirements.append(dict(root=root,owner=owner,kind=kind,reference=ref,need='raw' if kind in ('task','assignment') else 'content'))
+        for certificate in content.get('stopped',[]):
+            requirements.append(dict(root=root,owner=owner,kind='task',reference=certificate['reference'],need='identity'))
+    d3._require(len(requirements)<=4096,'Recovery current-root requirements exceed bound')
+    return requirements
+
+
+def _inspect_lifecycle_recovery_guarded(authorities,task_refs):
+    """Inspect one fixed set under caller-held complete guards; never acquire/expand locks."""
+    from runtime import evidence
+    dependencies=[];blockers=[];roots=[];requirements=[];discovered={};contexts=[];observed=[];pending={};journals={}
+    def result():
+        return _canonical_freeze(dict(complete=not blockers and not discovered,dependencies=dependencies,blockers=blockers,
+            roots=roots,requirements=requirements,authorities=sorted([_canonical_plain(c.authority_set[0]) for c in contexts],key=d3._digest),
+            discovered_authorities=sorted(discovered.values(),key=d3._digest)))
+    try:
+        pending={d3._digest(_canonical_plain(a)):_canonical_plain(a) for a in authorities}
+        d3._require(0<len(pending)<=4096,'Recovery authority selection is empty or exceeds bound')
+        for authority in pending.values():
+            seen_markers=set()
+            for location in _authority_locations([Path(authority['directory'])]):
+                marker=_authority_owner(location)
+                if marker is not None and d3._digest(marker) not in seen_markers:
+                    seen_markers.add(d3._digest(marker))
+                    blockers.append(dict(reason='active_or_uncertain_operation',authority=authority,owner=marker))
+                    dependencies.append(dict(authority=authority,**marker,source_artifact=None,journal=None,task_refs=[]))
+            context=_recovery_context(authority); contexts.append(context)
+            baseline,sources=_recovery_sources(context)
+            if baseline is None or baseline['content']['source_contract']!=2:
+                blockers.append(dict(reason='unknown_creation_time_d4_coverage',authority=authority))
+            for reference,content in sources:
+                with evidence._context_database(context) as db:
+                    history=evidence._recovery_source_history(context,db,reference,content['identity'])
+                for _,prior in history:
+                    for other in prior['authorities']:
+                        key=d3._digest(other)
+                        if key not in pending: discovered[key]=other
+                observed.append((context,reference,content))
+        if discovered:
+            d3._require(len(pending)+len(discovered)<=4096,'Recovery authority closure exceeds bound')
+            blockers.append(dict(reason='recovery_authority_set_incomplete'))
+            return result()
+        for context,reference,content in observed:
+            authority=_canonical_plain(context.authority_set[0])
+            path=Path(content['identity']['plan_dir'])
+            raw=d3._read_file(path/'transaction.json',MAX_JOURNAL,private=True)
+            journal=_scoped_journal_shape(d3.read_request(raw,limit=MAX_JOURNAL))
+            journals[path]=hashlib.sha256(raw).hexdigest()
+            d3._require(journal is not None and journal['schema_version']==2 and
+                all(journal[k]==content['identity'][k] for k in ('transaction_id','manifest_digest')),
+                'Recovery journal stable identity differs')
+            if hashlib.sha256(raw).hexdigest()!=content['journal']['sha256'] or journal['state']!=content['journal']['state']:
+                blockers.append(dict(reason='journal_snapshot_requires_reconciliation',identity=content['identity']))
+            generations=_validate_recovery_references(content,contexts)
+            with evidence._context_database(context) as db:
+                history=evidence._recovery_source_history(context,db,reference,content['identity'])
+            for _,prior in history:
+                _validate_recovery_references(prior,contexts)
+            current_root=dict(authority=authority,identity=content['identity'],source_artifact=reference)
+            roots.append(current_root);requirements.extend(_recovery_current_requirements(current_root,history))
+            d3._require(len(requirements)<=4096,'Recovery current-root requirements exceed bound')
+            dependencies.append(dict(authority=authority,**content['identity'],source_artifact=reference,journal=content['journal'],
+                task_refs=[t['reference'] for t in content['tasks']],assignments=content['assignments'],artifacts=content['artifacts'],generation_digest=d3._digest(generations)))
+        for original_ref in task_refs:
+            ref=_canonical_plain(original_ref); task_state._task_reference(ref)
+            context=next((c for c in contexts if _canonical_plain(c.authority_set[0])==ref['authority']),None)
+            d3._require(context is not None,'Named task authority is outside observed closure')
+            with evidence._context_database(context) as db:
+                identity=task_state._lifecycle_identity(db,'task',ref)
+                if identity['status']!='live':
+                    certificates=[certificate for _,_,value in observed for certificate in value.get('stopped',[]) if certificate['reference']==ref]
+                    d3._require(certificates,'Named retired recovery task lacks retained stopped support')
+                    for certificate in certificates: _check_stopped_certificate(context,db,certificate)
+        # Sources/physical bindings must still be the exact point observations before return.
+        for context,reference,content in observed:
+            _,latest=_recovery_sources(context)
+            d3._require(any(ref==reference and value==content for ref,value in latest),'Recovery source edge changed during inspection')
+        for path,digest in journals.items():
+            d3._require(hashlib.sha256(d3._read_file(path/'transaction.json',MAX_JOURNAL,private=True)).hexdigest()==digest,
+                'Recovery journal changed during inspection')
+        return result()
+    except (StartupError,task_state.StateError,OSError,sqlite3.Error,ValueError,TypeError,KeyError) as error:
+        blockers.append(dict(reason=str(error) if isinstance(error,(StartupError,task_state.StateError)) else 'recovery_source_unavailable'))
+        return result()
+
+
+def inspect_lifecycle_recovery(authorities,task_refs):
+    """Finite D4 coverage with release/reacquire on discovery; no closure authorization."""
     try:
         pending={d3._digest(_canonical_plain(a)):_canonical_plain(a) for a in authorities}
         d3._require(0<len(pending)<=4096,'Recovery authority selection is empty or exceeds bound')
         for _ in range(4096):
-            discovered={}; dependencies=[]; blockers=[]; contexts=[]; observed=[]
             with _authority_guards([Path(a['directory']) for a in pending.values()],observe=True):
-                for authority in pending.values():
-                    seen_markers=set()
-                    for location in _authority_locations([Path(authority['directory'])]):
-                        marker=_authority_owner(location)
-                        if marker is not None and d3._digest(marker) not in seen_markers:
-                            seen_markers.add(d3._digest(marker))
-                            blockers.append(dict(reason='active_or_uncertain_operation',authority=authority,owner=marker))
-                            dependencies.append(dict(authority=authority,**marker,source_artifact=None,journal=None,task_refs=[]))
-                    context=_recovery_context(authority); contexts.append(context)
-                    baseline,sources=_recovery_sources(context)
-                    if baseline is None or baseline['content']['source_contract']!=2:
-                        blockers.append(dict(reason='unknown_creation_time_d4_coverage',authority=authority))
-                    for reference,content in sources:
-                        for other in content['authorities']:
-                            key=d3._digest(other)
-                            if key not in pending: discovered[key]=other
-                        observed.append((context,reference,content))
-                if discovered:
-                    d3._require(len(pending)+len(discovered)<=4096,'Recovery authority closure exceeds bound')
-                else:
-                    for context,reference,content in observed:
-                        authority=_canonical_plain(context.authority_set[0])
-                        path=Path(content['identity']['plan_dir'])
-                        raw=d3._read_file(path/'transaction.json',MAX_JOURNAL,private=True)
-                        journal=_load_journal(path)
-                        d3._require(journal is not None and journal['schema_version']==2 and
-                            all(journal[k]==content['identity'][k] for k in ('transaction_id','manifest_digest')),
-                            'Recovery journal stable identity differs')
-                        if hashlib.sha256(raw).hexdigest()!=content['journal']['sha256'] or journal['state']!=content['journal']['state']:
-                            blockers.append(dict(reason='journal_snapshot_requires_reconciliation',identity=content['identity']))
-                        generations=_validate_recovery_references(content,contexts)
-                        with evidence._context_database(context) as db:
-                            history=evidence._recovery_source_history(context,db,reference,content['identity'])
-                        for _,prior in history:
-                            _validate_recovery_references(prior,contexts)
-                        dependencies.append(dict(authority=authority,**content['identity'],source_artifact=reference,journal=content['journal'],
-                            task_refs=[t['reference'] for t in content['tasks']],assignments=content['assignments'],artifacts=content['artifacts'],generation_digest=d3._digest(generations)))
-                    for original_ref in task_refs:
-                        ref=_canonical_plain(original_ref); task_state._task_reference(ref)
-                        context=next((c for c in contexts if _canonical_plain(c.authority_set[0])==ref['authority']),None)
-                        d3._require(context is not None,'Named task authority is outside observed closure')
-                        with evidence._context_database(context) as db:
-                            d3._require(task_state._task(db,ref['scope_id'],ref['client'],ref['session_id'],ref['task_id']) is not None,'Named recovery task unavailable')
-                    # Sources/physical bindings must still be the exact point observations before return.
-                    for context,reference,content in observed:
-                        _,latest=_recovery_sources(context)
-                        d3._require(any(ref==reference and value==content for ref,value in latest),'Recovery source edge changed during inspection')
-                    return _canonical_freeze(dict(complete=not blockers,dependencies=dependencies,blockers=blockers))
-            # Release partial guards before reacquiring the complete sorted set.
-            pending.update(discovered)
+                inspected=_inspect_lifecycle_recovery_guarded(tuple(pending.values()),task_refs)
+                discovered=[_canonical_plain(a) for a in inspected['discovered_authorities']]
+                if not discovered: return inspected
+                d3._require(len(pending)+len(discovered)<=4096,'Recovery authority closure exceeds bound')
+            # Never acquire a discovered lower-order guard while holding a partial set.
+            pending.update({d3._digest(a):a for a in discovered})
         raise Pending('Recovery authority closure did not converge')
     except (StartupError,task_state.StateError,OSError,sqlite3.Error,ValueError,TypeError,KeyError) as error:
-        blockers.append(dict(reason=str(error) if isinstance(error,(StartupError,task_state.StateError)) else 'recovery_source_unavailable'))
-        return _canonical_freeze(dict(complete=False,dependencies=dependencies,blockers=blockers))
+        return _canonical_freeze(dict(complete=False,dependencies=[],blockers=[dict(reason=str(error))],roots=[],requirements=[],
+            authorities=[],discovered_authorities=[]))
 
 
 def _scoped_journal_shape(journal):
