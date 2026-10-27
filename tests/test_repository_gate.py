@@ -40,6 +40,21 @@ def fixture(schema_version=2):
     return dict(version=1, policy=policy, before=observation, after=deepcopy(observation), now=1000)
 
 
+def fixture_v2():
+    data = fixture()
+    data['version'] = 2
+    data['policy']['version'] = 2
+    data['policy']['binding']['pins'].update(schema_version=3, accepted_scope_digest='9' * 64)
+    for observation in (data['before'], data['after']):
+        observation['version'] = 2
+        observation['binding']['pins'].update(schema_version=3, accepted_scope_digest='9' * 64)
+        for record in [*observation['checks'], *observation['reviews'], observation['writers']]:
+            record['binding']['pins'].update(schema_version=3, accepted_scope_digest='9' * 64)
+        for writer in observation['writers']['reconciled']:
+            writer['expected_pins'].update(schema_version=3, accepted_scope_digest='9' * 64)
+    return data
+
+
 class RepositoryGateTests(unittest.TestCase):
     def setUp(self):
         self.api = importlib.import_module('runtime.repository_gate')
@@ -76,6 +91,71 @@ class RepositoryGateTests(unittest.TestCase):
                     self.assertTrue(self.evaluate()['evidence_valid'])
                 else:
                     self.assert_blocked(self.evaluate(), 'invalid_input')
+
+    def test_version_2_fixture_passes_without_granting_authority_or_publication(self):
+        self.data = fixture_v2()
+        result = self.evaluate()
+        self.assertTrue(result['evidence_valid'], result)
+        self.assertEqual(result['blockers'], [])
+        self.assertEqual(result['source_authentication'], 'unverified')
+        self.assertEqual(result['execution_blockers'], ['unqualified_publisher', 'unqualified_evidence_source'])
+        self.assertFalse(result['merge_authorized'])
+        self.assertFalse(result['published'])
+        cli = self.cli(json.dumps(self.data).encode())
+        self.assertEqual(cli.returncode, 1)
+        self.assertTrue(json.loads(cli.stdout)['evidence_valid'])
+        self.assertFalse(json.loads(cli.stdout)['merge_authorized'])
+        self.assertFalse(json.loads(cli.stdout)['published'])
+
+    def test_v2_accepted_scope_digest_is_bound_to_each_observation(self):
+        self.data = fixture_v2()
+        self.data['after']['binding']['pins']['accepted_scope_digest'] = '8' * 64
+        self.assert_blocked(self.evaluate(), 'binding_mismatch')
+
+    def test_v2_original_writer_scope_digest_must_match_candidate_pins(self):
+        self.data = fixture_v2()
+        self.assert_blocked(self.changed(lambda o: o['writers']['reconciled'][0]['expected_pins'].update(
+            accepted_scope_digest='8' * 64)), 'writer_binding_mismatch')
+
+    def test_v2_rejects_mixed_versions_and_canonical_v1_pin_shape(self):
+        changes = [
+            lambda d: d.update(version=1),
+            lambda d: d['policy'].update(version=1),
+            lambda d: d['before'].update(version=1),
+            lambda d: d['after'].update(version=1),
+            lambda d: d['policy']['binding']['pins'].update(schema_version=2),
+            lambda d: d.update(version=True),
+            lambda d: d['policy'].update(version=True),
+            lambda d: d['before'].update(version=True),
+            lambda d: d['policy']['binding']['pins'].update(schema_version=True),
+        ]
+        for change in changes:
+            with self.subTest(change=change):
+                data = fixture_v2()
+                change(data)
+                with self.assertRaises(self.api.GateError):
+                    self.api.validate_envelope(data)
+
+        data = fixture_v2()
+        pins = data['policy']['binding']['pins']
+        pins['schema_version'] = 2
+        del pins['accepted_scope_digest']
+        with self.assertRaises(self.api.GateError):
+            self.api.validate_envelope(data)
+
+    def test_v2_pin_objects_reject_missing_extra_and_invalid_digest_fields(self):
+        changes = [
+            lambda pins: pins.pop('accepted_scope_digest'),
+            lambda pins: pins.update(unrecognized='a' * 64),
+            lambda pins: pins.update(accepted_scope_digest='g' * 64),
+            lambda pins: pins.update(policy_digest='b' * 40),
+        ]
+        for change in changes:
+            with self.subTest(change=change):
+                data = fixture_v2()
+                change(data['policy']['binding']['pins'])
+                with self.assertRaises(self.api.GateError):
+                    self.api.validate_envelope(data)
 
     def test_every_required_check_requires_explicit_success(self):
         for status in ('failure', 'cancelled', 'skipped', 'neutral', 'timed_out', 'pending', ''):
