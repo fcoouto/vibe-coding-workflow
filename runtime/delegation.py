@@ -1,4 +1,5 @@
 """Bounded local selection guidance; coordinator assertions grant no route authority."""
+from functools import partial
 from contextlib import contextmanager
 from datetime import datetime
 import fcntl
@@ -732,7 +733,15 @@ def _stored_claims(claims, *, maximum=MAX_CLAIMS):
     return claims
 
 
-def _record(scope, row, *, db=None):
+def _historical_read(scope, context, db, artifact_refs, reference):
+    _reference(reference)
+    value=evidence._read(None if context else scope,reference,context=context,db=db)
+    if artifact_refs is not None: artifact_refs.append(dict(reference))
+    return value
+
+
+def _record(scope, row, *, db=None, context=None, artifact_refs=None):
+    read = partial(_historical_read, scope, context, db, artifact_refs)
     identity, scope_id, client, session, task_id, dispatch_id, raw = row
     try:
         data = json_object(raw, limit=evidence.MAX_ARTIFACT)
@@ -746,7 +755,7 @@ def _record(scope, row, *, db=None):
         _require(_hex(data['request_digest']), 'Invalid assignment request digest')
         state._integer(data['revision'], 'stored assignment revision', 1)
         _reference(data['assignment'])
-        body = evidence._read(scope, data['assignment'], db=db)
+        body = read(data['assignment'])
         owner = dict(scope_id=scope_id, client=client, session_id=session, task_id=task_id, dispatch_id=dispatch_id)
         _require(body['owner'] == owner and all(body[key] == data[key] for key in
             ('job_id', 'role', 'claims', 'resource_units', 'revision', 'plan_digest', 'host_capacity', 'binding', 'retry_of', 'diagnostic')) and
@@ -772,18 +781,18 @@ def _record(scope, row, *, db=None):
             all(_hex(body['pins'][key]) for key in ('policy_digest', 'runtime_digest')) and
             all(body['request'][key] == owner[key] for key in ('client', 'session_id', 'task_id', 'dispatch_id')),
             'Assignment original owner or pins are corrupt')
-        verifier = data['role'] == 'coordinator' and evidence._read(scope, body['operation'], db=db).get('kind') == 'completion-verification'
+        verifier = data['role'] == 'coordinator' and read(body['operation']).get('kind') == 'completion-verification'
         size = len(raw.encode('utf-8')) if isinstance(raw, str) else len(raw)
         _require(verifier or size <= MAX_INPUT, 'Assignment record exceeds its role-specific byte limit')
         _stored_claims(data['claims'], maximum=MAX_VERIFICATION_CLAIMS if verifier else MAX_CLAIMS)
-        policy = evidence._read(scope, body['policy'], db=db)
+        policy = read(body['policy'])
         _require(policy['policy_digest'] == body['pins']['policy_digest'], 'Immutable assignment policy binding changed')
         if data['role'] in NATIVE_ROLES:
             state._fields(body, ('version', 'owner', 'pins', *canonical_fields, 'request', 'job_id', 'role', 'claims', 'resource_units',
                 'revision', 'plan', 'plan_digest', 'git_routing', 'host_capacity', 'binding', 'candidate',
                 'discovery', 'policy', 'report_contract', 'guidance', 'retry_of', 'diagnostic'), ('review',))
             _reference(body['plan'])
-            plan = evidence._read(scope, body['plan'], db=db)
+            plan = read(body['plan'])
             _require(body['plan']['digest'] == data['plan_digest'] and
                 plan['route']['parent_session_id'] == session, 'Native assignment has no actual original plan')
             if data['role'] == 'review':
@@ -793,7 +802,7 @@ def _record(scope, row, *, db=None):
                 _require(all(review[key] == body['request'][key] for key in ('coverage', 'criteria')),
                          'Review metadata differs from its original request')
                 _require(review['assignment_digest'] == hashlib.sha256(body['request']['assignment'].encode()).hexdigest() and
-                    evidence._read(scope, data['candidate'], db=db)['definitions_digest'] == review['d5_plan']['digest'] and
+                    read(data['candidate'])['definitions_digest'] == review['d5_plan']['digest'] and
                     all(claim['mode'] == 'read' for claim in data['claims']), 'Review prompt/plan/resources binding changed')
             else:
                 _require('review' not in body, 'Worker cannot carry review admission metadata')
@@ -814,7 +823,7 @@ def _record(scope, row, *, db=None):
                 data['binding'] is None and data['host_capacity'] is None and data['retry_of'] is None and
                 data['diagnostic'] is None, 'Model-free assignment cannot invent native facts or consumption')
             _require(body['scope_ref'] == body['request']['scope_ref'], 'Operation scope differs from original request')
-            operation = evidence._read(scope, body['operation'], db=db)
+            operation = read(body['operation'])
             state._fields(operation, ('id', 'kind', 'decision_ref', 'claims_digest'))
             _require(operation['claims_digest'] == evidence._digest(data['claims']) and
                 operation['decision_ref'] == body['decision_ref'], 'Operation resource/decision binding is corrupt')
@@ -823,22 +832,22 @@ def _record(scope, row, *, db=None):
                          'Task-only operation invented D5 plan/candidate facts')
             else:
                 _reference(body['d5_plan'])
-                evidence._read(scope, body['d5_plan'], db=db)
+                read(body['d5_plan'])
                 _require(data['plan_digest'] == body['d5_plan']['digest'], 'Original D5 plan binding changed')
                 if data['candidate'] is not None:
                     _reference(data['candidate'])
-                    candidate = evidence._read(scope, data['candidate'], db=db)
+                    candidate = read(data['candidate'])
                     _require(candidate['definitions_digest'] == data['plan_digest'] and candidate['pins'] == body['pins'],
                              'Original candidate binding changed')
             if body['d6_plan'] is not None:
                 _reference(body['d6_plan'])
-                evidence._read(scope, body['d6_plan'], db=db)
+                read(body['d6_plan'])
             if data['role'] == 'coordinator':
                 _require(operation['kind'] in {'coordinator-work', 'completion-verification'}, 'Invalid coordinator operation')
                 if data['job_id'] is not None:
                     _require(body['d6_plan'] is not None and operation['id'] == data['job_id'] and
                         any(job['id'] == data['job_id'] and job['role'] == 'coordinator'
-                            for job in evidence._read(scope, body['d6_plan'], db=db)['jobs']), 'Coordinator job binding is corrupt')
+                            for job in read(body['d6_plan'])['jobs']), 'Coordinator job binding is corrupt')
                 if operation['kind'] == 'completion-verification':
                     _require(body['d5_plan'] is not None and all(c['mode'] == 'read' for c in data['claims']),
                              'Verifier barrier requires actual D5 context and read-only claims')
@@ -849,14 +858,14 @@ def _record(scope, row, *, db=None):
                 _reference(data['candidate'])
                 _require(_hex(data['plan_digest']) and operation['kind'] == 'check' and
                     data['job_id'] == operation['id'], 'Check assignment requires actual D5 bindings')
-                plan = evidence._read(scope, body['d5_plan'], db=db)
-                candidate = evidence._read(scope, data['candidate'], db=db)
+                plan = read(body['d5_plan'])
+                candidate = read(data['candidate'])
                 _require(body['d5_plan']['digest'] == data['plan_digest'] and
                     candidate['definitions_digest'] == data['plan_digest'] and candidate['pins'] == body['pins'] and
                     any(check['id'] == operation['id'] for check in plan['checks']), 'Check bindings do not match actual D5 evidence')
         if data['status'] == 'settled':
             _reference(data['reconciliation'])
-            evidence._read(scope, data['reconciliation'], db=db)
+            read(data['reconciliation'])
             _require(isinstance(data['result'], dict) and data['result'].get('outcome') in
                      {'completed', 'failed', 'cancelled'}, 'Settled assignment has no reconciled result')
         return dict(id=identity, owner=owner, data=data, body=body)
@@ -864,11 +873,12 @@ def _record(scope, row, *, db=None):
         raise state.StateError('Shared assignment history is corrupt or incompatible') from None
 
 
-def _ledger(scope, db):
+def _ledger(scope, db, *, context=None, artifact_refs=None):
+    read = partial(_historical_read, scope, context, db, artifact_refs)
     rows = db.execute('select id,scope_id,client,session_id,task_id,dispatch_id,data from assignments limit ?',
                       (MAX_ASSIGNMENTS + 1,)).fetchall()
     _require(len(rows) <= MAX_ASSIGNMENTS, 'Shared assignment history exceeds its inspection bound')
-    records = [_record(scope, row, db=db) for row in rows]
+    records = [_record(scope, row, db=db, context=context, artifact_refs=artifact_refs) for row in rows]
     for record in records:
         owner, body = record['owner'], record['body']
         if state._retired(db, 'assignment', owner) or state._retired_assignment(db, record['id']):
@@ -878,7 +888,7 @@ def _ledger(scope, db):
             (body['pins']['schema_version'] != 3 or original['accepted_identity'] == body['accepted_identity']),
             'Assignment no longer matches its immutable original task')
         if record['data']['candidate'] is not None:
-            evidence._candidate_projection(evidence._read(scope, record['data']['candidate']), original)
+            evidence._candidate_projection(read(record['data']['candidate']), original)
     return records
 
 
@@ -1098,7 +1108,8 @@ def _check_claims(scope, definition):
     return _claims([dict(kind='path', key=str(scope.repository_root), mode='write')])
 
 
-def _linked_check(scope, scope_id, task, attempt, records):
+def _linked_check(scope, scope_id, task, attempt, records, *, context=None, db=None, artifact_refs=None):
+    read = partial(_historical_read, scope, context, db, artifact_refs)
     if attempt.get('kind') != 'check' or 'ledger_assignment_digest' not in attempt:
         return None
     found = next((r for r in records if r['id'] == attempt['id']), None)
@@ -1113,18 +1124,19 @@ def _linked_check(scope, scope_id, task, attempt, records):
         found['data']['observation'] == attempt.get('execution'), 'Check ledger link is absent or corrupt')
     _require(attempt['candidate'] == found['data']['candidate'], 'Check candidate reference changed')
     if attempt.get('execution'):
-        executed = evidence._read(scope, attempt['execution'])
-        definition = next(check for check in evidence._read(scope, found['body']['d5_plan'])['checks'] if check['id'] == attempt['check_id'])
+        executed = read(attempt['execution'])
+        definition = next(check for check in read(found['body']['d5_plan'])['checks'] if check['id'] == attempt['check_id'])
         _require(executed['command'] == definition and executed['result']['id'] == attempt['id'] and
             executed['result']['candidate_digest'] == attempt['candidate_digest'] and
-            executed['tool'] == evidence._read(scope, attempt['candidate'])['tools'][attempt['check_id']],
+            executed['tool'] == read(attempt['candidate'])['tools'][attempt['check_id']],
             'Check link does not bind actual command/execution')
     if attempt['status'] in {'reserved', 'running', 'uncertain'}:
         _require(found['data']['status'] != 'settled', 'Unresolved check cannot adopt settled ledger ownership')
     return found
 
 
-def _linked_review(scope, scope_id, task, attempt, records):
+def _linked_review(scope, scope_id, task, attempt, records, *, context=None, db=None, artifact_refs=None):
+    read = partial(_historical_read, scope, context, db, artifact_refs)
     if attempt.get('kind') != 'review' or 'ledger_assignment_digest' not in attempt:
         return None
     record = next((r for r in records if r['id'] == attempt['id']), None)
@@ -1137,7 +1149,7 @@ def _linked_review(scope, scope_id, task, attempt, records):
         record['owner']['dispatch_id'] == attempt['dispatch_id'] and data['job_id'] == attempt['job_id'] and
         data['candidate'] == attempt['candidate'] and data['candidate']['digest'] == attempt['candidate_digest'] and
         review['d5_plan']['digest'] == attempt['plan_digest'] and review['assignment_digest'] == attempt['assignment_digest'] and
-        evidence._read(scope, attempt['assignment']) == dict(prompt=record['body']['request']['assignment']) and
+        read(attempt['assignment']) == dict(prompt=record['body']['request']['assignment']) and
         all(review[key] == attempt[key] for key in ('coverage', 'criteria')) and
         data['binding']['task_name'] == attempt['task_name'] == 'review_' + attempt['id'], 'Review D5/D6 immutable link changed')
     if attempt.get('ownership_reconciliation') is not None:
@@ -1146,8 +1158,8 @@ def _linked_review(scope, scope_id, task, attempt, records):
     return record
 
 
-def _linked_attempt(scope, scope_id, task, attempt, records):
-    return (_linked_review if attempt.get('kind') == 'review' else _linked_check)(scope, scope_id, task, attempt, records)
+def _linked_attempt(scope, scope_id, task, attempt, records, *, context=None, db=None, artifact_refs=None):
+    return (_linked_review if attempt.get('kind') == 'review' else _linked_check)(scope, scope_id, task, attempt, records, context=context, db=db, artifact_refs=artifact_refs)
 
 
 def _resources_available(scope, db, claims, records):

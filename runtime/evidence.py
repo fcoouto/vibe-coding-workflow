@@ -119,6 +119,91 @@ class _BaselineOwner:
     creation: object
 
 
+@dataclass(frozen=True)
+class _RecoveryOwner:
+    project_id: str
+    source: object
+    created_at: int
+    dependencies: tuple
+    content: object
+
+
+def _recovery_source_dependencies(content,authority):
+    dependencies = [dict(kind='task',reference=t['reference']) for t in content['tasks']]
+    dependencies += [dict(kind='assignment',reference=a) for a in content['assignments']]
+    dependencies += [dict(kind='artifact',reference=a) for a in content['artifacts']]
+    if content['previous']:
+        dependencies.append(dict(kind='recovery',reference=dict(authority=authority,artifact=content['previous'])))
+    _require(len(dependencies)<=4096,'Recovery source dependency bound exceeded')
+    return dependencies
+
+
+def _recovery_source_history(context,db,reference,identity):
+    """Point-follow owned snapshots; missing prior support cannot be silently replaced."""
+    history=[]; seen=set(); age=None; owner=None
+    while reference is not None:
+        key=_raw(reference)
+        _require(key not in seen and len(seen)<4096,'Recovery source history is cyclic or excessive')
+        seen.add(key)
+        metadata,raw=_managed_artifact(None,reference,context=context,db=db)
+        value=json.loads(raw)
+        state._fields(value,('version','kind','identity','journal','authorities','tasks','assignments','artifacts','previous'))
+        _require(type(value['version']) is int and value['version']==1 and value['kind']=='d4-recovery-source'
+            and value['identity']==identity and metadata['class']=='compact','Recovery source history binding changed')
+        _require(metadata['dependencies']==_recovery_source_dependencies(value,_canonical_plain(context.authority_set[0])),
+            'Recovery typed metadata dependencies differ from owner source')
+        if age is None: age=metadata['created_at']; owner=metadata['owner']
+        _require(metadata['created_at']==age and metadata['owner']==owner,'Recovery source history original age or owner changed')
+        history.append((dict(reference),value))
+        reference=value['previous']
+        if reference is not None: state._artifact_reference(reference)
+    return history
+
+
+def _register_recovery_source(scope, db, source, *, context=None):
+    """Retain an inspected D4 source and its reverse edge in one existing transaction."""
+    from runtime import changes
+    _require((scope is None) != (context is None), 'Select exactly one existing evidence authority')
+    selected = context or _evidence_context(scope)
+    _check_context(selected, db)
+    changes._check_recovery_source(source, selected, db)
+    baseline = state._source_baseline(None, db, context=selected)
+    _require(baseline is not None, 'Recovery source baseline is unavailable; preserve operation markers')
+    baseline = _canonical_plain(baseline)
+    content = _canonical_plain(source.content)
+    identity = content['identity']
+    edges = baseline['dependencies']
+    matches = [e for e in edges if e['reference']['identity'] == identity]
+    _require(len(matches) <= 1, 'Conflicting stable recovery source edges')
+    previous = matches[0]['reference']['artifact'] if matches else None
+    created = source.created_at
+    state._integer(created,'original D4 source creation time')
+    if previous is not None:
+        metadata, raw = _managed_artifact(None, previous, context=selected, db=db)
+        prior = _recovery_source_history(selected,db,previous,identity)[0][1]
+        _require(prior.get('kind') == 'd4-recovery-source' and prior.get('identity') == identity
+            and metadata['class'] == 'compact' and metadata['owner'] == dict(kind='project',project_id=baseline['content']['project_id'],task=None),
+            'Prior recovery source ownership changed')
+        _require(metadata['created_at']==created,'Original D4 source age differs from observed first source')
+        comparable = dict(content, previous=prior.get('previous'))
+        comparable['journal'] = dict(comparable['journal'], observed_at=prior['journal']['observed_at'])
+        if comparable == prior:
+            return _canonical_freeze(previous)
+    content['previous'] = previous
+    dependencies = _recovery_source_dependencies(content,_canonical_plain(selected.authority_set[0]))
+    owner = _RecoveryOwner(baseline['content']['project_id'], source, created, tuple(_canonical_freeze(d) for d in dependencies), _canonical_freeze(content))
+    reference = _artifact(None, content, context=selected, owner=owner, db=db)
+    edges = [e for e in edges if e['reference']['identity'] != identity]
+    edges.append(dict(kind='recovery',reference=dict(identity=identity,artifact=reference)))
+    edges.sort(key=lambda e: _raw(e))
+    _require(len(edges) <= 4096, 'Recovery baseline source bound exceeded')
+    metadata = state._metadata(db, baseline['reference']['name'])
+    metadata['dependencies'] = edges
+    db.execute('update evidence_metadata set data=? where name=?', (_raw(metadata).decode(),baseline['reference']['name']))
+    changes._check_recovery_source(source, selected, db)
+    return _canonical_freeze(reference)
+
+
 def _register_source_baseline(scope, db, creation):
     """Initializer-only compact provenance; no D4 source completeness is implied."""
     path = state._path(scope)
@@ -131,7 +216,7 @@ def _register_source_baseline(scope, db, creation):
     if os.path.lexists(folder):
         state._private(folder, True)
         _require(next(folder.iterdir(), None) is None, 'Unknown evidence content protects this authority from bootstrap')
-    content = dict(version=1, kind='authority-source-baseline', source_contract=1,
+    content = dict(version=1, kind='authority-source-baseline', source_contract=2,
         authority=_canonical_plain(creation.authority), project_id=scope.project_id,
         created_at=creation.created_at, runtime_digest=state.runtime_fingerprint())
     reference = _artifact(scope, content, owner=_BaselineOwner(scope.project_id, creation), db=db)
@@ -158,6 +243,19 @@ def _evidence_context(scope):
     return EvidenceAuthorityContext(path.parent, path, _canonical_freeze(authority['directory_binding']),
         _canonical_freeze(authority['database_binding']), (_canonical_freeze(authority),),
         'existing accepted Project evidence authority')
+
+
+def _existing_authority_context(authority, *, db):
+    """D4 existing-store read/registration selection; no enumeration or eligibility proof."""
+    authority = _canonical_plain(_canonical_freeze(authority))
+    state._fields(authority, ('directory','database','directory_binding','database_binding'))
+    directory = state._canonical_path(authority['directory'])
+    database = state._canonical_path(authority['database'])
+    state._canonical_binding(authority['directory_binding']); state._canonical_binding(authority['database_binding'])
+    context = EvidenceAuthorityContext(directory, database, _canonical_freeze(authority['directory_binding']),
+        _canonical_freeze(authority['database_binding']), (_canonical_freeze(authority),), 'D4 existing physical authority')
+    _check_context(context, db)
+    return context
 
 
 def _check_context(context, db=None):
@@ -214,6 +312,12 @@ def _guidance_artifact_owner(scope):
 
 
 def _registered_owner(scope, context, owner, db):
+    if isinstance(owner, _RecoveryOwner):
+        from runtime import changes
+        changes._check_recovery_source(owner.source, context, db)
+        baseline = state._source_baseline(None, db, context=context)
+        _require(baseline is not None and baseline['content']['project_id'] == owner.project_id, 'Recovery Project owner changed')
+        return dict(kind='project', project_id=owner.project_id, task=None), None
     if isinstance(owner, _BaselineOwner):
         _require(scope is not None and owner.project_id == scope.project_id, 'Baseline Project owner changed')
         state._check_creation(context.database, owner.creation, db)
@@ -301,14 +405,16 @@ def _artifact_registered(scope, value, context, owner, db):
     finally:
         os.close(directory_fd)
     digest = hashlib.sha256(raw).hexdigest()
-    dependencies = _artifact_dependencies(value)
+    recovery = isinstance(owner, _RecoveryOwner)
+    if recovery: _require(value == _canonical_plain(owner.content), 'Recovery artifact differs from owner-derived content')
+    dependencies = [_canonical_plain(d) for d in owner.dependencies] if recovery else _artifact_dependencies(value)
     if task_ref is not None:
         dependencies.insert(0, dict(kind='task', reference=task_ref))
     baseline = isinstance(owner, _BaselineOwner)
-    created = owner.creation.created_at if baseline else state._owner_time()
-    content_class = 'compact' if baseline else 'detail'
+    created = owner.creation.created_at if baseline else owner.created_at if recovery else state._owner_time()
+    content_class = 'compact' if baseline or recovery else 'detail'
     if baseline:
-        expected = dict(version=1, kind='authority-source-baseline', source_contract=1,
+        expected = dict(version=1, kind='authority-source-baseline', source_contract=2,
             authority=_canonical_plain(owner.creation.authority), project_id=owner.project_id,
             created_at=created, runtime_digest=state.runtime_fingerprint())
         _require(value == expected and not dependencies, 'Baseline content differs from fresh owner provenance')
@@ -326,9 +432,10 @@ def _artifact_registered(scope, value, context, owner, db):
     return dict(name=path.name, digest=digest)
 
 
-def _managed_artifact(scope, reference, *, db=None):
+def _managed_artifact(scope, reference, *, context=None, db=None):
     """Reobserve stored physical ownership; matching bytes alone cannot adopt a replacement."""
-    context = _evidence_context(scope)
+    _require((scope is None) != (context is None), 'Select exactly one existing evidence authority')
+    context = context or _evidence_context(scope)
     if db is None:
         with _context_database(context) as connection:
             metadata = state._metadata(connection, reference['name'])
@@ -353,15 +460,16 @@ def _managed_artifact(scope, reference, *, db=None):
     return metadata, raw
 
 
-def _read(scope, reference, *, db=None):
+def _read(scope, reference, *, context=None, db=None):
     state._fields(reference, ('name', 'digest'))
     _require(isinstance(reference['name'], str) and re.fullmatch(r'[0-9a-f]{32}\.json', reference['name']),
              'Invalid evidence artifact reference')
-    path = _folder(scope) / reference['name']
+    _require((scope is None) != (context is None), 'Select exactly one existing evidence authority')
     try:
-        if state._scope_version(scope) == 3:
-            _, raw = _managed_artifact(scope, reference, db=db)
+        if context is not None or state._scope_version(scope) == 3:
+            _, raw = _managed_artifact(scope, reference, context=context, db=db)
         else:
+            path = _folder(scope) / reference['name']
             descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
             with os.fdopen(descriptor, 'rb') as stream:
                 info = os.fstat(stream.fileno())

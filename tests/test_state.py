@@ -985,7 +985,7 @@ class AuthorityBootstrapTests(unittest.TestCase):
             self.fixture.start()
         baseline = self.baseline()
         self.assertEqual(baseline['content']['created_at'], 100)
-        self.assertEqual(baseline['content']['source_contract'], 1)
+        self.assertEqual(baseline['content']['source_contract'], 2)
         self.assertNotIn('complete', baseline)
         with self.api._database(self.scope) as db:
             metadata = self.api._metadata(db, baseline['reference']['name'])

@@ -6,7 +6,7 @@ an authentication mechanism. Receipts prove local file observations only.
 
 from contextlib import ExitStack, closing, contextmanager
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import fcntl
 import hashlib
 import json
@@ -23,7 +23,7 @@ import uuid
 from runtime import onboarding as d3
 from runtime import state as task_state
 from runtime.startup import (PROJECT_FILE, ProjectScope, StartupError, checkout,
-                             policy_digest, runtime_settings)
+                             policy_digest, runtime_settings, _canonical_freeze, _canonical_plain)
 
 LOCK_ROOT = Path.home() / ".local/share/vcw-transactions"
 MAX_JOURNAL = 8 * 1024 * 1024
@@ -301,7 +301,7 @@ def _authority_owner(location):
 
 
 @contextmanager
-def _authority_guards(directories, owner=None):
+def _authority_guards(directories, owner=None, *, observe=False):
     """Shared approved-authority exclusion; never locks or writes the old database."""
     locations = _authority_locations(directories)
     with ExitStack() as locks:
@@ -314,7 +314,7 @@ def _authority_guards(directories, owner=None):
                 pass
             locks.enter_context(_lock(lock))
             held = _authority_owner(location)
-            if held is not None and held != owner:
+            if held is not None and held != owner and not observe:
                 raise Pending("Shared state authority has an active or uncertain D4 operation; resume its bound journal")
         yield locations
 
@@ -719,12 +719,13 @@ def _recovery_files(path, root, journal, cleanup=True):
             os.close(directory)
 
 
-def _fresh(plan, journal=None):
+def _fresh(plan, journal=None, *, external_owned=()):
     """Normalize only receipt-owned paths; unrelated inputs retain D3 freshness checks."""
     root = Path(plan["identity"]["repository_root"])
     current = d3._snapshot(root, d3._file_targets(plan["actions"]))
     previous = plan["identity"]
     owned = _owned(journal) if journal else {}
+    owned.update({key:(None,None) for key in external_owned})
     if journal and journal["enrollment"]:
         owned[str(PROJECT_FILE)] = (None, None)
     for key in ("repository_root", "git_common_dir", "head", "index_digest"):
@@ -1643,6 +1644,15 @@ def _scoped_runtime_locations(records, affected=None):
     return locations
 
 
+def _scoped_writer_roots(manifest):
+    git_roots={Path(a['owner']['git_common_dir']) for a in manifest['owners'] if a['owner']['kind']=='repository'}
+    return {Path(a['owner']['root']) for a in manifest['owners']} | git_roots,git_roots
+
+
+def _scoped_task_relevant(checkout_row,roots):
+    return Path(checkout_row[0]) in roots or any(Path(checkout_row[1])==root or root.is_relative_to(Path(checkout_row[1])) for root in roots)
+
+
 def _scoped_writers(locations, affected_roots, git_roots=()):
     from runtime import delegation, evidence
     claims = [dict(kind="path", key=str(root), mode="write") for root in affected_roots] + [dict(kind="git", key=str(root), mode="write") for root in git_roots]
@@ -1651,13 +1661,18 @@ def _scoped_writers(locations, affected_roots, git_roots=()):
             if _legacy_writers(replace(locator, runtime=replace(locator.runtime, schema_version=1))):
                 raise Pending("Affected legacy writers remain unreconciled")
             continue
-        path = task_state._path(locator)
-        if not os.path.lexists(path): continue
+        selected = locator if isinstance(locator,evidence.EvidenceAuthorityContext) else None
+        path = selected.database if selected else task_state._path(locator)
+        if not os.path.lexists(path):
+            d3._require(selected is None,'Discovered writer physical authority unavailable')
+            continue
         task_state._sidecars(path)
         with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=0.1)) as db:
             db.execute("pragma trusted_schema=off"); db.execute("begin")
             task_state._schema(db, version=version)
-            records = delegation._ledger(locator, db)
+            context = selected or (evidence._existing_authority_context(task_state._authority_identity(path), db=db) if version == 3 else None)
+            if context: evidence._check_context(context,db)
+            records = delegation._ledger(locator, db, context=context)
             if any(r["data"]["status"] != "settled" and delegation._held_conflict(claims, r["data"]["claims"]) for r in records):
                 raise Pending("Affected foreign or uncertain assignment remains unreconciled")
             rows = db.execute("select scope_id,client,session_id,task_id from tasks limit 4097").fetchall()
@@ -1668,9 +1683,9 @@ def _scoped_writers(locations, affected_roots, git_roots=()):
                 d3._require(row is not None, "Historical writer has no checkout")
                 unresolved = [a for a in task.get("evidence", {}).get("attempts", []) if a["status"] in {"reserved", "running", "uncertain"}]
                 retirement = task.get("retirement")
-                relevant = Path(row[0]) in affected_roots or any(Path(row[1]) == root or root.is_relative_to(Path(row[1])) for root in affected_roots)
-                if retirement:
-                    proof = evidence._read(locator, retirement["proof"])
+                relevant = _scoped_task_relevant(row,affected_roots)
+                if retirement and (relevant or unresolved):
+                    proof = evidence._read(None if context else locator, retirement["proof"], context=context, db=db)
                     d3._require(task["state"] == "cancelled" and proof.get("kind") == "stopped-writer-reconciliation"
                         and proof.get("stopped") is True and proof.get("descendants_stopped") is True
                         and proof.get("identity") == {k: task[k] for k in ("client", "session_id", "task_id", "scope_ref")}
@@ -1679,8 +1694,401 @@ def _scoped_writers(locations, affected_roots, git_roots=()):
                         "Historical stopped-writer proof does not match original pins/identity")
                 elif relevant and task["mode"] == "editable":
                     raise Pending("Affected editable task lacks exact stopped-writer retirement proof")
-                elif any(delegation._linked_attempt(locator, scope_id, task, a, records) is None for a in unresolved):
+                elif any(delegation._linked_attempt(locator, scope_id, task, a, records, context=context, db=db) is None for a in unresolved):
                     raise Pending("Unlinked or foreign task attempt retains unknown writer ownership")
+
+
+_RECOVERY_ISSUER = object()
+
+
+@dataclass(frozen=True)
+class _RecoverySourceObservation:
+    content: object
+    contexts: tuple
+    generations: object
+    created_at: int
+    issuer: object
+
+
+def _recovery_generation(db,tasks,assignments):
+    rows=[]
+    for item in tasks:
+        ref=item['reference']
+        row=db.execute('select data from tasks where scope_id=? and client=? and session_id=? and task_id=?',
+            tuple(ref[k] for k in ('scope_id','client','session_id','task_id'))).fetchone()
+        d3._require(row is not None,'Recovery original task unavailable')
+        rows.append(['task',ref,row[0]])
+    for item in assignments:
+        row=db.execute('select data from assignments where id=?',(item['id'],)).fetchone()
+        d3._require(row is not None,'Recovery original assignment unavailable')
+        rows.append(['assignment',item['id'],row[0]])
+    return d3._digest(rows)
+
+
+def _recovery_owner_refs(manifest,context,task_refs):
+    """Select actual affected-writer proofs; never inspect user payloads for lookalike refs."""
+    from runtime import evidence,delegation
+    roots,_=_scoped_writer_roots(manifest)
+    tasks=[]; assignments={}; references=[]
+    authority=_canonical_plain(context.authority_set[0])
+    with evidence._context_database(context) as db:
+        records=delegation._ledger(None,db,context=context)
+        rows=db.execute('select scope_id,client,session_id,task_id from tasks limit 4097').fetchall()
+        d3._require(len(rows)<=4096,'Recovery task discovery exceeds bound')
+        for scope_id,client,session,task_id in rows:
+            task=task_state._task(db,scope_id,client,session,task_id)
+            row=db.execute('select repository_root,git_common_dir from checkouts where scope_id=?',(scope_id,)).fetchone()
+            d3._require(row is not None,'Recovery task checkout unavailable')
+            relevant=_scoped_task_relevant(row,roots)
+            unresolved=[a for a in task.get('evidence',{}).get('attempts',[]) if a['status'] in {'reserved','running','uncertain'}]
+            ref=dict(authority=authority,scope_id=scope_id,client=client,session_id=session,task_id=task_id)
+            named=any(_canonical_plain(r)==ref for r in task_refs)
+            if not (named or unresolved or relevant and task.get('retirement')): continue
+            tasks.append(dict(reference=ref,revision=task['revision'],pins=task['pins'],turn_id=task['turn_id']))
+            if task.get('retirement'):
+                proof=task['retirement']['proof']; task_state._artifact_reference(proof); references.append(proof)
+            else:
+                for attempt in unresolved:
+                    record=delegation._linked_attempt(None,scope_id,task,attempt,records,context=context,db=db,artifact_refs=references)
+                    d3._require(record is not None,'Recovery task attempt has unknown ownership')
+                    assignments[record['id']]=record
+        for record in assignments.values():
+            row=db.execute('select id,scope_id,client,session_id,task_id,dispatch_id,data from assignments where id=?',(record['id'],)).fetchone()
+            delegation._record(None,row,db=db,context=context,artifact_refs=references)
+    return tasks,[dict(authority=authority,id=r['id'],owner=r['owner'],assignment=r['data']['assignment']) for r in assignments.values()],references
+
+
+def _collect_recovery_references(manifest,contexts,task_refs=()):
+    from runtime import evidence,delegation
+    by_authority={d3._digest(_canonical_plain(c.authority_set[0])):c for c in contexts}
+    tasks={}; assignments={}; artifacts={}; foreign={}; pending=[]; seen=set()
+    def enqueue(kind,authority,reference):
+        key=(kind,d3._digest(authority),d3._digest(reference))
+        if key not in seen:
+            d3._require(len(seen)<4096,'Recovery typed reference closure exceeds bound')
+            seen.add(key); pending.append((kind,authority,reference))
+    for context in contexts:
+        authority=_canonical_plain(context.authority_set[0])
+        selected,selected_assignments,roots=_recovery_owner_refs(manifest,context,task_refs)
+        for task in selected: tasks[d3._digest(task['reference'])]=task
+        for assignment in selected_assignments:
+            assignments[d3._digest(assignment)]=assignment
+        for reference in roots: enqueue('artifact',authority,reference)
+    def dependency(value,authority):
+        task_state._fields(value,('kind','reference')); kind=value['kind']; ref=value['reference']
+        if kind=='task':
+            task_state._task_reference(ref); enqueue('task',ref['authority'],ref)
+        elif kind=='artifact':
+            if set(ref)=={'name','digest'}:
+                task_state._artifact_reference(ref); enqueue('artifact',authority,ref)
+            else:
+                task_state._fields(ref,('authority','artifact')); task_state._artifact_reference(ref['artifact'])
+                enqueue('artifact',ref['authority'],ref['artifact'])
+        elif kind=='assignment':
+            task_state._fields(ref,('authority','id','owner','assignment'))
+            task_state._retired_identity('assignment',ref['owner']); task_state._artifact_reference(ref['assignment'])
+            d3._require(isinstance(ref['id'],str) and re.fullmatch(r'[0-9a-f]{32}',ref['id']),'Invalid recovery assignment ID')
+            enqueue('assignment',ref['authority'],ref)
+        elif kind=='recovery':
+            if set(ref)=={'identity','artifact'}:
+                task_state._fields(ref['identity'],('plan_dir','transaction_id','manifest_digest'))
+                task_state._canonical_path(ref['identity']['plan_dir']); d3._text(ref['identity']['transaction_id']); d3._hash(ref['identity']['manifest_digest'])
+                task_state._artifact_reference(ref['artifact']); enqueue('artifact',authority,ref['artifact'])
+            else:
+                task_state._fields(ref,('authority','artifact')); task_state._artifact_reference(ref['artifact'])
+                enqueue('artifact',ref['authority'],ref['artifact'])
+        else:
+            raise Pending('Unsupported typed recovery dependency; owner observation required')
+    while pending:
+        kind,authority,reference=pending.pop()
+        task_state._fields(authority,('directory','database','directory_binding','database_binding'))
+        task_state._canonical_path(authority['directory']); task_state._canonical_path(authority['database'])
+        task_state._canonical_binding(authority['directory_binding']); task_state._canonical_binding(authority['database_binding'])
+        context=by_authority.get(d3._digest(authority))
+        if context is None:
+            foreign[d3._digest(authority)]=authority
+            continue
+        with evidence._context_database(context) as db:
+            if kind=='artifact':
+                metadata,_=evidence._managed_artifact(None,reference,context=context,db=db)
+                artifacts[d3._digest([authority,reference])]=dict(authority=authority,artifact=reference)
+                for edge in metadata['dependencies']: dependency(edge,authority)
+            elif kind=='task':
+                task=task_state._task(db,reference['scope_id'],reference['client'],reference['session_id'],reference['task_id'])
+                d3._require(task is not None,'Typed recovery task unavailable')
+                tasks[d3._digest(reference)]=dict(reference=reference,revision=task['revision'],pins=task['pins'],turn_id=task['turn_id'])
+            else:
+                row=db.execute('select id,scope_id,client,session_id,task_id,dispatch_id,data from assignments where id=?',(reference['id'],)).fetchone()
+                d3._require(row is not None,'Typed recovery assignment unavailable')
+                roots=[]; record=delegation._record(None,row,db=db,context=context,artifact_refs=roots)
+                d3._require(record['owner']==reference['owner'] and record['data']['assignment']==reference['assignment'],'Typed recovery assignment differs')
+                assignments[d3._digest(reference)]=reference
+                for root in roots: enqueue('artifact',authority,root)
+    return list(tasks.values()),list(assignments.values()),list(artifacts.values()),list(foreign.values())
+
+
+def _existing_recovery_age(contexts,identity):
+    """Observe one original source age across stores, with no cross-store transaction held."""
+    from runtime import evidence
+    ages=set()
+    for context in contexts:
+        with evidence._context_database(context) as db:
+            baseline=task_state._source_baseline(None,db,context=context)
+            if baseline is None: continue
+            matches=[edge for edge in baseline['dependencies'] if _canonical_plain(edge['reference']['identity'])==identity]
+            d3._require(len(matches)<=1,'Conflicting original recovery source age edges')
+            if matches:
+                reference=_canonical_plain(matches[0]['reference']['artifact'])
+                evidence._recovery_source_history(context,db,reference,identity)
+                ages.add(task_state._metadata(db,reference['name'])['created_at'])
+    d3._require(len(ages)<=1,'Conflicting original recovery source ages')
+    return next(iter(ages)) if ages else None
+
+
+def _observe_recovery_source(path, journal, contexts, task_refs):
+    """Observe exact existing source owners under caller-held complete authority guards."""
+    raw=d3._read_file(path/'transaction.json',MAX_JOURNAL,private=True)
+    d3._require(d3.read_request(raw)==journal,'Recovery journal changed during source observation')
+    _scoped_journal_shape(journal); contexts=tuple(contexts)
+    tasks,assignments,artifacts,foreign=_collect_recovery_references(journal['manifest'],contexts,task_refs)
+    d3._require(not foreign,'Recovery requires another physical authority')
+    for ref in task_refs:
+        task_state._task_reference(_canonical_plain(ref))
+        d3._require(any(t['reference']==_canonical_plain(ref) for t in tasks),'Named recovery task unavailable')
+    canonical=lambda values: sorted(values,key=d3._digest)
+    content=dict(version=1,kind='d4-recovery-source',identity=dict(plan_dir=str(path),transaction_id=journal['transaction_id'],manifest_digest=journal['manifest_digest']),
+        journal=dict(sha256=hashlib.sha256(raw).hexdigest(),observed_at=task_state._owner_time(),state=journal['state']),
+        authorities=canonical([_canonical_plain(c.authority_set[0]) for c in contexts]),tasks=canonical(tasks),assignments=canonical(assignments),artifacts=canonical(artifacts),previous=None)
+    from runtime import evidence
+    generations={}
+    for context in contexts:
+        authority=_canonical_plain(context.authority_set[0])
+        with evidence._context_database(context) as db:
+            selected=[t for t in content['tasks'] if t['reference']['authority']==authority]
+            for item in selected:
+                ref=item['reference']; current=task_state._task(db,ref['scope_id'],ref['client'],ref['session_id'],ref['task_id'])
+                d3._require(current is not None and all(current[k]==item[k] for k in ('revision','pins','turn_id')),
+                    'Selected recovery owner changed during observation')
+            generations[d3._digest(authority)]=_recovery_generation(db,selected,[a for a in content['assignments'] if a['authority']==authority])
+    created_at=_existing_recovery_age(contexts,content['identity'])
+    if created_at is None: created_at=task_state._owner_time()
+    return _RecoverySourceObservation(_canonical_freeze(content),contexts,_canonical_freeze(generations),created_at,_RECOVERY_ISSUER)
+
+
+def _check_recovery_source(source,context,db):
+    from runtime import evidence
+    d3._require(isinstance(source,_RecoverySourceObservation) and source.issuer is _RECOVERY_ISSUER,'D4 owner-observed recovery source is required')
+    authority=_canonical_plain(context.authority_set[0]); content=_canonical_plain(source.content)
+    d3._require(authority in content['authorities'],'Recovery registration physical authority differs')
+    for observed in source.contexts: evidence._check_context(observed)
+    tasks=[t for t in content['tasks'] if t['reference']['authority']==authority]
+    assignments=[a for a in content['assignments'] if a['authority']==authority]
+    d3._require(_recovery_generation(db,tasks,assignments)==source.generations[d3._digest(authority)],
+        'Recovery source selected owner generation changed')
+    for item in content['artifacts']:
+        if item['authority']==authority:
+            evidence._managed_artifact(None,item['artifact'],context=context,db=db)
+    evidence._check_context(context,db)
+    raw=d3._read_file(Path(content['identity']['plan_dir'])/'transaction.json',MAX_JOURNAL,private=True)
+    d3._require(hashlib.sha256(raw).hexdigest()==content['journal']['sha256'],'Recovery journal changed before registration')
+
+
+def _check_recovery_source_global(source):
+    """Recheck each existing store before opening the next local registration writer."""
+    from runtime import evidence
+    for context in source.contexts:
+        with evidence._context_database(context) as db:
+            _check_recovery_source(source,context,db)
+    age=_existing_recovery_age(source.contexts,_canonical_plain(source.content['identity']))
+    d3._require(age is None or age==source.created_at,'Original recovery source age changed')
+
+
+def _recovery_context(authority):
+    from runtime import evidence
+    path=Path(authority['database'])
+    task_state._sidecars(path)
+    with closing(sqlite3.connect(path.as_uri()+'?mode=ro',uri=True,timeout=0.1)) as db:
+        db.execute('pragma trusted_schema=off'); db.execute('begin')
+        return evidence._existing_authority_context(authority,db=db)
+
+
+def _recovery_sources(context):
+    from runtime import evidence
+    with evidence._context_database(context) as db:
+        baseline=task_state._source_baseline(None,db,context=context)
+        if baseline is None: return None,[]
+        sources=[]
+        for edge in baseline['dependencies']:
+            reference=_canonical_plain(edge['reference']['artifact'])
+            content=evidence._read(None,reference,context=context,db=db)
+            metadata=task_state._metadata(db,reference['name'])
+            d3._require(metadata['class']=='compact' and metadata['owner']==dict(kind='project',project_id=baseline['content']['project_id'],task=None)
+                and metadata['closed_at'] is None and not metadata['targets'] and metadata['export'] is None,'Recovery source metadata owner differs')
+            evidence._recovery_source_history(context,db,reference,_canonical_plain(edge['reference']['identity']))
+            d3._object(content,('version','kind','identity','journal','authorities','tasks','assignments','artifacts','previous'))
+            d3._require(type(content['version']) is int and content['version']==1 and content['kind']=='d4-recovery-source' and content['identity']==_canonical_plain(edge['reference']['identity']), 'Recovery source edge binding differs')
+            d3._require(all(isinstance(content[k],list) and len(content[k])<=4096 for k in ('authorities','tasks','assignments','artifacts')),
+                'Recovery source reference bound or shape differs')
+            d3._object(content['journal'],('sha256','observed_at','state'))
+            d3._hash(content['journal']['sha256']); task_state._integer(content['journal']['observed_at'],'journal observation time')
+            if content['previous'] is not None: task_state._artifact_reference(content['previous'])
+            sources.append((reference,content))
+        return baseline,sources
+
+
+def _recovery_foreign_authorities(context,manifest):
+    return _collect_recovery_references(manifest,(context,))[3]
+
+
+def _validate_recovery_references(content,contexts):
+    from runtime import evidence,delegation
+    by_authority={d3._digest(_canonical_plain(c.authority_set[0])):c for c in contexts}
+    generations={}
+    for context in contexts:
+        authority=_canonical_plain(context.authority_set[0])
+        with evidence._context_database(context) as db:
+            generations[d3._digest(authority)]=_recovery_generation(db,[t for t in content['tasks'] if t['reference']['authority']==authority],
+                [a for a in content['assignments'] if a['authority']==authority])
+            for item in content['tasks']:
+                ref=item['reference']; task_state._task_reference(ref)
+                if ref['authority']!=authority: continue
+                task=task_state._task(db,ref['scope_id'],ref['client'],ref['session_id'],ref['task_id'])
+                d3._require(task is not None and task['pins']==item['pins'],'Recovery original task unavailable or changed')
+            selected=[a for a in content['assignments'] if a['authority']==authority]
+            for assignment in selected:
+                row=db.execute('select id,scope_id,client,session_id,task_id,dispatch_id,data from assignments where id=?',(assignment['id'],)).fetchone()
+                d3._require(row is not None,'Recovery original assignment unavailable')
+                record=delegation._record(None,row,db=db,context=context)
+                owner=record['owner']
+                original=task_state._task(db,owner['scope_id'],owner['client'],owner['session_id'],owner['task_id'])
+                d3._require(record['owner']==assignment['owner'] and record['data']['assignment']==assignment['assignment'] and original is not None
+                    and original['pins']==record['body']['pins'] and original['accepted_identity']==record['body']['accepted_identity'],
+                    'Recovery original assignment unavailable or changed')
+            for item in content['artifacts']:
+                if item['authority']==authority:
+                    evidence._managed_artifact(None,item['artifact'],context=context,db=db)
+    for item in [*[t['reference'] for t in content['tasks']],*content['assignments'],*content['artifacts']]:
+        d3._require(d3._digest(item['authority']) in by_authority,'Recovery reference physical authority unavailable')
+    return generations
+
+
+@contextmanager
+def _scoped_source_guards(locations,owner,manifest):
+    """Reacquire a complete finite source-authority set before registration/effects."""
+    pending={Path(d):None for d in locations}
+    for _ in range(4096):
+        expanded={}; contexts=[]
+        with _authority_guards(pending,owner) as guards:
+            for directory,expected in pending.items():
+                database=directory/'runtime.sqlite3'
+                version=locations.get(directory,(None,3))[1]
+                if expected is not None:
+                    context=_recovery_context(expected)
+                elif version==3 and os.path.lexists(database):
+                    context=_recovery_context(task_state._authority_identity(database))
+                else: continue
+                contexts.append(context)
+                _,sources=_recovery_sources(context)
+                candidates=_recovery_foreign_authorities(context,manifest)
+                candidates += [a for _,content in sources for a in content['authorities']]
+                for authority in candidates:
+                    other=Path(authority['directory'])
+                    if other not in pending: expanded[other]=authority
+                    elif pending[other] is not None:
+                        d3._require(pending[other]==authority,'Conflicting prior physical authority bindings')
+                    else:
+                        d3._require(task_state._authority_identity(other/'runtime.sqlite3')==authority,'Prior physical authority changed')
+            if not expanded:
+                yield guards,tuple(contexts)
+                return
+            d3._require(len(pending)+len(expanded)<=4096,'Recovery authority closure exceeds bound')
+        pending.update(expanded)
+    raise Pending('Recovery authority closure did not converge')
+
+
+def _scoped_writer_locations(locations,contexts):
+    # Historical schema3 reads use the exact discovered binding, never a synthetic scope.
+    return dict(locations) | {context.directory:(context,3) for context in contexts}
+
+
+def _scoped_register_sources(path,journal,contexts):
+    """Called only under the operation's complete ordered authority guards."""
+    from runtime import evidence
+    if not contexts: return
+    source=_observe_recovery_source(path,journal,contexts,())
+    for context in contexts:
+        _check_recovery_source_global(source)
+        with evidence._context_database(context,write=True) as db:
+            # Legacy/baselineless lifetimes remain unknown; never retrofit a baseline.
+            d3._require(task_state._source_baseline(None,db,context=context) is not None,
+                'Existing schema3 source baseline is unavailable; preserve recovery markers')
+            evidence._register_recovery_source(None,db,source,context=context)
+
+
+def inspect_lifecycle_recovery(authorities, task_refs):
+    """Finite D4-source coverage only; no lifecycle closure or cleanup authorization."""
+    from runtime import evidence
+    dependencies=[]; blockers=[]
+    try:
+        pending={d3._digest(_canonical_plain(a)):_canonical_plain(a) for a in authorities}
+        d3._require(0<len(pending)<=4096,'Recovery authority selection is empty or exceeds bound')
+        for _ in range(4096):
+            discovered={}; dependencies=[]; blockers=[]; contexts=[]; observed=[]
+            with _authority_guards([Path(a['directory']) for a in pending.values()],observe=True):
+                for authority in pending.values():
+                    seen_markers=set()
+                    for location in _authority_locations([Path(authority['directory'])]):
+                        marker=_authority_owner(location)
+                        if marker is not None and d3._digest(marker) not in seen_markers:
+                            seen_markers.add(d3._digest(marker))
+                            blockers.append(dict(reason='active_or_uncertain_operation',authority=authority,owner=marker))
+                            dependencies.append(dict(authority=authority,**marker,source_artifact=None,journal=None,task_refs=[]))
+                    context=_recovery_context(authority); contexts.append(context)
+                    baseline,sources=_recovery_sources(context)
+                    if baseline is None or baseline['content']['source_contract']!=2:
+                        blockers.append(dict(reason='unknown_creation_time_d4_coverage',authority=authority))
+                    for reference,content in sources:
+                        for other in content['authorities']:
+                            key=d3._digest(other)
+                            if key not in pending: discovered[key]=other
+                        observed.append((context,reference,content))
+                if discovered:
+                    d3._require(len(pending)+len(discovered)<=4096,'Recovery authority closure exceeds bound')
+                else:
+                    for context,reference,content in observed:
+                        authority=_canonical_plain(context.authority_set[0])
+                        path=Path(content['identity']['plan_dir'])
+                        raw=d3._read_file(path/'transaction.json',MAX_JOURNAL,private=True)
+                        journal=_load_journal(path)
+                        d3._require(journal is not None and journal['schema_version']==2 and
+                            all(journal[k]==content['identity'][k] for k in ('transaction_id','manifest_digest')),
+                            'Recovery journal stable identity differs')
+                        if hashlib.sha256(raw).hexdigest()!=content['journal']['sha256'] or journal['state']!=content['journal']['state']:
+                            blockers.append(dict(reason='journal_snapshot_requires_reconciliation',identity=content['identity']))
+                        generations=_validate_recovery_references(content,contexts)
+                        with evidence._context_database(context) as db:
+                            history=evidence._recovery_source_history(context,db,reference,content['identity'])
+                        for _,prior in history:
+                            _validate_recovery_references(prior,contexts)
+                        dependencies.append(dict(authority=authority,**content['identity'],source_artifact=reference,journal=content['journal'],
+                            task_refs=[t['reference'] for t in content['tasks']],assignments=content['assignments'],artifacts=content['artifacts'],generation_digest=d3._digest(generations)))
+                    for original_ref in task_refs:
+                        ref=_canonical_plain(original_ref); task_state._task_reference(ref)
+                        context=next((c for c in contexts if _canonical_plain(c.authority_set[0])==ref['authority']),None)
+                        d3._require(context is not None,'Named task authority is outside observed closure')
+                        with evidence._context_database(context) as db:
+                            d3._require(task_state._task(db,ref['scope_id'],ref['client'],ref['session_id'],ref['task_id']) is not None,'Named recovery task unavailable')
+                    # Sources/physical bindings must still be the exact point observations before return.
+                    for context,reference,content in observed:
+                        _,latest=_recovery_sources(context)
+                        d3._require(any(ref==reference and value==content for ref,value in latest),'Recovery source edge changed during inspection')
+                    return _canonical_freeze(dict(complete=not blockers,dependencies=dependencies,blockers=blockers))
+            # Release partial guards before reacquiring the complete sorted set.
+            pending.update(discovered)
+        raise Pending('Recovery authority closure did not converge')
+    except (StartupError,task_state.StateError,OSError,sqlite3.Error,ValueError,TypeError,KeyError) as error:
+        blockers.append(dict(reason=str(error) if isinstance(error,(StartupError,task_state.StateError)) else 'recovery_source_unavailable'))
+        return _canonical_freeze(dict(complete=False,dependencies=dependencies,blockers=blockers))
 
 
 def _scoped_journal_shape(journal):
@@ -1819,7 +2227,24 @@ def _scoped_fresh(plan, journal):
             local = dict(plan, identity=identity["snapshot"], actions=local_actions, schema_version=1)
             view = dict(journal, manifest=dict(journal["manifest"], actions=[a for a in journal["manifest"]["actions"] if a["owner"] == owner]),
                         enrollment=journal["enrollment"] if str(PROJECT_FILE) in owned else None)
-            _fresh(local, view)
+            external_owned=[]
+            for action in journal['manifest']['actions']:
+                if action['owner']['kind']!='project': continue
+                receipt=journal['receipts'].get(action['id'])
+                if receipt is None: continue
+                shared_root=Path(action['owner']['root'])
+                for effect,file in zip(action['effects'],receipt['files']):
+                    key='instruction:'+str(shared_root/effect['path'])
+                    if key not in identity['snapshot']['fingerprints']: continue
+                    if _fingerprint(shared_root,effect['path'])!=effect['after']: continue
+                    actual=_scoped_target(shared_root,effect['path'])
+                    _scoped_parent_guard(file['target'],journal)
+                    owned_target=file['owned_target']
+                    binding=file['result_binding'] or file['prepared_binding']
+                    d3._require(actual==owned_target if owned_target is not None else
+                        binding is not None and actual['binding']==binding,'Shared instruction physical ownership changed')
+                    external_owned.append(key)
+            _fresh(local, view, external_owned=external_owned)
         else:
             for name, fingerprint in identity["fingerprints"].items():
                 if name not in owned: d3._require(d3._fingerprint(root, name) == fingerprint, "Unrelated Project file changed")
@@ -2079,9 +2504,7 @@ def _run_scoped(plan_dir, request, operation):
         m = request["manifest"]; root = Path(m["enrollment"]["record"]["project_root"])
         authority, prior = _scoped_prior(plan)
         locations = _scoped_runtime_locations([prior, m["enrollment"]["record"]], affected)
-        affected_roots = {Path(a["owner"]["root"]) for a in m["owners"]} | {
-            Path(a["owner"]["git_common_dir"]) for a in m["owners"] if a["owner"]["kind"] == "repository"}
-        affected_git = {Path(a["owner"]["git_common_dir"]) for a in m["owners"] if a["owner"]["kind"] == "repository"}
+        affected_roots,affected_git=_scoped_writer_roots(m)
         lock_root = d3._plan_path(LOCK_ROOT)
         destination_keys = {"destination:" + str(root / PROJECT_FILE), "parent:" + str(root) + ":" + d3._digest(plan["identity"]["binding"])}
         if authority["binding"]: destination_keys.add("inode:" + d3._digest(authority["binding"]))
@@ -2113,8 +2536,9 @@ def _run_scoped(plan_dir, request, operation):
                 if prior:
                     raw = d3._read_file(root / PROJECT_FILE, 128 * 1024)
                     d3._require(hashlib.sha256(raw).hexdigest() == m["enrollment"]["before"]["raw_sha256"] and d3.read_request(raw) == prior, "Canonical approved bytes changed")
-            with _authority_guards(locations, owner) as authority_locations:
-                _scoped_writers(locations, affected_roots, affected_git)
+            with _scoped_source_guards(locations, owner, m) as (authority_locations,source_contexts):
+                writer_locations=_scoped_writer_locations(locations,source_contexts)
+                _scoped_writers(writer_locations, affected_roots, affected_git)
                 for git_dir in git_dirs:
                     marker = _command_owner(git_dir)
                     d3._require(marker is None or marker["plan_dir"] == str(path) and marker["transaction_id"] == m["transaction_id"], "Unresolved command owns an affected checkout")
@@ -2135,6 +2559,7 @@ def _run_scoped(plan_dir, request, operation):
                     ownership["journal"]=journal
                 for location in [canonical_location,*authority_locations]:
                     _atomic(location.parent, location.name + ".json", json.dumps(owner, sort_keys=True).encode())
+                _scoped_register_sources(path,journal,source_contexts)
             journal["blocked"] = []
             observation = request.get("observations")
             if observation:
@@ -2156,7 +2581,7 @@ def _run_scoped(plan_dir, request, operation):
             current_record = d3.read_request(d3._read_file(root / PROJECT_FILE, 128 * 1024)) if (root / PROJECT_FILE).exists() else None
             current_locations = _scoped_runtime_locations([current_record], affected)
             d3._require(set(current_locations) <= set(locations), "New authority needs separately reconciled state guards")
-            _scoped_writers(locations, affected_roots, affected_git)
+            _scoped_writers(writer_locations, affected_roots, affected_git)
             if operation == "rollback":
                 _scoped_restore(path, journal, current_record, authority_owned, observation)
                 journal["state"] = "rollback_partial" if journal["blocked"] else "rolled_back"
@@ -2179,7 +2604,7 @@ def _run_scoped(plan_dir, request, operation):
                         journal["blocked"].append(dict(id=action["id"], reason="Scoped action approval/dependency missing")); continue
                     try:
                         if originals[action["id"]]["target"] != str(PROJECT_FILE):
-                            _scoped_writers(locations, affected_roots, affected_git)
+                            _scoped_writers(writer_locations, affected_roots, affected_git)
                             _scoped_apply_action(path, journal, action, originals[action["id"]], observation, descriptors.get(action["owner"].get("git_dir")))
                         completed.add(action["id"])
                     except Pending as error:
@@ -2188,7 +2613,7 @@ def _run_scoped(plan_dir, request, operation):
                     raise Pending("Required scoped adoption effects are incomplete")
                 activates = any(e[2]["activation"]["status"] == "active" for key, e in _scoped_entries(m["enrollment"]["record"]).items() if key in affected)
                 if activates: _scoped_qualification(journal,observation,m["enrollment"]["record"])
-                _scoped_writers(locations, affected_roots, affected_git)
+                _scoped_writers(writer_locations, affected_roots, affected_git)
                 if not _scoped_owned_authority(journal): raise Pending("Canonical preimage ownership changed before publication")
                 _scoped_publish(path, journal, "final", m["enrollment"]["record"])
                 if activates: _scoped_qualification(journal,observation,m["enrollment"]["record"],published=True)
@@ -2200,8 +2625,11 @@ def _run_scoped(plan_dir, request, operation):
             _save(path, journal)
             unsettled = any(r.get("command") and not r["command"]["stopped"] for r in journal["receipts"].values())
             if not unsettled:
-                with _authority_guards(locations, owner):
-                    for location in [canonical_location,*authority_locations]:
+                with _scoped_source_guards(locations, owner, m) as (final_locations,source_contexts):
+                    writer_locations=_scoped_writer_locations(locations,source_contexts)
+                    _scoped_writers(writer_locations,affected_roots,affected_git)
+                    _scoped_register_sources(path,journal,source_contexts)
+                    for location in [canonical_location,*final_locations]:
                         if _authority_owner(location) == owner: os.unlink(Path(str(location)+".json"))
                     descriptor=d3._open_path(lock_root,os.O_RDONLY|os.O_DIRECTORY)
                     try: os.fsync(descriptor)

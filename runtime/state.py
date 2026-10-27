@@ -644,12 +644,15 @@ def _source_baseline_name(authority):
     return _digest(['authority-source-baseline', authority])[:32] + '.json'
 
 
-def _source_baseline(scope, db):
+def _source_baseline(scope, db, *, context=None):
     """Return fresh-owner provenance only; no source completeness or cleanup permission."""
-    if db is None or _scope_version(scope) != 3:
+    if (scope is None) == (context is None):
+        raise StateError('Select exactly one existing evidence authority')
+    if db is None or context is None and _scope_version(scope) != 3:
         return None
     from runtime import evidence
-    context = evidence._evidence_context(scope)
+    selected = context
+    context = context or evidence._evidence_context(scope)
     evidence._check_context(context, db)
     authority = _canonical_plain(context.authority_set[0])
     name = _source_baseline_name(authority)
@@ -657,10 +660,10 @@ def _source_baseline(scope, db):
     if metadata is None:
         return None
     reference = dict(name=name, digest=metadata['managed']['sha256'])
-    content = evidence._read(scope, reference, db=db)
+    content = evidence._read(None if selected else scope, reference, context=selected, db=db)
     _fields(content, ('version', 'kind', 'source_contract', 'authority', 'project_id', 'created_at', 'runtime_digest'))
     if (type(content['version']) is not int or content['version'] != 1 or content['kind'] != 'authority-source-baseline'
-            or type(content['source_contract']) is not int or content['source_contract'] != 1
+            or type(content['source_contract']) is not int or content['source_contract'] not in (1, 2)
             or content['authority'] != authority or metadata['class'] != 'compact'
             or metadata['owner'] != dict(kind='project', project_id=content['project_id'], task=None)
             or metadata['created_at'] != content['created_at'] or metadata['closed_at'] is not None

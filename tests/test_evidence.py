@@ -1183,3 +1183,45 @@ class ArtifactLifecycleTests(unittest.TestCase):
              patch.object(api.os, 'open', side_effect=track_open):
             self.assertEqual(api._read(self.scope, reference), dict(result='original'))
         self.assertEqual(len(opened), 1, 'schema3 consumption reopened a different pathname identity')
+
+
+class RecoveryContextTests(unittest.TestCase):
+    setUp = CanonicalEvidenceTests.setUp
+    owner = ArtifactLifecycleTests.owner
+
+    def test_existing_context_reads_managed_artifact_and_baseline_without_scope(self):
+        api=self.fixture.api
+        reference=api._artifact(self.scope,dict(result='observed'),owner=self.owner())
+        with state._database(self.scope) as db:
+            observed=api._evidence_context(self.scope)
+            context=api._existing_authority_context(dict(observed.authority_set[0]),db=db)
+            self.assertEqual(api._read(None,reference,context=context,db=db),dict(result='observed'))
+            baseline=state._source_baseline(None,db,context=context)
+            self.assertEqual(baseline['content']['source_contract'],2)
+            with self.assertRaises(state.StateError): api._read(self.scope,reference,context=context,db=db)
+        path=self.scope.runtime.state_dir/'evidence'/reference['name']
+        raw=path.read_bytes(); replacement=path.with_name('replacement'); replacement.write_bytes(raw); replacement.chmod(0o400); replacement.replace(path)
+        with self.assertRaises(state.StateError): api._read(None,reference,context=context)
+
+    def test_existing_context_rejects_database_binding_substitution(self):
+        api=self.fixture.api
+        with state._database(self.scope) as db:
+            authority=dict(api._evidence_context(self.scope).authority_set[0]); authority['database_binding']=dict(device=0,inode=0)
+            with self.assertRaises(state.StateError): api._existing_authority_context(authority,db=db)
+
+    def test_historical_ledger_and_linked_attempt_route_every_read_through_context(self):
+        from runtime import delegation
+        self.fixture.checked()
+        api=self.fixture.api; original=api._read; calls=[]
+        with state._database(self.scope) as db:
+            context=api._existing_authority_context(state._authority_identity(state._path(self.scope)),db=db)
+            def read(scope,reference,**kwargs):
+                self.assertIsNone(scope); self.assertIs(kwargs['context'],context); self.assertIs(kwargs['db'],db)
+                calls.append(reference)
+                return original(scope,reference,**kwargs)
+            with patch.object(api,'_read',side_effect=read):
+                records=delegation._ledger(None,db,context=context)
+                task=state._task(db,state._scope_id(self.scope),'codex','parent')
+                for attempt in task['evidence']['attempts']:
+                    delegation._linked_attempt(None,state._scope_id(self.scope),task,attempt,records,context=context,db=db)
+        self.assertTrue(calls)
