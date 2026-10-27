@@ -14,7 +14,7 @@ import subprocess
 import time
 import uuid
 
-from runtime.startup import PROJECT_FILE, StartupError, checkout, json_object, policy_digest, runtime_settings
+from runtime.startup import PROJECT_FILE, StartupError, checkout, decode_project_record, json_object, policy_digest, runtime_settings
 from runtime.state import runtime_fingerprint
 
 
@@ -672,9 +672,10 @@ def _checkout_observation(value, budget):
 
 def _authority_observation(root, budget):
     location = root / PROJECT_FILE
-    observed = {"path": str(location), "fingerprint": {}, "binding": None, "record": None, "error": None}
+    observed = {"path": str(location), "fingerprint": {}, "binding": None, "record": None, "error": None, "target": None}
     try:
         observed["fingerprint"] = _inspection_fingerprint(root, str(PROJECT_FILE), budget)
+        observed["target"] = _physical_target(root, location, observed["fingerprint"], budget)
         if observed["fingerprint"]["status"] == "absent":
             return observed
         _require(observed["fingerprint"]["status"] == "read", "Unreadable authority preimage")
@@ -685,6 +686,12 @@ def _authority_observation(root, budget):
         _require(hashlib.sha256(raw).hexdigest() == observed["fingerprint"]["sha256"], "Authority changed while reading")
         record = read_request(raw)
         _bounded(record)
+        _require(_physical_target(root, location, observed["fingerprint"], budget) == observed["target"],
+                 "Authority physical identity changed while reading")
+        if record.get("schema_version") == 2:
+            observed["record"] = record
+            decode_project_record(record)
+            return observed
         _object(record, ("schema_version", "project_id", "repository_root", "git_common_dir", "clients", "policy_digest"), ("runtime",))
         _require(type(record["schema_version"]) is int and record["schema_version"] == 1,
                  "Unsupported existing authority schema")
@@ -830,6 +837,32 @@ def _project_files(root, names, repositories, budget, gap):
             gap(name, "Project file inspection blocked: " + str(error))
     return fingerprints
 
+def _physical_target(root, location, fingerprint, budget, *, directory=False):
+    _no_links(location)
+    parents = {}
+    for parent in (location.parent, *location.parent.parents):
+        if not parent.is_relative_to(root):
+            break
+        if parent.exists():
+            charged = budget.setdefault("target_directories", set())
+            if str(parent) not in charged:
+                _require(budget["paths"] < MAX_PATHS, "Project aggregate target-parent limit exceeded")
+                budget["paths"] += 1
+                charged.add(str(parent))
+            parents[str(parent)] = _filesystem_binding(parent)
+    physical = None
+    if os.path.lexists(location):
+        info = location.stat()
+        _require(stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode),
+                 "Action target must be a regular file or command directory")
+        _require(directory or info.st_nlink == 1, "Action target has physical aliases")
+        physical = {"device": info.st_dev, "inode": info.st_ino}
+    _require(not directory or physical is not None, "Command cwd must be an observed existing directory")
+    if directory:
+        _require(budget["paths"] < MAX_PATHS, "Project aggregate command-cwd limit exceeded")
+        budget["paths"] += 1
+    return {"path": str(location), "binding": physical, "parents": parents, "fingerprint": fingerprint}
+
 def _target_observations(assessment, fingerprints, repositories=(), *, budget):
     owner = assessment["owner"]
     root = Path(owner["root"])
@@ -852,30 +885,8 @@ def _target_observations(assessment, fingerprints, repositories=(), *, budget):
             existing = next(p for p in (parent, *parent.parents) if p.is_dir())
             _require(checkout(existing) == (root, Path(owner["git_common_dir"])),
                      "Action target/cwd enters another checkout or Git tree")
-        parents = {}
-        for parent in (location.parent, *location.parent.parents):
-            if not parent.is_relative_to(root):
-                break
-            if parent.exists():
-                charged = budget.setdefault("target_directories", set())
-                if str(parent) not in charged:
-                    _require(budget["paths"] < MAX_PATHS, "Project aggregate target-parent limit exceeded")
-                    budget["paths"] += 1
-                    charged.add(str(parent))
-                parents[str(parent)] = _filesystem_binding(parent)
-        physical = None
-        if os.path.lexists(location):
-            info = location.stat()
-            _require(stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode),
-                     "Action target must be a regular file or command directory")
-            _require(directory or info.st_nlink == 1, "Action target has physical aliases")
-            physical = {"device": info.st_dev, "inode": info.st_ino}
-        _require(not directory or physical is not None, "Command cwd must be an observed existing directory")
-        if directory:
-            _require(budget["paths"] < MAX_PATHS, "Project aggregate command-cwd limit exceeded")
-            budget["paths"] += 1
-        targets[name] = {"path": str(location), "binding": physical, "parents": parents,
-                         "fingerprint": None if directory else fingerprints.get(name, {"status": "blocked"})}
+        targets[name] = _physical_target(root, location, None if directory else
+            fingerprints.get(name, {"status": "blocked"}), budget, directory=directory)
     return targets
 
 def _new_assessment(owner, identity):
@@ -1002,13 +1013,13 @@ def _project_plan_shape(plan):
     identity = plan["identity"]
     _require(identity["kind"] == scope["kind"] and identity["project_root"] == scope["project_root"]
              and identity["kind"] in ("standalone", "umbrella")
-             and identity["id_origin"] in ("proposed", "legacy_binding"), "Invalid Project identity binding")
+             and identity["id_origin"] in ("proposed", "legacy_binding", "canonical_binding"), "Invalid Project identity binding")
     _text(identity["project_id"])
     binding(identity["binding"])
     _require(isinstance(identity["authority"], list) and len(identity["authority"]) <= MAX_PATHS,
              "Invalid Project authority observations")
     for authority in identity["authority"]:
-        _object(authority, ("path", "fingerprint", "binding", "record", "error"))
+        _object(authority, ("path", "fingerprint", "binding", "record", "error"), ("target",))
         _require(Path(_text(authority["path"])).is_absolute(), "Invalid saved authority location")
         fingerprint(authority["fingerprint"], incomplete=authority["error"] is not None)
         if authority["binding"] is not None:
@@ -1016,6 +1027,18 @@ def _project_plan_shape(plan):
         _require(authority["record"] is None or isinstance(authority["record"], dict), "Invalid saved authority record")
         if authority["error"] is not None:
             _text(authority["error"])
+        if authority.get("target") is not None:
+            target = authority["target"]
+            _object(target, ("path", "binding", "parents", "fingerprint"))
+            _require(target["path"] == authority["path"] and target["binding"] == authority["binding"]
+                     and target["fingerprint"] == authority["fingerprint"], "Saved authority target differs")
+            _require(isinstance(target["parents"], dict) and len(target["parents"]) <= MAX_PATHS,
+                     "Invalid saved authority target parents")
+            for parent, value in target["parents"].items():
+                _require(Path(parent).is_relative_to(Path(authority["path"]).parent.parent)
+                         and Path(authority["path"]).is_relative_to(Path(parent))
+                         and Path(parent) != Path(authority["path"]), "Invalid saved authority target parent")
+                binding(value)
     current = plan["current_observations"]
     _object(current, ("project_binding", "authority", "project", "repositories"))
     _require(current["project_binding"] == identity["binding"] and current["authority"] == identity["authority"],
@@ -1118,7 +1141,58 @@ def _project_plan_shape(plan):
                     _require(target["fingerprint"] is None and target["binding"] is not None, "Invalid saved command cwd")
                 else:
                     fingerprint(target["fingerprint"])
+    if plan["identity"]["id_origin"] == "canonical_binding":
+        selected = next((a for a in plan["identity"]["authority"] if a["path"] == scope["authority"]["path"]), None)
+        _require(selected is not None and not selected["error"] and selected["record"] is not None,
+                 "Canonical identity requires its frozen authority")
+        record = selected["record"]
+        decode_project_record(record)
+        _require(record["project_id"] == plan["identity"]["project_id"]
+                 and record["project_root"] == scope["project_root"] and record["kind"] == scope["kind"]
+                 and record["project_binding"] == plan["identity"]["binding"], "Canonical Project identity differs")
+        retained_ids = {r["repository_id"] for r in record["repositories"]} | {
+            c["checkout_id"] for r in record["repositories"] for c in r["checkouts"]}
+        for assessment in repositories:
+            expected = _canonical_owner_ids(record, assessment["identity"])
+            for key, accepted in zip(("repository_id", "checkout_id"), expected):
+                proposed = assessment["owner"][key]
+                _require(proposed == accepted if accepted is not None else proposed not in retained_ids,
+                         "Canonical owner ID differs from its frozen authority")
     _validate_project_proposal(plan)
+
+
+def _match_authorities(frozen, current):
+    comparable = [{k: v for k, v in item.items() if k != "target" or "target" in prior}
+                  for prior, item in zip(frozen, current)]
+    return len(frozen) == len(current) and frozen == comparable
+
+
+def _canonical_owner_ids(record, repository):
+    matches = [r for r in record["repositories"] if r["primary_root"] == repository["primary_root"]]
+    if not matches:
+        for known in record["repositories"]:
+            _require(known["git_common_dir"] != repository["git_common_dir"] and
+                     known["binding"]["primary_root"] != repository["binding"].get("primary_root") and
+                     known["binding"]["git_common_dir"] != repository["binding"].get("git_common_dir") and
+                     all(c["root"] != repository["root"] and c["binding"]["root"] != repository["binding"].get("root")
+                         for c in known["checkouts"]), "Canonical Repository identity conflicts; reconcile ownership")
+        return None, None
+    known = matches[0]
+    _require(known["membership"] == "joined" and repository["membership"] == "included"
+             and known["git_common_dir"] == repository["git_common_dir"]
+             and all(known["binding"][k] == repository["binding"].get(k) for k in known["binding"]),
+             "Canonical Repository binding or removed membership requires reconciliation")
+    selected = next((c for c in known["checkouts"] if c["root"] == repository["root"]), None)
+    if selected is None:
+        _require(all(c["binding"]["root"] != repository["binding"].get("root") and
+                     c["git_dir"] != repository["git_dir"] and
+                     c["binding"]["git_dir"] != repository["binding"].get("git_dir") for c in known["checkouts"]),
+                 "Canonical checkout identity moved; reconcile ownership")
+        return known["repository_id"], None
+    _require(selected["git_dir"] == repository["git_dir"] and
+             all(selected["binding"][k] == repository["binding"].get(k) for k in selected["binding"]),
+             "Canonical checkout binding requires reconciliation")
+    return known["repository_id"], selected["checkout_id"]
 
 
 def _inspect_project_scope(cwd, plan_dir, request):
@@ -1142,9 +1216,20 @@ def _inspect_project_scope(cwd, plan_dir, request):
         sources = _sources(declared)
         observed, blockers = _project_observations(scope, sources, plan["assessments"] if plan else None)
         package = _package_pins()
-        reusable_id = None
+        reusable_id, canonical = None, None
         present = [a for a in observed["authority"] if a["fingerprint"].get("status") != "absent"]
-        if scope["kind"] == "standalone" and len(present) == 1:
+        selected = next(a for a in observed["authority"] if a["path"] == scope["authority"]["path"])
+        if selected["record"] and selected["record"].get("schema_version") == 2:
+            canonical = selected["record"]
+            _require(not selected["error"] and len(present) == 1
+                     and selected["fingerprint"].get("sha256") == scope["authority"]["sha256"]
+                     and canonical["kind"] == scope["kind"] and canonical["project_root"] == scope["project_root"]
+                     and canonical["project_binding"] == observed["project_binding"],
+                     "Canonical authority identity/bindings conflict; start a reconciled plan")
+            for repository in observed["repositories"]:
+                _canonical_owner_ids(canonical, repository)
+            reusable_id = canonical["project_id"]
+        elif scope["kind"] == "standalone" and len(present) == 1:
             selected = present[0]
             record = selected["record"]
             repository = observed["repositories"][0]
@@ -1164,7 +1249,7 @@ def _inspect_project_scope(cwd, plan_dir, request):
                                    "Propose an explicit transfer after authority reconciliation"))
         if plan is None:
             project_id = reusable_id or uuid.uuid4().hex
-            origin = "legacy_binding" if reusable_id else "proposed"
+            origin = "canonical_binding" if canonical else "legacy_binding" if reusable_id else "proposed"
             identity = {"project_id": project_id, "project_root": scope["project_root"], "kind": scope["kind"],
                         "binding": observed["project_binding"], "authority": observed["authority"], "id_origin": origin}
             assessments = {"project": None, "repositories": []}
@@ -1172,8 +1257,9 @@ def _inspect_project_scope(cwd, plan_dir, request):
                 assessments["project"] = _new_assessment({"kind": "project", "project_id": project_id,
                     "root": scope["project_root"]}, observed["project"])
             for repository in observed["repositories"]:
-                owner = {"kind": "repository", "project_id": project_id, "repository_id": uuid.uuid4().hex,
-                         "checkout_id": uuid.uuid4().hex} | {key: repository[key] for key in (
+                repository_id, checkout_id = _canonical_owner_ids(canonical, repository) if canonical else (None, None)
+                owner = {"kind": "repository", "project_id": project_id, "repository_id": repository_id or uuid.uuid4().hex,
+                         "checkout_id": checkout_id or uuid.uuid4().hex} | {key: repository[key] for key in (
                              "root", "primary_root", "git_dir", "git_common_dir")}
                 if repository["snapshot"] is not None:
                     repository["snapshot"]["clients"] = declared["clients"]
@@ -1185,8 +1271,9 @@ def _inspect_project_scope(cwd, plan_dir, request):
                     "recovery_requirement": "Schema 2 requires scoped D3 proposals and D4 adoption support before apply"}
         else:
             _require(plan["identity"]["binding"] == observed["project_binding"]
-                     and plan["identity"]["authority"] == observed["authority"],
+                     and _match_authorities(plan["identity"]["authority"], observed["authority"]),
                      "Project authority/filesystem binding changed; start a new reviewed plan")
+            observed["authority"] = deepcopy(plan["identity"]["authority"])
             for prior, current in zip(plan["assessments"]["repositories"], observed["repositories"]):
                 _require(all(prior["identity"][key] == current[key] for key in (
                     "root", "primary_root", "git_dir", "git_common_dir", "binding", "membership")),
@@ -1514,8 +1601,9 @@ def _project_current(plan):
     sources = _sources(plan["sources"]["declared"])
     observed, blockers = _project_observations(plan["project_scope"], sources, plan["assessments"])
     _require(observed["project_binding"] == plan["identity"]["binding"]
-             and observed["authority"] == plan["identity"]["authority"],
+             and _match_authorities(plan["identity"]["authority"], observed["authority"]),
              "Project authority/filesystem binding changed; start a new reviewed plan")
+    observed["authority"] = deepcopy(plan["identity"]["authority"])
     for prior, current in zip(plan["assessments"]["repositories"], observed["repositories"]):
         _require(all(prior["identity"][key] == current[key] for key in (
             "root", "primary_root", "git_dir", "git_common_dir", "binding", "membership")),
@@ -1529,7 +1617,7 @@ def _project_current(plan):
     return {"observations": observed, "sources": sources, "package_pins": _package_pins()}, blockers
 
 def _project_changes(plan, current):
-    changes = []
+    changes = ["authority_parent_observations"] if any("target" not in a for a in plan["identity"]["authority"]) else []
     if current["observations"] != _frozen_project(plan):
         changes.append("observations")
     for name in ("package_pins", "sources"):

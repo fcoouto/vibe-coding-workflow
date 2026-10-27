@@ -95,6 +95,205 @@ class OnboardingTests(unittest.TestCase):
         finally:
             self.repo = first
 
+    def canonical_authority(self, root=None, members=None, kind="standalone"):
+        root = root or self.repo
+        module = self.module()
+        repositories = []
+        for index, member in enumerate(members or [self.repo]):
+            observed, error = module._checkout_observation(str(member), {"paths": 0, "bytes": 0})
+            self.assertIsNone(error)
+            repositories.append(dict(repository_id="accepted-repository-" + str(index),
+                primary_root=observed["primary_root"], git_common_dir=observed["git_common_dir"],
+                binding={k: observed["binding"][k] for k in ("primary_root", "git_common_dir")},
+                membership="joined", checkouts=[dict(checkout_id="accepted-checkout-" + str(index),
+                    root=observed["root"], git_dir=observed["git_dir"],
+                    binding={k: observed["binding"][k] for k in ("root", "git_dir")}, clients=[])]))
+        record = dict(schema_version=2, revision=1, project_id="accepted-project", project_root=str(root),
+            kind=kind, project_binding=module._filesystem_binding(root),
+            membership=dict(include=["."], exclude=[], future_join=True,
+                            authorization=dict(reference="fixture:standing-authority", sha256="a" * 64)),
+            shared_policy=[], repositories=repositories)
+        location = root / ".vibe-coding-workflow/project.json"
+        location.parent.mkdir(exist_ok=True)
+        location.write_text(json.dumps(record))
+        return location, record
+
+    def test_canonical_reuse_standalone_and_full_authority_target(self):
+        location, accepted = self.canonical_authority()
+        request = self.project_record()
+        self.module().inspect_project(self.repo, self.directory, request)
+        plan = self.plan()
+        self.assertEqual(plan["identity"]["project_id"], accepted["project_id"])
+        self.assertEqual(plan["identity"]["id_origin"], "canonical_binding")
+        owner = plan["assessments"]["repositories"][0]["owner"]
+        self.assertEqual((owner["repository_id"], owner["checkout_id"]),
+                         ("accepted-repository-0", "accepted-checkout-0"))
+        authority = next(a for a in plan["identity"]["authority"] if a["path"] == str(location))
+        self.assertEqual(authority["record"], accepted)
+        self.assertEqual(authority["target"]["fingerprint"], authority["fingerprint"])
+        self.assertEqual(set(authority["target"]["parents"]), {str(self.repo), str(location.parent)})
+        self.module().inspect_project(self.repo, self.directory, request)
+        self.assertEqual(self.plan()["identity"], plan["identity"])
+
+    def test_canonical_reuse_umbrella_preserves_unselected_and_tombstone(self):
+        other = self.second_repository()
+        location, accepted = self.canonical_authority(self.base, [self.repo, other], "umbrella")
+        accepted["repositories"][1]["membership"] = "removed"
+        location.write_text(json.dumps(accepted))
+        request = self.project_record(self.base, [self.repo], "umbrella")
+        self.module().inspect_project(self.base, self.directory, request)
+        plan = self.plan()
+        self.assertEqual(plan["identity"]["project_id"], "accepted-project")
+        self.assertEqual(plan["assessments"]["repositories"][0]["owner"]["repository_id"], "accepted-repository-0")
+        self.assertEqual(next(a["record"] for a in plan["identity"]["authority"] if a["path"] == str(location)), accepted)
+
+    def test_canonical_reuse_linked_checkout_and_new_checkout_ids(self):
+        linked = self.base / "linked"
+        self.git("worktree", "add", "--detach", str(linked), "HEAD")
+        location, accepted = self.canonical_authority(members=[linked])
+        request = self.project_record(members=[linked])
+        self.module().inspect_project(linked, self.directory, request)
+        owner = self.plan()["assessments"]["repositories"][0]["owner"]
+        self.assertEqual(owner["checkout_id"], "accepted-checkout-0")
+        (self.directory / "plan.json").unlink()
+        request = self.project_record()
+        self.module().inspect_project(self.repo, self.directory, request)
+        owner = self.plan()["assessments"]["repositories"][0]["owner"]
+        self.assertEqual(owner["repository_id"], "accepted-repository-0")
+        self.assertNotEqual(owner["checkout_id"], "accepted-checkout-0")
+        self.assertEqual(owner["root"], str(self.repo))
+
+    def test_canonical_reuse_future_member_proposes_only_new_ids(self):
+        other = self.second_repository()
+        location, accepted = self.canonical_authority(self.base, [self.repo], "umbrella")
+        request = self.project_record(self.base, [other], "umbrella")
+        self.module().inspect_project(self.base, self.directory, request)
+        plan = self.plan()
+        self.assertEqual(plan["identity"]["project_id"], "accepted-project")
+        self.assertNotEqual(plan["assessments"]["repositories"][0]["owner"]["repository_id"], "accepted-repository-0")
+        self.assertEqual(next(a["record"] for a in plan["identity"]["authority"] if a["path"] == str(location)), accepted)
+        self.assertEqual(json.loads(location.read_text()), accepted)
+
+    def test_canonical_reuse_changed_binding_or_removed_owner_never_mints_replacement(self):
+        location, accepted = self.canonical_authority()
+        for change in ("project", "common", "checkout", "removed"):
+            bad = copy.deepcopy(accepted)
+            if change == "project": bad["project_binding"]["inode"] += 1
+            elif change == "common": bad["repositories"][0]["binding"]["git_common_dir"]["inode"] += 1
+            elif change == "checkout": bad["repositories"][0]["checkouts"][0]["binding"]["root"]["inode"] += 1
+            else: bad["repositories"][0]["membership"] = "removed"
+            location.write_text(json.dumps(bad))
+            with self.subTest(change=change), self.assertRaises(StartupError):
+                self.module().inspect_project(self.repo, self.directory, self.project_record())
+            self.assertFalse((self.directory / "plan.json").exists())
+
+    def test_canonical_reuse_absent_target_and_old_plan_stays_readable_stale(self):
+        request = self.project_record()
+        self.module().inspect_project(self.repo, self.directory, request)
+        plan = self.plan()
+        selected = next(a for a in plan["identity"]["authority"] if a["path"] == request["project_scope"]["authority"]["path"])
+        self.assertEqual(selected["target"]["fingerprint"], {"status": "absent"})
+        self.assertEqual(selected["target"]["parents"], {str(self.repo): self.module()._filesystem_binding(self.repo)})
+        for rows in (plan["identity"]["authority"], plan["current_observations"]["authority"]):
+            for row in rows: row.pop("target")
+        plan["review_digest"] = self.module()._review_digest(plan)
+        self.module()._project_plan_shape(plan)
+        (self.directory / "plan.json").write_text(json.dumps(plan))
+        self.module().inspect_project(self.repo, self.directory, request)
+        current = self.plan()
+        self.assertEqual(current["status"], "stale")
+        self.assertEqual(current["identity"]["authority"], plan["identity"]["authority"])
+        self.assertTrue(all("target" not in a for a in current["current_observations"]["authority"]))
+
+    def test_canonical_reuse_saved_owner_must_match_frozen_authority(self):
+        self.canonical_authority()
+        self.module().inspect_project(self.repo, self.directory, self.project_record())
+        plan = self.plan()
+        owner = plan["assessments"]["repositories"][0]["owner"]
+        owner["repository_id"] = "replacement-id"
+        plan["current_observations"]["repositories"][0]["owner"] = copy.deepcopy(owner)
+        with self.assertRaises(StartupError): self.module()._project_plan_shape(plan)
+
+    def test_canonical_reuse_old_parentless_plan_current_read_keeps_missing_proof(self):
+        request = self.project_record()
+        self.module().inspect_project(self.repo, self.directory, request)
+        plan = self.plan()
+        for rows in (plan["identity"]["authority"], plan["current_observations"]["authority"]):
+            for row in rows: row.pop("target")
+        current, _ = self.module()._project_current(plan)
+        self.assertEqual(current["observations"]["authority"], plan["identity"]["authority"])
+        self.assertIn("authority_parent_observations", self.module()._project_changes(plan, current))
+
+    def test_canonical_reuse_same_bytes_moved_root_blocks(self):
+        location, accepted = self.canonical_authority()
+        moved = self.base / "moved"
+        self.repo.rename(moved)
+        self.repo = moved
+        with self.assertRaises(StartupError):
+            self.module().inspect_project(moved, self.directory, self.project_record())
+        self.assertFalse((self.directory / "plan.json").exists())
+        self.assertEqual(json.loads((moved / ".vibe-coding-workflow/project.json").read_text()), accepted)
+
+    def test_canonical_reuse_overlapping_member_authority_blocks(self):
+        self.canonical_authority(self.base, [self.repo], "umbrella")
+        child = self.repo / ".vibe-coding-workflow/project.json"
+        child.parent.mkdir()
+        child.write_text(json.dumps(dict(schema_version=1, project_id="different-owner", clients=["codex"],
+            repository_root=str(self.repo), git_common_dir=str(self.repo / ".git"),
+            policy_digest=self.module().policy_digest(PACKAGE))))
+        request = self.project_record(self.base, kind="umbrella")
+        with self.assertRaisesRegex(StartupError, "authority|binding"):
+            self.module().inspect_project(self.base, self.directory, request)
+        self.assertFalse((self.directory / "plan.json").exists())
+
+    def test_canonical_reuse_authority_read_rechecks_physical_target(self):
+        location, _ = self.canonical_authority()
+        read = self.module()._read_file
+        replaced, reads = False, 0
+        def replace_after_read(path, *args, **kwargs):
+            nonlocal replaced, reads
+            raw = read(path, *args, **kwargs)
+            if path == location:
+                reads += 1
+            if path == location and reads == 2 and not replaced:
+                replacement = location.with_name("replacement.json")
+                replacement.write_bytes(raw)
+                replacement.replace(location)
+                replaced = True
+            return raw
+        with patch.object(self.module(), "_read_file", side_effect=replace_after_read):
+            observed = self.module()._authority_observation(self.repo, {"paths": 0, "bytes": 0})
+        self.assertTrue(replaced)
+        self.assertIsNotNone(observed["error"])
+
+    def test_canonical_reuse_new_checkout_cannot_alias_retained_private_git_identity(self):
+        _, accepted = self.canonical_authority()
+        observed, error = self.module()._checkout_observation(str(self.repo), {"paths": 0, "bytes": 0})
+        self.assertIsNone(error)
+        observed["membership"] = "included"
+        observed["root"] = str(self.base / "new-checkout")
+        observed["git_dir"] = str(self.repo / ".git/worktrees/new-checkout")
+        observed["binding"]["root"]["inode"] += 1
+        with self.assertRaisesRegex(StartupError, "identity|ownership"):
+            self.module()._canonical_owner_ids(accepted, observed)
+
+    def test_canonical_reuse_stale_configuration_is_inspected_without_qualification(self):
+        location, accepted = self.canonical_authority()
+        accepted["repositories"][0]["checkouts"][0]["clients"] = [dict(client="codex",
+            configuration=dict(policy_digest="a" * 64, runtime_digest="b" * 64, runtime=None,
+                               shared_dependencies=[], evidence=[]),
+            activation=dict(status="configured", qualification="pending", accepted_scope_digest=None,
+                            transaction_id=None, evidence=[], qualification_binding=None))]
+        location.write_text(json.dumps(accepted))
+        self.module().inspect_project(self.repo, self.directory, self.project_record())
+        self.assertEqual(self.plan()["identity"]["id_origin"], "canonical_binding")
+        before = (self.directory / "plan.json").read_bytes()
+        accepted["revision"] += 1
+        location.write_text(json.dumps(accepted))
+        with self.assertRaises(StartupError):
+            self.module().inspect_project(self.repo, self.directory, self.project_record())
+        self.assertEqual((self.directory / "plan.json").read_bytes(), before)
+
     def test_project_standalone_keeps_private_ids_and_selected_checkout_without_mutation(self):
         record = self.project_record()
         before = self.git("status", "--porcelain=v1", "-z")
