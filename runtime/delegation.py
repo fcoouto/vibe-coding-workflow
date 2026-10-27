@@ -738,7 +738,7 @@ def _record(scope, row):
         data = json_object(raw, limit=evidence.MAX_ARTIFACT)
         state._fields(data, ('version', 'job_id', 'role', 'status', 'request_digest', 'assignment', 'candidate',
             'claims', 'resource_units', 'revision', 'plan_digest', 'host_capacity', 'binding', 'retry_of',
-            'diagnostic', 'observation', 'reconciliation', 'result'))
+            'diagnostic', 'observation', 'reconciliation', 'result'), ('lifecycle',))
         _require(type(data['version']) is int and data['version'] == ADMISSION_VERSION and
                  isinstance(identity, str) and re.fullmatch(r'[0-9a-f]{32}', identity) and
                  data['role'] in NATIVE_ROLES | {'coordinator', 'check'} and
@@ -755,6 +755,12 @@ def _record(scope, row):
         state._identity(body['request'])
         pin_version = state._validate_pins(body['pins'])
         canonical_fields = ('accepted_identity',) if pin_version == 3 else ()
+        _require(('lifecycle' in body) == ('lifecycle' in data), 'Assignment lifetime metadata differs from immutable body')
+        if 'lifecycle' in data:
+            _require(pin_version == 3 and body['lifecycle'] == data['lifecycle'], 'Legacy or rebound assignment lifetime')
+            state._fields(data['lifecycle'], ('created_at',))
+            state._integer(data['lifecycle']['created_at'], 'original assignment creation time')
+            canonical_fields += ('lifecycle',)
         if pin_version == 3:
             accepted = state._accepted_identity(body.get('accepted_identity'))
             _require(state._digest(accepted) == body['pins']['accepted_scope_digest'] and
@@ -865,6 +871,8 @@ def _ledger(scope, db):
     records = [_record(scope, row) for row in rows]
     for record in records:
         owner, body = record['owner'], record['body']
+        if state._retired(db, 'assignment', owner) or state._retired_assignment(db, record['id']):
+            raise state.StateError('Live assignment conflicts with a retired identity marker')
         original = state._task(db, owner['scope_id'], owner['client'], owner['session_id'], owner['task_id'])
         _require(original is not None and original['pins'] == body['pins'] and
             (body['pins']['schema_version'] != 3 or original['accepted_identity'] == body['accepted_identity']),
@@ -902,6 +910,12 @@ def _invalidate_ready(db, scope, task, claims):
 
 
 def _insert_assignment(db, scope, task, record):
+    marker = state._retired(db, 'assignment', record['owner'])
+    if marker is not None:
+        _require(marker['request_digest'] == record['data']['request_digest'], 'Retired dispatch was reused with changed request bytes')
+        raise state.StateError('Retired dispatch cannot create a new assignment; evidence is unavailable or expired')
+    if state._retired_assignment(db, record['id']):
+        raise state.StateError('Retired native assignment ID cannot be reused')
     _require(db.execute('select count(*) from assignments').fetchone()[0] < MAX_ASSIGNMENTS,
              'Shared assignment history exceeds its insertion bound')
     owner, data = record['owner'], record['data']
@@ -934,6 +948,15 @@ def _reply(record, admitted=False):
         requested_model=data['binding']['requested_model'], requested_effort=data['binding']['requested_effort'],
         revision=data['revision'], status=data['status'], launch_admitted=admitted, replayed=not admitted,
         limitations=list(ADMISSION_LIMITATIONS))
+
+
+
+def _retired_dispatch(scope, db, request):
+    owner = dict(scope_id=state._scope_id(scope), **{k:request[k] for k in ('client','session_id','task_id','dispatch_id')})
+    marker = state._retired(db, 'assignment', owner)
+    if marker is not None:
+        _require(marker['request_digest'] == evidence._digest(_semantic(request)), 'Retired dispatch was reused with changed request bytes')
+        raise state.StateError('Retired dispatch evidence is unavailable or expired; no new launch is admitted')
 
 
 def _replay(scope, records, request):
@@ -1178,12 +1201,15 @@ def _operation_record(scope, task, request, role, claims, identity, candidate, o
         policy=evidence._artifact(scope, dict(policy_digest=task['pins']['policy_digest'], **(routing or {}))))
     if task['pins']['schema_version'] == 3:
         body['accepted_identity'] = task['accepted_identity']
+        body['lifecycle'] = dict(created_at=state._owner_time())
     evidence._bounded(body, byte_limit)
     reference = evidence._artifact(scope, body)
     data = {key: body[key] for key in ('version', 'job_id', 'role', 'claims', 'resource_units', 'revision', 'plan_digest',
                                       'candidate', 'host_capacity', 'binding', 'retry_of', 'diagnostic')}
     data.update(status='prepared', request_digest=evidence._digest(_semantic(request)), assignment=reference,
                 observation=None, reconciliation=None, result=None)
+    if 'lifecycle' in body:
+        data['lifecycle'] = body['lifecycle']
     record = dict(id=identity, owner=owner, data=data, body=body)
     return record
 
@@ -1233,6 +1259,7 @@ def _reserve_operation(scope, request, *, role, _verification=False):
         state._fields(request['verification'], ('purpose', 'git_directory', 'git_routing'))
     with state._database(scope) as db:
         _require(db is not None, 'Runtime task state is missing')
+        _retired_dispatch(scope, db, request)
         records = _ledger(scope, db)
         replay = _replay(scope, records, request)
         if replay:
@@ -1255,6 +1282,7 @@ def _reserve_operation(scope, request, *, role, _verification=False):
     record = _operation_record(scope, task, request, role, claims, uuid.uuid4().hex, candidate, request['operation'],
         request['operation']['id'] if role == 'check' else job_id, byte_limit=byte_limit)
     with _reservation_write(scope) as db:
+        _retired_dispatch(scope, db, request)
         records = _ledger(scope, db)
         replay = _replay(scope, records, request)
         if replay:
@@ -1376,6 +1404,7 @@ def _prepare_native(scope, request, *, role):
     state._integer(request['resource_units'], 'admitted resource units', 1)
     with state._database(scope) as db:
         _require(db is not None, 'Runtime task state is missing')
+        _retired_dispatch(scope, db, request)
         records = _ledger(scope, db)
         replay = _replay(scope, records, request)
         if replay:
@@ -1424,6 +1453,7 @@ def _prepare_native(scope, request, *, role):
         retry_of=request.get('retry_of'), diagnostic=diagnostic)
     if task['pins']['schema_version'] == 3:
         body['accepted_identity'] = task['accepted_identity']
+        body['lifecycle'] = dict(created_at=state._owner_time())
     if role == 'review':
         body['review'] = dict(assignment_digest=hashlib.sha256(request['assignment'].encode()).hexdigest(),
             coverage=request['coverage'], criteria=request['criteria'], d5_plan=task['evidence']['plan'])
@@ -1436,7 +1466,10 @@ def _prepare_native(scope, request, *, role):
         revision=request['expected_revision'] + 1, plan_digest=plan_digest, host_capacity=plan['limits']['host_capacity'],
         binding=content_binding, retry_of=request.get('retry_of'), diagnostic=diagnostic,
         observation=None, reconciliation=None, result=None)
+    if 'lifecycle' in body:
+        data['lifecycle'] = body['lifecycle']
     with _reservation_write(scope) as db:
+        _retired_dispatch(scope, db, request)
         records = _ledger(scope, db)
         replay = _replay(scope, records, request)
         if replay:
@@ -1468,6 +1501,8 @@ MAX_OBSERVATIONS = 32
 
 def _assignment(scope, db, request, *, roles=('worker',)):
     _require(db is not None, 'Missing native assignment state')
+    if state._retired_assignment(db, request['attempt_id']):
+        raise state.StateError('Retired assignment evidence is unavailable or expired')
     record = next((r for r in _ledger(scope, db) if r['id'] == request['attempt_id']), None)
     _require(record is not None and record['data']['role'] in roles and
         record['owner'] == dict(scope_id=state._scope_id(scope),
@@ -1749,6 +1784,8 @@ def prepared_native_assignment(scope, attempt_id):
     _require(isinstance(attempt_id, str) and re.fullmatch(r'[0-9a-f]{32}', attempt_id), 'Invalid native assignment id')
     with state._database(scope) as db:
         _require(db is not None, 'Missing native assignment state')
+        if state._retired_assignment(db, attempt_id):
+            raise state.StateError('Retired native assignment evidence is unavailable or expired')
         found = next((r for r in _ledger(scope, db) if r['id'] == attempt_id and r['owner']['scope_id'] == state._scope_id(scope)), None)
         _require(found is not None and found['data']['role'] == 'worker', 'Native worker assignment is absent or unqualified')
         return _native_binding(found)
@@ -1758,6 +1795,8 @@ def prepared_native_review_assignment(scope, attempt_id):
     """Read the exact same-ID D6 review binding for A5 lifecycle observation."""
     _require(isinstance(attempt_id, str) and re.fullmatch(r'[0-9a-f]{32}', attempt_id), 'Invalid native review assignment id')
     with state._database(scope) as db:
+        if db is not None and state._retired_assignment(db, attempt_id):
+            raise state.StateError('Retired native review evidence is unavailable or expired')
         record = next((r for r in _ledger(scope, db) if r['id'] == attempt_id and
             r['owner']['scope_id'] == state._scope_id(scope)), None) if db is not None else None
         _require(record is not None and record['data']['role'] == 'review', 'Exact native review assignment is absent')

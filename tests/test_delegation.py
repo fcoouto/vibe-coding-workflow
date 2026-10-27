@@ -2893,3 +2893,101 @@ class CanonicalDelegationTests(unittest.TestCase):
                              (prepared['attempt_id'],)).fetchone()
             self.assertEqual(f.api._record(f.scope, row)['body']['pins'], body['pins'])
             with self.assertRaises(state.StateError): f.api._ledger(f.scope, db)
+
+
+class LifecycleFoundationTests(unittest.TestCase):
+    def setUp(self):
+        self.fixture = CanonicalDelegationTests(methodName='runTest')
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.f = self.fixture.fixture
+
+    def marker(self,prepared,*,expired=True,delete_live=True):
+        # Exact seeded tombstone fixture only; this is not an authorized closure/retirement operation.
+        f=self.f
+        with state._database(f.scope,write=True) as db:
+            record=next(r for r in f.api._ledger(f.scope,db) if r['id']==prepared['attempt_id'])
+            data=dict(version=1,identity=record['owner'],assignment_id=record['id'],
+                pins_digest=state._digest(record['body']['pins']),request_digest=record['data']['request_digest'],
+                created_at=100,retired_at=200,outcome='unknown' if expired else 'completed',evidence_expired=expired)
+            db.execute('insert into retired_identities(kind,identity_digest,data,assignment_id) values(?,?,?,?)',
+                ('assignment',state._retired_identity('assignment',data['identity']),json.dumps(data),data['assignment_id']))
+            if delete_live: db.execute('delete from assignments where id=?',(record['id'],))
+        return data
+
+    def test_lifecycle_assignment_date_is_owner_assigned_once_and_replay_preserves_it(self):
+        f=self.f
+        with patch('runtime.state._owner_time',return_value=100): prepared=f.prepare()
+        with state._database(f.scope) as db:
+            record=f.api._ledger(f.scope,db)[0]
+        self.assertEqual(record['data']['lifecycle'],dict(created_at=100))
+        self.assertEqual(record['body']['lifecycle'],dict(created_at=100))
+        with patch('runtime.state._owner_time',side_effect=AssertionError('replay reset assignment age')):
+            replay=f.prepare()
+        self.assertFalse(replay['launch_admitted'])
+        self.assertEqual(replay['attempt_id'],prepared['attempt_id'])
+
+    def test_lifecycle_retired_dispatch_and_original_id_cannot_launch_or_resolve_as_success(self):
+        f=self.f; prepared=f.prepare(); marker=self.marker(prepared)
+        with state._database(f.scope) as db:
+            self.assertEqual(state._retired_assignment(db,prepared['attempt_id']),marker)
+        with patch('runtime.adapters.codex.discover_native_workers',side_effect=AssertionError('retired dispatch rediscovered native route')):
+            with self.assertRaisesRegex(state.StateError,'[Rr]etired|expired'): f.prepare()
+        with patch.object(f.api,'_ledger',side_effect=AssertionError('retired reference scanned lifetime live rows')):
+            with self.assertRaisesRegex(state.StateError,'[Rr]etired|expired'):
+                f.api.prepared_native_assignment(f.scope,prepared['attempt_id'])
+        changed=f.prepare_request(); changed['brief']['objective']='Different bytes under old dispatch'
+        with self.assertRaises(state.StateError): f.api.prepare_assignment(f.scope,changed)
+        with state._database(f.scope) as db:
+            self.assertEqual(db.execute('select count(*) from assignments').fetchone()[0],0)
+
+    def test_lifecycle_marker_native_id_is_unique_and_scalar_body_mismatch_rejects(self):
+        f=self.f; prepared=f.prepare(); marker=self.marker(prepared)
+        with state._database(f.scope,write=True) as db:
+            other=deepcopy(marker); other['identity']['dispatch_id']='another-dispatch'
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.execute('insert into retired_identities values(?,?,?,?)',('assignment',state._retired_identity('assignment',other['identity']),
+                    json.dumps(other),other['assignment_id']))
+            marker['assignment_id']='f'*32
+            db.execute('update retired_identities set data=?',(json.dumps(marker),))
+        with state._database(f.scope) as db,self.assertRaises(state.StateError):
+            state._retired_assignment(db,prepared['attempt_id'])
+
+    def test_lifecycle_live_and_retired_conflict_remains_protected(self):
+        f=self.f; prepared=f.prepare(); self.marker(prepared,delete_live=False)
+        with state._database(f.scope) as db,self.assertRaises(state.StateError): f.api._ledger(f.scope,db)
+
+
+    def test_lifecycle_more_than_4096_markers_keep_point_lookup_and_live_owners_separate(self):
+        f=self.f; owner=dict(scope_id=state._scope_id(f.scope),client='codex',session_id='parent',task_id='task')
+        rows=[]
+        for number in range(4100):
+            identity=owner | dict(dispatch_id='retired-'+str(number))
+            assignment_id=format(number,'032x')
+            marker=dict(version=1,identity=identity,assignment_id=assignment_id,pins_digest='a'*64,
+                request_digest='b'*64,created_at=100,retired_at=200,outcome='unknown',evidence_expired=True)
+            rows.append(('assignment',state._retired_identity('assignment',identity),json.dumps(marker),assignment_id))
+        with state._database(f.scope,write=True) as db:
+            db.executemany('insert into retired_identities values(?,?,?,?)',rows)
+        with state._database(f.scope) as db:
+            self.assertEqual(f.api._ledger(f.scope,db),[])
+            self.assertTrue(state._retired_assignment(db,format(4099,'032x'))['evidence_expired'])
+            plan=db.execute("explain query plan select data from retired_identities where kind='assignment' and assignment_id=?",
+                            (format(4099,'032x'),)).fetchall()
+            self.assertTrue(any('retired_assignment_id' in r[-1] and 'SEARCH' in r[-1] for r in plan))
+
+    def test_lifecycle_old_assignment_without_date_is_not_given_a_fresh_age(self):
+        f=self.f; prepared=f.prepare()
+        with state._database(f.scope,write=True) as db:
+            raw=db.execute('select data from assignments where id=?',(prepared['attempt_id'],)).fetchone()[0]
+            data=json.loads(raw); body=evidence._read(f.scope,data['assignment'])
+            del data['lifecycle']; del body['lifecycle']
+            data['assignment']=evidence._artifact(f.scope,body)
+            db.execute('update assignments set data=? where id=?',(json.dumps(data),prepared['attempt_id']))
+        with patch('runtime.state._owner_time',side_effect=AssertionError('old assignment guessed a date')):
+            replay=f.prepare()
+        self.assertFalse(replay['launch_admitted'])
+        with state._database(f.scope) as db:
+            record=f.api._ledger(f.scope,db)[0]
+            self.assertNotIn('lifecycle',record['data'])
+            self.assertNotIn('lifecycle',record['body'])

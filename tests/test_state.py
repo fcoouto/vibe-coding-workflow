@@ -260,6 +260,123 @@ class StateTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(), before)
 
 
+    def test_lifecycle_schema_three_tables_and_indexes_leave_legacy_exact(self):
+        self.scope = canonical_scope(self.scope)
+        self.start()
+        with self.api()._database(self.scope) as db:
+            tables = {r[0] for r in db.execute("select name from sqlite_master where type='table'")}
+            indexes = {r[0] for r in db.execute("select name from sqlite_master where type='index' and sql is not null")}
+            self.assertTrue({'evidence_metadata','retired_identities'} <= tables)
+            self.assertEqual(indexes, {'evidence_lifecycle','assignment_owner','retired_assignment_id'})
+        legacy = replace(self.scope.runtime, schema_version=2, state_dir=self.base / 'legacy')
+        old = ProjectScope('old', self.scope.repository_root, self.scope.git_common_dir, 'policy', legacy)
+        self.api().start_task(old, self.request)
+        with self.api()._database(old) as db:
+            self.assertEqual({r[0] for r in db.execute("select name from sqlite_master where type='table'")}, self.api().TABLES)
+            self.assertEqual(db.execute("select count(*) from sqlite_master where type='index' and sql is not null").fetchone()[0], 0)
+
+    def test_lifecycle_owner_time_is_once_and_caller_cannot_set_or_reset_age(self):
+        self.scope = canonical_scope(self.scope)
+        with patch('runtime.state._owner_time', return_value=100): first = self.start()['task']
+        self.assertEqual(first['lifecycle'], dict(created_at=100,safe_closed_at=None,closure=None,compact=None))
+        with patch('runtime.state._owner_time', side_effect=AssertionError('replay regenerated age')):
+            self.assertEqual(self.start()['task'], first)
+            self.update(state='active')
+            self.event('PostToolUse')
+        task = self.status()['task']
+        self.assertEqual(task['lifecycle']['created_at'],100)
+        with self.api()._database(self.scope, write=True) as db:
+            task['lifecycle']['created_at'] = 200
+            with self.assertRaises(self.api().StateError): self.api()._save(db,self.api()._scope_id(self.scope),task)
+        with self.assertRaises(self.api().StateError): self.start(lifecycle=dict(created_at=1))
+
+    def test_lifecycle_unknown_old_task_remains_undated_and_protected(self):
+        self.scope = canonical_scope(self.scope)
+        task = self.start()['task']; del task['lifecycle']
+        with closing(sqlite3.connect(self.scope.runtime.state_dir/'runtime.sqlite3')) as db,db:
+            db.execute('update tasks set data=?',(json.dumps(task),))
+        self.assertIsNone(self.api()._task_lifecycle(self.status()['task']))
+        self.event('PostToolUse')
+        self.assertNotIn('lifecycle',self.status()['task'])
+        with self.api()._database(self.scope,write=True) as db:
+            task['lifecycle']=dict(created_at=1,safe_closed_at=None,closure=None,compact=None)
+            with self.assertRaises(self.api().StateError): self.api()._save(db,self.api()._scope_id(self.scope),task)
+
+    def seed_marker(self,kind,identity,*,request_digest=None,expired=False):
+        api=self.api()
+        data=dict(version=1,identity=identity,pins_digest='a'*64,request_digest=request_digest,
+                  created_at=100,retired_at=200,outcome='unknown' if expired else 'completed',evidence_expired=expired)
+        with api._database(self.scope,write=True) as db:
+            db.execute('insert into retired_identities(kind,identity_digest,data) values(?,?,?)',(kind,api._retired_identity(kind,identity),json.dumps(data)))
+        return data
+
+    def test_lifecycle_retired_task_and_event_point_replays_cannot_recreate_rows(self):
+        self.scope=canonical_scope(self.scope); api=self.api()
+        with api._database(self.scope,write=True,initialize=True): pass
+        owner=dict(scope_id=api._scope_id(self.scope),client='codex',session_id='session',task_id='task')
+        self.seed_marker('task',owner,expired=True)
+        with self.assertRaisesRegex(api.StateError,'[Rr]etired|expired'): self.start()
+        turn={k:owner[k] for k in ('scope_id','client','session_id')} | dict(turn_id='turn')
+        self.seed_marker('turn',turn)
+        path=self.scope.runtime.state_dir/'runtime.sqlite3'; before=path.read_bytes()
+        self.event('PostToolUse')
+        self.assertEqual(path.read_bytes(),before)
+        with api._database(self.scope) as db:
+            self.assertEqual(db.execute('select count(*) from tasks').fetchone()[0],0)
+            self.assertEqual(db.execute('select count(*) from receipts').fetchone()[0],0)
+
+    def test_lifecycle_expired_marker_cannot_retain_a_passing_outcome(self):
+        self.scope=canonical_scope(self.scope)
+        with self.api()._database(self.scope,write=True,initialize=True): pass
+        owner=dict(scope_id=self.api()._scope_id(self.scope),client='codex',session_id='session',task_id='task')
+        marker=self.seed_marker('task',owner,expired=True)
+        marker['outcome']='completed'
+        with self.api()._database(self.scope,write=True) as db:
+            db.execute('update retired_identities set data=?',(json.dumps(marker),))
+        with self.api()._database(self.scope) as db,self.assertRaises(self.api().StateError): self.api()._retired(db,'task',owner)
+
+
+    def test_lifecycle_indexes_are_exact_and_older_unshipped_schema_is_not_upgraded(self):
+        self.scope=canonical_scope(self.scope); self.start()
+        path=self.scope.runtime.state_dir/'runtime.sqlite3'
+        with closing(sqlite3.connect(path)) as db,db:
+            db.execute('drop index retired_assignment_id')
+            db.execute("CREATE UNIQUE INDEX retired_assignment_id ON retired_identities(assignment_id) WHERE kind='assign ment'")
+        before=path.read_bytes()
+        with self.assertRaises(self.api().StateError): self.start()
+        self.assertEqual(path.read_bytes(),before)
+
+    def test_lifecycle_metadata_validates_columns_but_does_not_trust_physical_assertions(self):
+        self.scope=canonical_scope(self.scope); self.start(); api=self.api()
+        name='c'*32+'.json'; binding=dict(device=1,inode=10)
+        value=dict(version=1,owner=dict(kind='project',project_id='project',task=None),created_at=100,
+            **{'class':'compact'},bytes=7,status='live',closed_at=None,dependencies=[],targets=[],export=None,
+            managed=dict(path=str(self.scope.runtime.state_dir/'evidence'/name),binding=binding,
+                parents={str(self.scope.runtime.state_dir/'evidence'):binding},sha256='d'*64,mode=0o400,bytes=7))
+        with api._database(self.scope,write=True) as db:
+            db.execute('insert into evidence_metadata values(?,?,?,?,?,?,?,?,?)',
+                (name,'d'*64,'project:project','compact',100,None,'live',7,json.dumps(value)))
+        # Stored shape is valid even though there is no artifact; later evidence integration must establish ownership.
+        self.assertFalse(Path(value['managed']['path']).exists())
+        with api._database(self.scope) as db:
+            self.assertEqual(api._metadata(db,name),value)
+            self.assertIsNone(api._metadata(db,'e'*32+'.json'))
+        value['bytes']=1
+        value['managed']['bytes']=True
+        with api._database(self.scope,write=True) as db:
+            db.execute('update evidence_metadata set bytes=1,data=?',(json.dumps(value),))
+        with api._database(self.scope) as db,self.assertRaises(api.StateError): api._metadata(db,name)
+
+    def test_lifecycle_caller_cannot_save_a_structurally_valid_synthetic_closure(self):
+        self.scope=canonical_scope(self.scope); task=self.start()['task']; life=task['lifecycle']
+        life['safe_closed_at']=life['created_at']+1
+        life['closure']=dict(version=1,task_revision=task['revision'],dependency_digest='a'*64,
+                             observed_at=life['safe_closed_at'],evidence=[])
+        with self.api()._database(self.scope,write=True) as db,self.assertRaises(self.api().StateError):
+            self.api()._save(db,self.api()._scope_id(self.scope),task)
+        self.assertIsNone(self.status()['task']['lifecycle']['safe_closed_at'])
+
+
     def test_historical_retirement_requires_exact_stopped_writer_proof_and_preserves_pins(self):
         import hashlib
         self.start()

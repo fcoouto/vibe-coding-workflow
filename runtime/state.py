@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 import sqlite3
 import stat
+import time
 from types import MappingProxyType
 
 from runtime.engine import HookResult, evaluate
@@ -37,7 +38,19 @@ TABLE_SQL = {
         UNIQUE(scope_id,client,session_id,task_id,dispatch_id))""",
 }
 CANONICAL_SCHEMA_VERSION = 3
-CANONICAL_TABLE_SQL = TABLE_SQL | {"checkouts": TABLE_SQL["checkouts"][:-1] + ", physical_identity TEXT NOT NULL)"}
+CANONICAL_TABLE_SQL = TABLE_SQL | {
+    "checkouts": TABLE_SQL["checkouts"][:-1] + ", physical_identity TEXT NOT NULL)",
+    "evidence_metadata": """CREATE TABLE evidence_metadata(name TEXT PRIMARY KEY, digest TEXT NOT NULL,
+        owner_key TEXT NOT NULL, class TEXT NOT NULL, created_at INTEGER NOT NULL, closed_at INTEGER,
+        status TEXT NOT NULL, bytes INTEGER NOT NULL, data TEXT NOT NULL)""",
+    "retired_identities": """CREATE TABLE retired_identities(kind TEXT NOT NULL, identity_digest TEXT NOT NULL,
+        data TEXT NOT NULL, assignment_id TEXT, PRIMARY KEY(kind,identity_digest))""",
+}
+CANONICAL_INDEX_SQL = {
+    "evidence_lifecycle": "CREATE INDEX evidence_lifecycle ON evidence_metadata(owner_key,class,status,closed_at,created_at,name)",
+    "assignment_owner": "CREATE INDEX assignment_owner ON assignments(scope_id,client,session_id,task_id)",
+    "retired_assignment_id": "CREATE UNIQUE INDEX retired_assignment_id ON retired_identities(assignment_id) WHERE kind='assignment'",
+}
 TABLES = set(TABLE_SQL)
 
 
@@ -136,6 +149,233 @@ def _frozen_snapshot(value):
     if isinstance(value, tuple):
         return all(_frozen_snapshot(item) for item in value)
     return value is None or isinstance(value, (str, int, bool))
+
+
+
+def _owner_time():
+    try:
+        value = int(time.time())
+        _integer(value, "owner creation time")
+        return value
+    except (ValueError, OverflowError):
+        raise StateError("Owner creation time is unavailable") from None
+
+
+def _artifact_reference(value):
+    _fields(value, ("name", "digest"))
+    if not isinstance(value["name"], str) or not re.fullmatch(r"[0-9a-f]{32}\.json", value["name"]):
+        raise StateError("Invalid retained artifact reference")
+    _canonical_hash(value["digest"])
+
+
+def _task_lifecycle(task):
+    """Validate stored dates only; absence/closure never establishes safe cleanup."""
+    if "lifecycle" not in task:
+        return None
+    value = task["lifecycle"]
+    _fields(value, ("created_at", "safe_closed_at", "closure", "compact"))
+    _integer(value["created_at"], "original task creation time")
+    if value["compact"] is not None:
+        _artifact_reference(value["compact"])
+    if value["safe_closed_at"] is None:
+        if value["closure"] is not None:
+            raise StateError("Closure has no owner-proved closure time")
+    else:
+        _integer(value["safe_closed_at"], "safe closure time", value["created_at"])
+        closure = value["closure"]
+        _fields(closure, ("version", "task_revision", "dependency_digest", "observed_at", "evidence"))
+        if type(closure["version"]) is not int or closure["version"] != 1:
+            raise StateError("Unsupported stored closure receipt")
+        _integer(closure["task_revision"], "closure task revision", 1)
+        _integer(closure["observed_at"], "closure observation time", value["created_at"])
+        _canonical_hash(closure["dependency_digest"])
+        if not isinstance(closure["evidence"], list) or len(closure["evidence"]) > 4096:
+            raise StateError("Invalid closure evidence references")
+        for reference in closure["evidence"]:
+            _artifact_reference(reference)
+    return value
+
+
+def _retired_identity(kind, identity):
+    fields = {
+        "task": ("scope_id", "client", "session_id", "task_id"),
+        "assignment": ("scope_id", "client", "session_id", "task_id", "dispatch_id"),
+        "turn": ("scope_id", "client", "session_id", "turn_id"),
+        "receipt": ("scope_id", "client", "session_id", "turn_id", "tool_call_id", "kind"),
+    }
+    if kind not in fields:
+        raise StateError("Unsupported retired identity kind")
+    _fields(identity, fields[kind])
+    _canonical_hash(identity["scope_id"])
+    for field, value in identity.items():
+        _text(value, "retired " + field, 128 if field == "task_id" else 4096)
+    return _digest(identity)
+
+
+def _retired_record(kind, digest, raw, assignment_id):
+    try:
+        value = json_object(raw)
+        _fields(value, ("version", "identity", "pins_digest", "request_digest", "created_at", "retired_at", "outcome", "evidence_expired",
+                        *(["assignment_id"] if kind == "assignment" else [])))
+        if (type(value["version"]) is not int or value["version"] != 1
+                or _retired_identity(kind, value["identity"]) != digest
+                or value["outcome"] not in ("completed", "failed", "cancelled", "unknown")
+                or type(value["evidence_expired"]) is not bool
+                or value["evidence_expired"] and value["outcome"] != "unknown"):
+            raise StateError("Retired identity marker is corrupt")
+        if kind == "assignment":
+            if (not isinstance(assignment_id, str) or not re.fullmatch(r"[0-9a-f]{32}", assignment_id)
+                    or value["assignment_id"] != assignment_id):
+                raise StateError("Retired native assignment identity differs from its scalar")
+        elif assignment_id is not None:
+            raise StateError("Only assignment markers may have a native assignment ID")
+        for field in ("pins_digest", "request_digest"):
+            if value[field] is not None:
+                _canonical_hash(value[field])
+        if (kind in ("task", "assignment") and value["pins_digest"] is None
+                or kind in ("assignment", "receipt") and value["request_digest"] is None):
+            raise StateError("Retired identity is missing replay digests")
+        _integer(value["created_at"], "original marker creation time")
+        _integer(value["retired_at"], "marker retirement time", value["created_at"])
+        return value
+    except (StartupError, ValueError, TypeError, KeyError, RecursionError):
+        raise StateError("Retired identity marker is corrupt or incompatible") from None
+
+
+def _retired(db, kind, identity):
+    """Point replay lookup only; there is deliberately no marker writer yet."""
+    version = db.execute("pragma user_version").fetchone()[0]
+    if version in (1, 2):
+        return None
+    if version != 3:
+        raise StateError("Unsupported marker authority")
+    digest = _retired_identity(kind, identity)
+    row = db.execute("select data,assignment_id from retired_identities where kind=? and identity_digest=?", (kind, digest)).fetchone()
+    if row is None:
+        return None
+    value = _retired_record(kind, digest, *row)
+    if value["identity"] != identity:
+        raise StateError("Retired identity differs from its lookup key")
+    return value
+
+
+def _retired_assignment(db, assignment_id):
+    """Resolve the original native ID through its scalar index, never lifetime scans."""
+    version = db.execute("pragma user_version").fetchone()[0]
+    if version in (1, 2):
+        return None
+    if version != 3 or not isinstance(assignment_id, str) or not re.fullmatch(r"[0-9a-f]{32}", assignment_id):
+        raise StateError("Unsupported retired native assignment lookup")
+    row = db.execute("select identity_digest,data,assignment_id from retired_identities "
+                     "where kind='assignment' and assignment_id=?", (assignment_id,)).fetchone()
+    return _retired_record("assignment", *row) if row else None
+
+
+def _metadata(db, name):
+    """Read stored shape/accounting columns; no file or dependency trust is implied."""
+    if db.execute("pragma user_version").fetchone()[0] != 3:
+        return None
+    _text(name, "metadata name", 4096)
+    row = db.execute("select name,digest,owner_key,class,created_at,closed_at,status,bytes,data "
+                     "from evidence_metadata where name=?", (name,)).fetchone()
+    if row is None:
+        return None
+    try:
+        return _metadata_record(row)
+    except (StartupError, ValueError, TypeError, KeyError, RecursionError):
+        raise StateError("Evidence metadata is corrupt or incompatible; content remains protected") from None
+
+
+def _metadata_record(row):
+    name = row[0]
+    value = json_object(row[8])
+    _fields(value, ("version", "owner", "created_at", "class", "bytes", "status", "closed_at",
+                    "dependencies", "targets", "export", "managed"))
+    if type(value["version"]) is not int or value["version"] != 1:
+        raise StateError("Unsupported evidence metadata")
+    owner = value["owner"]
+    if not isinstance(owner, dict):
+        raise StateError("Invalid evidence metadata owner")
+    if owner.get("kind") == "temporary":
+        _fields(owner, ("kind", "id", "created_at"))
+        if not isinstance(owner["id"], str) or not re.fullmatch(r"[0-9a-f]{32}", owner["id"]):
+            raise StateError("Invalid temporary evidence owner")
+        _integer(owner["created_at"], "original owner creation time")
+        owner_key = "temporary:" + owner["id"]
+    else:
+        _fields(owner, ("kind", "project_id", "task"))
+        if owner["kind"] != "project" or not isinstance(owner["project_id"], str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", owner["project_id"]):
+            raise StateError("Invalid Project evidence owner")
+        owner_key = "project:" + owner["project_id"]
+        if owner["task"] is not None:
+            _task_reference(owner["task"])
+    _integer(value["created_at"], "artifact original creation time")
+    _integer(value["bytes"], "observed artifact bytes")
+    if value["closed_at"] is not None:
+        _integer(value["closed_at"], "first artifact closure time", value["created_at"])
+    if value["class"] not in ("detail", "compact") or value["status"] not in ("live", "delete_pending", "expired"):
+        raise StateError("Invalid evidence metadata class/status")
+    if row[:8] != (name, row[1], owner_key, value["class"], value["created_at"], value["closed_at"], value["status"], value["bytes"]):
+        raise StateError("Evidence metadata columns disagree with stored values")
+    _canonical_hash(row[1])
+    managed = value["managed"]
+    _fields(managed, ("path", "binding", "parents", "sha256", "mode", "bytes"))
+    path = _canonical_path(managed["path"])
+    _canonical_binding(managed["binding"])
+    _metadata_parents(path, managed["parents"])
+    if str(path.parent) not in managed["parents"]:
+        raise StateError("Managed content lacks its parent binding")
+    _integer(managed["mode"], "observed managed mode")
+    _integer(managed["bytes"], "observed managed bytes")
+    if managed["mode"] > 0o777 or managed["sha256"] != row[1] or managed["bytes"] != value["bytes"]:
+        raise StateError("Managed content metadata disagrees with observed columns")
+    if value["export"] is not None:
+        _fields(value["export"], ("kind",))
+        if value["export"]["kind"] != "managed-copy":
+            raise StateError("Unsupported managed export")
+    elif path.name != name or not re.fullmatch(r"[0-9a-f]{32}\.json", name):
+        raise StateError("Artifact name differs from its managed content")
+    for field in ("dependencies", "targets"):
+        if not isinstance(value[field], list) or len(value[field]) > 4096:
+            raise StateError("Invalid bounded evidence metadata references")
+    # Actual owner-specific dependencies and physical trust are composed by the later evidence owner.
+    for dependency in value["dependencies"]:
+        _fields(dependency, ("kind", "reference"))
+        if dependency["kind"] not in ("task", "artifact", "assignment", "recovery", "delivery") or not isinstance(dependency["reference"], dict) or not dependency["reference"]:
+            raise StateError("Invalid typed evidence dependency")
+    for target in value["targets"]:
+        _fields(target, ("path", "binding", "parents", "git"))
+        target_path = _canonical_path(target["path"])
+        _canonical_binding(target["binding"])
+        _metadata_parents(target_path, target["parents"])
+        if target["git"] is not None:
+            git = target["git"]
+            _fields(git, ("root", "primary_root", "git_dir", "git_common_dir", "binding"))
+            _fields(git["binding"], ("root", "primary_root", "git_dir", "git_common_dir"))
+            for field in git["binding"]:
+                _canonical_path(git[field]); _canonical_binding(git["binding"][field])
+    return value
+
+
+def _metadata_parents(path, parents):
+    if not isinstance(parents, dict) or not parents or len(parents) > 4096:
+        raise StateError("Invalid metadata parent observations")
+    for name, binding in parents.items():
+        parent = _canonical_path(name)
+        if parent == path or not path.is_relative_to(parent):
+            raise StateError("Metadata parent escapes its target")
+        _canonical_binding(binding)
+
+
+def _task_reference(value):
+    _fields(value, ("authority", "scope_id", "client", "session_id", "task_id"))
+    _retired_identity("task", {k: value[k] for k in ("scope_id", "client", "session_id", "task_id")})
+    authority = value["authority"]
+    _fields(authority, ("directory", "database", "directory_binding", "database_binding"))
+    directory, database = (_canonical_path(authority[k]) for k in ("directory", "database"))
+    if database != directory / "runtime.sqlite3":
+        raise StateError("Task reference database differs from its authority")
+    _canonical_binding(authority["directory_binding"]); _canonical_binding(authority["database_binding"])
 
 
 def _scope_version(scope):
@@ -274,7 +514,7 @@ def _sidecars(path):
 
 def _schema(db, *, version=SCHEMA_VERSION):
     # Version 1 is accepted only by D4's private read-only transition inspector.
-    tables = TABLES - {"assignments"} if version == 1 else TABLES
+    tables = TABLES - {"assignments"} if version == 1 else set(CANONICAL_TABLE_SQL) if version == 3 else TABLES
     objects = db.execute("select type,name,sql from sqlite_master").fetchall()
     if (version not in (1, SCHEMA_VERSION, CANONICAL_SCHEMA_VERSION) or
             db.execute("pragma application_id").fetchone()[0] != APPLICATION_ID or
@@ -286,8 +526,17 @@ def _schema(db, *, version=SCHEMA_VERSION):
         if kind == "table":
             if "".join(sql.split()).lower() != "".join((CANONICAL_TABLE_SQL if version == 3 else TABLE_SQL)[name].split()).lower():
                 raise StateError("Runtime database has an incompatible schema")
+        elif kind == "index" and version == 3:
+            if sql is None:
+                allowed = {"sqlite_autoindex_" + table + "_1" for table in CANONICAL_TABLE_SQL} | {"sqlite_autoindex_assignments_2"}
+                if name not in allowed:
+                    raise StateError("Runtime database contains unexpected indexes")
+            elif name not in CANONICAL_INDEX_SQL or sql.strip() != CANONICAL_INDEX_SQL[name]:
+                raise StateError("Runtime database has incompatible admission indexes")
         elif kind != "index" or sql is not None:
             raise StateError("Runtime database contains unsupported schema objects")
+    if version == 3 and {name for kind, name, sql in objects if kind == "index" and sql is not None} != set(CANONICAL_INDEX_SQL):
+        raise StateError("Runtime database is missing required lifecycle indexes")
 
 
 def _initialize(path, *, version=SCHEMA_VERSION):
@@ -305,7 +554,10 @@ def _initialize(path, *, version=SCHEMA_VERSION):
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     os.close(descriptor)
     with closing(sqlite3.connect(path, timeout=0.1)) as db, db:
-        db.executescript("BEGIN IMMEDIATE;\n" + ";\n".join((CANONICAL_TABLE_SQL if version == 3 else TABLE_SQL).values()) + ";")
+        statements = list((CANONICAL_TABLE_SQL if version == 3 else TABLE_SQL).values())
+        if version == 3:
+            statements += list(CANONICAL_INDEX_SQL.values())
+        db.executescript("BEGIN IMMEDIATE;\n" + ";\n".join(statements) + ";")
         db.execute("pragma application_id=" + str(APPLICATION_ID))
         db.execute("pragma user_version=" + str(version))
 
@@ -353,11 +605,13 @@ def _task(db, scope_id, client, session, task_id=None):
     row = db.execute("select data from tasks where scope_id=? and client=? and session_id=? and task_id=?",
                      (scope_id, client, session, task_id)).fetchone()
     if row is None:
+        if _retired(db, "task", dict(scope_id=scope_id, client=client, session_id=session, task_id=task_id)):
+            raise StateError("Retired task evidence is unavailable or expired")
         raise StateError("Runtime task binding is corrupt")
     version = db.execute("pragma user_version").fetchone()[0]
     task = json_object(row[0], limit=4 * 1024 * 1024) if version == 3 else json.loads(row[0])
     _fields(task, ("client", "session_id", "task_id", "scope_ref", "mode", "decision_ref", "state", "revision",
-                   "pins", "reason", "reference", "conditions", "turn_id", "turn_uncertain", *(["accepted_identity"] if version == 3 else [])), ("resolution_ref", "evidence", "retirement", "delegation"))
+                   "pins", "reason", "reference", "conditions", "turn_id", "turn_uncertain", *(["accepted_identity"] if version == 3 else [])), ("resolution_ref", "evidence", "retirement", "delegation", *(["lifecycle"] if version == 3 else [])))
     _identity(task)
     _integer(task["revision"], "stored revision", 1)
     for field in ("decision_ref", "reason", "reference", "resolution_ref"):
@@ -371,6 +625,10 @@ def _task(db, scope_id, client, session, task_id=None):
     if task["turn_id"] is not None:
         _text(task["turn_id"], "stored turn_id", 4096)
     _task_projection(db, scope_id, task)
+    if version == 3:
+        _task_lifecycle(task)
+        if _retired(db, "task", dict(scope_id=scope_id, client=client, session_id=session, task_id=task_id)):
+            raise StateError("Live task conflicts with a retired identity marker")
     seen = set()
     for condition in task["conditions"]:
         _fields(condition, ("id", "kind", "action", "reason", "reference", "status"), ("resolution_ref", "continuation"))
@@ -416,6 +674,16 @@ def _save(db, scope_id, task):
             old = json_object(previous[0], limit=4 * 1024 * 1024)
             if old["accepted_identity"] != task["accepted_identity"] or old["pins"] != task["pins"]:
                 raise StateError("Stored task identity and pins are immutable")
+            if old.get("lifecycle") != task.get("lifecycle") or ("lifecycle" in old) != ("lifecycle" in task):
+                raise StateError("Original lifecycle age/closure is immutable until owner integration")
+        else:
+            if "lifecycle" in task:
+                raise StateError("Caller cannot supply task lifecycle age or closure")
+            task["lifecycle"] = dict(created_at=_owner_time(), safe_closed_at=None, closure=None, compact=None)
+        _task_lifecycle(task)
+        owner = dict(scope_id=scope_id, **{k: task[k] for k in ("client", "session_id", "task_id")})
+        if _retired(db, "task", owner):
+            raise StateError("Retired task cannot be saved or rebound")
     if "delegation" in task:
         from runtime.delegation import validate_delegation
         validate_delegation(task["delegation"])
@@ -501,6 +769,8 @@ def start_task(scope, request):
     pins = _pins(scope)
     with _database(scope, write=True, initialize=True) as db:
         scope_id = _scope_id(scope)
+        if _retired(db, "task", dict(scope_id=scope_id, **{k:request[k] for k in ("client", "session_id", "task_id")})):
+            raise StateError("Retired task identity cannot start again; evidence is unavailable or expired")
         _checkout_row(db, scope, initialize=True)
         current = _task(db, scope_id, request["client"], request["session_id"])
         if current and current["task_id"] == request["task_id"]:
@@ -637,6 +907,14 @@ def process_event(scope, event):
             if db is None:
                 raise StateError("Task state has not been initialized")
             scope_id = _scope_id(scope)
+            event_identity = dict(scope_id=scope_id, client=event.client, session_id=event.session_id, turn_id=event.turn_id)
+            if event.turn_id is not None:
+                if _retired(db, "turn", event_identity):
+                    raise StateError("Retired event cannot be rebound")
+                if event.tool_call_id is not None:
+                    receipt_identity = event_identity | dict(tool_call_id=event.tool_call_id, kind=event.kind)
+                    if _retired(db, "receipt", receipt_identity):
+                        raise StateError("Retired receipt cannot be replayed as new work")
             _checkout_row(db, scope)
             task = _task(db, scope_id, event.client, event.session_id)
             _compatible(scope, task)
