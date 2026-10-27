@@ -29,7 +29,7 @@ def control_main():
             action = actions.add_parser(name, add_help=False)
             action.add_argument("--cwd", required=True)
             if name == "status":
-                action.add_argument("--client", required=True, choices=("codex",))
+                action.add_argument("--client", required=True, choices=("codex", "claude-code"))
                 action.add_argument("--session", required=True)
         evidence = commands.add_parser("evidence", add_help=False)
         evidence_actions = evidence.add_subparsers(dest="action", required=True)
@@ -101,7 +101,8 @@ def control_main():
                 args.command == "evidence" and args.action != "status"):
             request = json_object(sys.stdin.buffer.read(MAX_INPUT + 1))
             client = request.get("client")
-            if client != "codex":
+            allowed_clients = {"codex", "claude-code"} if args.command == "task" and args.action in ("start", "update") else {"codex"}
+            if client not in allowed_clients:
                 raise StartupError("Expected a supported native task client")
         else:
             client = args.client
@@ -162,38 +163,41 @@ def main():
         return control_main()
     requested_event = sys.argv[2] if len(sys.argv) == 3 else None
     from runtime.adapters import claude_code, codex, session_start
-    from runtime.engine import HookResult
+    from runtime.engine import HookResult, guarded_mutation
     from runtime.startup import MAX_INPUT, RuntimeScopeError, StartupError, json_object, orient, resolve_project
-    runtime_kind = requested_event if requested_event in codex.RUNTIME_EVENTS else None
+    client = sys.argv[1] if len(sys.argv) > 1 else None
+    adapters = {"codex": codex, "claude-code": claude_code}
+    adapter = adapters.get(client)
+    runtime_events = {"codex": codex.RUNTIME_EVENTS, "claude-code": claude_code.RUNTIME_EVENTS}
+    runtime_kind = requested_event if requested_event in runtime_events.get(client, set()) else None
+    event = None
 
     def failure(reason):
         if runtime_kind is not None:
-            return codex.runtime_diagnostic(runtime_kind, reason)
+            return adapter.runtime_diagnostic(runtime_kind, reason)
         return session_start.diagnostic(reason)
 
     try:
-        adapters = {"codex": codex, "claude-code": claude_code}
-        if len(sys.argv) != 3 or sys.argv[1] not in adapters:
+        if len(sys.argv) != 3 or adapter is None:
             raise StartupError("Expected a supported client and event")
-        if requested_event != "SessionStart" and (sys.argv[1] != "codex" or runtime_kind is None):
+        if requested_event != "SessionStart" and runtime_kind is None:
             raise StartupError("Unsupported client runtime event")
-        adapter = adapters[sys.argv[1]]
         payload = json_object(sys.stdin.buffer.read(MAX_INPUT + 1))
         if payload.get("hook_event_name") != requested_event:
             raise StartupError("CLI event does not match the payload event")
         if requested_event == "SessionStart":
             output = adapter.render(orient(adapter.normalize(payload), PACKAGE))
         else:
-            event = codex.normalize_runtime(payload)
+            event = adapter.normalize_runtime(payload)
             scope = resolve_project(event, PACKAGE)
             result = HookResult(event.kind)
             if scope is not None and scope.runtime is not None:
                 from runtime.state import process_event
                 result = process_event(scope, event)
-            output = codex.render_runtime(result)
+            output = adapter.render_runtime(result)
     except RuntimeScopeError as error:
-        if runtime_kind == "PreToolUse" and event.tool_name == "apply_patch":
-            output = codex.render_runtime(HookResult(runtime_kind, "deny", str(error)))
+        if event is not None and guarded_mutation(event):
+            output = adapter.render_runtime(HookResult(event.kind, "deny", str(error)))
         else:
             output = failure(str(error))
     except StartupError as error:

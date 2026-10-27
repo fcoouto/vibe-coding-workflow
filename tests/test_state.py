@@ -591,6 +591,110 @@ class StateTests(unittest.TestCase):
         self.update(conditions=[dict(id="patch", kind="blocker", action="patch", reason="Check", reference="ref")])
         self.assertEqual(self.api().process_event(self.scope, other).action, "pass")
 
+    def test_claude_file_tools_use_the_shared_bound_task_guard(self):
+        self.scope = canonical_scope(self.scope, client="claude-code")
+        api = self.api()
+        event = lambda name: RuntimeEvent("PreToolUse", "claude-code", "claude-session",
+                                          self.scope.repository_root, tool_name=name)
+        for name in ("Edit", "Write", "NotebookEdit"):
+            with self.subTest(tool=name):
+                self.assertEqual(api.process_event(self.scope, event(name)).action, "deny")
+
+        request = self.request | dict(client="claude-code", session_id="claude-session")
+        api.start_task(self.scope, request)
+        api.update_task(self.scope, {key: request[key] for key in ("client", "session_id", "task_id", "scope_ref")} |
+                        dict(expected_revision=1, state="active", reason="work", reference="user:1"))
+        for name in ("Edit", "Write", "NotebookEdit"):
+            with self.subTest(tool=name):
+                self.assertEqual(api.process_event(self.scope, event(name)).action, "pass")
+
+        api.update_task(self.scope, {key: request[key] for key in ("client", "session_id", "task_id", "scope_ref")} |
+                        dict(expected_revision=2, state="active", reason="work", reference="user:1",
+                             conditions=[dict(id="block", kind="blocker", action="patch", reason="Check", reference="ref")]))
+        for name in ("Edit", "Write", "NotebookEdit"):
+            with self.subTest(tool=name, blocked=True):
+                self.assertEqual(api.process_event(self.scope, event(name)).action, "deny")
+        self.assertEqual(api.process_event(self.scope, event("Bash")).action, "pass")
+        self.assertEqual(api.process_event(self.scope, event("mcp__demo__write")).action, "pass")
+
+    def test_claude_status_does_not_claim_stored_ready_as_verified(self):
+        self.scope = canonical_scope(self.scope, client="claude-code")
+        api = self.api()
+        request = self.request | dict(client="claude-code", session_id="claude-session")
+        api.start_task(self.scope, request)
+        with api._database(self.scope, write=True) as db:
+            scope_id = api._scope_id(self.scope)
+            raw = db.execute("select data from tasks where scope_id=? and client=? and session_id=? and task_id=?",
+                             (scope_id, "claude-code", "claude-session", "task")).fetchone()[0]
+            task = json.loads(raw)
+            task["state"] = "ready"
+            db.execute("update tasks set data=? where scope_id=? and client=? and session_id=? and task_id=?",
+                       (json.dumps(task, separators=(",", ":")), scope_id, "claude-code", "claude-session", "task"))
+        with self.assertRaisesRegex(api.StateError, "Claude Code task readiness is unverified"):
+            api.task_status(self.scope, "claude-code", "claude-session")
+
+    def test_claude_task_controls_require_exact_canonical_client_scope(self):
+        api = self.api()
+        request = self.request | dict(client="claude-code", session_id="claude-session")
+        with self.assertRaisesRegex(api.StateError, "accepted canonical client scope"):
+            api.start_task(self.scope, request)
+        with self.assertRaisesRegex(api.StateError, "accepted canonical client scope"):
+            api.task_status(self.scope, "claude-code", "claude-session")
+        event = RuntimeEvent("PreToolUse", "claude-code", "claude-session", self.scope.repository_root,
+                            tool_name="Edit")
+        self.assertEqual(api.process_event(self.scope, event).action, "deny")
+
+    def test_claude_scope_does_not_enable_retirement_evidence_or_delegation_apis(self):
+        self.scope = canonical_scope(self.scope, client="claude-code")
+        api = self.api()
+        from runtime import evidence, delegation
+        identity = self.request | dict(client="claude-code", session_id="claude-session")
+        task = api.start_task(self.scope, identity)["task"]
+        retirement = {key: task[key] for key in ("client", "session_id", "task_id", "scope_ref")}
+        retirement.update(expected_revision=task["revision"], expected_pins=task["pins"], reason="Stopped",
+                          reference="fixture:stop", stop_proof={})
+        with self.assertRaisesRegex(api.StateError, "Unsupported task client"):
+            api.retire_task(self.scope, retirement)
+        evidence_request = {key: identity[key] for key in ("client", "session_id", "task_id", "scope_ref")}
+        evidence_request.update(expected_revision=1, plan={})
+        with self.assertRaisesRegex(api.StateError, "Unsupported task client"):
+            evidence.plan_evidence(self.scope, evidence_request)
+        with self.assertRaisesRegex(api.StateError, "Unsupported task client"):
+            delegation.plan_delegation(self.scope, evidence_request | {"plan": {}})
+
+    def test_shared_scans_decode_canonical_claude_task_without_enabling_evidence_apis(self):
+        api = self.api()
+        codex_scope = canonical_scope(self.scope, client="codex")
+        claude_scope = canonical_scope(self.scope, client="claude-code")
+        api.start_task(codex_scope, self.request)
+        claude_request = self.request | dict(client="claude-code", session_id="claude-session")
+        api.start_task(claude_scope, claude_request)
+
+        report = api.inspect_state(claude_scope)
+        self.assertNotIn("error", report)
+        self.assertEqual(len(report["tasks"]), 2)
+
+        from runtime import delegation, evidence
+        with api._database(codex_scope) as db:
+            delegation._resources_available(codex_scope, db, [], [])
+        evidence_request = {key: claude_request[key] for key in
+                            ("client", "session_id", "task_id", "scope_ref")}
+        evidence_request.update(expected_revision=1, purpose="completion")
+        with self.assertRaisesRegex(api.StateError, "Unsupported task client"):
+            evidence.verify_completion(claude_scope, evidence_request)
+
+    def test_canonical_claude_task_replacement_rebinds_only_with_exact_revision(self):
+        self.scope = canonical_scope(self.scope, client="claude-code")
+        api = self.api()
+        request = self.request | dict(client="claude-code", session_id="claude-session")
+        first = api.start_task(self.scope, request)["task"]
+        replacement = request | dict(task_id="task-next", replaces={"task_id": first["task_id"],
+                                                                       "expected_revision": first["revision"]})
+        result = api.start_task(self.scope, replacement)
+        self.assertEqual(result["task"]["task_id"], "task-next")
+        self.assertEqual(api.task_status(self.scope, "claude-code", "claude-session")["task"]["task_id"],
+                         "task-next")
+
     def test_receipts_deduplicate_conflicts_missing_identity_and_late_events(self):
         self.start()
         self.event("PostToolUse", tool_name="unknown")

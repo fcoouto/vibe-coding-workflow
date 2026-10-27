@@ -148,6 +148,26 @@ class RuntimeTests(unittest.TestCase):
             self.assertFalse(output["ok"])
             self.assertNotIn("Traceback", str(output))
 
+    def test_legacy_codex_runtime_does_not_activate_claude_lifecycle(self):
+        self.enroll(runtime=self.runtime(), clients=["codex", "claude-code"])
+        claude_event = {"hook_event_name": "PreToolUse", "session_id": "claude-session", "cwd": str(self.repo),
+                        "tool_name": "Edit", "tool_use_id": "claude-call"}
+        self.assertIsNone(self.invoke("PreToolUse", claude_event, client="claude-code"))
+        self.assertFalse((self.base / "state").exists())
+
+        request = dict(client="claude-code", session_id="claude-session", task_id="claude-task",
+                       scope_ref="user:task", mode="editable", decision_ref="user:request")
+        code, output = self.task_cli("start", request)
+        self.assertEqual(code, 1)
+        self.assertIn("Runtime state is not configured", output["error"])
+        self.assertFalse((self.base / "state").exists())
+
+        startup_event = {"hook_event_name": "SessionStart", "session_id": "claude-session", "cwd": str(self.repo),
+                         "source": "startup"}
+        self.assertIn("hookSpecificOutput", self.invoke("SessionStart", startup_event, client="claude-code"))
+        codex_guard = self.invoke()
+        self.assertEqual(codex_guard["hookSpecificOutput"]["permissionDecision"], "deny")
+
     def test_evidence_cli_trivial_completion_and_separate_merge_evidence(self):
         (self.repo / 'note.txt').write_text('fixture')
         self.git(self.repo, 'add', '.')
@@ -396,14 +416,12 @@ class RuntimeTests(unittest.TestCase):
                     self.assertNotIn("PRIVATE_SENTINEL", str(output))
                     self.assertNotIn("decision", output)
 
-    def test_cli_event_must_match_payload_and_claude_remains_startup_only(self):
+    def test_cli_event_must_match_payload_and_wrong_client_remains_silent(self):
         self.enroll(runtime=self.runtime())
         output = self.invoke("Stop")
         self.assertIn("Stop", output.get("systemMessage", ""))
         self.assertNotIn("decision", output)
-        output = self.invoke(client="claude-code")
-        self.assertIn("unsupported", output.get("systemMessage", "").lower())
-        self.assertNotIn("permissionDecision", str(output))
+        self.assertIsNone(self.invoke(client="claude-code"))
 
 
 class RuntimeAdapterTests(unittest.TestCase):

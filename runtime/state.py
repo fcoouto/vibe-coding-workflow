@@ -11,7 +11,7 @@ import stat
 import time
 from types import MappingProxyType
 
-from runtime.engine import HookResult, evaluate
+from runtime.engine import HookResult, evaluate, guarded_mutation
 from runtime.startup import (StartupError, AcceptedScope, RuntimeSettings, PROJECT_FILE, json_object, _canonical_plain,
     _canonical_path, _canonical_binding, _canonical_ref, _canonical_hash)
 
@@ -19,7 +19,7 @@ from runtime.startup import (StartupError, AcceptedScope, RuntimeSettings, PROJE
 SCHEMA_VERSION = 2
 APPLICATION_ID = 0x56494245
 PACKAGE = Path(__file__).resolve().parents[1]
-LIMITATIONS = ["Supported apply_patch guard only; shell and external edits remain possible",
+LIMITATIONS = ["Supported Codex apply_patch and Claude Code Edit/Write/NotebookEdit guards only; shell and external edits remain possible",
                "Hooks alone do not establish client execution, filesystem locality or current completion evidence"]
 STATES = {"planned", "active", "awaiting_user", "blocked", "verifying", "ready", "cancelled"}
 TABLE_SQL = {
@@ -469,11 +469,16 @@ def _fields(value, required, optional=()):
         raise StateError("Invalid task control fields")
 
 
-def _identity(request):
+def _identity(request, *, allow_claude=False):
     for name in ("client", "session_id", "task_id", "scope_ref"):
         _text(request.get(name), name, 128 if name == "task_id" else 1024)
-    if request["client"] != "codex":
+    if request["client"] != "codex" and not (allow_claude and request["client"] == "claude-code"):
         raise StateError("Unsupported task client")
+
+
+def _require_claude_scope(scope, client):
+    if client == "claude-code" and (not isinstance(scope, AcceptedScope) or scope.client != client):
+        raise StateError("Claude Code runtime controls require an accepted canonical client scope")
 
 
 def _integer(value, field, minimum=0):
@@ -612,7 +617,10 @@ def _task(db, scope_id, client, session, task_id=None):
     task = json_object(row[0], limit=4 * 1024 * 1024) if version == 3 else json.loads(row[0])
     _fields(task, ("client", "session_id", "task_id", "scope_ref", "mode", "decision_ref", "state", "revision",
                    "pins", "reason", "reference", "conditions", "turn_id", "turn_uncertain", *(["accepted_identity"] if version == 3 else [])), ("resolution_ref", "evidence", "retirement", "delegation", *(["lifecycle"] if version == 3 else [])))
-    _identity(task)
+    stored_claude = (version == 3 and task.get("client") == "claude-code" and
+                     isinstance(task.get("accepted_identity"), dict) and
+                     task["accepted_identity"].get("client") == "claude-code")
+    _identity(task, allow_claude=stored_claude)
     _integer(task["revision"], "stored revision", 1)
     for field in ("decision_ref", "reason", "reference", "resolution_ref"):
         if field in task:
@@ -625,6 +633,8 @@ def _task(db, scope_id, client, session, task_id=None):
     if task["turn_id"] is not None:
         _text(task["turn_id"], "stored turn_id", 4096)
     _task_projection(db, scope_id, task)
+    if task["client"] == "claude-code" and any(field in task for field in ("evidence", "delegation", "retirement")):
+        raise StateError("Claude Code task records do not support evidence, delegation or retirement")
     if version == 3:
         _task_lifecycle(task)
         if _retired(db, "task", dict(scope_id=scope_id, client=client, session_id=session, task_id=task_id)):
@@ -713,12 +723,17 @@ def _status(db, scope, client, session):
 def task_status(scope, client, session_id):
     _text(client, "client")
     _text(session_id, "session_id")
-    if client != "codex":
+    if client not in {"codex", "claude-code"}:
         raise StateError("Unsupported task client")
-    from runtime.evidence import revalidate_ready
-    revalidate_ready(scope, client, session_id)
+    _require_claude_scope(scope, client)
+    if client == "codex":
+        from runtime.evidence import revalidate_ready
+        revalidate_ready(scope, client, session_id)
     with _database(scope) as db:
-        return _status(db, scope, client, session_id)
+        status = _status(db, scope, client, session_id)
+        if client == "claude-code" and status["task"] is not None and status["task"]["state"] == "ready":
+            raise StateError("Claude Code task readiness is unverified by the available evidence adapter")
+        return status
 
 
 def inspect_state(scope):
@@ -755,7 +770,8 @@ def _guard_assignments(db, scope, client, session):
 
 def start_task(scope, request):
     _fields(request, ("client", "session_id", "task_id", "scope_ref", "mode", "decision_ref"), ("replaces",))
-    _identity(request)
+    _identity(request, allow_claude=request.get("client") == "claude-code")
+    _require_claude_scope(scope, request["client"])
     _text(request["decision_ref"], "decision_ref")
     if request["mode"] not in ("read-only", "editable"):
         raise StateError("Invalid task mode")
@@ -836,7 +852,8 @@ def _condition(value, task, previous):
 def update_task(scope, request):
     _fields(request, ("client", "session_id", "task_id", "scope_ref", "expected_revision", "state", "reason", "reference"),
             ("conditions", "resolutions", "resolution_ref"))
-    _identity(request)
+    _identity(request, allow_claude=request.get("client") == "claude-code")
+    _require_claude_scope(scope, request["client"])
     _integer(request["expected_revision"], "expected_revision", 1)
     for field in ("reason", "reference"):
         _text(request[field], field)
@@ -901,6 +918,7 @@ def process_event(scope, event):
     if scope.runtime is None:
         return HookResult(event.kind)
     try:
+        _require_claude_scope(scope, event.client)
         if isinstance(scope, AcceptedScope) and event.client != scope.client:
             raise StateError("Event client differs from accepted scope")
         with _database(scope, write=True) as db:
@@ -939,8 +957,11 @@ def process_event(scope, event):
                 _save(db, scope_id, changes["task"])
             return result
     except (StateError, KeyError, TypeError):
-        if event.kind == "PreToolUse" and event.tool_name == "apply_patch":
-            return HookResult(event.kind, "deny", "Runtime state is missing, unsafe or incompatible; inspect task status")
+        if guarded_mutation(event):
+            reason = ("Runtime state is missing, unsafe or incompatible; inspect task status"
+                      if event.client == "codex" else
+                      "Runtime state is missing, unsafe or incompatible; inspect the bound task")
+            return HookResult(event.kind, "deny", reason)
         if event.kind == "Stop":
             return HookResult(event.kind)
         return HookResult(event.kind, "context", "Runtime state is unavailable; event processing and coverage are unverified")

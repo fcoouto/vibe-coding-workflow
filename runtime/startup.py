@@ -192,7 +192,7 @@ def resolve_project(event, package) -> ProjectScope | None:
     root, common = checkout(root)
     if record.get("repository_root") != str(root) or record.get("git_common_dir") != str(common):
         raise StartupError("Enrollment does not cover this checkout")
-    runtime = runtime_settings(record, package, common)
+    runtime = runtime_settings(record, package, common) if event.client == "codex" else None
     scope_error = RuntimeScopeError if runtime is not None else StartupError
     try:
         installed_policy = policy_digest(package)

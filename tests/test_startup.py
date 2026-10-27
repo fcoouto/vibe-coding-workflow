@@ -13,7 +13,8 @@ import unittest
 from unittest.mock import patch
 
 from runtime.adapters import claude_code, codex
-from runtime.startup import MAX_INPUT, PROJECT_FILE, checkout, orient, policy_digest
+from runtime.engine import HookResult
+from runtime.startup import MAX_INPUT, PROJECT_FILE, StartupError, checkout, orient, policy_digest
 from scripts.validate import validate
 
 
@@ -683,6 +684,18 @@ class StartupTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate Claude"):
             validate(package)
 
+    def test_package_validator_requires_exact_claude_file_tool_guard(self):
+        package = self.base / "package"
+        shutil.copytree(PACKAGE, package, ignore=shutil.ignore_patterns(".git", "__pycache__"))
+        path = package / "hooks/claude-code.json"
+        original = json.loads(path.read_text())
+        for invalid in ("^Edit$", ".*", "^(Edit|Write|NotebookEdit|Bash)$"):
+            hooks = json.loads(json.dumps(original))
+            hooks["hooks"]["PreToolUse"][0]["matcher"] = invalid
+            path.write_text(json.dumps(hooks))
+            with self.subTest(matcher=invalid), self.assertRaisesRegex(ValueError, "Claude file-tool"):
+                validate(package)
+
     def test_package_validator_rejects_different_client_versions(self):
         package = self.base / "package"
         shutil.copytree(PACKAGE, package, ignore=shutil.ignore_patterns(".git", "__pycache__"))
@@ -704,6 +717,22 @@ class ClaudeStartupTests(StartupTests):
     other_client = "codex"
     root_variable = "CLAUDE_PLUGIN_ROOT"
     manifest_directory = ".claude-plugin"
+
+    def test_pretool_adapter_keeps_native_call_id_without_fabricating_turn(self):
+        event = claude_code.normalize_runtime({"hook_event_name": "PreToolUse", "session_id": "session",
+            "cwd": str(self.repo), "tool_name": "Edit", "tool_use_id": "native-call"})
+        self.assertEqual((event.client, event.tool_name, event.tool_call_id),
+                         ("claude-code", "Edit", "native-call"))
+        self.assertIsNone(event.turn_id)
+        self.assertIsNone(event.receipt_fingerprint)
+        for field, value in (("session_id", []), ("cwd", "relative"), ("tool_name", ""),
+                             ("tool_use_id", {"id": "native-call"})):
+            with self.subTest(field=field), self.assertRaises(StartupError):
+                claude_code.normalize_runtime({"hook_event_name": "PreToolUse", "session_id": "session",
+                    "cwd": str(self.repo), "tool_name": "Edit", "tool_use_id": "native-call", field: value})
+        denied = claude_code.render_runtime(HookResult("PreToolUse", "deny", "Task must be active"))
+        self.assertEqual(denied["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertIsNone(claude_code.render_runtime(HookResult("PreToolUse")))
 
 
 if __name__ == "__main__":
