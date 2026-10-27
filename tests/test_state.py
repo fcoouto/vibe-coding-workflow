@@ -306,6 +306,126 @@ class StateTests(unittest.TestCase):
             task['lifecycle']=dict(created_at=1,safe_closed_at=None,closure=None,compact=None)
             with self.assertRaises(self.api().StateError): self.api()._save(db,self.api()._scope_id(self.scope),task)
 
+    def test_lifecycle_identity_reads_live_schema_three_task_from_exact_authority(self):
+        from runtime import evidence
+        self.scope=canonical_scope(self.scope)
+        task=self.start()['task']; api=self.api()
+        context=evidence._evidence_context(self.scope)
+        reference=dict(authority=api._canonical_plain(context.authority_set[0]),scope_id=api._scope_id(self.scope),
+            client=task['client'],session_id=task['session_id'],task_id=task['task_id'])
+        with evidence._context_database(context) as db:
+            actual=api._lifecycle_identity(db,'task',reference)
+        self.assertEqual(dict(actual),dict(status='live',identity={k:reference[k] for k in ('scope_id','client','session_id','task_id')},
+            pins_digest=api._digest(task['pins']),request_digest=None,created_at=task['lifecycle']['created_at']))
+        with evidence._context_database(context) as db,self.assertRaises(api.StateError):
+            api._lifecycle_identity(db,'task',reference | dict(task_id='missing'))
+        wrong=reference | dict(authority=reference['authority'] | dict(directory_binding=dict(device=0,inode=0)))
+        with evidence._context_database(context) as db,self.assertRaises(api.StateError):
+            api._lifecycle_identity(db,'task',wrong)
+
+    def test_lifecycle_identity_does_not_adopt_legacy_authority(self):
+        from runtime import evidence
+        api=self.api()
+        with api._database(self.scope,write=True,initialize=True) as db:
+            context=evidence._evidence_context(self.scope)
+            reference=dict(authority=api._canonical_plain(context.authority_set[0]),scope_id='a'*64,
+                client='codex',session_id='session',task_id='task')
+            with self.assertRaises(api.StateError):
+                api._lifecycle_identity(db,'task',reference)
+
+    def test_lifecycle_identity_requires_original_task_age_and_rejects_live_marker_conflict(self):
+        from runtime import evidence
+        self.scope=canonical_scope(self.scope); task=self.start()['task']; api=self.api()
+        context=evidence._evidence_context(self.scope)
+        reference=dict(authority=api._canonical_plain(context.authority_set[0]),scope_id=api._scope_id(self.scope),
+            client=task['client'],session_id=task['session_id'],task_id=task['task_id'])
+        path=self.scope.runtime.state_dir/'runtime.sqlite3'
+        with closing(sqlite3.connect(path)) as db,db:
+            task.pop('lifecycle')
+            db.execute('update tasks set data=?',(json.dumps(task),))
+        with evidence._context_database(context) as db,self.assertRaises(api.StateError):
+            api._lifecycle_identity(db,'task',reference)
+        task['lifecycle']=dict(created_at='bad',safe_closed_at=None,closure=None,compact=None)
+        with closing(sqlite3.connect(path)) as db,db:
+            db.execute('update tasks set data=?',(json.dumps(task),))
+        with evidence._context_database(context) as db,self.assertRaises(api.StateError):
+            api._lifecycle_identity(db,'task',reference)
+        task.pop('lifecycle')
+        with closing(sqlite3.connect(path)) as db,db:
+            db.execute('update tasks set data=?',(json.dumps(task),))
+        owner={k:reference[k] for k in ('scope_id','client','session_id','task_id')}
+        self.seed_marker('task',owner,request_digest=None)
+        with evidence._context_database(context) as db,self.assertRaises(api.StateError):
+            api._lifecycle_identity(db,'task',reference)
+
+    def test_lifecycle_identity_reads_retired_task_age_and_expiry_without_live_body(self):
+        from runtime import evidence
+        self.scope=canonical_scope(self.scope); self.start(); api=self.api()
+        context=evidence._evidence_context(self.scope)
+        reference=dict(authority=api._canonical_plain(context.authority_set[0]),scope_id=api._scope_id(self.scope),
+            client='codex',session_id='session',task_id='task')
+        owner={k:reference[k] for k in ('scope_id','client','session_id','task_id')}
+        marker=self.seed_marker('task',owner,request_digest=None,expired=True)
+        marker['created_at']='unknown'
+        with api._database(self.scope,write=True) as db:
+            db.execute('update retired_identities set data=?',(json.dumps(marker),))
+        with evidence._context_database(context) as db,self.assertRaises(api.StateError):
+            api._lifecycle_identity(db,'task',reference)
+        marker['created_at']=100
+        with api._database(self.scope,write=True) as db:
+            db.execute('update retired_identities set data=?',(json.dumps(marker),))
+        with closing(sqlite3.connect(context.database)) as db,db:
+            db.execute('delete from tasks where scope_id=? and client=? and session_id=? and task_id=?',
+                (owner['scope_id'],owner['client'],owner['session_id'],owner['task_id']))
+        with evidence._context_database(context) as db:
+            actual=api._lifecycle_identity(db,'task',reference)
+        self.assertEqual((actual['status'],actual['created_at'],actual['pins_digest'],actual['request_digest']),
+            ('expired',marker['created_at'],marker['pins_digest'],None))
+        marker.update(retired_at=marker['created_at']+1,outcome='completed',evidence_expired=False)
+        with api._database(self.scope,write=True) as db:
+            db.execute('update retired_identities set data=?',(json.dumps(marker),))
+        with evidence._context_database(context) as db:
+            retained=api._lifecycle_identity(db,'task',reference)
+        self.assertEqual(retained['status'],'retired')
+
+    def test_lifecycle_identity_uses_live_assignment_parser_then_marker_identity_only(self):
+        from runtime import evidence, state
+        from tests.test_delegation import CanonicalDelegationTests
+        fixture=CanonicalDelegationTests(methodName='runTest')
+        fixture.setUp(); self.addCleanup(fixture.doCleanups)
+        f=fixture.fixture
+        result=f.api.reserve_coordinator(f.scope,f.operation_request())
+        context=evidence._evidence_context(f.scope)
+        with evidence._context_database(context) as db:
+            record=f.api._ledger(f.scope,db)[0]
+            reference=dict(authority=state._canonical_plain(context.authority_set[0]),id=record['id'],
+                owner=record['owner'],assignment=record['data']['assignment'])
+            live=state._lifecycle_identity(db,'assignment',reference)
+        self.assertEqual((live['status'],live['identity'],live['pins_digest'],live['request_digest'],live['created_at']),
+            ('live',dict(id=record['id'],owner=record['owner']),state._digest(record['body']['pins']),
+             record['data']['request_digest'],record['data']['lifecycle']['created_at']))
+        marker=dict(version=1,identity=record['owner'],assignment_id=record['id'],
+            pins_digest=state._digest(record['body']['pins']),request_digest=record['data']['request_digest'],
+            created_at=record['data']['lifecycle']['created_at'],retired_at=record['data']['lifecycle']['created_at']+1,
+            outcome='unknown',evidence_expired=True)
+        with f.api._reservation_write(f.scope) as db:
+            db.execute('insert into retired_identities(kind,identity_digest,data,assignment_id) values(?,?,?,?)',
+                ('assignment',state._retired_identity('assignment',record['owner']),json.dumps(marker),record['id']))
+        with evidence._context_database(context) as db,self.assertRaises(state.StateError):
+            state._lifecycle_identity(db,'assignment',reference)
+        with f.api._reservation_write(f.scope) as db:
+            db.execute('delete from assignments where id=?',(record['id'],))
+        changed_pointer=dict(name='f'*32+'.json',digest='e'*64)
+        with evidence._context_database(context) as db:
+            expired=state._lifecycle_identity(db,'assignment',reference | dict(assignment=changed_pointer))
+            with self.assertRaises(state.StateError):
+                state._lifecycle_identity(db,'assignment',reference | dict(id='f'*32))
+            with self.assertRaises(state.StateError):
+                state._lifecycle_identity(db,'assignment',reference | dict(owner=record['owner'] | dict(dispatch_id='different')))
+        self.assertEqual((expired['status'],expired['identity'],expired['pins_digest'],expired['request_digest'],expired['created_at']),
+            ('expired',dict(id=record['id'],owner=record['owner']),marker['pins_digest'],marker['request_digest'],marker['created_at']))
+        self.assertEqual(result['attempt_id'],record['id'])
+
     def seed_marker(self,kind,identity,*,request_digest=None,expired=False):
         api=self.api()
         data=dict(version=1,identity=identity,pins_digest='a'*64,request_digest=request_digest,

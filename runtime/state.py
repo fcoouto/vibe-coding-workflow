@@ -379,6 +379,83 @@ def _task_reference(value):
     _canonical_binding(authority["directory_binding"]); _canonical_binding(authority["database_binding"])
 
 
+def _lifecycle_identity(db, kind, reference):
+    """Read bounded original identity/age from one exact existing schema-3 authority."""
+    from runtime import delegation, evidence
+    if db is None or not db.in_transaction:
+        raise StateError("Lifecycle identity requires its existing authority transaction")
+    if kind == "task":
+        _task_reference(reference)
+        identity = {key: reference[key] for key in ("scope_id", "client", "session_id", "task_id")}
+    elif kind == "assignment":
+        _fields(reference, ("authority", "id", "owner", "assignment"))
+        if not isinstance(reference["id"], str) or not re.fullmatch(r"[0-9a-f]{32}", reference["id"]):
+            raise StateError("Invalid lifecycle assignment ID")
+        _retired_identity("assignment", reference["owner"])
+        _artifact_reference(reference["assignment"])
+        identity = dict(id=reference["id"], owner=reference["owner"])
+    else:
+        raise StateError("Unsupported lifecycle identity kind")
+
+    context = evidence._existing_authority_context(reference["authority"], db=db)
+    authority = _canonical_plain(context.authority_set[0])
+    if reference["authority"] != authority:
+        raise StateError("Lifecycle identity authority is not canonical")
+    _schema(db, version=CANONICAL_SCHEMA_VERSION)
+
+    if kind == "task":
+        marker = _retired(db, "task", identity)
+        row = db.execute("select 1 from tasks where scope_id=? and client=? and session_id=? and task_id=?",
+                         tuple(identity[key] for key in ("scope_id", "client", "session_id", "task_id"))).fetchone()
+        if row is None:
+            if marker is None:
+                raise StateError("Lifecycle task identity or original age is unavailable")
+            return _canonical_freeze(dict(status="expired" if marker["evidence_expired"] else "retired",
+                identity=identity, pins_digest=marker["pins_digest"], request_digest=marker["request_digest"],
+                created_at=marker["created_at"]))
+        if marker is not None:
+            raise StateError("Live task conflicts with its retired identity marker")
+        task = _task(db, identity["scope_id"], identity["client"], identity["session_id"], identity["task_id"])
+        lifecycle = _task_lifecycle(task)
+        if task["pins"]["schema_version"] != CANONICAL_SCHEMA_VERSION or lifecycle is None:
+            raise StateError("Lifecycle task lacks canonical pins or an original creation time")
+        return _canonical_freeze(dict(status="live", identity=identity, pins_digest=_digest(task["pins"]),
+            request_digest=None, created_at=lifecycle["created_at"]))
+
+    marker_owner = _retired(db, "assignment", reference["owner"])
+    marker_id = _retired_assignment(db, reference["id"])
+    row = db.execute("select id,scope_id,client,session_id,task_id,dispatch_id,data from assignments where id=?",
+                     (reference["id"],)).fetchone()
+    if row is None:
+        if marker_owner is None or marker_id is None or marker_owner != marker_id:
+            raise StateError("Lifecycle assignment identity or original age is unavailable")
+        if marker_id["identity"] != reference["owner"] or marker_id["assignment_id"] != reference["id"]:
+            raise StateError("Retired assignment identity differs from its reference")
+        # The marker intentionally retains identity, not the old concrete assignment artifact pointer.
+        return _canonical_freeze(dict(status="expired" if marker_id["evidence_expired"] else "retired",
+            identity=identity, pins_digest=marker_id["pins_digest"], request_digest=marker_id["request_digest"],
+            created_at=marker_id["created_at"]))
+    if marker_owner is not None or marker_id is not None:
+        raise StateError("Live assignment conflicts with its retired identity marker")
+    record = delegation._record(None, row, db=db, context=context)
+    if (record["id"] != reference["id"] or record["owner"] != reference["owner"] or
+            record["data"]["assignment"] != reference["assignment"]):
+        raise StateError("Live assignment differs from its exact identity reference")
+    task_owner = record["owner"]
+    task = _task(db, task_owner["scope_id"], task_owner["client"], task_owner["session_id"], task_owner["task_id"])
+    if (task["pins"] != record["body"]["pins"] or
+            task.get("accepted_identity") != record["body"].get("accepted_identity")):
+        raise StateError("Live assignment differs from its original task pins")
+    lifecycle = record["data"].get("lifecycle")
+    if lifecycle is None:
+        raise StateError("Lifecycle assignment lacks an original creation time")
+    _fields(lifecycle, ("created_at",))
+    _integer(lifecycle["created_at"], "original assignment creation time")
+    return _canonical_freeze(dict(status="live", identity=identity,
+        pins_digest=_digest(record["body"]["pins"]), request_digest=record["data"]["request_digest"],
+        created_at=lifecycle["created_at"]))
+
+
 def _scope_version(scope):
     if isinstance(scope, AcceptedScope):
         if (not all(isinstance(getattr(scope, key), MappingProxyType) and _frozen_snapshot(getattr(scope, key))
