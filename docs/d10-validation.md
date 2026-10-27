@@ -1,0 +1,7 @@
+# D10 instruction validation
+
+27 October 2026. The [Review my Project skill](../skills/review-my-project/SKILL.md), selectively loaded procedure, README discovery link, and source-coverage row are implemented. Package validation and instruction-path checks passed; the entry is within its 150-word limit.
+
+A bounded manual delegated-procedure probe used a private disposable fixture. The selected repository's safe local check passed once at its actual checkout directory. Independent filesystem and log checks found no source changes, unchanged source hashes, and clean selected and excluded repositories. Probe notes report no additional scope question, installation, fix, or excluded-repository reads. The initial inspection command used the package directory and failed; the worker corrected its directory before running the check. Private evidence label: D10 procedure probe, nonce `ha03bdra`.
+
+This evidence covers one documented interaction and command-routing case only. It is not an installed-plugin discovery/restart test, protected evaluator result, complete D10c qualification, native hook qualification, or proof of retention. The managed target-owner resolver is not implemented; while ownership reconciliation is unavailable, the procedure requires limited in-chat findings and does not persist a detailed plugin report. D10 does not control native history or claim it was erased. Remaining cases and owner/retention dependencies stay in the [approved D10 plan](d10-project-review-plan.md).
