@@ -58,6 +58,10 @@ class StateTests(unittest.TestCase):
                                   RuntimeSettings(2, self.base / "private"))
         self.request = dict(client="codex", session_id="session", task_id="task", scope_ref="request:1",
                             mode="editable", decision_ref="user:1")
+        from runtime import changes
+        guard_patch = patch.object(changes, 'LOCK_ROOT', self.base / 'authority-guards')
+        guard_patch.start()
+        self.addCleanup(guard_patch.stop)
 
     def api(self):
         self.assertIsNotNone(importlib.util.find_spec("runtime.state"), "durable state implementation missing")
@@ -957,6 +961,240 @@ class StateTests(unittest.TestCase):
         results = [process.communicate(timeout=5) for process in processes]
         self.assertTrue(all(process.returncode == 0 for process in processes), results)
         self.assertEqual(sum(stdout.strip() == b"continue" for stdout, _ in results), 1, results)
+
+
+class AuthorityBootstrapTests(unittest.TestCase):
+    def setUp(self):
+        self.fixture = StateTests(methodName='runTest')
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.scope = canonical_scope(self.fixture.scope)
+        self.fixture.scope = self.scope
+        self.api = self.fixture.api()
+        from runtime import changes
+        lock_patch = patch.object(changes, 'LOCK_ROOT', self.fixture.base / 'authority-guards')
+        lock_patch.start(); self.addCleanup(lock_patch.stop)
+
+    def baseline(self):
+        with self.api._database(self.scope) as db:
+            return self.api._source_baseline(self.scope, db)
+
+    def test_fresh_owner_baseline_precedes_task_and_preserves_original_age(self):
+        from runtime import evidence
+        with patch.object(self.api, '_owner_time', return_value=100):
+            self.fixture.start()
+        baseline = self.baseline()
+        self.assertEqual(baseline['content']['created_at'], 100)
+        self.assertEqual(baseline['content']['source_contract'], 1)
+        self.assertNotIn('complete', baseline)
+        with self.api._database(self.scope) as db:
+            metadata = self.api._metadata(db, baseline['reference']['name'])
+        self.assertEqual(metadata['class'], 'compact')
+        self.assertEqual(metadata['created_at'], 100)
+        self.assertEqual(metadata['owner'], dict(kind='project', project_id='project', task=None))
+        with patch.object(self.api, '_owner_time', side_effect=AssertionError('baseline age reset')):
+            self.fixture.start()
+        self.assertEqual(self.baseline(), baseline)
+        with self.assertRaises(self.api.StateError):
+            evidence._artifact(self.scope, dict(result='forged purpose'),
+                owner=evidence._ArtifactOwner('project', None, None, 'authority-source-baseline'))
+
+    def test_replacement_after_exclusive_create_before_sqlite_open_rejects(self):
+        original = sqlite3.connect
+        replaced = []
+        path = self.scope.runtime.state_dir / 'runtime.sqlite3'
+        def replace_before_open(database, *args, **kwargs):
+            if not replaced and str(database) == str(path):
+                path.rename(path.with_name('original.sqlite3'))
+                path.touch(mode=0o600)
+                replaced.append(True)
+            return original(database, *args, **kwargs)
+        with patch.object(sqlite3, 'connect', side_effect=replace_before_open):
+            with self.assertRaises(self.api.StateError): self.fixture.start()
+        self.assertTrue(replaced)
+        with closing(original(path)) as db:
+            self.assertEqual(db.execute('select count(*) from sqlite_master').fetchone()[0], 0)
+
+    def test_preexisting_empty_database_never_gets_creation_baseline(self):
+        witness = self.api._initialize(self.scope.runtime.state_dir / 'runtime.sqlite3', version=3)
+        if witness is not None: os.close(witness.descriptor)
+        self.fixture.start()
+        self.assertIsNone(self.baseline())
+
+    def test_copied_database_does_not_rebind_its_baseline(self):
+        import shutil
+        self.fixture.start()
+        original = self.baseline()
+        path = self.scope.runtime.state_dir / 'runtime.sqlite3'
+        replacement = path.with_name('copy.sqlite3')
+        shutil.copyfile(path, replacement); replacement.chmod(0o600); replacement.replace(path)
+        self.assertIsNone(self.baseline())
+        self.fixture.start()
+        self.assertIsNone(self.baseline())
+        with self.api._database(self.scope) as db:
+            self.assertIsNotNone(self.api._metadata(db, original['reference']['name']))
+
+    def test_active_d4_marker_blocks_before_database_creation(self):
+        from runtime import changes
+        directory = self.scope.runtime.state_dir
+        directory.mkdir(mode=0o700)
+        for location in changes._authority_locations([directory]):
+            marker = Path(str(location) + '.json')
+            marker.write_text(json.dumps(dict(schema_version=1, plan_dir=str(self.fixture.base),
+                transaction_id='fixture:active', manifest_digest='a'*64)))
+            marker.chmod(0o600)
+        with self.assertRaises(self.api.StateError): self.fixture.start()
+        self.assertFalse((directory / 'runtime.sqlite3').exists())
+
+    def test_rollback_leaves_protected_orphan_and_never_retrofits_baseline(self):
+        with self.assertRaisesRegex(RuntimeError, 'rollback bootstrap'):
+            with self.api._database(self.scope, write=True, initialize=True):
+                raise RuntimeError('rollback bootstrap')
+        artifacts = list((self.scope.runtime.state_dir / 'evidence').iterdir())
+        self.assertEqual(len(artifacts), 1)
+        self.assertIsNone(self.baseline())
+        self.fixture.start()
+        self.assertIsNone(self.baseline())
+        self.assertEqual(list((self.scope.runtime.state_dir / 'evidence').iterdir()), artifacts)
+
+    def test_missing_and_same_byte_substituted_baseline_remain_unknown_without_retrofit(self):
+        self.fixture.start()
+        baseline = self.baseline()
+        path = self.scope.runtime.state_dir / 'evidence' / baseline['reference']['name']
+        replacement = path.with_suffix('.copy')
+        replacement.write_bytes(path.read_bytes()); replacement.chmod(0o400); replacement.replace(path)
+        with self.assertRaises(self.api.StateError): self.baseline()
+        path.unlink()
+        with self.assertRaises(self.api.StateError): self.baseline()
+        self.fixture.start()
+        self.assertFalse(path.exists())
+
+    def test_concurrent_initializer_cannot_bypass_held_authority_guard(self):
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+        entered, release = threading.Event(), threading.Event()
+        original = self.api._initialize
+        def pause(*args, **kwargs):
+            entered.set()
+            if not release.wait(5): raise AssertionError('bootstrap guard test timed out')
+            return original(*args, **kwargs)
+        with patch.object(self.api, '_initialize', side_effect=pause), ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(self.fixture.start)
+            try:
+                self.assertTrue(entered.wait(5))
+                second = executor.submit(self.fixture.start)
+                with self.assertRaises(self.api.StateError): second.result(timeout=2)
+            finally:
+                release.set()
+            self.assertTrue(first.result(timeout=5)['ok'])
+        self.assertIsNotNone(self.baseline())
+
+    def test_replacement_immediately_after_open_cannot_change_captured_descriptor_identity(self):
+        original_open = os.open
+        path = self.scope.runtime.state_dir / 'runtime.sqlite3'
+        replaced = []
+        def replace_after_open(target, flags, *args, **kwargs):
+            descriptor = original_open(target, flags, *args, **kwargs)
+            actual_target = path if target == path.name and kwargs.get('dir_fd') is not None else Path(target)
+            if actual_target == path and flags & os.O_EXCL and not replaced:
+                path.rename(path.with_name('original.sqlite3'))
+                replacement = original_open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                os.close(replacement)
+                replaced.append(True)
+            return descriptor
+        with patch.object(os, 'open', side_effect=replace_after_open):
+            with self.assertRaises(self.api.StateError): self.fixture.start()
+        self.assertTrue(replaced)
+        with closing(sqlite3.connect(path)) as db:
+            self.assertEqual(db.execute('select count(*) from sqlite_master').fetchone()[0], 0)
+
+    def test_replacement_at_runtime_open_registration_and_first_commit_rejects(self):
+        import shutil
+        from runtime import evidence
+        for stage in ('runtime-open', 'registration', 'first-commit'):
+            with self.subTest(stage=stage):
+                scope = canonical_scope(replace(self.fixture.scope, runtime=replace(self.fixture.scope.runtime,
+                    state_dir=self.fixture.base / ('bootstrap-' + stage))))
+                self.scope = self.fixture.scope = scope
+                path = scope.runtime.state_dir / 'runtime.sqlite3'
+                changed = []
+                def substitute():
+                    copy = path.with_name('copy.sqlite3')
+                    shutil.copyfile(path, copy); copy.chmod(0o600)
+                    path.rename(path.with_name('original.sqlite3')); copy.replace(path)
+                    changed.append(True)
+                original_connect = sqlite3.connect
+                original_register = evidence._register_source_baseline
+                original_save = self.api._save
+                def connect(database, *args, **kwargs):
+                    if stage == 'runtime-open' and str(database).startswith(path.as_uri()) and not changed:
+                        substitute()
+                    return original_connect(database, *args, **kwargs)
+                def register(*args, **kwargs):
+                    if stage == 'registration': substitute()
+                    return original_register(*args, **kwargs)
+                def save(*args, **kwargs):
+                    result = original_save(*args, **kwargs)
+                    if stage == 'first-commit': substitute()
+                    return result
+                with patch.object(sqlite3, 'connect', side_effect=connect), \
+                     patch.object(evidence, '_register_source_baseline', side_effect=register), \
+                     patch.object(self.api, '_save', side_effect=save):
+                    with self.assertRaises(self.api.StateError): self.fixture.start()
+                self.assertTrue(changed)
+                self.assertIsNone(self.baseline())
+
+    def test_preexisting_orphan_blocks_fresh_baseline_and_never_gets_adopted(self):
+        directory = self.scope.runtime.state_dir
+        folder = directory / 'evidence'
+        folder.mkdir(mode=0o700, parents=True); directory.chmod(0o700)
+        orphan = folder / ('f'*32 + '.json')
+        orphan.write_text('{}'); orphan.chmod(0o400)
+        with self.assertRaises(self.api.StateError): self.fixture.start()
+        self.assertIsNone(self.baseline())
+        self.fixture.start()
+        self.assertIsNone(self.baseline())
+        self.assertEqual(list(folder.iterdir()), [orphan])
+
+    def test_exclusive_create_race_winner_does_not_give_loser_a_witness(self):
+        original = self.api._initialize
+        def raced(path, **kwargs):
+            witness = original(path, **kwargs)
+            os.close(witness.descriptor)
+            raise FileExistsError('another initializer won')
+        with patch.object(self.api, '_initialize', side_effect=raced): self.fixture.start()
+        self.assertIsNone(self.baseline())
+
+
+    def test_first_task_write_still_holds_guard_and_existing_d6_path_does_not_reenter(self):
+        from runtime import delegation
+        original = self.api._save
+        checked = []
+        def save(*args, **kwargs):
+            with self.assertRaises(self.api.StateError):
+                with delegation._reservation_write(self.scope): pass
+            checked.append(True)
+            return original(*args, **kwargs)
+        with patch.object(self.api, '_save', side_effect=save): self.fixture.start()
+        self.assertEqual(checked, [True])
+        with delegation._reservation_write(self.scope) as db:
+            self.assertIsNotNone(self.api._source_baseline(self.scope, db))
+
+
+    def test_guarded_directory_replacement_before_initializer_rejects_before_creation(self):
+        original = self.api._initialize
+        directory = self.scope.runtime.state_dir
+        saved = directory.with_name('original-authority-directory')
+        def substitute(path, **kwargs):
+            directory.rename(saved)
+            directory.mkdir(mode=0o700)
+            return original(path, **kwargs)
+        with patch.object(self.api, '_initialize', side_effect=substitute):
+            with self.assertRaises(self.api.StateError): self.fixture.start()
+        self.assertFalse((directory / 'runtime.sqlite3').exists())
+        self.assertFalse((saved / 'runtime.sqlite3').exists())
+        self.assertFalse((directory / 'evidence').exists())
+
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 """Private, bounded SQLite task controls and atomic deterministic hook decisions."""
 
-from contextlib import closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager
+from dataclasses import dataclass
 import hashlib
 import json
 import os
@@ -12,7 +13,7 @@ import time
 from types import MappingProxyType
 
 from runtime.engine import HookResult, evaluate, guarded_mutation
-from runtime.startup import (StartupError, AcceptedScope, RuntimeSettings, PROJECT_FILE, json_object, _canonical_plain,
+from runtime.startup import (StartupError, AcceptedScope, RuntimeSettings, PROJECT_FILE, json_object, _canonical_plain, _canonical_freeze,
     _canonical_path, _canonical_binding, _canonical_ref, _canonical_hash)
 
 
@@ -544,60 +545,202 @@ def _schema(db, *, version=SCHEMA_VERSION):
         raise StateError("Runtime database is missing required lifecycle indexes")
 
 
-def _initialize(path, *, version=SCHEMA_VERSION):
-    missing = []
-    directory = path.parent
-    while not directory.exists():
-        missing.append(directory)
-        directory = directory.parent
-    for directory in reversed(missing):
-        try:
-            directory.mkdir(mode=0o700)
-        except FileExistsError:
-            _private(directory, True)
+_CREATION_ISSUER = object()
+
+
+@dataclass(frozen=True)
+class _AuthorityCreation:
+    authority: object
+    created_at: int
+    descriptor: int
+    issuer: object
+
+
+def _authority_identity(path):
+    def binding(item):
+        info = item.lstat()
+        return dict(device=info.st_dev, inode=info.st_ino)
+    return dict(directory=str(path.parent), database=str(path),
+        directory_binding=binding(path.parent), database_binding=binding(path))
+
+
+def _check_creation(path, creation, db=None):
+    if not isinstance(creation, _AuthorityCreation) or creation.issuer is not _CREATION_ISSUER:
+        raise StateError('Fresh authority creation witness is required')
+    info = os.fstat(creation.descriptor)
+    authority = _canonical_plain(creation.authority)
     _private(path.parent, True)
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    os.close(descriptor)
-    with closing(sqlite3.connect(path, timeout=0.1)) as db, db:
-        statements = list((CANONICAL_TABLE_SQL if version == 3 else TABLE_SQL).values())
+    _private(path)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1
+            or info.st_mode & 0o077 or dict(device=info.st_dev, inode=info.st_ino) != authority['database_binding']
+            or _authority_identity(path) != authority):
+        raise StateError('Fresh database physical identity changed')
+    if db is not None:
+        if db.execute('pragma database_list').fetchall() != [(0, 'main', str(path))]:
+            raise StateError('Fresh database connection differs from creation witness')
+
+
+def _prepare_directory(directory):
+    missing = []
+    ancestor = directory
+    while not ancestor.exists():
+        missing.append(ancestor)
+        ancestor = ancestor.parent
+    for item in reversed(missing):
+        try:
+            item.mkdir(mode=0o700)
+        except FileExistsError:
+            _private(item, True)
+    _private(directory, True)
+
+
+def _initialize(path, *, version=SCHEMA_VERSION, expected_directory=None):
+    _prepare_directory(path.parent)
+    if version == 3:
+        parent_descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            directory_info = os.fstat(parent_descriptor)
+            binding = dict(device=directory_info.st_dev, inode=directory_info.st_ino)
+            if expected_directory is not None and binding != expected_directory:
+                raise StateError('Authority directory differs from the guarded physical identity')
+            descriptor = os.open(path.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                 0o600, dir_fd=parent_descriptor)
+        finally:
+            os.close(parent_descriptor)
+    else:
+        directory_info = path.parent.lstat()
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    creation = None
+    try:
         if version == 3:
-            statements += list(CANONICAL_INDEX_SQL.values())
-        db.executescript("BEGIN IMMEDIATE;\n" + ";\n".join(statements) + ";")
-        db.execute("pragma application_id=" + str(APPLICATION_ID))
-        db.execute("pragma user_version=" + str(version))
+            info = os.fstat(descriptor)
+            authority = dict(directory=str(path.parent), database=str(path),
+                directory_binding=dict(device=directory_info.st_dev, inode=directory_info.st_ino),
+                database_binding=dict(device=info.st_dev, inode=info.st_ino))
+            creation = _AuthorityCreation(_canonical_freeze(authority), _owner_time(), descriptor, _CREATION_ISSUER)
+            _check_creation(path, creation)
+        else:
+            os.close(descriptor)
+            descriptor = None
+        with closing(sqlite3.connect(path, timeout=0.1)) as db, db:
+            if creation is not None:
+                _check_creation(path, creation, db)
+            statements = list((CANONICAL_TABLE_SQL if version == 3 else TABLE_SQL).values())
+            if version == 3:
+                statements += list(CANONICAL_INDEX_SQL.values())
+            db.executescript('BEGIN IMMEDIATE;\n' + ';\n'.join(statements) + ';')
+            db.execute('pragma application_id=' + str(APPLICATION_ID))
+            db.execute('pragma user_version=' + str(version))
+            if creation is not None:
+                _check_creation(path, creation, db)
+        return creation
+    except BaseException:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise
+
+
+def _source_baseline_name(authority):
+    return _digest(['authority-source-baseline', authority])[:32] + '.json'
+
+
+def _source_baseline(scope, db):
+    """Return fresh-owner provenance only; no source completeness or cleanup permission."""
+    if db is None or _scope_version(scope) != 3:
+        return None
+    from runtime import evidence
+    context = evidence._evidence_context(scope)
+    evidence._check_context(context, db)
+    authority = _canonical_plain(context.authority_set[0])
+    name = _source_baseline_name(authority)
+    metadata = _metadata(db, name)
+    if metadata is None:
+        return None
+    reference = dict(name=name, digest=metadata['managed']['sha256'])
+    content = evidence._read(scope, reference, db=db)
+    _fields(content, ('version', 'kind', 'source_contract', 'authority', 'project_id', 'created_at', 'runtime_digest'))
+    if (type(content['version']) is not int or content['version'] != 1 or content['kind'] != 'authority-source-baseline'
+            or type(content['source_contract']) is not int or content['source_contract'] != 1
+            or content['authority'] != authority or metadata['class'] != 'compact'
+            or metadata['owner'] != dict(kind='project', project_id=content['project_id'], task=None)
+            or metadata['created_at'] != content['created_at'] or metadata['closed_at'] is not None
+            or metadata['targets'] or metadata['export'] is not None):
+        raise StateError('Authority source baseline provenance is invalid')
+    _canonical_hash(content['runtime_digest'])
+    _integer(content['created_at'], 'original authority creation time')
+    for dependency in metadata['dependencies']:
+        if dependency['kind'] != 'recovery':
+            raise StateError('Authority baseline has an unsupported source dependency')
+        _fields(dependency['reference'], ('identity', 'artifact'))
+        _fields(dependency['reference']['identity'], ('plan_dir', 'transaction_id', 'manifest_digest'))
+        _canonical_path(dependency['reference']['identity']['plan_dir'])
+        _text(dependency['reference']['identity']['transaction_id'], 'recovery transaction identity')
+        _canonical_hash(dependency['reference']['identity']['manifest_digest'])
+        _artifact_reference(dependency['reference']['artifact'])
+    return _canonical_freeze(dict(reference=reference, content=content, dependencies=metadata['dependencies']))
 
 
 @contextmanager
 def _database(scope, write=False, initialize=False):
-    db = None
-    try:
-        path = _path(scope)
-        if not os.path.lexists(path):
-            if initialize:
-                try:
-                    _initialize(path, version=_scope_version(scope))
-                except FileExistsError:
-                    pass
-            else:
-                yield None
-                return
-        _sidecars(path)
-        db = sqlite3.connect(path.as_uri() + ("?mode=rw" if write else "?mode=ro"), uri=True, timeout=0.1)
-        db.execute("pragma busy_timeout=100")
-        db.execute("pragma trusted_schema=off")
-        _schema(db, version=_scope_version(scope))
-        db.execute("begin immediate" if write else "begin")
-        yield db
-        if write:
+    db = creation = None
+    with ExitStack() as guards:
+        try:
+            path = _path(scope)
+            version = _scope_version(scope)
+            if initialize and version == 3:
+                if not write:
+                    raise StateError('Fresh schema3 bootstrap requires its write transaction')
+                _prepare_directory(path.parent)
+                directory_binding = _authority_identity(path)['directory_binding'] if path.exists() else dict(
+                    device=path.parent.lstat().st_dev, inode=path.parent.lstat().st_ino)
+                from runtime.changes import _authority_guards
+                guards.enter_context(_authority_guards([path.parent]))
+                info = path.parent.lstat()
+                if dict(device=info.st_dev, inode=info.st_ino) != directory_binding:
+                    raise StateError('Authority directory changed before bootstrap guard')
+            if not os.path.lexists(path):
+                if initialize:
+                    try:
+                        if version == 3:
+                            creation = _initialize(path, version=version, expected_directory=directory_binding)
+                        else:
+                            creation = _initialize(path, version=version)
+                    except FileExistsError:
+                        pass
+                else:
+                    yield None
+                    return
             _sidecars(path)
-            db.commit()
-    except StateError:
-        raise
-    except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
-        raise StateError("Runtime state is unavailable, corrupt, locked or incompatible") from None
-    finally:
-        if db is not None:
-            db.close()
+            if creation is not None:
+                _check_creation(path, creation)
+            db = sqlite3.connect(path.as_uri() + ('?mode=rw' if write else '?mode=ro'), uri=True, timeout=0.1)
+            if creation is not None:
+                _check_creation(path, creation, db)
+            db.execute('pragma busy_timeout=100')
+            db.execute('pragma trusted_schema=off')
+            _schema(db, version=version)
+            db.execute('begin immediate' if write else 'begin')
+            if creation is not None:
+                from runtime.evidence import _register_source_baseline
+                _register_source_baseline(scope, db, creation)
+                _check_creation(path, creation, db)
+            yield db
+            if write:
+                _sidecars(path)
+                if creation is not None:
+                    _check_creation(path, creation, db)
+                db.commit()
+                if creation is not None:
+                    _check_creation(path, creation, db)
+        except StateError:
+            raise
+        except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
+            raise StateError('Runtime state is unavailable, corrupt, locked or incompatible') from None
+        finally:
+            if db is not None:
+                db.close()
+            if creation is not None:
+                os.close(creation.descriptor)
 
 
 def _task(db, scope_id, client, session, task_id=None):

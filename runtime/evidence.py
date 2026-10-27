@@ -113,6 +113,38 @@ class _ArtifactOwner:
     purpose: str = 'task'
 
 
+@dataclass(frozen=True)
+class _BaselineOwner:
+    project_id: str
+    creation: object
+
+
+def _register_source_baseline(scope, db, creation):
+    """Initializer-only compact provenance; no D4 source completeness is implied."""
+    path = state._path(scope)
+    state._check_creation(path, creation, db)
+    _require(db.in_transaction and state._scope_version(scope) == 3, 'Baseline requires the fresh schema3 transaction')
+    for table in state.CANONICAL_TABLE_SQL:
+        _require(db.execute('select 1 from ' + table + ' limit 1').fetchone() is None,
+                 'Existing authority records cannot acquire a creation baseline')
+    folder = path.parent / 'evidence'
+    if os.path.lexists(folder):
+        state._private(folder, True)
+        _require(next(folder.iterdir(), None) is None, 'Unknown evidence content protects this authority from bootstrap')
+    content = dict(version=1, kind='authority-source-baseline', source_contract=1,
+        authority=_canonical_plain(creation.authority), project_id=scope.project_id,
+        created_at=creation.created_at, runtime_digest=state.runtime_fingerprint())
+    reference = _artifact(scope, content, owner=_BaselineOwner(scope.project_id, creation), db=db)
+    state._check_creation(path, creation, db)
+    os.fsync(creation.descriptor)
+    directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+    return reference
+
+
 def _binding(path):
     info = path.lstat()
     return dict(device=info.st_dev, inode=info.st_ino)
@@ -182,6 +214,10 @@ def _guidance_artifact_owner(scope):
 
 
 def _registered_owner(scope, context, owner, db):
+    if isinstance(owner, _BaselineOwner):
+        _require(scope is not None and owner.project_id == scope.project_id, 'Baseline Project owner changed')
+        state._check_creation(context.database, owner.creation, db)
+        return dict(kind='project', project_id=owner.project_id, task=None), None
     _require(isinstance(owner, _ArtifactOwner) and scope is not None and owner.project_id == scope.project_id,
              'Artifact requires an explicitly derived existing owner')
     if owner.task is None:
@@ -251,7 +287,8 @@ def _artifact_registered(scope, value, context, owner, db):
         pass
     state._private(folder, True)
     parents = {str(folder): _binding(folder), str(context.directory): _binding(context.directory)}
-    path = folder / (uuid.uuid4().hex + '.json')
+    name = state._source_baseline_name(_canonical_plain(owner.creation.authority)) if isinstance(owner, _BaselineOwner) else uuid.uuid4().hex + '.json'
+    path = folder / name
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)
     with os.fdopen(descriptor, 'wb') as stream:
         stream.write(raw)
@@ -267,12 +304,20 @@ def _artifact_registered(scope, value, context, owner, db):
     dependencies = _artifact_dependencies(value)
     if task_ref is not None:
         dependencies.insert(0, dict(kind='task', reference=task_ref))
-    created = state._owner_time()
-    data = dict(version=1, owner=metadata_owner, created_at=created, **{'class': 'detail'}, bytes=len(raw),
+    baseline = isinstance(owner, _BaselineOwner)
+    created = owner.creation.created_at if baseline else state._owner_time()
+    content_class = 'compact' if baseline else 'detail'
+    if baseline:
+        expected = dict(version=1, kind='authority-source-baseline', source_contract=1,
+            authority=_canonical_plain(owner.creation.authority), project_id=owner.project_id,
+            created_at=created, runtime_digest=state.runtime_fingerprint())
+        _require(value == expected and not dependencies, 'Baseline content differs from fresh owner provenance')
+        state._check_creation(context.database, owner.creation, db)
+    data = dict(version=1, owner=metadata_owner, created_at=created, **{'class': content_class}, bytes=len(raw),
         status='live', closed_at=None, dependencies=dependencies, targets=[], export=None,
         managed=dict(path=str(path), binding=dict(device=info.st_dev, inode=info.st_ino), parents=parents,
             sha256=digest, mode=stat.S_IMODE(info.st_mode), bytes=info.st_size))
-    row = (path.name, digest, 'project:' + metadata_owner['project_id'], 'detail', created, None, 'live', len(raw), _raw(data).decode())
+    row = (path.name, digest, 'project:' + metadata_owner['project_id'], content_class, created, None, 'live', len(raw), _raw(data).decode())
     state._metadata_record(row)
     _check_context(context, db)
     _require(all(_binding(Path(parent)) == binding for parent, binding in parents.items())
