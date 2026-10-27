@@ -1649,11 +1649,22 @@ def _scoped_writer_roots(manifest):
     return {Path(a['owner']['root']) for a in manifest['owners']} | git_roots,git_roots
 
 
-def _scoped_task_relevant(checkout_row,roots):
-    return Path(checkout_row[0]) in roots or any(Path(checkout_row[1])==root or root.is_relative_to(Path(checkout_row[1])) for root in roots)
+def _scoped_changed_paths(manifest):
+    # Fingerprints include mode and existence, not just the content digest.
+    paths={Path(action['owner']['root'])/effect['path'] for action in manifest['actions']
+        for effect in action['effects'] if effect['before']!=effect['after']}
+    # The approved canonical revision always changes; publication/recovery can also create/delete it.
+    paths.add(Path(manifest['enrollment']['record']['project_root'])/PROJECT_FILE)
+    return paths
 
 
-def _scoped_writers(locations, affected_roots, git_roots=()):
+def _scoped_task_relevant(checkout_row,roots,task=None,changed_paths=()):
+    physical=Path(checkout_row[0]) in roots or any(Path(checkout_row[1])==root or root.is_relative_to(Path(checkout_row[1])) for root in roots)
+    historical=task.get('accepted_identity',{}).get('shared_policy',[]) if task is not None else []
+    return physical or any(Path(dependency['path']) in changed_paths for dependency in historical)
+
+
+def _scoped_writers(locations, affected_roots, git_roots=(), *, changed_paths=()):
     from runtime import delegation, evidence
     claims = [dict(kind="path", key=str(root), mode="write") for root in affected_roots] + [dict(kind="git", key=str(root), mode="write") for root in git_roots]
     for directory, (locator, version) in locations.items():
@@ -1683,7 +1694,7 @@ def _scoped_writers(locations, affected_roots, git_roots=()):
                 d3._require(row is not None, "Historical writer has no checkout")
                 unresolved = [a for a in task.get("evidence", {}).get("attempts", []) if a["status"] in {"reserved", "running", "uncertain"}]
                 retirement = task.get("retirement")
-                relevant = _scoped_task_relevant(row,affected_roots)
+                relevant = _scoped_task_relevant(row,affected_roots,task,changed_paths)
                 if retirement and (relevant or unresolved):
                     proof = evidence._read(None if context else locator, retirement["proof"], context=context, db=db)
                     d3._require(task["state"] == "cancelled" and proof.get("kind") == "stopped-writer-reconciliation"
@@ -1729,6 +1740,7 @@ def _recovery_owner_refs(manifest,context,task_refs):
     """Select actual affected-writer proofs; never inspect user payloads for lookalike refs."""
     from runtime import evidence,delegation
     roots,_=_scoped_writer_roots(manifest)
+    changed_paths=_scoped_changed_paths(manifest)
     tasks=[]; assignments={}; references=[]
     authority=_canonical_plain(context.authority_set[0])
     with evidence._context_database(context) as db:
@@ -1739,7 +1751,7 @@ def _recovery_owner_refs(manifest,context,task_refs):
             task=task_state._task(db,scope_id,client,session,task_id)
             row=db.execute('select repository_root,git_common_dir from checkouts where scope_id=?',(scope_id,)).fetchone()
             d3._require(row is not None,'Recovery task checkout unavailable')
-            relevant=_scoped_task_relevant(row,roots)
+            relevant=_scoped_task_relevant(row,roots,task,changed_paths)
             unresolved=[a for a in task.get('evidence',{}).get('attempts',[]) if a['status'] in {'reserved','running','uncertain'}]
             ref=dict(authority=authority,scope_id=scope_id,client=client,session_id=session,task_id=task_id)
             named=any(_canonical_plain(r)==ref for r in task_refs)
@@ -2505,6 +2517,7 @@ def _run_scoped(plan_dir, request, operation):
         authority, prior = _scoped_prior(plan)
         locations = _scoped_runtime_locations([prior, m["enrollment"]["record"]], affected)
         affected_roots,affected_git=_scoped_writer_roots(m)
+        changed_paths=_scoped_changed_paths(m)
         lock_root = d3._plan_path(LOCK_ROOT)
         destination_keys = {"destination:" + str(root / PROJECT_FILE), "parent:" + str(root) + ":" + d3._digest(plan["identity"]["binding"])}
         if authority["binding"]: destination_keys.add("inode:" + d3._digest(authority["binding"]))
@@ -2538,7 +2551,7 @@ def _run_scoped(plan_dir, request, operation):
                     d3._require(hashlib.sha256(raw).hexdigest() == m["enrollment"]["before"]["raw_sha256"] and d3.read_request(raw) == prior, "Canonical approved bytes changed")
             with _scoped_source_guards(locations, owner, m) as (authority_locations,source_contexts):
                 writer_locations=_scoped_writer_locations(locations,source_contexts)
-                _scoped_writers(writer_locations, affected_roots, affected_git)
+                _scoped_writers(writer_locations, affected_roots, affected_git, changed_paths=changed_paths)
                 for git_dir in git_dirs:
                     marker = _command_owner(git_dir)
                     d3._require(marker is None or marker["plan_dir"] == str(path) and marker["transaction_id"] == m["transaction_id"], "Unresolved command owns an affected checkout")
@@ -2581,7 +2594,7 @@ def _run_scoped(plan_dir, request, operation):
             current_record = d3.read_request(d3._read_file(root / PROJECT_FILE, 128 * 1024)) if (root / PROJECT_FILE).exists() else None
             current_locations = _scoped_runtime_locations([current_record], affected)
             d3._require(set(current_locations) <= set(locations), "New authority needs separately reconciled state guards")
-            _scoped_writers(writer_locations, affected_roots, affected_git)
+            _scoped_writers(writer_locations, affected_roots, affected_git, changed_paths=changed_paths)
             if operation == "rollback":
                 _scoped_restore(path, journal, current_record, authority_owned, observation)
                 journal["state"] = "rollback_partial" if journal["blocked"] else "rolled_back"
@@ -2604,7 +2617,7 @@ def _run_scoped(plan_dir, request, operation):
                         journal["blocked"].append(dict(id=action["id"], reason="Scoped action approval/dependency missing")); continue
                     try:
                         if originals[action["id"]]["target"] != str(PROJECT_FILE):
-                            _scoped_writers(writer_locations, affected_roots, affected_git)
+                            _scoped_writers(writer_locations, affected_roots, affected_git, changed_paths=changed_paths)
                             _scoped_apply_action(path, journal, action, originals[action["id"]], observation, descriptors.get(action["owner"].get("git_dir")))
                         completed.add(action["id"])
                     except Pending as error:
@@ -2613,7 +2626,7 @@ def _run_scoped(plan_dir, request, operation):
                     raise Pending("Required scoped adoption effects are incomplete")
                 activates = any(e[2]["activation"]["status"] == "active" for key, e in _scoped_entries(m["enrollment"]["record"]).items() if key in affected)
                 if activates: _scoped_qualification(journal,observation,m["enrollment"]["record"])
-                _scoped_writers(writer_locations, affected_roots, affected_git)
+                _scoped_writers(writer_locations, affected_roots, affected_git, changed_paths=changed_paths)
                 if not _scoped_owned_authority(journal): raise Pending("Canonical preimage ownership changed before publication")
                 _scoped_publish(path, journal, "final", m["enrollment"]["record"])
                 if activates: _scoped_qualification(journal,observation,m["enrollment"]["record"],published=True)
@@ -2627,7 +2640,7 @@ def _run_scoped(plan_dir, request, operation):
             if not unsettled:
                 with _scoped_source_guards(locations, owner, m) as (final_locations,source_contexts):
                     writer_locations=_scoped_writer_locations(locations,source_contexts)
-                    _scoped_writers(writer_locations,affected_roots,affected_git)
+                    _scoped_writers(writer_locations,affected_roots,affected_git,changed_paths=changed_paths)
                     _scoped_register_sources(path,journal,source_contexts)
                     for location in [canonical_location,*final_locations]:
                         if _authority_owner(location) == owner: os.unlink(Path(str(location)+".json"))

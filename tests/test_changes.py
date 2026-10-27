@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import subprocess
 import sqlite3
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -1750,6 +1751,117 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
         self.assertTrue(any(t['reference']['task_id']=='linked-writer' for t in content['tasks']))
         self.assertIn(dict(authority=evidence._canonical_plain(context.authority_set[0]),artifact=reference),content['artifacts'])
         self.assertTrue(self.changes.inspect_lifecycle_recovery(context.authority_set,())['complete'])
+
+    def historical_shared_consumer(self, *, changed=True, mode_change=False):
+        from runtime import startup,state
+        first=self.scoped_request(umbrella=True); contexts=[self.recovery_authority()[1],self.recovery_authority()[1]]
+        record=first['manifest']['enrollment']['record']
+        action=next(a for a in first['manifest']['actions'] if a['owner']['kind']=='project')
+        shared=Path(action['owner']['root'])/action['effects'][0]['path']
+        record['shared_policy']=[dict(path=str(shared),sha256=action['effects'][0]['after']['sha256'])]
+        first=self.activate_request(first)
+        activation=copy.deepcopy(record['repositories'][0]['checkouts'][0]['clients'][0]['activation'])
+        for repository,context in zip(record['repositories'],contexts):
+            checkout=repository['checkouts'][0]; entry=checkout['clients'][0]
+            entry['configuration']['runtime']=dict(schema_version=3,state_dir=str(context.directory))
+            entry['configuration']['shared_dependencies']=[str(shared)]
+            identity=startup.canonical_scope_projection(startup.decode_project_record(record),repository_id=repository['repository_id'],checkout_id=checkout['checkout_id'],client='codex')
+            digest=onboarding._digest(startup._canonical_plain(identity))
+            entry['activation']=copy.deepcopy(activation); entry['activation']['accepted_scope_digest']=digest
+            entry['activation']['qualification_binding']['accepted_scope_digest']=digest
+        first['approval']['manifest_digest']=onboarding._digest(first['manifest'])
+        self.assertNotEqual(self.changes._run_scoped(self.directory,first,'apply')['exit_code'],0)
+        observed=self.observe_active(first)
+        for row in observed['observations']['qualification']:
+            row['scope_observations']['observation']['dependencies']=[dict(path=str(shared),status='read',target=self.changes._scoped_target(self.base,'AGENTS.md'))]
+        applied=self.changes._run_scoped(self.directory,observed,'resume'); self.assertEqual(applied['exit_code'],0,applied)
+        published=json.loads((self.base/PROJECT_FILE).read_text()); consumer=published['repositories'][1]
+        facts=copy.deepcopy(observed['observations']['qualification'][1]['scope_observations'])
+        facts['authority']=dict(path=str(self.base/PROJECT_FILE),target=self.changes._scoped_target(self.base,str(PROJECT_FILE)))
+        resolved=startup.resolve_canonical_scope(startup.decode_project_record(published),**facts)
+        self.assertEqual(resolved.status,'active'); scope=resolved.scope
+        task=state.start_task(scope,dict(client='codex',session_id='historical-consumer',task_id='historical-consumer',scope_ref='fixture:shared',mode='editable',decision_ref='fixture'))['task']
+        self.assertEqual(task['accepted_identity']['shared_policy'],published['shared_policy'])
+        source=self.source.read_bytes()
+        def request(label):
+            temporary=tempfile.TemporaryDirectory(prefix='vcw-historical-'+label+'-');self.addCleanup(temporary.cleanup)
+            self.directory=Path(temporary.name).resolve()/'plan';self.directory.mkdir(mode=0o700)
+            self.source=self.directory/'catalog.md';self.source.write_bytes(source);self.source.chmod(0o600)
+            self.record['toolkit']['files'][0]['local_path']=str(self.source)
+            onboarding.inspect_project(self.base,self.directory,self.project_record(self.base,[self.repo],'umbrella',['AGENTS.md']))
+            proposal=self.scoped_proposal(); action=proposal['assessments']['project']['actions'][0]
+            action['text']='product rules\nchanged shared process\n' if changed else shared.read_text()
+            action['after']=hashlib.sha256(action['text'].encode()).hexdigest()
+            self.assertEqual(onboarding.record_plan(self.directory,proposal)['status'],'ready_for_review')
+            pending=self.scoped_request(prepared=True)
+            effect=next(a for a in pending['manifest']['actions'] if a['owner']['kind']=='project')['effects'][0]
+            pending['manifest']['enrollment']['record']['shared_policy']=[dict(path=str(shared),sha256=effect['after']['sha256'])]
+            pending['approval']['manifest_digest']=onboarding._digest(pending['manifest'])
+            return pending
+        if changed:
+            control=request('current'); before=shared.read_bytes()
+            blocked=self.changes._run_scoped(self.directory,control,'apply')
+            self.assertNotEqual(blocked['exit_code'],0,blocked)
+            self.assertIn('affected set',str(blocked)); self.assertEqual(shared.read_bytes(),before)
+        # A fresh inspection must retain an externally edited current record without repinning the old task.
+        current=copy.deepcopy(published); entry=current['repositories'][1]['checkouts'][0]['clients'][0]
+        entry['configuration']['shared_dependencies']=[];entry['activation']['status']='suspended';current['revision']+=1
+        startup.decode_project_record(current)
+        (self.base/PROJECT_FILE).write_text(json.dumps(current,sort_keys=True)+'\n')
+        if mode_change: shared.chmod(0o600)
+        pending=request('historical'); self.changes._validate_scoped(pending,self.plan())
+        affected={tuple(row[k] for k in ('repository_id','checkout_id','client')) for row in pending['manifest']['enrollment']['affected']}
+        self.assertNotIn((consumer['repository_id'],consumer['checkouts'][0]['checkout_id'],'codex'),affected)
+        return pending,scope,contexts[1],task,shared
+
+    def test_historical_shared_consumer_blocks_actual_effect_after_current_dependency_removed(self):
+        from runtime import evidence,state
+        request,scope,context,task,shared=self.historical_shared_consumer()
+        before=shared.read_bytes()
+        result=self.changes._run_scoped(self.directory,request,'apply')
+        self.assertNotEqual(result['exit_code'],0,result)
+        self.assertIn('stopped-writer',str(result));self.assertEqual(shared.read_bytes(),before)
+        with evidence._context_database(context) as db:
+            self.assertEqual(state._task(db,state._scope_id(scope),'codex','historical-consumer'),task)
+
+    def test_historical_shared_consumer_retirement_proof_is_required_and_retained(self):
+        from runtime import evidence,state
+        request,scope,context,task,shared=self.historical_shared_consumer()
+        with evidence._context_database(context,write=True) as db:
+            proof=dict(version=1,kind='stopped-writer-reconciliation',identity={k:task[k] for k in ('client','session_id','task_id','scope_ref')},
+                expected_revision=task['revision'],expected_pins=task['pins'],observed_turn_id=task['turn_id'],stopped=True,descendants_stopped=True,
+                attempt_ids=[],observation_ref='fixture:stopped',coordinator_ref='fixture:owner')
+            reference=evidence._artifact(scope,proof,owner=evidence._artifact_owner(scope,task),db=db)
+            retired=copy.deepcopy(task);retired.update(state='cancelled',revision=task['revision']+1,retirement=dict(proof_digest=reference['digest'],proof=reference,
+                observation_ref='fixture:stopped',coordinator_ref='fixture:owner',previous_revision=task['revision']))
+            state._save(db,state._scope_id(scope),retired)
+        result=self.changes._run_scoped(self.directory,request,'apply');self.assertEqual(result['exit_code'],0,result)
+        _,sources=self.changes._recovery_sources(context)
+        source=next(content for _,content in sources if content['identity']['plan_dir']==str(self.directory))
+        self.assertTrue(any(item['reference']['task_id']=='historical-consumer' for item in source['tasks']))
+        self.assertIn(dict(authority=evidence._canonical_plain(context.authority_set[0]),artifact=reference),source['artifacts'])
+        self.assertTrue(self.changes.inspect_lifecycle_recovery(context.authority_set,())['complete'])
+
+    def test_historical_shared_consumer_unchanged_effect_is_not_new_dependency(self):
+        from runtime import evidence,state
+        request,scope,context,task,shared=self.historical_shared_consumer(changed=False)
+        before=shared.read_bytes()
+        result=self.changes._run_scoped(self.directory,request,'apply');self.assertEqual(result['exit_code'],0,result)
+        self.assertEqual(shared.read_bytes(),before)
+        _,sources=self.changes._recovery_sources(context)
+        source=next(content for _,content in sources if content['identity']['plan_dir']==str(self.directory))
+        self.assertFalse(any(item['reference']['task_id']=='historical-consumer' for item in source['tasks']))
+        with evidence._context_database(context) as db:
+            self.assertEqual(state._task(db,state._scope_id(scope),'codex','historical-consumer'),task)
+
+    def test_historical_shared_consumer_blocks_mode_only_effect(self):
+        request,scope,context,task,shared=self.historical_shared_consumer(changed=False,mode_change=True)
+        effect=next(a for a in request['manifest']['actions'] if a['owner']['kind']=='project')['effects'][0]
+        self.assertEqual(effect['before']['sha256'],effect['after']['sha256'])
+        self.assertNotEqual(effect['before']['mode'],effect['after']['mode'])
+        result=self.changes._run_scoped(self.directory,request,'apply')
+        self.assertNotEqual(result['exit_code'],0,result);self.assertIn('stopped-writer',str(result))
+        self.assertEqual(self.changes._fingerprint(shared.parent,shared.name),effect['before'])
 
     def command_scoped_request(self, before=None):
         import sys
