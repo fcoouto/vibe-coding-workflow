@@ -2,6 +2,8 @@
 
 Read this contract only when a Codex task needs explicit task controls, a `doctor` report, or lifecycle troubleshooting. Startup-only projects do not need it. For native delegated work only, also read [native delegation](delegation.md). For planned checks, review, completion, or local merge evidence, also read [task checks and review evidence](evidence.md). Shared policy remains in the [policy index](../policies/00-index.md); native qualification status and procedures are in [validation guidance](../docs/d2-validation.md).
 
+This CLI and its evidence, delegation, doctor and retirement APIs remain Codex-only. Read the [Claude Code prepared guard](claude-code.md#prepared-file-guard) only when the task concerns Claude Code support.
+
 ## Opt in
 
 The existing checkout-root `.vibe-coding-workflow/project.json` may include this optional field:

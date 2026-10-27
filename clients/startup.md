@@ -22,6 +22,8 @@ Private Project-plan schema 2 is not an enrollment record. Startup still reads s
 
 Additional project fields remain available to later slices. Require the current native client in `clients`. Superset is a host, not a client ID or an enrollment signal. This startup record does not distinguish host surfaces; qualify the actual launch separately.
 
+The current schema-1 resolver applies optional `runtime` only to Codex. A dual-client record keeps Claude `SessionStart` orientation but does not enable Claude file guards or task controls. Production canonical per-client scope resolution remains an integration dependency; see [Claude's prepared guard boundary](claude-code.md#prepared-file-guard).
+
 A copied checkout record, changed policy digest, malformed JSON, link or special-file record produces a diagnostic. Reconcile accepted scope/version through onboarding; never silently rewrite it during startup. Omitting `runtime` preserves startup-only behavior. This field does not enable Claude lifecycle controls.
 
 ## Runtime limits

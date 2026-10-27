@@ -10,6 +10,10 @@ The [adapter](../runtime/adapters/claude_code.py) identifies the native client a
 
 Normal output adds local client/policy pointers through `hookSpecificOutput.additionalContext`, without an activation announcement. Invalid integration returns diagnostic context and a warning. The shared startup code makes the enrollment decision; installation does not enroll a project.
 
+## Prepared file guard
+
+The package contains a prepared `PreToolUse` guard for Claude's native `Edit`, `Write` and `NotebookEdit` tools, plus internal canonical per-client task start/update/status state support. These require an accepted `claude-code` scope and are not available through the current production CLI; see the [shared startup contract](startup.md#enrollment-input) for the activation boundary. Claude evidence checks, delegation, retirement, correlated turns and continuation are unsupported. Read the [runtime contract](runtime.md) only when the task also concerns its Codex-only APIs.
+
 ## Installation and qualification
 
 For local testing, use `claude --plugin-dir /absolute/path/to/vibe-coding-workflow`. Review the package before enabling it. Claude's plugin installation/trust rules apply; it does not use Codex's per-definition hash approval flow. Preserve existing hooks, permissions, model selection and authentication.

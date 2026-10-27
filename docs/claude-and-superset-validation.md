@@ -1,12 +1,12 @@
 # Claude startup and Superset host validation
 
-25 October 2026. Scope: reuse the validated startup layer for another native client and establish Superset's actual integration boundary. Onboarding, enforcement, model routing and connector implementation remain later work.
+25 October 2026 evidence record, with a 27 October 2026 status note below. Original scope: reuse the validated startup layer for another native client and establish Superset's actual integration boundary. That native observation applies to the historical startup-only candidate and listed versions; it does not qualify later hook definitions or runtime behavior.
 
 ## Candidate and automated proof
 
 Claude runtime/manifest SHA-256: `c6224e1dad862fceb223d9e2da19b4b35fe7facaa294cd4ebb0f9dbbbb6ad79d`. The digest concatenates each ordered relative filename, NUL, exact bytes, NUL: `.claude-plugin/plugin.json`, `hooks/claude-code.json`, `scripts/workflow.py`, `runtime/startup.py`, `runtime/adapters/claude_code.py`, `runtime/adapters/session_start.py`, `runtime/adapters/codex.py`.
 
-Policy digest: `e955274b00b5dbf75f266677e99da138f0c3da835e8c23ed7fc1e34c03be429d`; approved policies are unchanged.
+Historical policy digest for the 25 October 2026 candidate snapshot: `e955274b00b5dbf75f266677e99da138f0c3da835e8c23ed7fc1e34c03be429d`; the approved policies were unchanged at that snapshot.
 
 - Package validation passed.
 - 54 tests passed. Both native adapters run the shared acceptance cases, including checkout/worktree isolation, wrong-client enrollment, malformed records, settings preservation and hostile Python/Git environments.
@@ -44,5 +44,11 @@ The plugin does not copy these launch flags or treat the environment hints as au
 ## Limits
 
 Claude Desktop is not installed here. Desktop Code, Cowork, Superset launches, desktop UI behavior and model policy compliance remain untested. Native startup success does not qualify those surfaces or later enforcement features.
+
+## Current package status (27 October 2026)
+
+The historical Claude Code CLI 2.1.304 startup observation and source digest above remain evidence for that exact startup-only candidate. The prepared D8 checkpoint at `f166a21` had ordered runtime/manifest source digest `cfbe62d0f28fa325a0dbe45493406ca7fcffb161472749da820e56a12b95b4a5`, versus the historical `c6224e1dad862fceb223d9e2da19b4b35fe7facaa294cd4ebb0f9dbbbb6ad79d`. Later D4 startup integration changes alter source files, so the D8 checkpoint digest is not a hash of the current integrated package. The prepared D8 package adds a Claude `PreToolUse` definition for `Edit`, `Write` and `NotebookEdit`; the old full-source qualification cannot be reused. No current Claude runtime hook or task-control execution was observed.
+
+The current package contains prepared canonical per-client Claude file-guard and task-state support. The [shared startup contract](../clients/startup.md#enrollment-input) documents the schema-1 Codex-only runtime and pending production canonical-resolver integration. Claude native runtime qualification remains pending. Claude D5 evidence, D6 delegation, retirement, turn correlation and continuation remain unsupported. Superset implementation remains suspended; do not infer its behavior from Claude Code. Desktop Code requires separate capability qualification; Cowork remains unqualified.
 
 Sources: [Claude hooks](https://code.claude.com/docs/en/hooks), [Claude plugin manifest](https://code.claude.com/docs/en/plugins-reference), [Superset agent integration](https://docs.superset.sh/add-agent-support), [Superset environment controls](https://docs.superset.sh/cli/env-vars).
