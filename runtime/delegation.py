@@ -336,7 +336,7 @@ def record_guidance(scope, request):
         def unexpired():
             _require(claim["expires_at"] > _now(), "Guidance refresh claim expired before publication")
         if "guidance" in request:
-            reference = evidence._artifact(scope, request["guidance"])
+            reference = evidence._artifact(scope, request["guidance"], owner=evidence._guidance_artifact_owner(scope))
             _atomic(folder / (request["client_surface"] + ".json"),
                     dict(guidance=request["guidance"], snapshot_ref=reference), guard=unexpired)
             _, _, prior = _snapshot(scope, folder, request)
@@ -693,7 +693,7 @@ def plan_delegation(scope, request):
     for job in plan['jobs']:
         if job['role'] == 'worker':
             _worker_scope(scope, job['claims'])
-    reference = evidence._artifact(scope, plan)
+    reference = evidence._artifact(scope, plan, owner=evidence._artifact_owner(scope, task))
     with state._database(scope, write=True) as db:
         task = evidence._task(db, scope, request)
         _require('delegation' not in task, 'Delegation plan was concurrently established')
@@ -732,7 +732,7 @@ def _stored_claims(claims, *, maximum=MAX_CLAIMS):
     return claims
 
 
-def _record(scope, row):
+def _record(scope, row, *, db=None):
     identity, scope_id, client, session, task_id, dispatch_id, raw = row
     try:
         data = json_object(raw, limit=evidence.MAX_ARTIFACT)
@@ -746,7 +746,7 @@ def _record(scope, row):
         _require(_hex(data['request_digest']), 'Invalid assignment request digest')
         state._integer(data['revision'], 'stored assignment revision', 1)
         _reference(data['assignment'])
-        body = evidence._read(scope, data['assignment'])
+        body = evidence._read(scope, data['assignment'], db=db)
         owner = dict(scope_id=scope_id, client=client, session_id=session, task_id=task_id, dispatch_id=dispatch_id)
         _require(body['owner'] == owner and all(body[key] == data[key] for key in
             ('job_id', 'role', 'claims', 'resource_units', 'revision', 'plan_digest', 'host_capacity', 'binding', 'retry_of', 'diagnostic')) and
@@ -772,18 +772,18 @@ def _record(scope, row):
             all(_hex(body['pins'][key]) for key in ('policy_digest', 'runtime_digest')) and
             all(body['request'][key] == owner[key] for key in ('client', 'session_id', 'task_id', 'dispatch_id')),
             'Assignment original owner or pins are corrupt')
-        verifier = data['role'] == 'coordinator' and evidence._read(scope, body['operation']).get('kind') == 'completion-verification'
+        verifier = data['role'] == 'coordinator' and evidence._read(scope, body['operation'], db=db).get('kind') == 'completion-verification'
         size = len(raw.encode('utf-8')) if isinstance(raw, str) else len(raw)
         _require(verifier or size <= MAX_INPUT, 'Assignment record exceeds its role-specific byte limit')
         _stored_claims(data['claims'], maximum=MAX_VERIFICATION_CLAIMS if verifier else MAX_CLAIMS)
-        policy = evidence._read(scope, body['policy'])
+        policy = evidence._read(scope, body['policy'], db=db)
         _require(policy['policy_digest'] == body['pins']['policy_digest'], 'Immutable assignment policy binding changed')
         if data['role'] in NATIVE_ROLES:
             state._fields(body, ('version', 'owner', 'pins', *canonical_fields, 'request', 'job_id', 'role', 'claims', 'resource_units',
                 'revision', 'plan', 'plan_digest', 'git_routing', 'host_capacity', 'binding', 'candidate',
                 'discovery', 'policy', 'report_contract', 'guidance', 'retry_of', 'diagnostic'), ('review',))
             _reference(body['plan'])
-            plan = evidence._read(scope, body['plan'])
+            plan = evidence._read(scope, body['plan'], db=db)
             _require(body['plan']['digest'] == data['plan_digest'] and
                 plan['route']['parent_session_id'] == session, 'Native assignment has no actual original plan')
             if data['role'] == 'review':
@@ -793,7 +793,7 @@ def _record(scope, row):
                 _require(all(review[key] == body['request'][key] for key in ('coverage', 'criteria')),
                          'Review metadata differs from its original request')
                 _require(review['assignment_digest'] == hashlib.sha256(body['request']['assignment'].encode()).hexdigest() and
-                    evidence._read(scope, data['candidate'])['definitions_digest'] == review['d5_plan']['digest'] and
+                    evidence._read(scope, data['candidate'], db=db)['definitions_digest'] == review['d5_plan']['digest'] and
                     all(claim['mode'] == 'read' for claim in data['claims']), 'Review prompt/plan/resources binding changed')
             else:
                 _require('review' not in body, 'Worker cannot carry review admission metadata')
@@ -814,7 +814,7 @@ def _record(scope, row):
                 data['binding'] is None and data['host_capacity'] is None and data['retry_of'] is None and
                 data['diagnostic'] is None, 'Model-free assignment cannot invent native facts or consumption')
             _require(body['scope_ref'] == body['request']['scope_ref'], 'Operation scope differs from original request')
-            operation = evidence._read(scope, body['operation'])
+            operation = evidence._read(scope, body['operation'], db=db)
             state._fields(operation, ('id', 'kind', 'decision_ref', 'claims_digest'))
             _require(operation['claims_digest'] == evidence._digest(data['claims']) and
                 operation['decision_ref'] == body['decision_ref'], 'Operation resource/decision binding is corrupt')
@@ -823,22 +823,22 @@ def _record(scope, row):
                          'Task-only operation invented D5 plan/candidate facts')
             else:
                 _reference(body['d5_plan'])
-                evidence._read(scope, body['d5_plan'])
+                evidence._read(scope, body['d5_plan'], db=db)
                 _require(data['plan_digest'] == body['d5_plan']['digest'], 'Original D5 plan binding changed')
                 if data['candidate'] is not None:
                     _reference(data['candidate'])
-                    candidate = evidence._read(scope, data['candidate'])
+                    candidate = evidence._read(scope, data['candidate'], db=db)
                     _require(candidate['definitions_digest'] == data['plan_digest'] and candidate['pins'] == body['pins'],
                              'Original candidate binding changed')
             if body['d6_plan'] is not None:
                 _reference(body['d6_plan'])
-                evidence._read(scope, body['d6_plan'])
+                evidence._read(scope, body['d6_plan'], db=db)
             if data['role'] == 'coordinator':
                 _require(operation['kind'] in {'coordinator-work', 'completion-verification'}, 'Invalid coordinator operation')
                 if data['job_id'] is not None:
                     _require(body['d6_plan'] is not None and operation['id'] == data['job_id'] and
                         any(job['id'] == data['job_id'] and job['role'] == 'coordinator'
-                            for job in evidence._read(scope, body['d6_plan'])['jobs']), 'Coordinator job binding is corrupt')
+                            for job in evidence._read(scope, body['d6_plan'], db=db)['jobs']), 'Coordinator job binding is corrupt')
                 if operation['kind'] == 'completion-verification':
                     _require(body['d5_plan'] is not None and all(c['mode'] == 'read' for c in data['claims']),
                              'Verifier barrier requires actual D5 context and read-only claims')
@@ -849,14 +849,14 @@ def _record(scope, row):
                 _reference(data['candidate'])
                 _require(_hex(data['plan_digest']) and operation['kind'] == 'check' and
                     data['job_id'] == operation['id'], 'Check assignment requires actual D5 bindings')
-                plan = evidence._read(scope, body['d5_plan'])
-                candidate = evidence._read(scope, data['candidate'])
+                plan = evidence._read(scope, body['d5_plan'], db=db)
+                candidate = evidence._read(scope, data['candidate'], db=db)
                 _require(body['d5_plan']['digest'] == data['plan_digest'] and
                     candidate['definitions_digest'] == data['plan_digest'] and candidate['pins'] == body['pins'] and
                     any(check['id'] == operation['id'] for check in plan['checks']), 'Check bindings do not match actual D5 evidence')
         if data['status'] == 'settled':
             _reference(data['reconciliation'])
-            evidence._read(scope, data['reconciliation'])
+            evidence._read(scope, data['reconciliation'], db=db)
             _require(isinstance(data['result'], dict) and data['result'].get('outcome') in
                      {'completed', 'failed', 'cancelled'}, 'Settled assignment has no reconciled result')
         return dict(id=identity, owner=owner, data=data, body=body)
@@ -868,7 +868,7 @@ def _ledger(scope, db):
     rows = db.execute('select id,scope_id,client,session_id,task_id,dispatch_id,data from assignments limit ?',
                       (MAX_ASSIGNMENTS + 1,)).fetchall()
     _require(len(rows) <= MAX_ASSIGNMENTS, 'Shared assignment history exceeds its inspection bound')
-    records = [_record(scope, row) for row in rows]
+    records = [_record(scope, row, db=db) for row in rows]
     for record in records:
         owner, body = record['owner'], record['body']
         if state._retired(db, 'assignment', owner) or state._retired_assignment(db, record['id']):
@@ -924,7 +924,7 @@ def _insert_assignment(db, scope, task, record):
         'Reservation owner or revision differs from the current task')
     row = (record['id'], owner['scope_id'], owner['client'], owner['session_id'], owner['task_id'],
            owner['dispatch_id'], evidence._raw(data).decode())
-    _record(scope, row)
+    _record(scope, row, db=db)
     _invalidate_ready(db, scope, task, data['claims'])
     db.execute('insert into assignments values(?,?,?,?,?,?,?)', row)
     if data['role'] in NATIVE_ROLES:
@@ -1193,17 +1193,17 @@ def _operation_record(scope, task, request, role, claims, identity, candidate, o
     d5_plan = task.get('evidence', {}).get('plan')
     d6_plan = task.get('delegation', {}).get('plan') if role == 'coordinator' else None
     owner = dict(scope_id=state._scope_id(scope), **{key: request[key] for key in ('client', 'session_id', 'task_id', 'dispatch_id')})
-    operation = evidence._artifact(scope, dict(operation, decision_ref=task['decision_ref'], claims_digest=evidence._digest(claims)))
+    operation = evidence._artifact(scope, dict(operation, decision_ref=task['decision_ref'], claims_digest=evidence._digest(claims)), owner=evidence._artifact_owner(scope, task))
     body = dict(version=ADMISSION_VERSION, owner=owner, pins=task['pins'], scope_ref=task['scope_ref'], decision_ref=task['decision_ref'],
         request=_semantic(request), operation=operation, job_id=job_id, role=role,
         claims=claims, resource_units=0, revision=request['expected_revision'] + 1, plan_digest=d5_plan['digest'] if d5_plan else None,
         candidate=candidate, d5_plan=d5_plan, d6_plan=d6_plan, host_capacity=None, binding=None, retry_of=None, diagnostic=None,
-        policy=evidence._artifact(scope, dict(policy_digest=task['pins']['policy_digest'], **(routing or {}))))
+        policy=evidence._artifact(scope, dict(policy_digest=task['pins']['policy_digest'], **(routing or {})), owner=evidence._artifact_owner(scope, task)))
     if task['pins']['schema_version'] == 3:
         body['accepted_identity'] = task['accepted_identity']
         body['lifecycle'] = dict(created_at=state._owner_time())
     evidence._bounded(body, byte_limit)
-    reference = evidence._artifact(scope, body)
+    reference = evidence._artifact(scope, body, owner=evidence._artifact_owner(scope, task))
     data = {key: body[key] for key in ('version', 'job_id', 'role', 'claims', 'resource_units', 'revision', 'plan_digest',
                                       'candidate', 'host_capacity', 'binding', 'retry_of', 'diagnostic')}
     data.update(status='prepared', request_digest=evidence._digest(_semantic(request)), assignment=reference,
@@ -1429,7 +1429,7 @@ def _prepare_native(scope, request, *, role):
     observed, guidance = _discovery(scope, plan, request)
     candidate = evidence.capture_candidate(scope, proof_plan)
     _require(candidate['actual_policy_digest'] == task['pins']['policy_digest'], 'Actual policy changed from accepted task pins')
-    candidate_ref = evidence._artifact(scope, candidate)
+    candidate_ref = evidence._artifact(scope, candidate, owner=evidence._artifact_owner(scope, task))
     attempt_id = uuid.uuid4().hex
     binding = dict(attempt_id=attempt_id, parent_session_id=plan['route']['parent_session_id'], task_name=('worker_' if role == 'worker' else 'review_') + attempt_id,
         candidate_digest=candidate_ref['digest'], requested_model=request['selection']['model']
@@ -1437,16 +1437,16 @@ def _prepare_native(scope, request, *, role):
         if request['selection']['mode'] == 'explicit' else None, client_surface=observed['client_surface'], native_version=observed['native_version'])
     # The content digest excludes itself; the accessor supplies the immutable artifact digest.
     content_binding = binding
-    diagnostic = evidence._artifact(scope, request['diagnostic']) if 'diagnostic' in request else None
+    diagnostic = evidence._artifact(scope, request['diagnostic'], owner=evidence._artifact_owner(scope, task)) if 'diagnostic' in request else None
     owner = dict(scope_id=state._scope_id(scope), **{key: request[key] for key in ('client', 'session_id', 'task_id', 'dispatch_id')})
     body = dict(version=ADMISSION_VERSION, owner=owner, pins=task['pins'], request=_semantic(request), job_id=job['id'], role=role,
         claims=claims, resource_units=request['resource_units'], revision=request['expected_revision'] + 1,
         plan=task['delegation']['plan'], plan_digest=plan_digest, git_routing=git_routing,
         host_capacity=plan['limits']['host_capacity'], binding=content_binding, candidate=candidate_ref,
-        discovery=evidence._artifact(scope, observed), policy=evidence._artifact(scope, dict(
+        discovery=evidence._artifact(scope, observed, owner=evidence._artifact_owner(scope, task)), policy=evidence._artifact(scope, dict(
             policy_digest=task['pins']['policy_digest'], actual_policy_digest=candidate['actual_policy_digest'],
             files=[dict(path=path.name, sha256=hashlib.sha256(path.read_bytes()).hexdigest())
-                   for path in sorted((state.PACKAGE / 'policies').glob('*.md'))])),
+                   for path in sorted((state.PACKAGE / 'policies').glob('*.md'))]), owner=evidence._artifact_owner(scope, task)),
         report_contract=dict(version=1, status=['completed', 'blocked', 'pending-decision'],
             required=['version', 'attempt_id', 'assignment_digest', 'candidate_digest', 'status', 'changed_paths', 'evidence', 'limitations']),
         guidance={key: guidance[key] for key in ('snapshot_ref', 'snapshot_digest', 'checked_at', 'freshness')},
@@ -1460,7 +1460,7 @@ def _prepare_native(scope, request, *, role):
         body['report_contract'] = dict(version=1, assignment_digest=body['review']['assignment_digest'],
             required=['version', 'attempt_id', 'assignment_digest', 'candidate_digest', 'coverage', 'findings', 'limitations'])
     evidence._bounded(body)
-    assignment_ref = evidence._artifact(scope, body)
+    assignment_ref = evidence._artifact(scope, body, owner=evidence._artifact_owner(scope, task))
     data = dict(version=ADMISSION_VERSION, job_id=job['id'], role=role, status='prepared', request_digest=evidence._digest(_semantic(request)),
         assignment=assignment_ref, candidate=candidate_ref, claims=claims, resource_units=request['resource_units'],
         revision=request['expected_revision'] + 1, plan_digest=plan_digest, host_capacity=plan['limits']['host_capacity'],
@@ -1488,7 +1488,7 @@ def _prepare_native(scope, request, *, role):
         _insert_assignment(db, scope, task, dict(id=attempt_id, owner=owner, data=data, body=body))
         record = dict(id=attempt_id, owner=owner, data=data, body=body)
         if role == 'review':
-            task['evidence']['attempts'].append(evidence._review_attempt(scope, record))
+            task['evidence']['attempts'].append(evidence._review_attempt(scope, record, task=task, db=db))
         state._save(db, state._scope_id(scope), task)
     if role == 'worker':
         return _reply(record, admitted=True)
@@ -1647,7 +1647,7 @@ def observe_assignment(scope, request):
     if duplicate:
         return _observation_reply(record, *duplicate, replayed=True)
     _require(len(history) < MAX_OBSERVATIONS, 'Worker observation history bound reached')
-    incoming_ref = evidence._artifact(scope, incoming)
+    incoming_ref = evidence._artifact(scope, incoming, owner=evidence._artifact_owner(scope, task))
     prior = history[0][1] if history else None
     conflict = prior['conflict'] if prior else None
     previous_receipt = prior['receipt'] if prior else None
@@ -1672,7 +1672,7 @@ def observe_assignment(scope, request):
     value = dict(version=1, receipt=receipt, result=result, report=report, error=error,
         request=_semantic(request), incoming=incoming_ref, previous=record['data']['observation'], conflict=conflict,
         revision=request['expected_revision'] + 1, status='uncertain' if error or conflict else 'observed')
-    reference = evidence._artifact(scope, value)
+    reference = evidence._artifact(scope, value, owner=evidence._artifact_owner(scope, task))
     with _reservation_write(scope) as db:
         current = _assignment(scope, db, request, roles=('worker', 'review'))
         duplicate = _observation_replay(scope, _worker_history(scope, current['data']['observation']), incoming)
@@ -1746,9 +1746,9 @@ def reconcile_assignment(scope, request):
             'Completed review requires the exact latest collected D5 report and uncontradicted native completion')
     artifact = dict(version=2, request_digest=evidence._digest(_semantic(request)), proof=proof,
         source_digest=request['host_proof']['sha256'], assessment=assessment,
-        current_candidate=evidence._artifact(scope, candidate) if candidate is not None else None, reservation_snapshot_digest=evidence._digest(reservations),
+        current_candidate=evidence._artifact(scope, candidate, owner=evidence._artifact_owner(scope, task)) if candidate is not None else None, reservation_snapshot_digest=evidence._digest(reservations),
         revision=request['expected_revision'] + 1)
-    reference = evidence._artifact(scope, artifact)
+    reference = evidence._artifact(scope, artifact, owner=evidence._artifact_owner(scope, task))
     with _reservation_write(scope) as db:
         current = _assignment(scope, db, request, roles=('worker', 'review', 'coordinator'))
         task = _assignment_task(scope, db, request)

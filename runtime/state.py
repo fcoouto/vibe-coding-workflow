@@ -959,7 +959,7 @@ def retire_task(scope, request):
     for field in ('reason', 'reference'):
         _text(request[field], field)
     _validate_pins(request['expected_pins'])
-    from runtime.evidence import _artifact, _read_host_proof
+    from runtime.evidence import _artifact, _artifact_owner, _read_host_proof
     proof = _read_host_proof(scope, request['stop_proof'])
     _fields(proof, ('version', 'kind', 'identity', 'expected_revision', 'expected_pins', 'observed_turn_id',
                     'stopped', 'descendants_stopped', 'attempt_ids', 'observation_ref', 'coordinator_ref'))
@@ -968,7 +968,6 @@ def retire_task(scope, request):
     if (type(proof['version']) is not int or proof['version'] != 1 or proof['kind'] != 'stopped-writer-reconciliation' or
             proof['stopped'] is not True or proof['descendants_stopped'] is not True):
         raise StateError('Trusted stopped-writer and descendant reconciliation remains missing')
-    retained_proof = _artifact(scope, proof)
     with _database(scope, write=True) as db:
         if db is None:
             raise StateError('Task state has not been initialized')
@@ -984,6 +983,7 @@ def retire_task(scope, request):
         if (proof['identity'] != identity or proof['expected_revision'] != task['revision'] or proof['expected_pins'] != task['pins'] or
                 proof['observed_turn_id'] != task['turn_id'] or proof['attempt_ids'] != attempts):
             raise StateError('Stopped-writer proof does not match exact historical task and attempts')
+        retained_proof = _artifact(scope, proof, owner=_artifact_owner(scope, task), db=db)
         task.update(state='cancelled', reason=request['reason'], reference=request['reference'],
                     retirement=dict(proof_digest=request['stop_proof']['sha256'], proof=retained_proof, observation_ref=proof['observation_ref'],
                                     coordinator_ref=proof['coordinator_ref'], previous_revision=task['revision']))

@@ -1023,3 +1023,163 @@ class CanonicalEvidenceTests(unittest.TestCase):
         self.assertEqual(before, self.fixture.api.capture_candidate(replace(scope, authority_revision=scope.authority_revision+1), plan))
         shared.write_text('changed workflow\n')
         with self.assertRaises(state.StateError): self.fixture.api.capture_candidate(scope, plan)
+
+
+class LinkedPlanTests(unittest.TestCase):
+    setUp = CanonicalEvidenceTests.setUp
+
+    def reference(self, task_id):
+        directory = self.scope.runtime.state_dir
+        def binding(path):
+            info = path.stat()
+            return dict(device=info.st_dev, inode=info.st_ino)
+        return dict(authority=dict(directory=str(directory), database=str(directory / 'runtime.sqlite3'),
+            directory_binding=binding(directory), database_binding=binding(directory / 'runtime.sqlite3')),
+            scope_id=state._scope_id(self.scope), client='codex', session_id='parent', task_id=task_id)
+
+    def linked_plan(self, own_delivery=None, companions=()):
+        from copy import deepcopy
+        plan = deepcopy(self.fixture.api._load_plan(self.scope, self.fixture.identity))
+        plan.update(version=2, linked=dict(acceptance=[dict(id='integrated', text='Both changes work together')],
+            delivery=own_delivery, companions=list(companions)))
+        return plan
+
+    def test_self_plus_peers_normalizes_both_directions_and_no_publication(self):
+        api = self.fixture.api
+        a, b = self.reference('a'), self.reference('b')
+        left = self.linked_plan(companions=[dict(task=b, delivery=None)])
+        right = self.linked_plan(companions=[dict(task=a, delivery=None)])
+        self.assertEqual(api._linked_projection(a, api._plan(left)), api._linked_projection(b, api._plan(right)))
+        self.assertEqual([row['delivery'] for row in api._linked_projection(a, left)['participants']], [None, None])
+
+    def test_missing_third_member_and_divergent_delivery_are_not_equal(self):
+        api = self.fixture.api
+        a, b, c = [self.reference(key) for key in ('a', 'b', 'c')]
+        delivery = dict(provider='github', repository='owner/repo', target='main', pull_request='https://github.com/owner/repo/pull/1')
+        complete = self.linked_plan(companions=[dict(task=b, delivery=delivery), dict(task=c, delivery=None)])
+        missing = self.linked_plan(own_delivery=delivery, companions=[dict(task=a, delivery=None)])
+        self.assertNotEqual(api._linked_projection(a, api._plan(complete)), api._linked_projection(b, api._plan(missing)))
+        divergent = self.linked_plan(own_delivery=delivery | dict(target='release'),
+            companions=[dict(task=a, delivery=None), dict(task=c, delivery=None)])
+        self.assertNotEqual(api._linked_projection(a, complete), api._linked_projection(b, api._plan(divergent)))
+
+    def test_duplicate_peer_self_peer_and_duplicate_shared_criterion_reject(self):
+        api = self.fixture.api
+        a, b = self.reference('a'), self.reference('b')
+        duplicate = self.linked_plan(companions=[dict(task=b, delivery=None), dict(task=b, delivery=None)])
+        with self.assertRaises(state.StateError): api._plan(duplicate)
+        self_peer = self.linked_plan(companions=[dict(task=a, delivery=None)])
+        with self.assertRaises(state.StateError): api._linked_projection(a, api._plan(self_peer))
+        criteria = self.linked_plan()
+        criteria['linked']['acceptance'] *= 2
+        with self.assertRaises(state.StateError): api._plan(criteria)
+
+    def test_legacy_owner_cannot_admit_v2_plan(self):
+        plan = self.linked_plan()
+        legacy = EvidenceTests(methodName='runTest')
+        legacy.setUp()
+        self.addCleanup(legacy.doCleanups)
+        with self.assertRaises(state.StateError):
+            legacy.api.plan_evidence(legacy.scope, legacy.request(plan=plan))
+
+    def test_local_completion_cannot_pass_unverified_shared_acceptance(self):
+        self.fixture.api.plan_evidence(self.scope, self.fixture.request(plan=self.linked_plan(),
+            change_decision_ref='fixture:linked-acceptance'))
+        with self.assertRaisesRegex(state.StateError, 'Linked'):
+            self.fixture.api.verify_completion(self.scope, self.fixture.request(purpose='completion'))
+
+
+    def test_admission_rejects_self_companion_without_writes(self):
+        api = self.fixture.api
+        with state._database(self.scope) as db:
+            before = state._task(db, state._scope_id(self.scope), 'codex', 'parent')
+        folder = self.scope.runtime.state_dir / 'evidence'
+        files = set(folder.iterdir())
+        plan = self.linked_plan(companions=[dict(task=self.reference('task'), delivery=None)])
+        with self.assertRaises(state.StateError):
+            api.plan_evidence(self.scope, self.fixture.request(plan=plan, change_decision_ref='fixture:invalid-self'))
+        with state._database(self.scope) as db:
+            after = state._task(db, state._scope_id(self.scope), 'codex', 'parent')
+        self.assertEqual(after, before)
+        self.assertEqual(set(folder.iterdir()), files)
+
+
+class ArtifactLifecycleTests(unittest.TestCase):
+    setUp = CanonicalEvidenceTests.setUp
+
+    def owner(self):
+        with state._database(self.scope) as db:
+            task = state._task(db, state._scope_id(self.scope), 'codex', 'parent')
+        return self.fixture.api._artifact_owner(self.scope, task)
+
+    def test_artifact_registers_observed_file_before_reference_return(self):
+        api = self.fixture.api
+        reference = api._artifact(self.scope, dict(result='actual content'), owner=self.owner())
+        path = self.scope.runtime.state_dir / 'evidence' / reference['name']
+        with state._database(self.scope) as db:
+            metadata = state._metadata(db, reference['name'])
+        self.assertIsNotNone(metadata)
+        self.assertEqual(metadata['owner']['project_id'], 'fixture')
+        self.assertEqual(metadata['owner']['task']['task_id'], 'task')
+        self.assertEqual(metadata['managed']['binding']['inode'], path.stat().st_ino)
+        self.assertEqual(metadata['bytes'], len(path.read_bytes()))
+        self.assertEqual(metadata['managed']['sha256'], hashlib.sha256(path.read_bytes()).hexdigest())
+        self.assertIsNone(metadata['closed_at'])
+
+    def test_registration_uses_existing_writer_and_rollback_leaves_protected_orphan(self):
+        api = self.fixture.api
+        owner = self.owner()
+        with self.assertRaisesRegex(RuntimeError, 'rollback fixture'):
+            with state._database(self.scope, write=True) as db:
+                reference = api._artifact(self.scope, dict(result='uncommitted'), owner=owner, db=db)
+                self.assertIsNotNone(state._metadata(db, reference['name']))
+                raise RuntimeError('rollback fixture')
+        self.assertTrue((self.scope.runtime.state_dir / 'evidence' / reference['name']).exists())
+        with state._database(self.scope) as db:
+            self.assertIsNone(state._metadata(db, reference['name']))
+        with self.assertRaises(state.StateError):
+            api._read(self.scope, reference)
+
+    def test_arbitrary_owner_mapping_and_foreign_connection_cannot_register(self):
+        api = self.fixture.api
+        with self.assertRaises(state.StateError):
+            api._artifact(self.scope, dict(result='unowned'), owner=dict(kind='project', project_id='fixture', task=None))
+        import sqlite3
+        with sqlite3.connect(':memory:') as foreign:
+            with self.assertRaises(state.StateError):
+                api._artifact(self.scope, dict(result='foreign'), owner=self.owner(), db=foreign)
+
+    def test_same_byte_replacement_fails_physical_metadata_validation(self):
+        api = self.fixture.api
+        reference = api._artifact(self.scope, dict(result='physical original'), owner=self.owner())
+        path = self.scope.runtime.state_dir / 'evidence' / reference['name']
+        replacement = path.with_suffix('.copy')
+        replacement.write_bytes(path.read_bytes())
+        replacement.chmod(0o400)
+        replacement.replace(path)
+        with self.assertRaises(state.StateError):
+            api._managed_artifact(self.scope, reference)
+
+
+    def test_read_consumes_only_the_descriptor_validated_before_path_replacement(self):
+        api = self.fixture.api
+        reference = api._artifact(self.scope, dict(result='original'), owner=self.owner())
+        path = self.scope.runtime.state_dir / 'evidence' / reference['name']
+        original = api._managed_artifact
+        original_open = os.open
+        opened = []
+        def track_open(target, *args, **kwargs):
+            if Path(target) == path:
+                opened.append(target)
+            return original_open(target, *args, **kwargs)
+        def replace_after_validation(*args, **kwargs):
+            checked = original(*args, **kwargs)
+            replacement = path.with_suffix('.copy')
+            replacement.write_bytes(path.read_bytes())
+            replacement.chmod(0o400)
+            replacement.replace(path)
+            return checked
+        with patch.object(api, '_managed_artifact', side_effect=replace_after_validation), \
+             patch.object(api.os, 'open', side_effect=track_open):
+            self.assertEqual(api._read(self.scope, reference), dict(result='original'))
+        self.assertEqual(len(opened), 1, 'schema3 consumption reopened a different pathname identity')

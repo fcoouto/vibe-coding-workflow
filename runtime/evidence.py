@@ -3,6 +3,8 @@
 Coordinator decisions describe semantic coverage and existing authorization. They do
 not authenticate review execution or grant permission for a command's effects.
 """
+from contextlib import contextmanager
+from dataclasses import dataclass
 from copy import deepcopy
 import hashlib
 import json
@@ -14,13 +16,14 @@ import selectors
 import shutil
 import signal
 import stat
+import sqlite3
 import subprocess
 import sys
 import time
 import uuid
 
 from runtime import state
-from runtime.startup import MAX_INPUT, StartupError, AcceptedScope, json_object, policy_digest
+from runtime.startup import MAX_INPUT, StartupError, AcceptedScope, json_object, policy_digest, _canonical_freeze, _canonical_plain
 
 VERSION = 1
 MAX_ATTEMPTS = 32
@@ -91,32 +94,237 @@ def _folder(scope, create=False):
     return path
 
 
-def _artifact(scope, value):
+@dataclass(frozen=True)
+class EvidenceAuthorityContext:
+    """Internal observed existing store; request JSON cannot authorize an authority set."""
+    directory: Path
+    database: Path
+    directory_binding: object
+    database_binding: object
+    authority_set: tuple
+    authorization: str
+
+
+@dataclass(frozen=True)
+class _ArtifactOwner:
+    project_id: str
+    task: object
+    pins: object
+    purpose: str = 'task'
+
+
+def _binding(path):
+    info = path.lstat()
+    return dict(device=info.st_dev, inode=info.st_ino)
+
+
+def _evidence_context(scope):
+    path = state._path(scope)
+    state._sidecars(path)
+    authority = dict(directory=str(path.parent), database=str(path),
+        directory_binding=_binding(path.parent), database_binding=_binding(path))
+    return EvidenceAuthorityContext(path.parent, path, _canonical_freeze(authority['directory_binding']),
+        _canonical_freeze(authority['database_binding']), (_canonical_freeze(authority),),
+        'existing accepted Project evidence authority')
+
+
+def _check_context(context, db=None):
+    _require(isinstance(context, EvidenceAuthorityContext), 'Existing authorized evidence context is required')
+    _require(context.database == context.directory / 'runtime.sqlite3' and context.database.is_absolute()
+        and context.database.resolve() == context.database, 'Evidence authority path changed')
+    state._private(context.directory, True)
+    state._sidecars(context.database)
+    _require(_binding(context.directory) == _canonical_plain(context.directory_binding)
+        and _binding(context.database) == _canonical_plain(context.database_binding), 'Evidence authority physical identity changed')
+    if db is not None:
+        names = db.execute('pragma database_list').fetchall()
+        _require(len(names) == 1 and names[0][1:] == ('main', str(context.database)), 'Artifact connection is not its evidence authority')
+        state._schema(db, version=3)
+        _require(db.in_transaction, 'Artifact registration requires its existing transaction')
+
+
+@contextmanager
+def _context_database(context, *, write=False):
+    _check_context(context)
+    db = None
+    try:
+        db = sqlite3.connect(context.database.as_uri() + ('?mode=rw' if write else '?mode=ro'), uri=True, timeout=0.1)
+        db.execute('pragma trusted_schema=off')
+        db.execute('begin immediate' if write else 'begin')
+        _check_context(context, db)
+        yield db
+        _check_context(context, db)
+        if write:
+            db.commit()
+    except sqlite3.Error:
+        raise state.StateError('Evidence authority registration unavailable or locked') from None
+    finally:
+        if db is not None:
+            db.close()
+
+
+def _artifact_owner(scope, task):
+    if state._scope_version(scope) != 3:
+        return None
+    _require(task["pins"]["schema_version"] == 3 and
+        state._physical_identity(task["accepted_identity"]) == state._physical_identity(_canonical_plain(scope.accepted_identity)),
+        "Artifact task physical owner differs from scope")
+    context = _evidence_context(scope)
+    reference = dict(authority=_canonical_plain(context.authority_set[0]), scope_id=state._scope_id(scope),
+        **{key: task[key] for key in ('client', 'session_id', 'task_id')})
+    return _ArtifactOwner(scope.project_id, _canonical_freeze(reference), _canonical_freeze(task['pins']))
+
+
+def _guidance_artifact_owner(scope):
+    if state._scope_version(scope) != 3:
+        return None
+    return _ArtifactOwner(scope.project_id, None, _canonical_freeze(state._pins(scope)), 'guidance')
+
+
+def _registered_owner(scope, context, owner, db):
+    _require(isinstance(owner, _ArtifactOwner) and scope is not None and owner.project_id == scope.project_id,
+             'Artifact requires an explicitly derived existing owner')
+    if owner.task is None:
+        _require(owner.purpose == 'guidance' and _canonical_plain(owner.pins) == state._pins(scope),
+                 'Only existing scope guidance may omit a task owner')
+        return dict(kind='project', project_id=owner.project_id, task=None), None
+    reference = _canonical_plain(owner.task)
+    state._task_reference(reference)
+    _require(reference['authority'] == _canonical_plain(context.authority_set[0])
+        and reference['scope_id'] == state._scope_id(scope), 'Artifact owner authority changed')
+    task = state._task(db, reference['scope_id'], reference['client'], reference['session_id'], reference['task_id'])
+    _require(task is not None and task['pins'] == _canonical_plain(owner.pins), 'Artifact original task owner is unavailable')
+    _require(state._physical_identity(task['accepted_identity']) == state._physical_identity(_canonical_plain(scope.accepted_identity)),
+        'Artifact original task physical owner changed')
+    return dict(kind='project', project_id=owner.project_id, task=reference), reference
+
+
+def _artifact_dependencies(value):
+    references = {}
+    def visit(item):
+        if isinstance(item, dict):
+            if set(item) == {'name', 'digest'}:
+                state._artifact_reference(item)
+                references[_raw(item)] = dict(kind='artifact', reference=item)
+            else:
+                for child in item.values(): visit(child)
+        elif isinstance(item, list):
+            for child in item: visit(child)
+    visit(value)
+    _require(len(references) < 4096, 'Artifact dependency bound exceeded')
+    return list(references.values())
+
+
+def _artifact(scope, value, *, context=None, owner=None, db=None):
+    """Register observed bytes before use; rollback leaves a protected unaccounted orphan.
+
+    Existing schema-1/2 behavior is unchanged. An internal context represents trusted
+    coordinator selection, never authentication of a caller-provided mapping.
+    """
+    if scope is not None and state._scope_version(scope) != 3:
+        raw = _raw(value)
+        _require(len(raw) <= MAX_ARTIFACT, 'Evidence artifact size limit exceeded')
+        path = _folder(scope, create=True) / (uuid.uuid4().hex + '.json')
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)
+        with os.fdopen(descriptor, 'wb') as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        return dict(name=path.name, digest=hashlib.sha256(raw).hexdigest())
+    _require((scope is None) != (context is None), 'Select exactly one existing evidence authority')
+    context = context or _evidence_context(scope)
+    if db is None:
+        with _context_database(context, write=True) as connection:
+            return _artifact_registered(scope, value, context, owner, connection)
+    _check_context(context, db)
+    return _artifact_registered(scope, value, context, owner, db)
+
+
+def _artifact_registered(scope, value, context, owner, db):
+    metadata_owner, task_ref = _registered_owner(scope, context, owner, db)
     raw = _raw(value)
     _require(len(raw) <= MAX_ARTIFACT, 'Evidence artifact size limit exceeded')
-    path = _folder(scope, create=True) / (uuid.uuid4().hex + '.json')
+    folder = context.directory / 'evidence'
+    try:
+        folder.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    state._private(folder, True)
+    parents = {str(folder): _binding(folder), str(context.directory): _binding(context.directory)}
+    path = folder / (uuid.uuid4().hex + '.json')
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)
     with os.fdopen(descriptor, 'wb') as stream:
         stream.write(raw)
         stream.flush()
         os.fsync(stream.fileno())
-    return dict(name=path.name, digest=hashlib.sha256(raw).hexdigest())
+        info = os.fstat(stream.fileno())
+    directory_fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+    digest = hashlib.sha256(raw).hexdigest()
+    dependencies = _artifact_dependencies(value)
+    if task_ref is not None:
+        dependencies.insert(0, dict(kind='task', reference=task_ref))
+    created = state._owner_time()
+    data = dict(version=1, owner=metadata_owner, created_at=created, **{'class': 'detail'}, bytes=len(raw),
+        status='live', closed_at=None, dependencies=dependencies, targets=[], export=None,
+        managed=dict(path=str(path), binding=dict(device=info.st_dev, inode=info.st_ino), parents=parents,
+            sha256=digest, mode=stat.S_IMODE(info.st_mode), bytes=info.st_size))
+    row = (path.name, digest, 'project:' + metadata_owner['project_id'], 'detail', created, None, 'live', len(raw), _raw(data).decode())
+    state._metadata_record(row)
+    _check_context(context, db)
+    _require(all(_binding(Path(parent)) == binding for parent, binding in parents.items())
+        and _binding(path) == data['managed']['binding'], 'Artifact identity changed before registration')
+    db.execute('insert into evidence_metadata values(?,?,?,?,?,?,?,?,?)', row)
+    return dict(name=path.name, digest=digest)
 
 
-def _read(scope, reference):
+def _managed_artifact(scope, reference, *, db=None):
+    """Reobserve stored physical ownership; matching bytes alone cannot adopt a replacement."""
+    context = _evidence_context(scope)
+    if db is None:
+        with _context_database(context) as connection:
+            metadata = state._metadata(connection, reference['name'])
+    else:
+        _check_context(context, db)
+        metadata = state._metadata(db, reference['name'])
+    _require(metadata is not None and metadata['status'] == 'live', 'Artifact accounting unavailable or expired')
+    managed = metadata['managed']
+    path = context.directory / 'evidence' / reference['name']
+    _require(managed['path'] == str(path) and managed['sha256'] == reference['digest'], 'Artifact metadata reference mismatch')
+    _require(all(_binding(Path(parent)) == binding for parent, binding in managed['parents'].items()),
+             'Artifact parent identity changed')
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        raw = stream.read(MAX_ARTIFACT + 1)
+    _require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1
+        and info.st_mode & 0o377 == 0 and len(raw) <= MAX_ARTIFACT
+        and dict(device=info.st_dev, inode=info.st_ino) == managed['binding'] and stat.S_IMODE(info.st_mode) == managed['mode']
+        and info.st_size == managed['bytes'] == len(raw) and hashlib.sha256(raw).hexdigest() == managed['sha256'],
+        'Artifact physical ownership changed')
+    return metadata, raw
+
+
+def _read(scope, reference, *, db=None):
     state._fields(reference, ('name', 'digest'))
     _require(isinstance(reference['name'], str) and re.fullmatch(r'[0-9a-f]{32}\.json', reference['name']),
              'Invalid evidence artifact reference')
     path = _folder(scope) / reference['name']
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        with os.fdopen(descriptor, 'rb') as stream:
-            info = os.fstat(stream.fileno())
-            _require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1
-                     and info.st_mode & 0o377 == 0, 'Evidence artifact is unsafe or mutable')
-            raw = stream.read(MAX_ARTIFACT + 1)
-        _require(len(raw) <= MAX_ARTIFACT and hashlib.sha256(raw).hexdigest() == reference['digest'],
-                 'Evidence artifact integrity failed')
+        if state._scope_version(scope) == 3:
+            _, raw = _managed_artifact(scope, reference, db=db)
+        else:
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(descriptor, 'rb') as stream:
+                info = os.fstat(stream.fileno())
+                _require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1
+                         and info.st_mode & 0o377 == 0, 'Evidence artifact is unsafe or mutable')
+                raw = stream.read(MAX_ARTIFACT + 1)
+            _require(len(raw) <= MAX_ARTIFACT and hashlib.sha256(raw).hexdigest() == reference['digest'],
+                     'Evidence artifact integrity failed')
         # Artifact JSON was generated here, and can exceed the external request bound.
         result = json.loads(raw)
         _require(isinstance(result, dict), 'Invalid evidence artifact')
@@ -165,11 +373,60 @@ def _relative(value):
     return value
 
 
+def _delivery(value):
+    if value is None:
+        return
+    state._fields(value, ('provider', 'repository', 'target', 'pull_request'))
+    for field in value:
+        state._text(value[field], 'linked delivery ' + field)
+
+
+def _linked(value):
+    state._fields(value, ('acceptance', 'delivery', 'companions'))
+    _delivery(value['delivery'])
+    _require(isinstance(value['acceptance'], list) and 0 < len(value['acceptance']) <= 32,
+             'Missing bounded shared acceptance')
+    ids = set()
+    for criterion in value['acceptance']:
+        state._fields(criterion, ('id', 'text'))
+        state._text(criterion['id'], 'shared criterion id', 128)
+        state._text(criterion['text'], 'shared criterion text')
+        _require(criterion['id'] not in ids, 'Duplicate shared criterion')
+        ids.add(criterion['id'])
+    _require(isinstance(value['companions'], list) and len(value['companions']) <= 64,
+             'Invalid bounded companion set')
+    seen = set()
+    for companion in value['companions']:
+        state._fields(companion, ('task', 'delivery'))
+        state._task_reference(companion['task'])
+        _delivery(companion['delivery'])
+        identity = _raw(companion['task'])
+        _require(identity not in seen, 'Duplicate linked task')
+        seen.add(identity)
+
+
+def _linked_projection(task_ref, plan):
+    """Compare approved participants; equality cannot prove scope completeness."""
+    state._task_reference(task_ref)
+    _require(plan.get('version') == 2, 'Linked acceptance requires plan version 2')
+    linked = plan['linked']
+    _linked(linked)
+    _require(all(row['task'] != task_ref for row in linked['companions']), 'Self companion is forbidden')
+    participants = [dict(task=task_ref, delivery=linked['delivery']), *linked['companions']]
+    return deepcopy(dict(acceptance=sorted(linked['acceptance'], key=lambda row: row['id']),
+                         participants=sorted(participants, key=lambda row: _raw(row['task']))))
+
+
 def _plan(value):
     _bounded(value)
     state._fields(value, ('version', 'decision_ref', 'criteria', 'checks', 'reviews', 'security_impact', 'base',
-                         'comparison', 'nontrivial', 'instructions', 'exclusions', 'review_limit'), ('relevant_untracked',))
-    _require(type(value['version']) is int and value['version'] == VERSION, 'Unsupported evidence plan version')
+                         'comparison', 'nontrivial', 'instructions', 'exclusions', 'review_limit'), ('relevant_untracked', 'linked'))
+    _require(type(value['version']) is int and value['version'] in (1, 2), 'Unsupported evidence plan version')
+    if value['version'] == 2:
+        _require('linked' in value, 'Linked plan contract is missing')
+        _linked(value['linked'])
+    else:
+        _require('linked' not in value, 'Legacy plans cannot carry linked acceptance')
     for name in ('decision_ref', 'base'):
         state._text(value[name], name)
     _require(value['comparison'] in {'endpoint', 'merge-base'} and type(value['nontrivial']) is bool,
@@ -369,8 +626,11 @@ def capture_candidate(scope, plan):
 def plan_evidence(scope, request):
     _request(request, ('plan',), ('change_decision_ref',))
     plan = _plan(deepcopy(request['plan']))
+    _require(plan['version'] == 1 or state._scope_version(scope) == 3, 'Linked plans require canonical schema 3')
     with state._database(scope) as db:
         task = _task(db, scope, request)
+        if plan['version'] == 2:
+            _linked_projection(_canonical_plain(_artifact_owner(scope, task).task), plan)
         old = deepcopy(task.get('evidence'))
         if old and _read(scope, old['plan']) != plan:
             state._text(request.get('change_decision_ref'), 'scoped rule-change decision reference')
@@ -384,7 +644,7 @@ def plan_evidence(scope, request):
         history.append({key: old[key] for key in ('plan', 'candidate', 'verification') if key in old} |
                        dict(revision=request['expected_revision'], decision_ref=request.get('change_decision_ref', plan['decision_ref'])))
     candidate = capture_candidate(scope, plan)
-    evidence = dict(version=VERSION, plan=_artifact(scope, plan), candidate=_artifact(scope, candidate),
+    evidence = dict(version=VERSION, plan=_artifact(scope, plan, owner=_artifact_owner(scope, task)), candidate=_artifact(scope, candidate, owner=_artifact_owner(scope, task)),
                     attempts=old['attempts'] if old else [], history=history)
     with state._database(scope, write=True) as db:
         task = _task(db, scope, request)
@@ -564,7 +824,7 @@ def _reserve_check(scope, request):
         _check_admission(scope, db, task, check, claims, delegation._ledger(scope, db))
         generation = db.execute('select generation from checkouts where scope_id=?', (state._scope_id(scope),)).fetchone()[0]
     candidate = capture_candidate(scope, plan)
-    reference = _artifact(scope, candidate)
+    reference = _artifact(scope, candidate, owner=_artifact_owner(scope, task))
     git_directory = delegation._git_directory(scope)
     routing = dict(git_directory=git_directory, git_routing=delegation._git_routing(scope, git_directory))
     attempt = dict(id=uuid.uuid4().hex, kind='check', status='reserved', check_id=check['id'], dispatch_id=request['dispatch_id'], candidate=reference,
@@ -612,7 +872,7 @@ def run_check(scope, request):
     revision = result['task']['revision']
     execution_owner = deepcopy(result['attempt'])
     attempt.update(_execute(scope, check, candidate['tools'][check['id']]))
-    output_ref = _artifact(scope, attempt.pop('private_output'))
+    output_ref = _artifact(scope, attempt.pop('private_output'), owner=_artifact_owner(scope, result["task"]))
     try:
         after = capture_candidate(scope, plan)
         attempt['inputs_changed'] = candidate != after
@@ -631,7 +891,7 @@ def run_check(scope, request):
     attempt['observed_status'] = attempt['status']
     if attempt.get('process_started'):
         attempt['status'] = 'uncertain'
-    attempt['execution'] = _artifact(scope, dict(command=check, tool=candidate['tools'][check['id']], output=output_ref, result=attempt.copy()))
+    attempt['execution'] = _artifact(scope, dict(command=check, tool=candidate['tools'][check['id']], output=output_ref, result=attempt.copy()), owner=_artifact_owner(scope, result["task"]))
     return _finish(scope, request, attempt, revision, execution_owner=execution_owner)
 
 
@@ -697,7 +957,7 @@ def _reconcile_unlinked_check(scope, request):
         status = 'cancelled'
     _require(status in {'passed', 'failed', 'timed-out', 'changed-inputs', 'not-run', 'cancelled'},
              'Unknown observed check result cannot become passing proof')
-    attempt.update(status=status, reconciliation=_artifact(scope, dict(proof=proof, source_digest=request['host_proof']['sha256'])))
+    attempt.update(status=status, reconciliation=_artifact(scope, dict(proof=proof, source_digest=request['host_proof']['sha256']), owner=_artifact_owner(scope, task)))
     return _finish(scope, request, attempt, request['expected_revision'])
 
 
@@ -744,7 +1004,7 @@ def reconcile_check(scope, request):
         status = 'cancelled'
     _require(status in {'passed', 'failed', 'timed-out', 'changed-inputs', 'not-run', 'cancelled'}, 'Unknown check result')
     retained = _artifact(scope, dict(version=2, proof=proof, source_digest=request['host_proof']['sha256'],
-        request_digest=_digest(delegation._semantic(request)), current_candidate=_artifact(scope, candidate)))
+        request_digest=_digest(delegation._semantic(request)), current_candidate=_artifact(scope, candidate, owner=_artifact_owner(scope, task))), owner=_artifact_owner(scope, task))
     attempt.update(status=status, reconciliation=retained)
     with delegation._reservation_write(scope) as db:
         current = delegation._assignment_task(scope, db, request)
@@ -778,11 +1038,11 @@ def _review_admission(scope, task, plan, request):
              'Original review round limit reached; preserve limits and seek a scoped decision')
 
 
-def _review_attempt(scope, record):
+def _review_attempt(scope, record, *, task, db):
     data, review = record['data'], record['body']['review']
     return dict(id=record['id'], kind='review', status='reserved', candidate=data['candidate'],
         candidate_digest=data['candidate']['digest'], plan_digest=review['d5_plan']['digest'],
-        task_name=data['binding']['task_name'], assignment=_artifact(scope, dict(prompt=record['body']['request']['assignment'])),
+        task_name=data['binding']['task_name'], assignment=_artifact(scope, dict(prompt=record['body']['request']['assignment']), owner=_artifact_owner(scope, task), db=db),
         assignment_digest=review['assignment_digest'], coverage=review['coverage'], criteria=review['criteria'],
         job_id=data['job_id'], dispatch_id=record['owner']['dispatch_id'],
         ledger_assignment_digest=data['assignment']['digest'], ledger_claims_digest=_digest(data['claims']))
@@ -921,7 +1181,7 @@ def collect_review(scope, request):
              'D5 review collection differs from the exact D6 lifecycle result')
     report = _report(observed['report'], attempt)
     _require(_digest(capture_candidate(scope, _load_plan(scope, request))) == attempt['candidate_digest'], 'Review candidate changed during collection')
-    attempt.update(status='collected', collected=_artifact(scope, dict(receipt=receipt, report=report)))
+    attempt.update(status='collected', collected=_artifact(scope, dict(receipt=receipt, report=report), owner=_artifact_owner(scope, task)))
     return _finish(scope, request, attempt, request['expected_revision'])
 
 
@@ -980,7 +1240,7 @@ def assess_review(scope, request):
         history = attempt.setdefault('assessment_history', [])
         _require(len(history) < 8, 'Coordinator assessment history bound reached')
         history.append(attempt['assessment'])
-    attempt.update(status='assessed', assessment=_artifact(scope, dict(collected_digest=attempt['collected']['digest'], assessment=assessment)))
+    attempt.update(status='assessed', assessment=_artifact(scope, dict(collected_digest=attempt['collected']['digest'], assessment=assessment), owner=_artifact_owner(scope, task)))
     return _finish(scope, request, attempt, request['expected_revision'])
 
 
@@ -1193,6 +1453,7 @@ def verify_completion(scope, request):
         task = deepcopy(_task(db, scope, request))
         _require('evidence' in task, 'Evidence plan is missing')
         plan = _read(scope, task['evidence']['plan'])
+        _require(plan['version'] == 1, 'Linked acceptance requires linked verification owner integration')
         generation = db.execute('select generation from checkouts where scope_id=?', (state._scope_id(scope),)).fetchone()[0]
     resources, closure, routing = _verification_resources(scope, task, plan)
     def ownership_blockers():
@@ -1232,7 +1493,7 @@ def verify_completion(scope, request):
     verification = dict(version=VERSION, candidate_digest=_digest(candidate), plan_digest=_digest(plan),
         purpose=request['purpose'], generation=generation, blockers=blockers, reuse=reuse, security_impact=security_impact,
         resource_closure=closure, barrier_id=barrier['id'])
-    verification_ref = _artifact(scope, verification)
+    verification_ref = _artifact(scope, verification, owner=_artifact_owner(scope, task))
     with delegation._reservation_write(scope) as db:
         current = _task(db, scope, request)
         actual_generation = db.execute('select generation from checkouts where scope_id=?', (state._scope_id(scope),)).fetchone()[0]
@@ -1245,7 +1506,7 @@ def verify_completion(scope, request):
         if final_blockers != blockers:
             blockers = final_blockers
             verification['blockers'] = blockers
-            verification_ref = _artifact(scope, verification)
+            verification_ref = _artifact(scope, verification, owner=_artifact_owner(scope, task), db=db)
         current['evidence']['verification'] = verification_ref
         if not blockers and request['purpose'] == 'completion':
             current['state'] = 'ready'
@@ -1256,7 +1517,7 @@ def verify_completion(scope, request):
             current['state'] = 'verifying'
         current['revision'] += 1
         reconciliation = _artifact(scope, dict(version=1, kind='synchronous-verification', barrier_id=barrier['id'],
-            verification=verification_ref, revision=current['revision']))
+            verification=verification_ref, revision=current['revision']), owner=_artifact_owner(scope, task), db=db)
         active['data'].update(status='settled', reconciliation=reconciliation, result=dict(outcome='failed' if blockers else 'completed'))
         db.execute('update assignments set data=? where id=?', (_raw(active['data']).decode(), barrier['id']))
         state._save(db, state._scope_id(scope), current)

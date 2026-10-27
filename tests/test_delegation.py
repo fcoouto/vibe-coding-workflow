@@ -225,8 +225,8 @@ class GuidanceTests(unittest.TestCase):
         from runtime import evidence
         original = evidence._artifact
         clock = [1800000000]
-        def prepare(scope, value):
-            reference = original(scope, value)
+        def prepare(scope, value, **artifact_kwargs):
+            reference = original(scope, value, **artifact_kwargs)
             clock[0] += 2
             return reference
         with patch.object(api, "_now", side_effect=lambda: clock[0]):
@@ -901,10 +901,10 @@ class AdmissionTests(unittest.TestCase):
                 (work / '.git').mkdir()
             return original(scope, controls)
         publish = evidence._artifact
-        def artifact(scope, content):
+        def artifact(scope, content, **artifact_kwargs):
             if timing == 'after' and not (work / '.git').exists():
                 (work / '.git').mkdir()
-            return publish(scope, content)
+            return publish(scope, content, **artifact_kwargs)
         if timing == 'before':
             (work / '.git').mkdir()
         with patch.object(self.discover, 'side_effect', discover), patch.object(evidence, '_artifact', side_effect=artifact):
@@ -927,9 +927,9 @@ class AdmissionTests(unittest.TestCase):
         value = self.plan_value()
         value['jobs'][0]['claims'] = [self.path_claim('work/app.py')]
         original = evidence._artifact
-        def publish(scope, content):
+        def publish(scope, content, **artifact_kwargs):
             (work / '.git').mkdir(exist_ok=True)
-            return original(scope, content)
+            return original(scope, content, **artifact_kwargs)
         with patch.object(evidence, '_artifact', side_effect=publish):
             with self.assertRaisesRegex(state.StateError, 'separate repository'):
                 self.plan(value)
@@ -1803,12 +1803,12 @@ class AdmissionTests(unittest.TestCase):
         if change == 'common-alias':
             original = evidence._artifact
             changed = False
-            def publish(owner, value):
+            def publish(artifact_scope, value, **artifact_kwargs):
                 nonlocal changed
-                if owner == scope and not changed:
+                if artifact_scope == scope and not changed:
                     changed = True
                     mutate()
-                return original(owner, value)
+                return original(artifact_scope, value, **artifact_kwargs)
             interception = patch.object(evidence, '_artifact', side_effect=publish)
         else:
             original = self.discover.side_effect
@@ -1918,9 +1918,9 @@ class AdmissionTests(unittest.TestCase):
         from runtime import evidence
         value = self.plan_value()
         original_artifact = evidence._artifact
-        def publish(scope, content):
+        def publish(scope, content, **artifact_kwargs):
             value['limits']['max_attempts'] = 9
-            return original_artifact(scope, content)
+            return original_artifact(scope, content, **artifact_kwargs)
         with patch.object(evidence, '_artifact', side_effect=publish):
             planned = self.plan(value)
         self.assertEqual(evidence._read(self.scope, planned['plan'])['limits']['max_attempts'], 8)
@@ -2886,7 +2886,8 @@ class CanonicalDelegationTests(unittest.TestCase):
             body = evidence._read(f.scope, data['assignment'])
             body['accepted_identity']['membership']['authorization']['reference'] = 'fixture:rebound-authority'
             body['pins']['accepted_scope_digest'] = evidence._digest(body['accepted_identity'])
-            data['assignment'] = evidence._artifact(f.scope, body)
+            task = state._task(db, state._scope_id(f.scope), 'codex', 'parent')
+            data['assignment'] = evidence._artifact(f.scope, body, owner=evidence._artifact_owner(f.scope, task), db=db)
             db.execute('update assignments set data=? where id=?', (json.dumps(data), prepared['attempt_id']))
         with state._database(f.scope) as db:
             row = db.execute('select id,scope_id,client,session_id,task_id,dispatch_id,data from assignments where id=?',
@@ -2982,7 +2983,8 @@ class LifecycleFoundationTests(unittest.TestCase):
             raw=db.execute('select data from assignments where id=?',(prepared['attempt_id'],)).fetchone()[0]
             data=json.loads(raw); body=evidence._read(f.scope,data['assignment'])
             del data['lifecycle']; del body['lifecycle']
-            data['assignment']=evidence._artifact(f.scope,body)
+            task=state._task(db,state._scope_id(f.scope),'codex','parent')
+            data['assignment']=evidence._artifact(f.scope,body,owner=evidence._artifact_owner(f.scope,task),db=db)
             db.execute('update assignments set data=? where id=?',(json.dumps(data),prepared['attempt_id']))
         with patch('runtime.state._owner_time',side_effect=AssertionError('old assignment guessed a date')):
             replay=f.prepare()
