@@ -41,6 +41,359 @@ class JsonBoundaryTests(unittest.TestCase):
                     json_object(invalid, limit=bound)
 
 
+class CanonicalScopeTests(unittest.TestCase):
+    """Synthetic observer facts prove comparison, never native qualification."""
+
+    @staticmethod
+    def digest(value):
+        import hashlib
+        return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                         ensure_ascii=True).encode()).hexdigest()
+
+    def fixture(self, *, umbrella=False, linked=False):
+        b = {"device": 1, "inode": 10}
+        ref = {"reference": "fixture-proof", "sha256": "a" * 64}
+        root = "/project/repo" if umbrella else "/repo"
+        project = "/project" if umbrella else root
+        selected = "/linked" if linked else root
+        common = root + "/.git"
+        private = common + "/worktrees/linked" if linked else common
+        bindings = {k: dict(b) for k in ("root", "primary_root", "git_dir", "git_common_dir")}
+        config = dict(policy_digest="b" * 64, runtime_digest="c" * 64,
+                      runtime=dict(schema_version=3, state_dir="/state/tasks"),
+                      shared_dependencies=[project + "/guide.md"], evidence=[dict(ref)])
+        identity = dict(version=1, project_id="project", repository_id="repository", checkout_id="checkout",
+                        project_root=project, project_binding=b, primary_root=root, repository_root=selected,
+                        git_dir=private, git_common_dir=common, bindings=bindings, client="codex",
+                        membership=dict(included=True, authorization=ref),
+                        configuration={k: config[k] for k in ("policy_digest", "runtime_digest", "runtime")},
+                        shared_policy=[dict(path=project + "/guide.md", sha256="d" * 64)])
+        digest = self.digest(identity)
+        hook = dict(root="/harness", binding=dict(b), source="/harness/hook", sha256="e" * 64)
+        q = dict(client="codex", surface="codex-desktop", version="1", configuration_digest="f" * 64,
+                 hook_owner=hook, accepted_scope_digest=digest, receipt=dict(ref))
+        activation = dict(status="active", qualification="qualified", accepted_scope_digest=digest,
+                          transaction_id="transaction", evidence=[dict(ref)], qualification_binding=q)
+        client = dict(client="codex", configuration=config, activation=activation)
+        repo = dict(repository_id="repository", primary_root=root, git_common_dir=common,
+                    binding={k: dict(b) for k in ("primary_root", "git_common_dir")},
+                    membership="joined", checkouts=[dict(checkout_id="checkout", root=selected,
+                        git_dir=private, binding={k: dict(b) for k in ("root", "git_dir")}, clients=[client])])
+        record = dict(schema_version=2, revision=1, project_id="project", project_root=project,
+                      kind="umbrella" if umbrella else "standalone", project_binding=dict(b),
+                      membership=dict(include=["."], exclude=[], future_join=True, authorization=dict(ref)),
+                      shared_policy=copy.deepcopy(identity["shared_policy"]), repositories=[repo])
+        def target(path, sha):
+            return dict(path=path, binding=dict(b), parents={str(Path(path).parent): dict(b)},
+                        fingerprint=dict(status="read", sha256=sha, bytes=10))
+        authority = dict(path=project + "/" + str(PROJECT_FILE),
+                         target=target(project + "/" + str(PROJECT_FILE), "1" * 64))
+        authority["target"]["parents"][project] = dict(b)
+        observation = dict(project_root=project, project_binding=dict(b), root=selected, primary_root=root,
+                           git_dir=private, git_common_dir=common, binding=copy.deepcopy(bindings),
+                           membership="included", conflicting_authorities=[],
+                           dependencies=[dict(path=project + "/guide.md", status="read",
+                                              target=target(project + "/guide.md", "d" * 64))],
+                           qualification=dict(current={k: copy.deepcopy(q[k]) for k in
+                               ("client", "surface", "version", "configuration_digest", "hook_owner")},
+                               receipt=dict(ref), binding=copy.deepcopy(q),
+                               provenance=dict(kind="trusted-coordinator", **ref)),
+                           runtime_location=dict(path="/state/tasks", existing_ancestors=[
+                               dict(path="/state/tasks", binding=None, kind="absent"),
+                               dict(path="/state", binding=dict(b), kind="directory"),
+                               dict(path="/", binding=dict(b), kind="directory")],
+                               git_probe=dict(cwd="/state", result="outside"),
+                               exclusions=dict(package_root="/package", software_roots=[project, root, selected],
+                                               git_roots=[common, private], plugin_cache_roots=[]),
+                               provenance=dict(kind="runtime-location-observer", **ref)))
+        installed = dict(policy_digest="b" * 64, runtime_digest="c" * 64,
+                         clients=["codex", "claude-code"], package_root="/package")
+        return record, dict(authority=authority, observation=observation, client="codex", installed=installed), identity
+
+    def resolve(self, record, args):
+        from runtime.startup import decode_project_record, resolve_canonical_scope
+        return resolve_canonical_scope(decode_project_record(record), **args)
+
+    def test_canonical_active_identity_is_selected_and_no_io(self):
+        from contextlib import ExitStack
+        for umbrella, linked in ((False, False), (True, False), (True, True), (False, True)):
+            with self.subTest(umbrella=umbrella, linked=linked):
+                record, args, identity = self.fixture(umbrella=umbrella, linked=linked)
+                with ExitStack() as stack:
+                    for name in ("builtins.open", "os.open", "subprocess.run", "pathlib.Path.resolve",
+                                 "pathlib.Path.stat", "pathlib.Path.exists", "pathlib.Path.open",
+                                 "os.stat", "os.lstat", "os.scandir", "os.readlink"):
+                        stack.enter_context(patch(name, side_effect=AssertionError("pure API performed IO")))
+                    result = self.resolve(json.dumps(record).encode(), args)
+                self.assertEqual((result.status, result.reason), ("active", "active"))
+                self.assertEqual(dict(result.scope.accepted_identity) | {"shared_policy": [dict(v) for v in result.scope.accepted_identity["shared_policy"]]}, identity)
+                self.assertEqual(str(result.scope.repository_root), identity["repository_root"])
+                self.assertEqual(result.scope.accepted_scope_digest, self.digest(identity))
+
+    def test_canonical_decoder_rejects_malformed_and_bounded_json(self):
+        from runtime.startup import decode_project_record, StartupError
+        record, _, _ = self.fixture()
+        invalid = [b'{"schema_version":2,"schema_version":2}', b'{"x":NaN}', b'[]', b'\xff',
+                   b'x' * (MAX_INPUT + 1)]
+        for change in (dict(schema_version=True), dict(revision=0), dict(unexpected=1),
+                       dict(project_root="/repo/../repo"), dict(kind="bad")):
+            invalid.append(record | change)
+        bad = copy.deepcopy(record); bad["repositories"] *= 2; invalid.append(bad)
+        bad = copy.deepcopy(record); bad["membership"]["include"] = ["../escape"]; invalid.append(bad)
+        bad = copy.deepcopy(record); bad["repositories"][0]["binding"]["primary_root"]["inode"] = True; invalid.append(bad)
+        for value in invalid:
+            with self.subTest(value=str(value)[:70]), self.assertRaises(StartupError):
+                decode_project_record(value)
+
+    def test_canonical_dependency_observations_are_current_and_selected(self):
+        for change, reason in (("changed", "dependency_changed"), ("missing", "dependency_unobserved"),
+                               ("unknown", "dependency_unobserved"), ("absent", "dependency_unobserved")):
+            record, args, _ = self.fixture()
+            dep = args["observation"]["dependencies"][0]
+            if change == "changed": dep["target"]["fingerprint"]["sha256"] = "0" * 64
+            if change == "missing": args["observation"]["dependencies"] = []
+            if change == "unknown": dep.update(status="unknown", target=None)
+            if change == "absent": dep.update(status="absent", target=dict(dep["target"], binding=None, fingerprint=dict(status="absent")))
+            with self.subTest(change=change):
+                result = self.resolve(record, args)
+                self.assertEqual((result.status, result.reason), ("suspended", reason))
+                self.assertIsNone(result.scope)
+
+    def test_canonical_missing_or_changed_qualification_never_activates(self):
+        for field in (None, "version", "configuration_digest", "hook_owner", "receipt"):
+            record, args, _ = self.fixture()
+            q = args["observation"]["qualification"]
+            if field is None: args["observation"]["qualification"] = None
+            elif field == "hook_owner": q["current"][field]["sha256"] = "0" * 64
+            elif field == "receipt": q[field]["sha256"] = "0" * 64
+            else: q["current"][field] = "changed" if field == "version" else "0" * 64
+            with self.subTest(field=field):
+                result = self.resolve(record, args)
+                self.assertEqual(result.status, "configured" if field is None else "suspended")
+                self.assertIsNone(result.scope)
+
+    def test_canonical_runtime_location_unknown_or_unsafe_never_activates(self):
+        for change, status in (("missing", "configured"), ("unknown", "configured"),
+                               ("bare", "conflict"), ("repository", "conflict"),
+                               ("link", "conflict"), ("package", "conflict"),
+                               ("software", "conflict"), ("git", "conflict"), ("cache", "conflict")):
+            record, args, _ = self.fixture()
+            loc = args["observation"]["runtime_location"]
+            if change == "missing": args["observation"]["runtime_location"] = None
+            elif change in ("unknown", "bare", "repository"): loc["git_probe"]["result"] = change
+            elif change == "link": loc["existing_ancestors"][1]["kind"] = "link"
+            elif change == "package": loc["exclusions"]["package_root"] = "/state"
+            else: loc["exclusions"][{"software": "software_roots", "git": "git_roots", "cache": "plugin_cache_roots"}[change]].append("/state")
+            with self.subTest(change=change):
+                result = self.resolve(record, args)
+                self.assertEqual(result.status, status)
+                self.assertIsNone(result.scope)
+
+    def test_canonical_identity_conflict_precedes_pending_and_changed_proof(self):
+        for key in ("project_binding", "binding", "primary_root", "root", "git_common_dir", "conflicting_authorities"):
+            record, args, _ = self.fixture()
+            obs = args["observation"]
+            if key == "project_binding": obs[key]["inode"] += 1
+            elif key == "binding": obs[key]["root"]["inode"] += 1
+            elif key == "conflicting_authorities": obs[key] = ["/other/authority"]
+            else: obs[key] = "/changed"
+            obs["qualification"] = None
+            with self.subTest(key=key): self.assertEqual(self.resolve(record, args).status, "conflict")
+
+    def test_canonical_states_exclusions_removal_and_pending_client(self):
+        for change, want in (("excluded", "outside"), ("removed", "outside"), ("client", "pending"),
+                             ("pending", "pending"), ("configured", "configured"), ("suspended", "suspended")):
+            record, args, _ = self.fixture()
+            entry = record["repositories"][0]["checkouts"][0]["clients"][0]
+            if change == "excluded": record["membership"]["exclude"] = ["."]
+            elif change == "removed": record["repositories"][0]["membership"] = "removed"
+            elif change == "client": args["client"] = "claude-code"
+            else: entry["activation"]["status"] = change
+            with self.subTest(change=change): self.assertEqual(self.resolve(record, args).status, want)
+
+    def test_canonical_snapshots_reject_caller_mutation_and_ignore_unrelated_join(self):
+        from runtime.startup import decode_project_record, resolve_canonical_scope
+        record, args, _ = self.fixture(umbrella=True)
+        decoded = decode_project_record(record)
+        first = resolve_canonical_scope(decoded, **args)
+        record["repositories"][0]["checkouts"][0]["root"] = "/attacker"
+        args["observation"]["qualification"]["provenance"]["reference"] = "changed"
+        self.assertEqual(str(first.scope.repository_root), "/project/repo")
+        self.assertEqual(first.scope.qualification_provenance["reference"], "fixture-proof")
+        with self.assertRaises(TypeError): first.scope.accepted_identity["project_id"] = "attacker"
+        record, args, _ = self.fixture(umbrella=True)
+        second_repo = copy.deepcopy(record["repositories"][0])
+        second_repo.update(repository_id="other-repo", primary_root="/project/other", git_common_dir="/project/other/.git")
+        second_repo["checkouts"][0].update(checkout_id="other-checkout", root="/project/other", git_dir="/project/other/.git")
+        second_repo["checkouts"][0]["clients"] = []
+        record["repositories"].append(second_repo)
+        record["shared_policy"].append(dict(path="/project/other-guide", sha256="0" * 64))
+        record["revision"] += 1
+        second = self.resolve(record, args)
+        self.assertEqual(second.status, "active")
+        self.assertEqual(first.scope.accepted_scope_digest, second.scope.accepted_scope_digest)
+
+    def test_canonical_incomplete_provenance_and_runtime_chain_stay_non_active(self):
+        for change in ("qualification-provenance", "qualification-binding", "runtime-provenance", "chain"):
+            record, args, _ = self.fixture()
+            obs = args["observation"]
+            if change == "qualification-provenance": obs["qualification"]["provenance"] = None
+            elif change == "qualification-binding": obs["qualification"]["binding"] = None
+            elif change == "runtime-provenance": obs["runtime_location"]["provenance"] = None
+            else: obs["runtime_location"]["existing_ancestors"].pop()
+            with self.subTest(change=change):
+                self.assertEqual(self.resolve(record, args).status, "configured")
+
+    def test_canonical_runtime_mismatch_precedes_exclusion_and_dependency_gap(self):
+        record, args, _ = self.fixture()
+        record["membership"]["exclude"] = ["."]
+        record["repositories"][0]["checkouts"][0]["clients"][0]["configuration"]["runtime"]["state_dir"] = "/other-state"
+        args["observation"]["dependencies"] = []
+        self.assertEqual(self.resolve(record, args).status, "conflict")
+
+    def test_canonical_target_and_nested_invalid_types_are_sanitized(self):
+        from runtime.startup import StartupError, decode_project_record
+        record, args, _ = self.fixture()
+        bad = copy.deepcopy(record)
+        bad["repositories"][0]["checkouts"][0]["clients"][0]["configuration"]["shared_dependencies"] = [[]]
+        with self.assertRaises(StartupError): decode_project_record(bad)
+        args["authority"]["target"]["parents"] = {"/elsewhere": {"device": 1, "inode": 2}}
+        with self.assertRaises(StartupError): self.resolve(record, args)
+
+    def test_canonical_future_primary_is_pending_excluded_or_outside_without_inheritance(self):
+        for primary, exclude, expected in (("/project/new", [], "pending"),
+                                            ("/project/new", ["new"], "outside"),
+                                            ("/elsewhere/new", [], "outside")):
+            record, args, _ = self.fixture(umbrella=True)
+            record["membership"]["exclude"] = exclude
+            obs = args["observation"]
+            obs.update(root=primary, primary_root=primary, git_dir=primary + "/.git", git_common_dir=primary + "/.git")
+            obs["binding"] = {k: dict(device=1, inode=99) for k in obs["binding"]}
+            with self.subTest(primary=primary, exclude=exclude):
+                self.assertEqual(self.resolve(record, args).status, expected)
+        obs["primary_root"] = "/project/copied"
+        obs["binding"]["primary_root"] = dict(device=1, inode=10)
+        self.assertEqual(self.resolve(record, args).status, "conflict")
+
+    def test_canonical_unsafe_location_precedes_future_member_pending(self):
+        record, args, _ = self.fixture(umbrella=True)
+        obs = args["observation"]
+        obs.update(root="/project/new", primary_root="/project/new", git_dir="/project/new/.git", git_common_dir="/project/new/.git")
+        obs["binding"] = {k: dict(device=1, inode=99) for k in obs["binding"]}
+        obs["runtime_location"]["git_probe"]["result"] = "bare"
+        self.assertEqual(self.resolve(record, args).status, "conflict")
+
+
+    def test_canonical_authority_parent_identity_cannot_be_replaced(self):
+        record, args, _ = self.fixture()
+        args["authority"]["target"]["parents"]["/repo"] = dict(device=1, inode=88)
+        self.assertEqual(self.resolve(record, args).status, "conflict")
+
+
+    def test_canonical_absent_checkout_is_pending_without_reusing_moved_identity(self):
+        record, args, _ = self.fixture()
+        args["observation"]["root"] = "/new-worktree"
+        args["observation"]["binding"]["root"]["inode"] = 99
+        self.assertEqual(self.resolve(record, args).status, "pending")
+
+
+    def test_canonical_different_clients_have_distinct_task_projection_same_checkout(self):
+        record, args, identity = self.fixture()
+        first = self.resolve(record, args)
+        other = copy.deepcopy(record["repositories"][0]["checkouts"][0]["clients"][0])
+        identity["client"] = "claude-code"
+        other["client"] = "claude-code"
+        digest = self.digest(identity)
+        other["activation"]["accepted_scope_digest"] = digest
+        binding = other["activation"]["qualification_binding"]
+        binding.update(client="claude-code", accepted_scope_digest=digest)
+        record["repositories"][0]["checkouts"][0]["clients"].append(other)
+        args["client"] = "claude-code"
+        qualification = args["observation"]["qualification"]
+        qualification["binding"] = copy.deepcopy(binding)
+        qualification["current"]["client"] = "claude-code"
+        result = self.resolve(record, args)
+        self.assertEqual(result.status, "active")
+        self.assertEqual(first.scope.checkout_id, result.scope.checkout_id)
+        self.assertNotEqual(first.scope.accepted_scope_digest, result.scope.accepted_scope_digest)
+        self.assertEqual(result.scope.accepted_identity["client"], "claude-code")
+
+    def test_canonical_missing_linked_checkout_cannot_bypass_exclusion_or_common_identity(self):
+        for change, want in (("exclude", "outside"), ("common", "conflict")):
+            record, args, _ = self.fixture()
+            obs = args["observation"]
+            obs["root"] = "/new-linked"
+            obs["binding"]["root"]["inode"] = 99
+            if change == "exclude": record["membership"]["exclude"] = ["."]
+            else: obs["binding"]["git_common_dir"]["inode"] = 99
+            with self.subTest(change=change): self.assertEqual(self.resolve(record, args).status, want)
+
+    def test_canonical_one_directory_cannot_have_inconsistent_record_bindings(self):
+        from runtime.startup import StartupError, decode_project_record
+        record, _, _ = self.fixture()
+        record["repositories"][0]["checkouts"][0]["binding"]["root"]["inode"] = 77
+        with self.assertRaises(StartupError): decode_project_record(record)
+
+    def test_canonical_immutable_observer_inputs_are_supported(self):
+        from types import MappingProxyType
+        def immutable(value):
+            if isinstance(value, dict): return MappingProxyType({k: immutable(v) for k, v in value.items()})
+            if isinstance(value, list): return tuple(immutable(v) for v in value)
+            return value
+        record, args, _ = self.fixture()
+        self.assertEqual(self.resolve(immutable(record), immutable(args)).status, "active")
+
+
+    def test_canonical_read_authority_requires_its_immediate_parent(self):
+        from runtime.startup import StartupError
+        record, args, _ = self.fixture()
+        del args["authority"]["target"]["parents"]["/repo/.vibe-coding-workflow"]
+        with self.assertRaises(StartupError): self.resolve(record, args)
+
+    def test_canonical_dependency_parent_must_match_known_directory_identity(self):
+        record, args, _ = self.fixture()
+        args["observation"]["dependencies"][0]["target"]["parents"]["/repo"]["inode"] = 999
+        result = self.resolve(record, args)
+        self.assertEqual((result.status, result.reason), ("suspended", "dependency_changed"))
+
+    def test_canonical_observations_cannot_disagree_on_an_unregistered_parent(self):
+        record, args, _ = self.fixture()
+        args["authority"]["target"]["parents"]["/"] = dict(device=1, inode=999)
+        args["observation"]["dependencies"][0]["target"]["parents"]["/"] = dict(device=1, inode=10)
+        result = self.resolve(record, args)
+        self.assertEqual((result.status, result.reason), ("suspended", "dependency_changed"))
+
+    def test_canonical_valid_nested_dependency_parent_chain_is_active(self):
+        record, args, identity = self.fixture()
+        path = "/repo/shared/guides/guide.md"
+        record["shared_policy"][0]["path"] = path
+        entry = record["repositories"][0]["checkouts"][0]["clients"][0]
+        entry["configuration"]["shared_dependencies"] = [path]
+        identity["shared_policy"][0]["path"] = path
+        digest = self.digest(identity)
+        entry["activation"]["accepted_scope_digest"] = digest
+        entry["activation"]["qualification_binding"]["accepted_scope_digest"] = digest
+        obs = args["observation"]
+        obs["qualification"]["binding"]["accepted_scope_digest"] = digest
+        dep = obs["dependencies"][0]
+        dep["path"] = dep["target"]["path"] = path
+        dep["target"]["parents"].update({"/repo/shared": dict(device=1, inode=20),
+                                          "/repo/shared/guides": dict(device=1, inode=30)})
+        result = self.resolve(record, args)
+        self.assertEqual(result.status, "active")
+        self.assertEqual(result.scope.accepted_scope_digest, digest)
+
+
+    def test_canonical_selected_pins_and_installed_configuration_cannot_be_refreshed(self):
+        for change in ("policy", "runtime", "stored-scope", "installed-client"):
+            record, args, _ = self.fixture()
+            if change == "stored-scope":
+                record["repositories"][0]["checkouts"][0]["clients"][0]["activation"]["accepted_scope_digest"] = "0" * 64
+            elif change == "installed-client": args["installed"]["clients"] = []
+            else: args["installed"][change + "_digest"] = "0" * 64
+            with self.subTest(change=change): self.assertEqual(self.resolve(record, args).status, "suspended")
+
+
 class StartupTests(unittest.TestCase):
     client = "codex"
     adapter = codex
@@ -210,6 +563,14 @@ class StartupTests(unittest.TestCase):
             with self.subTest(update=update):
                 self.enroll(**update)
                 self.assert_diagnostic(self.invoke())
+
+    def test_complete_canonical_record_still_rejected_by_production_startup(self):
+        record, _, _ = CanonicalScopeTests().fixture()
+        path = self.repo / PROJECT_FILE
+        path.parent.mkdir()
+        path.write_text(json.dumps(record))
+        self.assert_diagnostic(self.invoke())
+
 
     def test_missing_broken_link_and_special_records_do_not_hang(self):
         path = self.enroll()
