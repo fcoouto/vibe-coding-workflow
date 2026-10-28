@@ -5,6 +5,7 @@ from datetime import datetime
 import fcntl
 import hashlib
 import os
+from pathlib import Path
 import re
 import stat
 import time
@@ -234,7 +235,7 @@ def _locked(scope, request, create=False):
         raise state.StateError("Guidance cache is unavailable, unsafe or locked") from None
 
 
-def _snapshot(scope, folder, request):
+def _snapshot(scope, folder, request, *, context=None, db=None):
     raw = _read_bytes(folder / (request["client_surface"] + ".json")) if folder else None
     prior = hashlib.sha256(raw).hexdigest() if raw is not None else "missing"
     if raw is None:
@@ -246,10 +247,110 @@ def _snapshot(scope, folder, request):
         guidance = stored["guidance"]
         _require(isinstance(guidance, dict), "Invalid guidance snapshot")
         _guidance(guidance, dict(client_surface=request["client_surface"], applicability=guidance.get("applicability")))
-        _require(evidence._read(scope, stored["snapshot_ref"]) == guidance, "Guidance snapshot evidence changed")
+        actual=(evidence._read(scope,stored['snapshot_ref']) if context is None else
+            evidence._read(None,stored['snapshot_ref'],context=context,db=db))
+        _require(actual == guidance, "Guidance snapshot evidence changed")
         return guidance, stored["snapshot_ref"], prior
     except (state.StateError, ValueError, TypeError, RecursionError):
         return None, None, prior
+
+
+def _closure_guidance(context,db,records):
+    """Read original native guidance plus its current cache; never acquire cache locks."""
+    from runtime import changes
+    references={};surfaces=set();files={};folder=context.directory/'model-guidance';retained=[];native=[]
+    def source(reference):
+        value=evidence._read(None,reference,context=context,db=db)
+        _guidance(value,dict(client_surface=value.get('client_surface'),applicability=value.get('applicability')))
+        metadata=state._metadata(db,reference['name'])
+        _require(metadata is not None and metadata['class']=='detail' and metadata['owner']['task'] is None,
+            'Guidance requires original registered scope ownership')
+        result=dict(reference=reference,created_at=metadata['created_at'],owner=metadata['owner'],guidance=value)
+        references[evidence._raw(reference)]=result
+        return result
+    def assignment(body,reference,created_at,request_digest):
+        discovery=evidence._read(None,body['discovery'],context=context,db=db)
+        guidance=body['guidance'];state._fields(guidance,('snapshot_ref','snapshot_digest','checked_at','freshness'))
+        surface=body['binding']['client_surface'];original=source(guidance['snapshot_ref']);surfaces.add(surface)
+        _guidance(original['guidance'],dict(client_surface=surface,applicability=dict(client_version=discovery['native_version'],
+            capability_fingerprint=discovery['capability_digest'])))
+        _require(guidance['snapshot_digest']==guidance['snapshot_ref']['digest'] and guidance['checked_at']==original['guidance']['checked_at'],
+            'Original native guidance correspondence changed')
+        return dict(reference=reference,created_at=created_at,request_digest=request_digest,guidance=guidance,
+            discovery={key:discovery[key] for key in ('client_surface','native_version','capability_digest')},
+            binding={key:body['binding'][key] for key in ('client_surface','native_version','parent_session_id','task_name')},
+            source_created_at=original['created_at'])
+    for record in records:
+        if record['data']['role'] not in NATIVE_ROLES:continue
+        reference=dict(authority=evidence._canonical_plain(context.authority_set[0]),id=record['id'],owner=record['owner'],assignment=record['data']['assignment'])
+        native.append(assignment(record['body'],reference,record['data']['lifecycle']['created_at'],record['data']['request_digest']))
+    rows=db.execute("select name,digest,owner_key,class,created_at,closed_at,status,bytes,data from evidence_metadata where class='compact' and status='live' order by name limit 4097").fetchall()
+    _require(len(rows)<=4096,'Retained guidance ownership support exceeds bound')
+    owners=set()
+    for row in rows:
+        metadata=state._metadata_record(row);owner=metadata['owner'].get('task')
+        if owner is None:continue
+        _require(owner['authority']==evidence._canonical_plain(context.authority_set[0]),'Foreign retained guidance owner remains protected')
+        marker=state._retired(db,'task',{key:owner[key] for key in ('scope_id','client','session_id','task_id')})
+        if marker is None:continue
+        owner_key=evidence._raw(owner);_require(owner_key not in owners,'Retained guidance owner has ambiguous compact receipts');owners.add(owner_key)
+        compact=evidence._read(None,dict(name=row[0],digest=row[1]),context=context,db=db)
+        _require(compact.get('kind')=='task-closure' and compact['identity']==owner and not marker['evidence_expired']
+            and marker['pins_digest']==state._digest(compact['pins']) and marker['created_at']==compact['created_at']==metadata['created_at'],
+            'Retained scope-guidance receipt differs from original task identity/age')
+        changes._check_stopped_certificate(context,db,compact['stopped'])
+        _require(len(compact.get('native_guidance',[]))==sum(item['role'] in NATIVE_ROLES for item in compact['stopped'].get('assignments',[])),
+            'Retained native guidance coverage differs from complete issued assignments')
+        markers=[]
+        for certificate in compact['stopped'].get('assignments',[]):
+            ref=certificate['reference'];assignment_marker=state._retired_assignment(db,ref['id']);markers.append([ref['id'],assignment_marker])
+            if certificate['role'] not in NATIVE_ROLES:continue
+            body=evidence._read(None,ref['assignment'],context=context,db=db)
+            _require(body['owner']==ref['owner'] and body['role']==certificate['role'] and body['pins']==compact['pins'] and body['accepted_identity']==compact['accepted_identity']
+                and body['lifecycle']['created_at']==certificate['created_at'] and evidence._digest(body['request'])==certificate['request_digest'],
+                'Retained native assignment differs from issued owner/pins/request/age')
+            for original in (ref['assignment'],body['discovery'],body['guidance']['snapshot_ref']):
+                source_metadata=state._metadata(db,original['name'])
+                _require(source_metadata is not None,'Retained native guidance source metadata is unavailable')
+                projected=dict(reference=original,created_at=source_metadata['created_at'],owner=source_metadata['owner'],
+                    bytes=source_metadata['bytes'],unit='bytes')
+                _require(original in compact['artifacts'] and projected in compact['sources'],
+                    'Retained native guidance source differs from original managed provenance/age')
+            actual=assignment(body,ref,certificate['created_at'],certificate['request_digest'])
+            _require(actual in compact.get('native_guidance',[]),'Retained native guidance projection differs from actual original assignment')
+        for original in compact.get('scope_guidance',[]):
+            actual=source(original['reference'])
+            _require(actual==original and original['reference'] in compact['artifacts'],
+                'Retained scope guidance differs from original source projection')
+        retained.append(dict(reference=dict(name=row[0],digest=row[1]),identity=owner,marker=marker,assignments=markers))
+    if folder.exists():
+        state._private(folder,True);entries=list(folder.iterdir());_require(len(entries)<=4096,'Guidance cache source bound exceeded')
+        surfaces.update(path.name[:-5] for path in entries if path.name.endswith('.json') and not path.name.endswith('.control.json'))
+    if not surfaces:return dict(references=[],sources=[],native=native,retained=retained,files={},folder=None)
+    state._private(folder,True);folder_binding=evidence._binding(folder)
+    for surface in sorted(surfaces):
+        _require(re.fullmatch(r'[a-z][a-z0-9-]{0,63}',surface),'Invalid original guidance surface')
+        paths=[folder/(surface+suffix) for suffix in ('.json','.control.json')]
+        _require(all(os.path.lexists(path) for path in paths),'Current guidance cache/control is missing')
+        before={str(path):evidence._closure_file_stat(path) for path in paths}
+        raw={str(path):_read_bytes(path) for path in paths}
+        control=_control(folder,surface)
+        _require(control['claim'] is None and control['last_attempt'] is not None,'Guidance refresh remains incomplete')
+        current,reference,_=_snapshot(None,folder,dict(client_surface=surface),context=context,db=db)
+        _require(current is not None and reference is not None,'Current guidance cache is missing or corrupt')
+        _require(control['generation']>0,'Current guidance control generation is unavailable')
+        # Failed refresh keys bind attempted applicability, not the preserved historical snapshot.
+        if control['last_attempt']['outcome']=='verified':
+            _require(control['last_attempt']['key']==_key(dict(applicability=current['applicability']),
+                hashlib.sha256(raw[str(paths[0])]).hexdigest(),True),'Current guidance control/source correspondence changed')
+        _require(all(evidence._closure_file_stat(path)==before[str(path)] and _read_bytes(path)==raw[str(path)] for path in paths)
+            and evidence._binding(folder)==folder_binding,'Guidance cache changed during owner observation')
+        source(reference)
+        for path in paths:
+            files[str(path)]=dict(stat=before[str(path)],digest=hashlib.sha256(raw[str(path)]).hexdigest())
+    sources=sorted(references.values(),key=evidence._raw)
+    return dict(references=sorted([value['reference'] for value in sources],key=evidence._raw),sources=sources,native=native,
+        retained=retained,files=files,folder=dict(path=str(folder),binding=folder_binding))
 
 
 def _trigger(value):
@@ -1539,14 +1640,49 @@ def _assignment(scope, db, request, *, roles=('worker',)):
     return record
 
 
+def _closure_assignments(context,db,task_ref,task,certificate):
+    """Complete original membership, independently stopped and reconciled per role."""
+    from runtime import changes
+    records=[record for record in _ledger(None,db,context=context) if all(
+        record['owner'][key]==task_ref[key] for key in ('scope_id','client','session_id','task_id'))]
+    issued=certificate.get('assignments',[])
+    _require(len(issued)==len(records) and len({item['reference']['id'] for item in issued})==len(issued),
+        'Stopped assignment certificate membership differs from complete original owners')
+    actual=[changes._assignment_certificate(context,db,task,record) for record in records]
+    _require(sorted(actual,key=evidence._raw)==sorted(issued,key=evidence._raw),
+        'Stopped assignments differ from exact current immutable reconciliation support')
+    return records
+
+
 def retire_settled(db, task_ref, closure):
-    """No assignment may disappear until its actual owner certificate is integrated."""
+    """Insert exact certified assignment markers before atomically removing their rows."""
     context=evidence._existing_authority_context(task_ref['authority'],db=db)
-    evidence._check_closure_observation(context,db,task_ref,closure)
-    rows=db.execute('select id from assignments where scope_id=? and client=? and session_id=? and task_id=?',
-        tuple(task_ref[k] for k in ('scope_id','client','session_id','task_id'))).fetchall()
-    _require(not rows,'Assignment retirement requires retained exact stopped/reconciliation certificate integration')
-    return 0
+    facts=evidence._check_closure_observation(context,db,task_ref,closure)
+    records=_closure_assignments(context,db,task_ref,facts['task'],facts['certificate'])
+    task=state._task(db,task_ref['scope_id'],task_ref['client'],task_ref['session_id'],task_ref['task_id'])
+    lifetime=state._task_lifecycle(task)
+    _require(lifetime is not None and lifetime['safe_closed_at'] is not None
+        and evidence._read(None,lifetime['compact'],context=context,db=db)==evidence._closure_content(facts),
+        'Assignment retirement requires exact retained safe closure')
+    retired_at=state._owner_time()
+    _require(retired_at>=lifetime['safe_closed_at'],'Assignment retirement clock regressed')
+    markers=[]
+    for record in records:
+        owner=record['owner'];data=record['data']
+        _require(state._retired(db,'assignment',owner) is None and state._retired_assignment(db,record['id']) is None,
+            'Live assignment conflicts with retained marker')
+        marker=dict(version=1,identity=owner,pins_digest=state._digest(record['body']['pins']),request_digest=data['request_digest'],
+            created_at=data['lifecycle']['created_at'],retired_at=retired_at,outcome=data['result']['outcome'],
+            evidence_expired=False,assignment_id=record['id'])
+        digest=state._retired_identity('assignment',owner);raw=evidence._raw(marker).decode()
+        state._retired_record('assignment',digest,raw,record['id'])
+        db.execute('insert into retired_identities values(?,?,?,?)',('assignment',digest,raw,record['id']))
+        markers.append((record['id'],marker))
+    for record in records:db.execute('delete from assignments where id=?',(record['id'],))
+    evidence._check_closure_observation(context,db,task_ref,closure,assignments_retired=True)
+    _require(all(state._retired_assignment(db,identity)==marker for identity,marker in markers),
+        'Assignment marker changed before local retirement')
+    return len(records)
 
 
 def _assignment_task(scope, db, request, *, revision=True):
@@ -1592,9 +1728,10 @@ def _worker_report(scope, record, result):
         report['status'] in {'completed', 'blocked', 'pending-decision'}, 'Worker report binding is invalid')
     for field in ('changed_paths', 'evidence', 'limitations'):
         _strings(report[field], 'worker report ' + field, maximum=64, limit=4096)
+    root=scope.repository_root if scope is not None else Path(state._accepted_identity(record['body']['accepted_identity'])['repository_root'])
     for name in report['changed_paths']:
         evidence._relative(name)
-        claim = _claims([dict(kind='path', key=str(scope.repository_root / name), mode='write')])[0]
+        claim = _claims([dict(kind='path', key=str(root / name), mode='write')])[0]
         _require(name != '.' and any(_covers(held, claim) and held['mode'] == 'write' for held in data['claims']),
                  'Worker report names an unreserved mutable path')
     return report

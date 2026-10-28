@@ -376,15 +376,82 @@ class _ClosureOwner:
 
 
 def _closure_task_artifacts(task):
-    refs=[]
-    if 'retirement' in task:refs.append(task['retirement']['proof'])
-    evidence=task.get('evidence',{})
-    for field in ('plan','candidate','verification'):
-        if field in evidence:refs.append(evidence[field])
-    _require(not evidence.get('attempts') and not evidence.get('history') and 'linked_verification' not in evidence,
-        'Collected assignment or linked proof requires its complete owner certificate integration')
-    _require('delegation' not in task,'Delegation closure requires original assignment certificate integration')
-    return refs
+    _require('linked_verification' not in task.get('evidence',{}),
+        'Linked closure requires exact stopped participant/delivery composition')
+    return [edge['reference'] for edge in _artifact_dependencies({key:value for key,value in task.items() if key!='lifecycle'})]
+
+
+def _closure_assignment_projection(context,db,task,records):
+    """Project original managed facts, never native transcripts or inferred usage."""
+    from runtime import delegation
+    read=lambda ref:_read(None,ref,context=context,db=db)
+    outcomes=[];numerical=[];reviews=[];workers=[]
+    attempts=task.get('evidence',{}).get('attempts',[])
+    for attempt in attempts:
+        record=delegation._linked_attempt(None,_task_scope_id(task),task,attempt,records,context=context,db=db)
+        _require(record is not None and record['data']['status']=='settled',
+            'Historical evidence attempt lacks its exact settled owner certificate')
+        _require(attempt['status'] not in {'reserved','running','uncertain'},'Unresolved evidence attempt remains protected')
+        outcome=dict(attempt=deepcopy(attempt),assignment_id=record['id'],outcome=record['data']['result']['outcome'])
+        if attempt['kind']=='check' and attempt.get('execution'):
+            source=attempt['execution'];execution=read(source);result=execution['result']
+            metadata=state._metadata(db,source['name'])
+            _require(metadata is not None and metadata['owner']['task']==dict(authority=_canonical_plain(context.authority_set[0]),
+                scope_id=_task_scope_id(task),**{key:task[key] for key in ('client','session_id','task_id')}),
+                'Execution needs its exact original managed owner/age/provenance')
+            for field,unit in (('exit_code','exit-code'),('output_bytes','bytes')):
+                value=result.get(field)
+                _require(value==attempt.get(field) and (type(value) is int or field=='exit_code' and value is None),
+                    'Execution numerical fact differs from original attempt')
+                if field=='output_bytes':_require(value>=0,'Invalid original output byte count')
+                numerical.append(dict(field=field,value=value,unit=unit,source=source,created_at=metadata['created_at'],
+                    assignment_id=record['id'],owner=record['owner'],status=result['status'],
+                    semantics='bounded-observed-output' if field=='output_bytes' else 'observed-process-exit'))
+            outcome['execution']=dict(command=execution['command'],tool=execution['tool'],output=execution['output'],
+                result={k:v for k,v in result.items() if k!='private_output'})
+        if attempt['kind']=='review':
+            review=dict(assignment_id=record['id'],status=attempt['status'],coverage=attempt['coverage'],criteria=attempt['criteria'])
+            if 'collected' in attempt:
+                collected=read(attempt['collected']);_report(collected['report'],attempt)
+                if record['data']['result']['outcome']=='completed':
+                    _require(_review_quality_matches(None,attempt,record,collected,context=context),
+                        'Completed historical review lacks its exact bound native report')
+                review.update(source=attempt['collected'],report=collected['report'],receipt=collected['receipt'])
+            assessments=[]
+            for source in attempt.get('assessment_history',[])+([attempt['assessment']] if 'assessment' in attempt else []):
+                assessed=read(source)
+                state._fields(assessed,('collected_digest','assessment'))
+                _require(assessed['collected_digest']==attempt['collected']['digest'],'Review assessment source changed')
+                assessment=assessed['assessment']
+                state._fields(assessment,('coverage','criteria','qualification','independence','semantic_coverage','dispositions','decision_refs'),
+                    ('rechecked_findings',))
+                _require(isinstance(assessment['dispositions'],list) and len(assessment['dispositions'])<=64,
+                    'Original review finding dispositions are unavailable')
+                finding_ids={finding['id'] for finding in collected['report']['findings']};seen=set()
+                for disposition in assessment['dispositions']:
+                    state._fields(disposition,('finding_id','status','reference'))
+                    _require(disposition['finding_id'] in finding_ids and disposition['finding_id'] not in seen
+                        and disposition['status'] in {'resolved','accepted','open'},'Original finding disposition changed')
+                    state._text(disposition['reference'],'original finding disposition reference');seen.add(disposition['finding_id'])
+                assessments.append(dict(source=source,assessment=assessed['assessment']))
+            review['assessments']=assessments;reviews.append(review)
+        outcomes.append(outcome)
+    for record in records:
+        if record['data']['role'] not in {'worker','review'}:continue
+        history=delegation._worker_history(None,record['data']['observation'],context=context)
+        if record['data']['role']=='worker':
+            for _,value in history:
+                if value['report'] is not None:
+                    _require(delegation._worker_report(None,record,value['result'])==value['report'],
+                        'Historical worker report differs from actual bound result')
+        workers.append(dict(assignment_id=record['id'],role=record['data']['role'],outcome=record['data']['result']['outcome'],
+            observations=[dict(source=ref,status=value['status'],report=value['report'],receipt=value['receipt'],
+                error=value['error'],conflict=value['conflict'],revision=value['revision']) for ref,value in history]))
+    verifications=[]
+    for entry in task.get('evidence',{}).get('history',[])+[task.get('evidence',{})]:
+        if 'verification' in entry:
+            verifications.append(dict(source=entry['verification'],result=read(entry['verification'])))
+    return dict(outcomes=outcomes,reviews=reviews,workers=workers,numerical=numerical,verifications=verifications)
 
 
 def _lifecycle_requirements(context, roots, *, db):
@@ -434,7 +501,8 @@ def _lifecycle_requirements(context, roots, *, db):
 
 
 def _closure_file_stat(path):
-    info=path.lstat()
+    try:info=path.lstat()
+    except OSError:raise state.StateError('Closure source is unavailable') from None
     _require(stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode),'Closure source is not a physical file/directory')
     return [info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_nlink,info.st_size,info.st_mtime_ns,info.st_ctime_ns]
 
@@ -467,16 +535,33 @@ def _closure_facts(context, task_ref, db, recovery, *, recovery_files=None):
     _require(recovery['complete'] is True and not recovery['blockers'] and not recovery['discovered_authorities']
         and recovery['authorities']==[authority],'Recovery current source coverage is incomplete or foreign')
     observed=state.inspect_dependencies(db,task_ref);task=observed['task']
-    _require(not observed['blockers'],'; '.join(observed['blockers']))
+    assignment_blocker='Assignment body requires original task; exact assignment certificate integration is required'
+    _require(not [blocker for blocker in observed['blockers'] if blocker!=assignment_blocker],'; '.join(observed['blockers']))
     _require(task['pins']['schema_version']==3 and task['state']=='cancelled' and task.get('retirement')
         and task.get('lifecycle'),'Closure needs a dated actually cancelled stopped owner')
     certificate=changes._stopped_certificate(context,db,dict(reference=task_ref,pins=task['pins']))
     _require(not certificate['proof']['attempt_ids'],'Stopped unresolved attempts require assignment certificate integration')
-    delegation._ledger(None,db,context=context)
+    records=delegation._closure_assignments(context,db,task_ref,task,certificate)
+    all_records=delegation._ledger(None,db,context=context)
+    guidance=delegation._closure_guidance(context,db,all_records)
+    projection=_closure_assignment_projection(context,db,task,records)
+    own_ids={record['id'] for record in records}
+    projection.update(native_guidance=[item for item in guidance['native'] if item['reference']['id'] in own_ids],
+        scope_guidance=guidance['sources'])
     own_refs=_closure_task_artifacts(task)
-    for ref in own_refs:
+    own_refs.extend(guidance['references'])
+    for record in records:
+        own_refs.extend(edge['reference'] for edge in _artifact_dependencies(record))
+    visited={};pending=own_refs
+    while pending:
+        ref=pending.pop()
+        if _raw(ref) in visited:continue
+        _require(len(visited)<4096,'Original closure artifact support exceeds bound')
         body=_read(None,ref,context=context,db=db)
         _require(body.get('version')!=2 or 'linked' not in body,'Linked closure requires exact stopped participant/delivery composition')
+        visited[_raw(ref)]=ref
+        pending.extend(edge['reference'] for edge in _artifact_dependencies(body))
+    own_refs=list(visited.values())
     roots=[]
     for row in observed['tasks']:
         if row['reference']==task_ref:continue
@@ -485,6 +570,12 @@ def _closure_facts(context, task_ref, db, recovery, *, recovery_files=None):
         linked=row['task'].get('evidence',{}).get('linked_verification')
         if linked:
             roots.append(dict(owner=row['reference'],kind='artifact',reference=dict(authority=linked['authority'],artifact=linked['reference']),need='content'))
+    for record in all_records:
+        if record['id'] in own_ids:continue
+        roots.extend(dict(owner=dict(authority=authority,id=record['id']),**edge,need='content')
+            for edge in _artifact_dependencies(record))
+    roots.extend(dict(owner=dict(authority=authority,source='native-guidance'),kind='artifact',reference=ref,need='content')
+        for ref in guidance['references'])
     # D4 already classified its current roots, including independent old proof routes.
     requirements=list(recovery['requirements'])+_lifecycle_requirements(context,roots,db=db)
     _require(not any(edge['kind']=='task' and edge['reference']==task_ref and edge['need']=='raw' for edge in requirements),
@@ -498,8 +589,10 @@ def _closure_facts(context, task_ref, db, recovery, *, recovery_files=None):
         owner=metadata['owner'];body=json.loads(raw)
         _require(owner.get('kind')=='project' and owner.get('project_id')==task['accepted_identity']['project_id'],
             'Unknown or foreign evidence owner remains protected')
+        _require(owner['task'] is None or owner['task']['authority']==authority,'Foreign evidence task owner remains protected')
         if owner['task'] is None:
-            _require(metadata['class']=='compact' and body.get('kind') in {'authority-source-baseline','d4-recovery-source'},
+            _require(metadata['class']=='compact' and body.get('kind') in {'authority-source-baseline','d4-recovery-source'}
+                or metadata['class']=='detail' and ref in guidance['references'],
                 'Scope-owned consumer dependencies require existing guidance/review owner integration')
         physical.append(dict(reference=ref,metadata=metadata,stat=before))
     folder=context.directory/'evidence'
@@ -513,13 +606,16 @@ def _closure_facts(context, task_ref, db, recovery, *, recovery_files=None):
     normalized['metadata']=[item for item in observed['metadata'] if item['reference']!=compact]
     normalized.pop('digest')
     physical=[item for item in physical if item['reference']!=compact]
+    projection['sources']=[dict(reference=item['reference'],created_at=item['metadata']['created_at'],
+        owner=item['metadata']['owner'],bytes=item['metadata']['bytes'],unit='bytes')
+        for item in physical if item['reference'] in own_refs]
     original=task['accepted_identity']
     bindings={original['project_root']:original['project_binding']}
     bindings.update({original[k]:original['bindings'][label] for k,label in (('repository_root','root'),('primary_root','primary_root'),('git_dir','git_dir'),('git_common_dir','git_common_dir'))})
     _require(all(_binding(Path(path))==binding for path,binding in bindings.items()),'Historical checkout physical identity changed')
     return dict(version=1,task_ref=task_ref,task=task,certificate=certificate,bindings=bindings,recovery_files=recovery_files or {},
         observed=normalized,physical=physical,requirements=sorted(requirements,key=_raw),recovery=recovery,
-        artifacts=sorted(own_refs,key=_raw))
+        artifacts=sorted(own_refs,key=_raw),projection=projection,guidance=guidance)
 
 
 def _observe_closure(contexts, task_ref):
@@ -538,12 +634,12 @@ def _closure_content(facts):
     task=facts['task']
     return dict(version=1,kind='task-closure',identity=facts['task_ref'],pins=task['pins'],accepted_identity=task['accepted_identity'],
         created_at=task['lifecycle']['created_at'],revision=task['revision'],outcome='cancelled',coverage='stopped-owner-only',
-        stopped=facts['certificate'],artifacts=facts['artifacts'],numerical=[],usage='unknown',
+        stopped=facts['certificate'],artifacts=facts['artifacts'],**facts['projection'],usage='unknown',
         dependency_digest=_digest(facts),limitations=['Cancellation is not implementation success or delivery evidence',
-            'No command executions or native usage are asserted by this zero-assignment closure'])
+            'Command values describe original local executions; native usage remains unknown'])
 
 
-def _check_closure_observation(context, db, task_ref, observations, *, new_compact=None, retired=False):
+def _check_closure_observation(context, db, task_ref, observations, *, new_compact=None, retired=False, assignments_retired=False):
     """Final local recheck only; complete source interpretation precedes the writer."""
     facts=_issued_closure(context,observations)
     _require(isinstance(facts,dict) and facts.get('task_ref')==task_ref,'Closure snapshot identity is unavailable')
@@ -556,6 +652,22 @@ def _check_closure_observation(context, db, task_ref, observations, *, new_compa
     current['metadata']=[item for item in current['metadata'] if item['reference']!=compact]
     current.pop('digest')
     expected=deepcopy(facts['observed'])
+    if assignments_retired or retired:
+        certificates=facts['certificate'].get('assignments',[])
+        ids={item['reference']['id'] for item in certificates}
+        _require(not any(row[0] in ids for row in current['assignments']),'Certified retired assignment remains live')
+        expected['assignments']=[row for row in expected['assignments'] if row[0] not in ids]
+        expected['requirements']=[edge for edge in expected['requirements'] if not (
+            edge['kind']=='assignment' and edge['reference']['id'] in ids)]
+        expected['blockers']=[blocker for blocker in expected['blockers'] if blocker!=
+            'Assignment body requires original task; exact assignment certificate integration is required']
+        for item in certificates:
+            ref=item['reference'];marker=state._retired_assignment(db,ref['id'])
+            _require(marker is not None and state._retired(db,'assignment',ref['owner'])==marker
+                and marker['identity']==ref['owner'] and marker['created_at']==item['created_at']
+                and marker['pins_digest']==state._digest(facts['task']['pins'])
+                and marker['request_digest']==item['request_digest'] and marker['outcome']==item['reconciliation']['outcome']
+                and not marker['evidence_expired'],'Assignment retirement marker differs from exact original certificate')
     if retired:
         _require(current['task'] is None,'Retired owner unexpectedly remains live')
         identity=tuple(task_ref[k] for k in ('scope_id','client','session_id','task_id'))
@@ -572,6 +684,18 @@ def _check_closure_observation(context, db, task_ref, observations, *, new_compa
         for path,binding in item['metadata']['managed']['parents'].items():
             _require(_binding(Path(path))==binding,'Closure content parent changed')
     _require(all(_closure_file_stat(Path(path))==value for path,value in facts['recovery_files'].items()),'Recovery source changed before closure commit')
+    guidance=facts['guidance']
+    for support in guidance['retained']:
+        _require(state._retired(db,'task',{key:support['identity'][key] for key in ('scope_id','client','session_id','task_id')})==support['marker']
+            and all(state._retired_assignment(db,identity)==marker for identity,marker in support['assignments']),
+            'Retained guidance owner markers changed before closure commit')
+    if guidance['folder'] is not None:
+        _require(_binding(Path(guidance['folder']['path']))==guidance['folder']['binding'],'Guidance cache folder changed')
+    from runtime import delegation
+    for path,original in guidance['files'].items():
+        _require(_closure_file_stat(Path(path))==original['stat']
+            and hashlib.sha256(delegation._read_bytes(Path(path))).hexdigest()==original['digest'],
+            'Guidance cache source changed before closure commit')
     names=sorted(path.name for path in (context.directory/'evidence').iterdir())
     expected=sorted([item['reference']['name'] for item in current['metadata']]+([] if compact is None else [compact['name']]))
     _require(names==expected,'Unaccounted content appeared before closure commit')

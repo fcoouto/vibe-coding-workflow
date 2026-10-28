@@ -244,7 +244,7 @@ def _retired_record(kind, digest, raw, assignment_id):
 
 
 def _retired(db, kind, identity):
-    """Point replay lookup only; there is deliberately no marker writer yet."""
+    """Point replay lookup for exact owner-written retirement markers."""
     version = db.execute("pragma user_version").fetchone()[0]
     if version in (1, 2):
         return None
@@ -520,7 +520,8 @@ def _close_lifecycle(db, task_ref, observations, compact):
     if task['revision']!=facts['task']['revision'] or task['state']!='cancelled':
         raise StateError('Closure original cancelled owner changed')
     closed_at=_owner_time()
-    if closed_at<task['lifecycle']['created_at']:raise StateError('Closure clock regressed before original owner age')
+    original_age=max([task['lifecycle']['created_at']]+[item['created_at'] for item in facts['certificate'].get('assignments',[])])
+    if closed_at<original_age:raise StateError('Closure clock regressed before original owner age')
     task['lifecycle']=dict(created_at=task['lifecycle']['created_at'],safe_closed_at=closed_at,compact=compact,
         closure=dict(version=1,task_revision=task['revision'],dependency_digest=_digest(facts),observed_at=closed_at,evidence=facts['artifacts']))
     _task_lifecycle(task)
@@ -534,7 +535,9 @@ def retire_closed(db, task_ref, closure):
     """Atomically mark exact identities before removing rows; never delete evidence files."""
     from runtime import evidence
     context=evidence._existing_authority_context(task_ref['authority'],db=db)
-    facts=evidence._check_closure_observation(context,db,task_ref,closure)
+    facts=evidence._check_closure_observation(context,db,task_ref,closure,assignments_retired=True)
+    assignment_markers=[(item['reference']['id'],_retired_assignment(db,item['reference']['id']))
+        for item in facts['certificate'].get('assignments',[])]
     task=_task(db,task_ref['scope_id'],task_ref['client'],task_ref['session_id'],task_ref['task_id'])
     lifetime=_task_lifecycle(task)
     if lifetime is None or lifetime['safe_closed_at'] is None or evidence._read(None,lifetime['compact'],context=context,db=db)!=evidence._closure_content(facts):
@@ -570,6 +573,8 @@ def retire_closed(db, task_ref, closure):
     evidence._check_closure_observation(context,db,task_ref,closure,new_compact=lifetime['compact'],retired=True)
     for kind,key,data in markers:
         if _retired(db,kind,key)!=data:raise StateError('Retirement marker changed before commit')
+    if any(_retired_assignment(db,identity)!=marker for identity,marker in assignment_markers):
+        raise StateError('Assignment retirement marker changed before commit')
     evidence._check_context(context,db)
     return dict(retired=True,identity=identity,outcome='cancelled')
 

@@ -13,7 +13,7 @@ import unittest
 from unittest.mock import patch
 
 from runtime import state
-from runtime.startup import ProjectScope, RuntimeSettings, policy_digest
+from runtime.startup import ProjectScope, RuntimeSettings, StartupError, policy_digest
 
 
 class EvidenceTests(unittest.TestCase):
@@ -1227,6 +1227,159 @@ class RecoveryContextTests(unittest.TestCase):
                 for attempt in task['evidence']['attempts']:
                     delegation._linked_attempt(None,state._scope_id(self.scope),task,attempt,records,context=context,db=db)
         self.assertTrue(calls)
+
+
+class AssignedCancelledClosureTests(unittest.TestCase):
+    """Real local check/reconciliation artifacts; synthetic coordinator stop authority."""
+    setUp = CanonicalEvidenceTests.setUp
+
+    def stopped(self):
+        api=self.fixture.api
+        result=self.fixture.checked()
+        task=state.task_status(self.scope,'codex','parent')['task']
+        proof=dict(version=1,kind='stopped-writer-reconciliation',identity=self.fixture.identity,
+            expected_revision=task['revision'],expected_pins=task['pins'],observed_turn_id=task['turn_id'],
+            stopped=True,descendants_stopped=True,attempt_ids=[],observation_ref='fixture:checked-stop',coordinator_ref='fixture:independent')
+        raw=json.dumps(proof).encode();path=self.fixture.root/'cancel-proof.json';path.write_bytes(raw);path.chmod(0o400)
+        task=state.retire_task(self.scope,self.fixture.request(expected_pins=task['pins'],reason='Cancelled after independent stop',
+            reference='fixture:cancel',stop_proof=dict(path=str(path),sha256=hashlib.sha256(raw).hexdigest())))['task']
+        context=api._evidence_context(self.scope)
+        ref=api._canonical_plain(api._artifact_owner(self.scope,task).task)
+        return task,context,ref,result['attempt']
+
+    def close(self,task,context,ref):
+        api=self.fixture.api
+        return api.close_task(self.scope,self.fixture.request(expected_pins=task['pins']),api._observe_closure((context,),ref))['task']
+
+    def test_actual_check_values_and_original_ages_survive_atomic_assignment_retirement(self):
+        api=self.fixture.api;task,context,ref,attempt=self.stopped()
+        closed=self.close(task,context,ref);compact=api._read(self.scope,closed['lifecycle']['compact'])
+        self.assertEqual(compact['outcome'],'cancelled');self.assertEqual(compact['usage'],'unknown')
+        self.assertEqual(len(compact['stopped']['assignments']),1)
+        numbers={item['field']:item for item in compact['numerical']}
+        for field,unit in (('exit_code','exit-code'),('output_bytes','bytes')):
+            self.assertEqual(numbers[field]['value'],attempt[field]);self.assertEqual(numbers[field]['unit'],unit)
+            self.assertEqual(numbers[field]['source'],attempt['execution'])
+        with api._context_database(context) as db:
+            age=state._metadata(db,attempt['execution']['name'])['created_at']
+        self.assertEqual(numbers['output_bytes']['created_at'],age)
+        api._retire_closed_task(context,ref)
+        with api._context_database(context) as db:
+            self.assertEqual(db.execute('select count(*) from assignments').fetchone()[0],0)
+            self.assertEqual(db.execute('select count(*) from tasks').fetchone()[0],0)
+            marker=state._retired_assignment(db,attempt['id'])
+            certificate=compact['stopped']['assignments'][0]
+            self.assertEqual(marker['created_at'],certificate['created_at'])
+            self.assertEqual(marker['request_digest'],certificate['request_digest'])
+            self.assertEqual(marker['outcome'],'completed')
+        with self.assertRaises(state.StateError):
+            api.run_check(self.scope,self.fixture.identity|dict(expected_revision=task['revision'],check_id='unit'))
+
+    def test_failure_after_assignment_markers_rolls_back_assignments_and_task(self):
+        api=self.fixture.api;task,context,ref,attempt=self.stopped();self.close(task,context,ref)
+        original=state._retired_record
+        def fail(kind,*args):
+            if kind=='task':raise state.StateError('fixture:after assignment marker')
+            return original(kind,*args)
+        with patch.object(state,'_retired_record',side_effect=fail):
+            with self.assertRaises(state.StateError):api._retire_closed_task(context,ref)
+        with api._context_database(context) as db:
+            self.assertEqual(db.execute('select count(*) from assignments').fetchone()[0],1)
+            self.assertEqual(db.execute('select count(*) from tasks').fetchone()[0],1)
+            self.assertEqual(db.execute('select count(*) from retired_identities').fetchone()[0],0)
+
+    def test_execution_change_after_assignment_removal_rolls_back_all_local_rows(self):
+        api=self.fixture.api;task,context,ref,attempt=self.stopped();self.close(task,context,ref)
+        path=context.directory/'evidence'/attempt['execution']['name'];original=state._retired_record
+        changed=[]
+        def mutate(kind,*args):
+            result=original(kind,*args)
+            if kind=='task' and not changed:
+                path.chmod(0o600);path.write_bytes(path.read_bytes()+b' ');path.chmod(0o400);changed.append(True)
+            return result
+        with patch.object(state,'_retired_record',side_effect=mutate):
+            with self.assertRaises(state.StateError):api._retire_closed_task(context,ref)
+        self.assertTrue(changed)
+        with api._context_database(context) as db:
+            self.assertEqual(db.execute('select count(*) from assignments').fetchone()[0],1)
+            self.assertEqual(db.execute('select count(*) from tasks').fetchone()[0],1)
+            self.assertEqual(db.execute('select count(*) from retired_identities').fetchone()[0],0)
+
+    def test_complete_certificate_set_and_original_assignment_pointer_are_required(self):
+        from runtime import changes,delegation
+        api=self.fixture.api;task,context,ref,_=self.stopped()
+        with api._context_database(context) as db:
+            certificate=changes._stopped_certificate(context,db,dict(reference=ref,pins=task['pins']))
+            self.assertEqual(len(certificate['assignments']),1)
+            incomplete=api._canonical_plain(certificate);incomplete['assignments']=[]
+            with self.assertRaises(state.StateError):delegation._closure_assignments(context,db,ref,task,incomplete)
+            wrong=api._canonical_plain(certificate)
+            wrong['assignments'][0]['reference']['assignment']=task['evidence']['candidate']
+            with self.assertRaises(state.StateError):delegation._closure_assignments(context,db,ref,task,wrong)
+
+    def test_merely_settled_assignment_without_exact_reconciliation_cannot_close(self):
+        api=self.fixture.api;task,context,ref,attempt=self.stopped()
+        with api._context_database(context,write=True) as db:
+            row=db.execute('select data from assignments where id=?',(attempt['id'],)).fetchone()
+            data=json.loads(row[0]);data['reconciliation']=task['retirement']['proof']
+            db.execute('update assignments set data=? where id=?',(json.dumps(data),attempt['id']))
+        with self.assertRaises(StartupError):self.close(task,context,ref)
+
+    def test_missing_or_substituted_numerical_source_cannot_close(self):
+        api=self.fixture.api;task,context,ref,attempt=self.stopped()
+        with api._context_database(context,write=True) as db:
+            changed=state._task(db,ref['scope_id'],'codex','parent','task')
+            changed['evidence']['attempts'][0]['output_bytes']+=1
+            db.execute('update tasks set data=?',(json.dumps(changed),))
+        with self.assertRaises(state.StateError):self.close(task,context,ref)
+
+    def test_independent_live_body_consumer_prevents_assignment_retirement(self):
+        api=self.fixture.api;task,context,ref,_=self.stopped()
+        other=state.start_task(self.scope,self.fixture.identity|dict(session_id='other',task_id='other',mode='editable',decision_ref='user:accepted'))['task']
+        source=api._artifact(self.scope,dict(kind='fixture:required-body'),owner=api._artifact_owner(self.scope,other))
+        with api._context_database(context,write=True) as db:
+            metadata=state._metadata(db,source['name']);metadata['dependencies'].append(dict(kind='task',reference=ref))
+            db.execute('update evidence_metadata set data=? where name=?',(json.dumps(metadata),source['name']))
+            other['evidence']=dict(version=1,plan=source,candidate=source,attempts=[])
+            state._save(db,ref['scope_id'],other)
+        with self.assertRaises(state.StateError):self.close(task,context,ref)
+
+    def test_review_findings_and_original_dispositions_survive_cancelled_closure(self):
+        finding=dict(id='review-1',severity='medium',scope='general',status='confirmed',location='app.py:1 working',
+            scenario='Actual reviewed fixture path',evidence='Code tracing',counterevidence='None',correction='Bounded correction')
+        reviewed=self.fixture.review(findings=[finding]);review_id=reviewed['attempt_id']
+        task,context,ref,_=self.stopped();closed=self.close(task,context,ref)
+        compact=self.fixture.api._read(self.scope,closed['lifecycle']['compact'])
+        review=next(item for item in compact['reviews'] if item['assignment_id']==review_id)
+        self.assertEqual(review['report']['findings'],[finding])
+        self.assertEqual(review['assessments'][0]['assessment']['dispositions'],[])
+        self.assertEqual(review['report']['limitations'],[])
+
+    def test_actual_d4_assigned_source_cut_composes_owner_retirement_and_exact_pointer(self):
+        from tests.test_changes import ScopedChangesTests
+        f=ScopedChangesTests(methodName='runTest');f.setUp();self.addCleanup(f.doCleanups)
+        request,context,ref,identity,_=f.recovery_release_fixture(assignment=True)
+        api=self.fixture.api
+        with self.assertRaises(StartupError):api._observe_closure((context,),ref)
+        released=f.changes._register_recovery_release(f.changes._observe_recovery_release(context.authority_set,identity))
+        self.assertTrue(released['complete'])
+        with api._context_database(context) as db:
+            task=state._task(db,ref['scope_id'],ref['client'],ref['session_id'],ref['task_id'])
+        selected={key:task[key] for key in ('client','session_id','task_id','scope_ref')}
+        closed=api.close_task(f.release_fixture_scope,selected|dict(expected_revision=task['revision'],expected_pins=task['pins']),
+            api._observe_closure((context,),ref))['task']
+        compact=api._read(None,closed['lifecycle']['compact'],context=context)
+        assignment=compact['stopped']['assignments'][0]
+        api._retire_closed_task(context,ref)
+        with api._context_database(context) as db:
+            self.assertEqual(db.execute('select count(*) from assignments').fetchone()[0],0)
+            self.assertEqual(db.execute('select count(*) from tasks').fetchone()[0],0)
+            f.changes._check_stopped_certificate(context,db,compact['stopped'])
+        changed=json.loads(json.dumps(assignment['reference']));changed['assignment']=task['retirement']['proof']
+        with self.assertRaisesRegex(StartupError,'issued pointer'):f.changes._stopped_assignment_certificate(compact['stopped'],changed)
+        self.assertTrue(f.changes.inspect_lifecycle_recovery(context.authority_set,(ref,))['complete'])
+        for operation in ('resume','rollback'):
+            self.assertEqual(f.changes._run_scoped(f.directory,request,operation)['exit_code'],0)
 
 
 class CancelledClosureTests(unittest.TestCase):

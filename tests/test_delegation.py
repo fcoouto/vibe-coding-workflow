@@ -2896,6 +2896,205 @@ class CanonicalDelegationTests(unittest.TestCase):
             with self.assertRaises(state.StateError): f.api._ledger(f.scope, db)
 
 
+class AssignedClosureGuidanceTests(unittest.TestCase):
+    setUp=CanonicalDelegationTests.setUp
+
+    def test_original_and_refreshed_current_guidance_are_both_observed(self):
+        f=self.fixture;f.prepare();context=evidence._evidence_context(f.scope)
+        original=f.api.guidance_status(f.scope,f.cache_request)['snapshot_ref']
+        updated=evidence._read(f.scope,original)
+        updated['recommendations'][0]['work']='Refreshed actual fixture guidance'
+        claim=f.api.claim_guidance(f.scope,f.cache_request|dict(trigger=dict(kind='manual',id='refresh-for-closure')))
+        current=f.api.record_guidance(f.scope,f.cache_request|dict(token=claim['token'],generation=claim['generation'],
+            coordinator_ref='fixture:checked-refresh',guidance=updated))['snapshot_ref']
+        with evidence._context_database(context) as db:
+            observed=f.api._closure_guidance(context,db,f.api._ledger(None,db,context=context))
+        self.assertEqual(observed['references'],sorted([original,current],key=evidence._raw))
+        self.assertEqual(len(observed['files']),2)
+
+    def test_original_managed_guidance_substitution_is_protected(self):
+        f=self.fixture;f.prepare();context=evidence._evidence_context(f.scope)
+        reference=f.api.guidance_status(f.scope,f.cache_request)['snapshot_ref']
+        path=context.directory/'evidence'/reference['name']
+        replacement=path.with_name('replacement');replacement.write_bytes(path.read_bytes());replacement.chmod(0o400);replacement.replace(path)
+        with evidence._context_database(context) as db:
+            with self.assertRaises(state.StateError):f.api._closure_guidance(context,db,f.api._ledger(None,db,context=context))
+
+    def stopped_worker(self, *, started=True):
+        f=self.fixture;prepared=f.prepare()
+        if started:f.observe_worker(prepared)
+        f.api.reconcile_assignment(f.scope,f.worker_reconciliation_request(prepared,outcome='completed' if started else 'cancelled'))
+        return (*self.stop_current_task(),prepared)
+
+    def stop_current_task(self):
+        f=self.fixture
+        task=state.task_status(f.scope,'codex','parent')['task']
+        proof=dict(version=1,kind='stopped-writer-reconciliation',identity=f.identity,
+            expected_revision=task['revision'],expected_pins=task['pins'],observed_turn_id=task['turn_id'],
+            stopped=True,descendants_stopped=True,attempt_ids=[],observation_ref='fixture:stopped-coordinator',coordinator_ref='fixture:checked')
+        raw=json.dumps(proof).encode();path=f.root/('closure-stop-'+task['task_id']+'.json');path.write_bytes(raw);path.chmod(0o400)
+        task=state.retire_task(f.scope,f.request(expected_pins=task['pins'],reason='Stopped',reference='fixture:cancel',
+            stop_proof=dict(path=str(path),sha256=hashlib.sha256(raw).hexdigest())))['task']
+        context=evidence._evidence_context(f.scope);ref=evidence._canonical_plain(evidence._artifact_owner(f.scope,task).task)
+        return task,context,ref
+
+    def refresh_guidance(self,stage):
+        f=self.fixture;reference=f.api.guidance_status(f.scope,f.cache_request)['snapshot_ref']
+        updated=evidence._read(f.scope,reference);updated['recommendations'][0]['work']='Refreshed at '+stage
+        claim=f.api.claim_guidance(f.scope,f.cache_request|dict(trigger=dict(kind='manual',id=stage)))
+        return f.api.record_guidance(f.scope,f.cache_request|dict(token=claim['token'],generation=claim['generation'],
+            coordinator_ref='fixture:checked-'+stage,guidance=updated))['snapshot_ref']
+
+    def successor_after_retirement(self,stage):
+        f=self.fixture;task,context,ref,_=self.stopped_worker()
+        if stage in {'before','both'}:self.refresh_guidance('before-retirement')
+        closed=evidence.close_task(f.scope,f.request(expected_pins=task['pins']),evidence._observe_closure((context,),ref))['task']
+        first_compact=evidence._read(f.scope,closed['lifecycle']['compact'])
+        evidence._retire_closed_task(context,ref)
+        if stage in {'after','both'}:self.refresh_guidance('after-retirement')
+        f.identity=f.identity|dict(task_id='second-task')
+        state.start_task(f.scope,f.identity|dict(mode='editable',decision_ref='user:accepted'))
+        second,_,second_ref=self.stop_current_task()
+        return first_compact,second,context,second_ref
+
+    def sequential_closure(self,stage):
+        f=self.fixture;first_compact,second,context,second_ref=self.successor_after_retirement(stage)
+        observed=evidence._observe_closure((context,),second_ref)
+        closed=evidence.close_task(f.scope,f.request(expected_pins=second['pins']),observed)['task']
+        compact=evidence._read(f.scope,closed['lifecycle']['compact'])
+        self.assertEqual(compact['stopped']['assignments'],[])
+        self.assertEqual(compact['workers'],[])
+        self.assertEqual(compact['numerical'],[])
+        for original in first_compact['scope_guidance']:self.assertIn(original,compact['scope_guidance'])
+        evidence._retire_closed_task(context,second_ref)
+        with evidence._context_database(context) as db:self.assertEqual(db.execute('select count(*) from assignments').fetchone()[0],0)
+        return first_compact,compact
+
+    def test_second_task_closes_after_native_assignment_retirement(self):
+        self.sequential_closure('unchanged')
+
+    def test_second_task_preserves_guidance_refreshed_before_retirement(self):
+        self.sequential_closure('before')
+
+    def test_second_task_preserves_guidance_refreshed_after_retirement(self):
+        self.sequential_closure('after')
+
+    def test_second_task_preserves_original_and_both_refreshed_guidance_sources(self):
+        self.sequential_closure('both')
+
+    def test_failed_refresh_for_changed_capability_preserves_historical_guidance_closure(self):
+        f=self.fixture;first,second,context,ref=self.successor_after_retirement('unchanged')
+        old=f.api.guidance_status(f.scope,f.cache_request)['snapshot_ref']
+        path=context.directory/'model-guidance'/(f.cache_request['client_surface']+'.json');before=path.read_bytes()
+        changed=f.cache_request|dict(applicability=dict(client_version='new-version',capability_fingerprint='b'*64))
+        claim=f.api.claim_guidance(f.scope,changed|dict(trigger=dict(kind='routine',id='changed-capability')))
+        result=f.api.record_guidance(f.scope,changed|dict(token=claim['token'],generation=claim['generation'],
+            coordinator_ref='fixture:refresh-failed',failure='Official guidance unavailable for changed capability'))
+        self.assertEqual(result['freshness'],'incompatible');self.assertFalse(result['usable'])
+        self.assertEqual(result['snapshot_ref'],old);self.assertEqual(path.read_bytes(),before)
+        closed=evidence.close_task(f.scope,f.request(expected_pins=second['pins']),evidence._observe_closure((context,),ref))['task']
+        compact=evidence._read(f.scope,closed['lifecycle']['compact'])
+        self.assertEqual(compact['workers'],[]);self.assertEqual(compact['stopped']['assignments'],[])
+        for original in first['scope_guidance']:self.assertIn(original,compact['scope_guidance'])
+        evidence._retire_closed_task(context,ref)
+        with evidence._context_database(context) as db:self.assertEqual(db.execute('select count(*) from assignments').fetchone()[0],0)
+
+    def test_corrupt_verified_guidance_key_still_protects_historical_closure(self):
+        f=self.fixture;_,_,context,ref=self.successor_after_retirement('unchanged')
+        path=context.directory/'model-guidance'/(f.cache_request['client_surface']+'.control.json')
+        control=json.loads(path.read_bytes());self.assertEqual(control['last_attempt']['outcome'],'verified')
+        control['last_attempt']['key']='f'*64;path.write_text(json.dumps(control))
+        with self.assertRaisesRegex(state.StateError,'control/source correspondence'):
+            evidence._observe_closure((context,),ref)
+
+    def test_active_guidance_refresh_still_protects_historical_closure(self):
+        f=self.fixture;_,_,context,ref=self.successor_after_retirement('unchanged')
+        changed=f.cache_request|dict(applicability=dict(client_version='new-version',capability_fingerprint='b'*64))
+        claim=f.api.claim_guidance(f.scope,changed|dict(trigger=dict(kind='routine',id='active-capability-refresh')))
+        self.assertTrue(claim['claimed'])
+        with self.assertRaisesRegex(state.StateError,'refresh remains incomplete'):
+            evidence._observe_closure((context,),ref)
+
+    def test_retained_guidance_original_age_substitution_protects_second_task(self):
+        first,_,context,ref=self.successor_after_retirement('after')
+        original=first['native_guidance'][0]['guidance']['snapshot_ref']
+        with evidence._context_database(context,write=True) as db:
+            metadata=state._metadata(db,original['name']);metadata['created_at']+=1
+            db.execute('update evidence_metadata set created_at=?,data=? where name=?',
+                (metadata['created_at'],json.dumps(metadata),original['name']))
+        with self.assertRaises(state.StateError):evidence._observe_closure((context,),ref)
+
+    def test_retained_guidance_marker_change_after_observation_protects_second_task(self):
+        f=self.fixture;first,second,context,ref=self.successor_after_retirement('after')
+        observed=evidence._observe_closure((context,),ref)
+        assignment_id=first['stopped']['assignments'][0]['reference']['id']
+        with evidence._context_database(context,write=True) as db:
+            marker=state._retired_assignment(db,assignment_id);marker.update(outcome='unknown',evidence_expired=True)
+            db.execute("update retired_identities set data=? where kind='assignment' and assignment_id=?",(json.dumps(marker),assignment_id))
+        with self.assertRaises(state.StartupError):evidence.close_task(f.scope,f.request(expected_pins=second['pins']),observed)
+
+    def test_retained_guidance_marker_change_during_compact_write_rolls_back(self):
+        f=self.fixture;first,second,context,ref=self.successor_after_retirement('after')
+        observed=evidence._observe_closure((context,),ref);assignment_id=first['stopped']['assignments'][0]['reference']['id']
+        with evidence._context_database(context) as db:before=state._retired_assignment(db,assignment_id)
+        original=evidence._artifact_registered
+        def mutate(scope,value,actual_context,owner,db):
+            reference=original(scope,value,actual_context,owner,db)
+            if value.get('kind')=='task-closure':
+                marker=state._retired_assignment(db,assignment_id);marker['retired_at']+=1
+                db.execute("update retired_identities set data=? where kind='assignment' and assignment_id=?",(json.dumps(marker),assignment_id))
+            return reference
+        with patch.object(evidence,'_artifact_registered',side_effect=mutate):
+            with self.assertRaisesRegex(state.StateError,'owner markers changed'):
+                evidence.close_task(f.scope,f.request(expected_pins=second['pins']),observed)
+        with evidence._context_database(context) as db:
+            self.assertEqual(state._retired_assignment(db,assignment_id),before)
+            self.assertIsNone(state._task(db,ref['scope_id'],'codex','parent','second-task')['lifecycle']['safe_closed_at'])
+
+    def test_independently_stopped_not_started_worker_keeps_empty_native_observation(self):
+        f=self.fixture;task,context,ref,prepared=self.stopped_worker(started=False)
+        closed=evidence.close_task(f.scope,f.request(expected_pins=task['pins']),evidence._observe_closure((context,),ref))['task']
+        compact=evidence._read(f.scope,closed['lifecycle']['compact'])
+        self.assertEqual(compact['workers'][0]['observations'],[])
+        self.assertEqual(compact['workers'][0]['outcome'],'cancelled')
+        self.assertEqual(compact['stopped']['assignments'][0]['reconciliation']['proof']['launch_state'],'not-started')
+        evidence._retire_closed_task(context,ref)
+        with evidence._context_database(context) as db:self.assertIsNotNone(state._retired_assignment(db,prepared['attempt_id']))
+
+    def test_actual_native_preparation_guidance_composes_local_closure(self):
+        f=self.fixture;task,context,ref,prepared=self.stopped_worker()
+        observed=evidence._observe_closure((context,),ref)
+        closed=evidence.close_task(f.scope,f.request(expected_pins=task['pins']),observed)['task']
+        compact=evidence._read(f.scope,closed['lifecycle']['compact'])
+        self.assertEqual(compact['outcome'],'cancelled');self.assertEqual(compact['workers'][0]['outcome'],'completed')
+        self.assertEqual(compact['workers'][0]['observations'][0]['report']['status'],'completed')
+        self.assertNotIn('result',compact['workers'][0]['observations'][0])
+        evidence._retire_closed_task(context,ref)
+        with evidence._context_database(context) as db:
+            self.assertIsNotNone(state._retired_assignment(db,prepared['attempt_id']))
+
+    def test_guidance_cache_substitution_after_observation_blocks_closure(self):
+        f=self.fixture;task,context,ref,_=self.stopped_worker()
+        observed=evidence._observe_closure((context,),ref)
+        path=context.directory/'model-guidance'/ (f.cache_request['client_surface']+'.json')
+        replacement=path.with_name('replacement.json');replacement.write_bytes(path.read_bytes());replacement.chmod(0o600)
+        replacement.replace(path)
+        with self.assertRaises(state.StateError):evidence.close_task(f.scope,f.request(expected_pins=task['pins']),observed)
+
+    def test_guidance_owned_raw_dependency_stays_protected(self):
+        f=self.fixture;task,context,ref,_=self.stopped_worker()
+        reference=f.api.guidance_status(f.scope,f.cache_request)['snapshot_ref']
+        with evidence._context_database(context,write=True) as db:
+            metadata=state._metadata(db,reference['name']);metadata['dependencies'].append(dict(kind='task',reference=ref))
+            db.execute('update evidence_metadata set data=? where name=?',(json.dumps(metadata),reference['name']))
+        with self.assertRaisesRegex(state.StateError,'raw task body'):evidence._observe_closure((context,),ref)
+
+    def test_missing_current_guidance_cache_protects_original_assignment(self):
+        f=self.fixture;_,context,ref,_=self.stopped_worker()
+        (context.directory/'model-guidance'/(f.cache_request['client_surface']+'.json')).unlink()
+        with self.assertRaises(state.StateError):evidence._observe_closure((context,),ref)
+
+
 class LifecycleFoundationTests(unittest.TestCase):
     def setUp(self):
         self.fixture = CanonicalDelegationTests(methodName='runTest')
