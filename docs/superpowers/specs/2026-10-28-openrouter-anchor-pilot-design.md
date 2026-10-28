@@ -8,6 +8,8 @@ Use published benchmarks for familiar native models as reference points when sel
 
 The user requested an optional pilot in this local checkout before publication. Native discovery and native execution remain the default. The user permits paid candidates and explicitly chose OpenRouter settings as the spending authority: the workflow checks available budget before assigning work and does not introduce a second monetary cap.
 
+The user also requested a discovery mechanism with cached results, following the native discovery structure and refreshing when the cache expires. OpenRouter metadata follows that lifecycle; available spending credit remains a live pre-dispatch check.
+
 The proposed implementation is a coordinator-managed proposal call. An external model receives selected context and returns text or a proposed patch. Native Codex owns tools, filesystem changes, review, validation and integration. This implementation choice is proposed for approval.
 
 ## Goals, non-goals and constraints
@@ -34,13 +36,32 @@ Use the live native catalog for availability. Use OpenRouter's benchmark and mod
 
 Preserve source, retrieval time, source timestamp and benchmark version when supplied, model identifier, canonical snapshot when supplied, metric, reasoning configuration and known harness details. Missing fields remain unknown. API metadata version is not automatically the benchmark version. An OpenRouter model name matching a native alias does not establish identical native execution settings.
 
-Read existing cached metadata during routine work. Refresh on explicit request, relevant catalog change or scheduled maintenance through the existing guidance-maintenance pattern. Do not contact every benchmark service before each subtask. Check current route availability, pricing and budget at dispatch.
+Use the discovery snapshot described below during routine work, including model/provider capabilities, benchmark data and listed pricing. Do not fetch metadata before every subtask. Snapshot availability and prices are observations at retrieval time, not guarantees at dispatch; provider rejection and reported generation cost remain authoritative. Check the executing client's exposed controls and available spending credit before dispatch.
 
 Compare models within a benchmark source, metric and known compatible version/configuration. Unknown comparability lowers confidence and is visible. Do not divide scores to obtain a percentage of native ability, derive a guaranteed difficulty cutoff, interpolate missing scores, or mix Intelligence Index, coding results and arena Elo into one number.
 
 The coordinator records a short task profile: task family, language, bounded context/files, ambiguity, dependencies, consequences, acceptance checks and expected verification effort. Benchmark data nominates a candidate; it does not grant execution authority. Prefer relevant task metrics when available, with general intelligence as supporting context. First-use candidates remain unobserved locally until a real task is verified.
 
 A candidate can be tried without offline qualification when its route and data terms are allowed, necessary controls are supported, context fits, failure is reversible, and native checks can assess the result. Keep security-sensitive decisions, broad architectural work and tasks with weak verification native during the first pilot. If no suitable candidate remains, use the normal native path.
+
+## Discovery and cache lifecycle
+
+Mirror the native separation of discovery, local status, a bounded refresh claim, atomic publication and immutable evidence. Keep OpenRouter's metadata snapshot separate from native selection guidance. The existing native guidance cache explicitly does not expire by age; this design adds expiry for OpenRouter metadata without changing native behavior or pretending the native cache already has a TTL.
+
+Cache the bounded discovery result under the approved state directory, outside repositories and plugin installations. Scope it to the OpenRouter service, source/query coverage and schema. Retain model identifiers, provider endpoints and supported controls, benchmark/reference mappings, relevant data-use restrictions, listed prices, source URLs, source timestamps/versions where supplied, `fetched_at`, `expires_at` and a content digest. Cache only the metadata needed by the pilot, never credentials, prompts or an account balance. A complete snapshot must identify its coverage; absent or truncated results cannot masquerade as a complete catalog.
+
+Proposed pilot default: a 24-hour cache lifetime, with `expires_at = fetched_at + 24 hours`. This is a refresh schedule, not a guarantee that availability, prices or benchmark comparability remain unchanged. The TTL is an implementation default proposed here, not a value supplied by the user.
+
+1. On first use, fetch and validate the discovery result, then publish the complete snapshot atomically.
+2. While the snapshot is unexpired and compatible, selection and plotting read it locally. Repeated tasks make no catalog, provider-metadata or benchmark calls.
+3. On first use after expiry, claim one refresh. Concurrent callers share that refresh rather than starting duplicate requests. No background scheduler is required.
+4. Missing, corrupt or incompatible snapshots require discovery; an explicit user refresh may also bypass the remaining lifetime. A new task alone is not a refresh trigger.
+5. A failed refresh preserves the previous snapshot and its original timestamps for inspection, marks it stale and sends dependent work to the native path. Do not select a new external proposal from stale discovery data. Record a separate one-hour retry delay; tasks before that time reuse the failure and fall back natively. The first later demand may retry once, or an explicit user refresh may retry earlier. The retry delay never makes expired data fresh.
+6. A route rejected during dispatch is unavailable for the rest of that task. Record the failure and continue natively; do not refresh metadata or retry another external route automatically inside the task.
+
+Reuse the existing short-lock, claim-generation and atomic-publication safeguards where compatible. Fetch outside hooks, locks and database transactions. Reject superseded publications. Do not force provider metadata into native-only guidance schemas or widen native route admission to reuse an API. Pin each attempt's selected snapshot digest and freshness so a later refresh cannot rewrite its evidence.
+
+Available spending credit and accessible current-key allowance are deliberately outside this metadata cache. Check them before each external call as specified below. A cached positive balance cannot authorize another paid attempt.
 
 ## Execution and budget
 
@@ -85,6 +106,9 @@ Keep benchmark evidence separate from local outcomes. A later pilot report shoul
 ## Acceptance and rollback
 
 - Native-only behavior is unchanged when the pilot is disabled or unavailable.
+- Repeated tasks within the metadata cache lifetime perform no catalog, provider-metadata or benchmark fetches; available spending credit is still checked before each external call.
+- First use and expiry trigger one bounded discovery refresh; concurrent callers cannot publish partial or superseded snapshots.
+- Failed refresh preserves the prior data and timestamps, falls back natively and suppresses repeated refresh attempts until the separate retry delay or an explicit refresh.
 - No external call occurs without explicit pilot enablement, a bounded verifiable task, eligible data handling and a successful applicable budget preflight.
 - Missing/expired authentication, exhausted credit, provider rejection and timeouts produce bounded, truthful fallback behavior.
 - External output cannot gain local authority or fabricate native worker/reviewer evidence.
