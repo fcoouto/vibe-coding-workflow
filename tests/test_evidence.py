@@ -1427,6 +1427,7 @@ class ReadyClosureTests(unittest.TestCase):
         self.assertTrue(compact['reviews']);self.assertTrue(compact['numerical']);self.assertTrue(compact['verifications'])
         api._retire_closed_task(context,ref)
         with api._context_database(context) as db:
+            self.assertEqual(state._metadata(db,closed['lifecycle']['compact']['name'])['closed_at'],closed['lifecycle']['safe_closed_at'])
             self.assertEqual(db.execute('select count(*) from tasks').fetchone()[0],0)
             self.assertEqual(db.execute('select count(*) from assignments').fetchone()[0],0)
             self.assertEqual(db.execute('select count(*) from turns').fetchone()[0],0)
@@ -1985,13 +1986,65 @@ class CancelledClosureTests(unittest.TestCase):
         with patch.object(state,'_owner_time',return_value=300):self.assertEqual(self.close()['task'],task)
 
     def test_atomic_retirement_preserves_exact_replay_markers(self):
-        with patch.object(state,'_owner_time',return_value=200):self.close()
+        with patch.object(state,'_owner_time',return_value=200):closed=self.close()['task']
         with patch.object(state,'_owner_time',return_value=250):self.api._retire_closed_task(self.context,self.ref)
         with self.api._context_database(self.context) as db:
             self.assertEqual(db.execute('select count(*) from tasks').fetchone()[0],0)
             marker=state._retired(db,'task',{k:self.ref[k] for k in ('scope_id','client','session_id','task_id')})
             self.assertEqual(marker['created_at'],100);self.assertEqual(marker['outcome'],'cancelled')
+            self.assertEqual(state._metadata(db,closed['lifecycle']['compact']['name'])['closed_at'],closed['lifecycle']['safe_closed_at'])
         with self.assertRaises(state.StateError):self.f.start()
+
+    def test_cancelled_retirement_date_stamp_exact_replay(self):
+        task=self.close()['task'];observation=self.api._observe_closure((self.context,),self.ref)
+        compact=task['lifecycle']['compact'];closed_at=task['lifecycle']['safe_closed_at']
+        with self.api._context_database(self.context,write=True) as db:
+            self.api._stamp_linked_retirement(self.context,db,self.ref,observation)
+            first=state._metadata(db,compact['name'])
+            self.api._stamp_linked_retirement(self.context,db,self.ref,observation)
+            second=state._metadata(db,compact['name'])
+        self.assertEqual(first['closed_at'],closed_at)
+        self.assertEqual(second,first)
+
+    def test_cancelled_retirement_date_conflict_and_transaction_retry(self):
+        from runtime import delegation
+        task=self.close()['task'];compact=task['lifecycle']['compact'];safe_closed_at=task['lifecycle']['safe_closed_at']
+        with patch.object(delegation,'retire_settled',side_effect=state.StateError('fixture:after date stamp')):
+            with self.assertRaises(state.StateError):self.api._retire_closed_task(self.context,self.ref)
+        with self.api._context_database(self.context) as db:
+            self.assertIsNone(state._metadata(db,compact['name'])['closed_at'])
+            self.assertIsNotNone(state._task(db,self.ref['scope_id'],'codex','session'))
+            self.assertEqual(db.execute('select count(*) from retired_identities').fetchone()[0],0)
+        with self.api._context_database(self.context,write=True) as db:
+            metadata=state._metadata(db,compact['name']);conflict=safe_closed_at+1
+            metadata=dict(metadata,closed_at=conflict)
+            db.execute('update evidence_metadata set closed_at=?,data=? where name=?',
+                (conflict,json.dumps(metadata,separators=(',',':')),compact['name']))
+        with self.api._context_database(self.context) as db:before=list(db.iterdump())
+        with self.assertRaises(state.StateError):self.api._retire_closed_task(self.context,self.ref)
+        with self.api._context_database(self.context) as db:self.assertEqual(list(db.iterdump()),before)
+        with self.api._context_database(self.context,write=True) as db:
+            metadata=state._metadata(db,compact['name']);metadata=dict(metadata,closed_at=None)
+            db.execute('update evidence_metadata set closed_at=NULL,data=? where name=?',
+                (json.dumps(metadata,separators=(',',':')),compact['name']))
+        self.api._retire_closed_task(self.context,self.ref)
+        with self.api._context_database(self.context) as db:
+            self.assertEqual(state._metadata(db,compact['name'])['closed_at'],safe_closed_at)
+            self.assertEqual(state._retired(db,'task',{k:self.ref[k] for k in ('scope_id','client','session_id','task_id')})['outcome'],'cancelled')
+
+    def test_retirement_rejects_mismatched_closure_envelope_date(self):
+        self.close();identity=tuple(self.ref[key] for key in ('scope_id','client','session_id','task_id'))
+        with self.api._context_database(self.context,write=True) as db:
+            row=db.execute('select data from tasks where scope_id=? and client=? and session_id=? and task_id=?',identity).fetchone()
+            task=json.loads(row[0]);task['lifecycle']['closure']['observed_at']+=1
+            db.execute('update tasks set data=? where scope_id=? and client=? and session_id=? and task_id=?',
+                (json.dumps(task,separators=(',',':')),*identity))
+        with self.api._context_database(self.context) as db:before=list(db.iterdump())
+        with self.assertRaises(state.StateError):self.api._retire_closed_task(self.context,self.ref)
+        with self.api._context_database(self.context) as db:
+            self.assertEqual(list(db.iterdump()),before)
+            self.assertIsNotNone(state._task(db,*identity))
+            self.assertIsNone(state._retired(db,'task',{k:self.ref[k] for k in ('scope_id','client','session_id','task_id')}))
 
     def test_unproved_cancelled_flag_and_caller_snapshot_cannot_close(self):
         with self.assertRaises(state.StateError):self.api.close_task(self.scope,self.request,dict(closed=True,stopped=True))

@@ -983,9 +983,24 @@ def _linked_retirement_facts(context,task_ref,pointer,authorities,*,writer=None,
 
 def _stamp_linked_retirement(context,db,task_ref,observation):
     facts=_check_closure_observation(context,db,task_ref,observation)
-    _require('linked_retirement' in facts,'Closure date stamp requires actual linked retirement acquisition')
-    retained=facts['linked_retirement'];ref=retained['closure']['reference'];metadata=state._metadata(db,ref['name']);closed_at=retained['closed_at']
-    _require(metadata==retained['closure']['metadata'] and metadata['closed_at'] in (None,closed_at), 'Original closure metadata date changed')
+    if 'linked_retirement' in facts:
+        retained=facts['linked_retirement'];ref=retained['closure']['reference'];closed_at=retained['closed_at']
+        metadata=state._metadata(db,ref['name'])
+        _require(metadata==retained['closure']['metadata'] and metadata['closed_at'] in (None,closed_at), 'Original closure metadata date changed')
+    else:
+        current=_linked_raw_task(db,task_ref)
+        _require(current is not None,'Original task closure owner is unavailable')
+        ref=current['lifecycle']['compact'];closed_at=current['lifecycle']['safe_closed_at']
+        _require(closed_at is not None,'Task has no authenticated safe closure date')
+        metadata,raw=_managed_artifact(None,ref,context=context,db=db)
+        body=json.loads(raw);closure=current['lifecycle']['closure']
+        _require(metadata['owner']==dict(kind='project',project_id=current['accepted_identity']['project_id'],task=task_ref)
+            and metadata['class']=='compact' and metadata['created_at']==current['lifecycle']['created_at']
+            and metadata['closed_at'] in (None,closed_at) and body==_closure_content(facts)
+            and closure['task_revision']==current['revision']==body['revision']
+            and closure['dependency_digest']==body['dependency_digest'] and closure['observed_at']==closed_at
+            and closure['evidence']==body['artifacts'],
+            'Original task closure metadata, content or age changed')
     metadata=dict(metadata,closed_at=closed_at)
     db.execute('update evidence_metadata set closed_at=?,data=? where name=?',(closed_at,_raw(metadata).decode(),ref['name']))
     _require(state._metadata(db,ref['name'])==metadata,'Closure date was not retained atomically')
@@ -1308,6 +1323,7 @@ def _retire_closed_task(context, task_ref):
             _require(task['lifecycle']['safe_closed_at'] is not None,'Task has no retained safe closure')
             compact=_read(None,task['lifecycle']['compact'],context=context,db=db)
             _require(compact==_closure_content(facts),'Closure support or current dependencies changed')
+            _stamp_linked_retirement(context,db,task_ref,issued)
             delegation.retire_settled(db,task_ref,issued)
             return state.retire_closed(db,task_ref,issued)
 
