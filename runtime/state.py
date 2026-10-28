@@ -530,7 +530,9 @@ def _writer_stop_shape(value):
     if type(value['version']) is not int or value['version']!=1:raise StateError('Unsupported retained ready stop')
     _integer(value['task_revision'],'ready stop revision',1);_integer(value['generation'],'ready stop generation')
     for key in ('proof_digest','request_digest'):_canonical_hash(value[key])
-    for key in ('proof','candidate','verification',*(['linked'] if 'linked' in value else [])):_artifact_reference(value[key])
+    for key in ('proof','candidate','verification',*(['linked'] if 'linked' in value else [])):
+        if key=='verification' and value[key] is None and 'linked' in value:continue
+        _artifact_reference(value[key])
     for key in ('observation_ref','coordinator_ref'):_text(value[key],key)
     if not isinstance(value['inputs'],dict) or len(value['inputs'])>4096:raise StateError('Ready input observation exceeds bound')
     for path,info in value['inputs'].items():
@@ -544,8 +546,8 @@ def _ready_stop(context,db,task,*,observe=False):
     stop=task.get('writer_stop');_writer_stop_shape(stop)
     if stop.get('linked') and task['lifecycle']['safe_closed_at'] is not None:
         linked=evidence._read(None,stop['linked'],context=context,db=db)
-        if evidence._linked_component_closed(linked['aggregate'],writer=(context,db)):
-            retained=evidence._linked_retained_component(linked['aggregate'],linked['authorities'],writer=(context,db))
+        if evidence._linked_component_closed(evidence._linked_basis_root(linked),writer=(context,db)):
+            retained=evidence._linked_retained_component(evidence._linked_basis_root(linked),linked['authorities'],writer=(context,db))
             if retained.get('discovered_authorities'):raise StateError('Retained linked stop requires complete source guards')
             own=next(m for m in retained['members'] if m['reference']['authority']==evidence._canonical_plain(context.authority_set[0]) and
                 m['reference']['scope_id']==evidence._task_scope_id(task) and all(m['reference'][key]==task[key] for key in ('client','session_id','task_id')))
@@ -554,11 +556,11 @@ def _ready_stop(context,db,task,*,observe=False):
     proof=evidence._read(None,stop['proof'],context=context,db=db)
     bindings=_ready_stop_bindings(context,db,task)
     candidate=evidence._read(None,stop['candidate'],context=context,db=db)
-    verification_ref=evidence._stop_verification(context,db,task)
     linked=evidence._read(None,stop['linked'],context=context,db=db) if 'linked' in stop else None
+    verification_ref=evidence._stop_verification(context,db,task,allow_absent=linked is not None and linked['version']==2)
     if linked is not None:
         evidence._linked_stop_shape(linked)
-        if evidence._linked_stopped_basis(linked['aggregate'],linked['authorities'],writer=(context,db))!=linked:raise StateError('Linked complete-stop basis changed')
+        if evidence._linked_stopped_basis(evidence._linked_basis_root(linked),linked['authorities'],writer=(context,db))!=linked:raise StateError('Linked complete-stop basis changed')
     evidence._ready_stop_proof(task,proof,bindings,candidate,verification_ref,linked)
     if (stop['task_revision']!=task['revision'] or stop['generation']!=bindings['generation'] or
         stop['verification']!=verification_ref or
@@ -566,20 +568,22 @@ def _ready_stop(context,db,task,*,observe=False):
         raise StateError('Retained ready stop envelope changed')
     evidence._candidate_projection(candidate,task)
     if linked is None or task['lifecycle']['safe_closed_at'] is None:evidence._check_ready_inputs(stop['inputs'],directory_identity=True)
-    verification=evidence._read(None,stop['verification'],context=context,db=db)
-    if task['state']=='ready' and verification['candidate_digest']!=proof['candidate_digest']:raise StateError('Retained ready verification changed')
+    verification=evidence._read(None,stop['verification'],context=context,db=db) if stop['verification'] is not None else None
+    if task['state']=='ready' and (verification is None or verification['candidate_digest']!=proof['candidate_digest']):raise StateError('Retained ready verification changed')
     if observe and linked is None:evidence._ready_stop_candidate(context,task,candidate)
     return proof
 
 
-def _retain_ready_stop(scope,request):
+def _retain_ready_stop(scope,request,*,linked_basis=None):
     """Private complete host stop, preserving original outcome/revision and age."""
     from runtime import evidence,changes
     if not isinstance(scope,AcceptedScope) or _scope_version(scope)!=3:raise StateError('Ready stop requires actual accepted schema3 scope')
     _fields(request,('client','session_id','task_id','scope_ref','expected_revision','expected_pins','stop_proof'),('linked_verification',))
     _identity(request);_integer(request['expected_revision'],'ready stop request revision',1);_validate_pins(request['expected_pins'])
     context=evidence._evidence_context(scope)
-    pointer=request.get('linked_verification')
+    if linked_basis is not None and 'linked_verification' in request:raise StateError('Select one actual linked stop source')
+    pointer=linked_basis if linked_basis is not None else request.get('linked_verification')
+    request_digest=_digest(dict(request=request,linked_basis=linked_basis)) if linked_basis is not None else _digest(request)
     guards=evidence._linked_stop_guards(pointer,_canonical_plain(context.authority_set)) if pointer is not None else changes._authority_guards([context.directory])
     with guards as authorities:
         with evidence._context_database(context) as db:
@@ -588,15 +592,18 @@ def _retain_ready_stop(scope,request):
             if task['revision']!=request['expected_revision'] or task['pins']!=request['expected_pins'] or task['scope_ref']!=request['scope_ref']:
                 raise StateError('Ready stop request changed original task pins/revision')
             if task.get('writer_stop'):
+                if linked_basis is not None:
+                    retained=evidence._read(None,task['writer_stop']['linked'],context=context,db=db)
+                    if evidence._linked_basis_root(retained)!=pointer:raise StateError('Ready stop replay common basis changed')
                 _ready_stop(context,db,task,observe=True)
-                if task['writer_stop']['request_digest']!=_digest(request) or task['writer_stop']['proof_digest']!=request['stop_proof']['sha256']:
+                if task['writer_stop']['request_digest']!=request_digest or task['writer_stop']['proof_digest']!=request['stop_proof']['sha256']:
                     raise StateError('Ready stop replay payload changed')
                 return dict(ok=True,task=task,replayed=True)
             _assert_open(task)
             if task['state'] not in ({'ready','verifying','cancelled'} if pointer is not None else {'ready','cancelled'}) or 'evidence' not in task:
                 raise StateError('Independent ready stop requires actual ordinary ready verification')
             snapshot=_ready_stop_bindings(context,db,task)
-            verification_ref=evidence._stop_verification(context,db,task)
+            verification_ref=evidence._stop_verification(context,db,task,allow_absent=linked_basis is not None)
             plan=evidence._read(None,task['evidence']['plan'],context=context,db=db)
         proof=evidence._read_host_proof(scope,request['stop_proof'])
         linked=evidence._linked_stop_basis(pointer,authorities) if pointer is not None else None
@@ -617,7 +624,7 @@ def _retain_ready_stop(scope,request):
             stop=dict(version=1,task_revision=task['revision'],proof_digest=request['stop_proof']['sha256'],
                 proof=evidence._artifact(scope,proof,owner=owner,db=db),observation_ref=proof['observation_ref'],
                 coordinator_ref=proof['coordinator_ref'],generation=snapshot['generation'],
-                candidate=evidence._artifact(scope,candidate,owner=owner,db=db),verification=verification_ref,request_digest=_digest(request),inputs=files)
+                candidate=evidence._artifact(scope,candidate,owner=owner,db=db),verification=verification_ref,request_digest=request_digest,inputs=files)
             if linked is not None:
                 dependencies=[dict(kind='artifact',reference=dict(authority=pointer['authority'],artifact=pointer['reference']))]
                 dependencies += [dict(kind='task',reference=row['task']) for row in linked['members']]

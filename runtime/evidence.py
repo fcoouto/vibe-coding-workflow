@@ -72,14 +72,14 @@ def _request(request, required=(), optional=(), *, limit=MAX_INPUT):
     state._integer(request['expected_revision'], 'expected_revision', 1)
 
 
-def _task(db, scope, request, revision=True):
+def _task(db, scope, request, revision=True, *, allow_cancelled=False):
     _require(db is not None, 'Task state has not been initialized')
     task = state._task(db, state._scope_id(scope), request['client'], request['session_id'])
     _require(task is not None and all(task[k] == request[k] for k in IDENTITY[:4]), 'Evidence task binding changed')
     state._compatible(scope, task)
     state._assert_open(task)
     _require(not revision or task['revision'] == request['expected_revision'], 'Task revision conflict')
-    _require(task['state'] != 'cancelled', 'Cancelled tasks cannot collect or verify evidence')
+    _require(allow_cancelled or task['state'] != 'cancelled', 'Cancelled tasks cannot collect or verify evidence')
     return task
 
 
@@ -544,7 +544,9 @@ def _ready_stop_shape(proof):
         'Ready stop attempt identity set is malformed')
     if proof['observed_turn_id'] is not None:state._text(proof['observed_turn_id'],'ready stop turn',4096)
     for key in ('observation_ref','coordinator_ref'):state._text(proof[key],key)
-    for key in ('candidate_digest','verification_digest','task_digest','attempts_digest','assignments_digest'):state._canonical_hash(proof[key])
+    for key in ('candidate_digest','verification_digest','task_digest','attempts_digest','assignments_digest'):
+        if key=='verification_digest' and proof[key] is None and 'linked_digest' in proof:continue
+        state._canonical_hash(proof[key])
     if 'linked_digest' in proof:state._canonical_hash(proof['linked_digest'])
     state._integer(proof['generation'],'ready proof generation')
     _require(type(proof['version']) is int and proof['version']==2 and proof['kind']=='stopped-writer-reconciliation' and
@@ -569,7 +571,8 @@ def _ready_stop_proof(task,proof,bindings,candidate,verification,linked=None):
         proof['expected_revision']==task['revision'] and proof['expected_pins']==task['pins'] and proof['observed_turn_id']==task['turn_id'] and
         proof['attempt_ids']==[a['id'] for a in attempts] and not any(a['status'] in {'reserved','running','uncertain'} for a in attempts) and
         all(proof[k]==v for k,v in bindings.items()) and proof['candidate_digest']==_digest(candidate) and
-        proof['verification_digest']==verification['digest'],
+        proof['verification_digest']==(verification['digest'] if verification is not None else None) and
+        (verification is not None or linked is not None and linked['version']==2 and own[0]['verification'] is None),
         'Independent ready stop does not bind the complete current original owner snapshot')
 
 
@@ -581,18 +584,20 @@ def _check_ready_inputs(files,*,directory_identity=False):
         else:_require(current==value,'Ready candidate inputs changed before owner commit')
 
 
-def _stop_verification(context,db,task):
-    """Select actual barrier support; cancellation never asserts passing readiness."""
-    if task['state'] in {'ready','verifying'}:return task['evidence']['verification']
+def _stop_verification(context,db,task,*,allow_absent=False):
+    """Preserve every actual historical verifier; absence is only factual v2 compatibility."""
+    if task['state'] in {'ready','verifying'} and not allow_absent:return task['evidence']['verification']
     from runtime import changes,delegation
-    _require(task['state']=='cancelled' and task.get('retirement'),'Complete cancelled stop needs original retirement')
     ref=dict(authority=_canonical_plain(context.authority_set[0]),scope_id=_task_scope_id(task),
         **{k:task[k] for k in ('client','session_id','task_id')})
-    legacy=dict(reference=ref,created_at=task['lifecycle']['created_at'],**{k:task[k] for k in
-        ('revision','pins','accepted_identity','scope_ref','turn_id','retirement')},proof=_read(None,task['retirement']['proof'],context=context,db=db))
-    changes._stopped_certificate_shape(legacy)
-    attempts=[a['id'] for a in task.get('evidence',{}).get('attempts',[]) if a['status'] in {'reserved','running','uncertain'}]
-    _require(legacy['proof']['attempt_ids']==attempts,'Original cancellation attempt membership changed')
+    if task['state']=='cancelled':
+        _require(task.get('retirement'),'Complete cancelled stop needs original retirement')
+        legacy=dict(reference=ref,created_at=task['lifecycle']['created_at'],**{k:task[k] for k in
+            ('revision','pins','accepted_identity','scope_ref','turn_id','retirement')},proof=_read(None,task['retirement']['proof'],context=context,db=db))
+        changes._stopped_certificate_shape(legacy)
+        attempts=[a['id'] for a in task.get('evidence',{}).get('attempts',[]) if a['status'] in {'reserved','running','uncertain'}]
+        _require(legacy['proof']['attempt_ids']==attempts,'Original cancellation attempt membership changed')
+    else:_require(allow_absent and task['state'] in {'ready','verifying'},'Complete stop lacks terminal task authority')
     barriers=[]
     for record in delegation._ledger(None,db,context=context):
         if not all(record['owner'][k]==ref[k] for k in ('scope_id','client','session_id','task_id')):continue
@@ -600,7 +605,10 @@ def _stop_verification(context,db,task):
         rec=_read(None,record['data']['reconciliation'],context=context,db=db)
         if rec.get('kind')=='synchronous-verification':
             changes._barrier_facts(context,db,task,record,rec);barriers.append(rec)
-    _require(barriers,'Cancelled complete stop requires an actual original synchronous barrier')
+    if not barriers:
+        references=[e.get('verification') for e in task['evidence'].get('history',[])+[task['evidence']]]
+        _require(allow_absent and not any(references),'Cancelled complete stop requires an actual original synchronous barrier')
+        return None
     return max(barriers,key=lambda rec:rec['revision'])['verification']
 
 
@@ -608,7 +616,7 @@ def _ready_stop_candidate(context,task,candidate):
     """Read-only freshness from original pinned context; never reserve another verifier."""
     if task.get('writer_stop',{}).get('linked'):
         with _context_database(context) as db:linked=_read(None,task['writer_stop']['linked'],context=context,db=db)
-        _require(_linked_stopped_basis(linked['aggregate'],linked['authorities'],fresh=True)==linked,'Linked complete-stop basis changed')
+        _require(_linked_stopped_basis(_linked_basis_root(linked),linked['authorities'],fresh=True)==linked,'Linked complete-stop basis changed')
         return next(row['inputs'] for row in linked['members'] if row['task']['authority']==_canonical_plain(context.authority_set[0])
             and row['task']['scope_id']==_task_scope_id(task) and all(row['task'][k]==task[k] for k in ('client','session_id','task_id')))
     with _context_database(context) as db:
@@ -1071,7 +1079,7 @@ def _closure_support_guards(contexts):
                         if owner is None or state._retired(db,'task',{key:owner[key] for key in ('scope_id','client','session_id','task_id')}) is None:continue
                         value=_read(None,dict(name=name,digest=digest),context=context,db=db)
                         if value.get('kind') not in {'task-closure','linked-closure-preparation'} or not value.get('stopped',{}).get('linked'):continue
-                        _,authorities,_=_linked_stop_sources(value['stopped']['linked']['aggregate'],list(pending.values()))
+                        _,authorities,_=_linked_stop_sources(_linked_basis_root(value['stopped']['linked']),list(pending.values()))
                         expanded.update({_raw(a):a for a in authorities})
             _require(len(expanded)<=4096,'Retained closure source authority bound exceeded')
             if set(expanded)==set(pending):yield;return
@@ -1089,7 +1097,7 @@ def _observe_closure(contexts, task_ref):
         task=state._task(db,task_ref['scope_id'],task_ref['client'],task_ref['session_id'],task_ref['task_id'])
         linked=task.get('writer_stop',{}).get('linked') if task else None
         historical=bool(linked and task['lifecycle']['safe_closed_at'] is not None)
-        if linked and not historical:pointer=_read(None,linked,context=context,db=db)['aggregate']
+        if linked and not historical:pointer=_linked_basis_root(_read(None,linked,context=context,db=db))
     if historical:
         with changes._authority_guards([context.directory],observe=True),_context_database(context) as db:
             return _ClosureObservation(_canonical_freeze(_linked_historical_closure(context,db,task_ref)),context,_CLOSURE_ISSUER)
@@ -1294,7 +1302,7 @@ def _retire_closed_task(context, task_ref):
                 if metadata['owner'].get('task')==task_ref:
                     body=_read(None,dict(name=name,digest=digest),context=context,db=reader)
                     if body.get('kind')=='linked-closure-preparation':linked=body['stopped']['writer_stop']['linked'];break
-        if linked:pointer=_read(None,linked,context=context,db=reader)['aggregate']
+        if linked:pointer=_linked_basis_root(_read(None,linked,context=context,db=reader))
     if linked:
         pending=[task_ref['authority']]
         for _ in range(4096):
@@ -2803,13 +2811,13 @@ class _LinkedOwner:
     dependencies: tuple
 
 
-def _linked_members(scope, request, observations):
+def _linked_members(scope, request, observations, *, lifecycle=False):
     state._fields(observations, ('members', 'observe'))
     _require(callable(observations['observe']), 'Linked observation acquisition requires the existing trusted coordinator owner')
     rows = observations['members']
     _require(isinstance(rows, list) and 1 <= len(rows) <= 65, 'Invalid bounded linked members')
     with state._database(scope) as db:
-        selected = _task(db, scope, request)
+        selected = _task(db, scope, request, allow_cancelled=lifecycle)
         plan = _read(scope, selected['evidence']['plan'], db=db)
         selected_ref = _canonical_plain(_artifact_owner(scope, selected).task)
         projection = _linked_projection(selected_ref, plan)
@@ -2821,7 +2829,7 @@ def _linked_members(scope, request, observations):
         _request(member_request, ('purpose',), ('reuse', 'security_impact'))
         _require(member_request['purpose'] == request['purpose'], 'Linked verification purpose differs')
         with state._database(member_scope) as db:
-            task = _task(db, member_scope, member_request)
+            task = _task(db, member_scope, member_request, allow_cancelled=lifecycle)
             _require('evidence' in task, 'Linked member approval is missing')
             member_plan = _plan(_read(member_scope, task['evidence']['plan'], db=db))
             reference = _canonical_plain(_artifact_owner(member_scope, task).task)
@@ -2863,8 +2871,10 @@ def _linked_stop_content(content):
     state._fields(content,('version','kind','purpose','projection','inputs','inputs_digest','observations','members',
         'selected','publication_revision','implementation_verified','delivery_complete','deliveries','blockers'))
     _require(type(content['version']) is int and content['version']==1 and content['kind']=='linked-verification' and
-        content['purpose'] in {'completion','merge-evidence'} and content['implementation_verified'] is True and not content['blockers'],
-        'Linked stop requires actual supported implementation verification')
+        content['purpose'] in {'completion','merge-evidence'} and type(content['implementation_verified']) is bool and
+        isinstance(content['blockers'],list) and all(isinstance(value,str) for value in content['blockers']) and
+        content['blockers']==sorted(set(content['blockers'])) and content['implementation_verified']==(not content['blockers']),
+        'Linked stop requires exact actual implementation result')
     _require(isinstance(content['members'],list) and 1<=len(content['members'])<=65 and
         [row['task'] for row in content['members']]==[row['task'] for row in content['projection']['participants']] and
         content['selected'] in [row['task'] for row in content['members']], 'Linked stop participant set is incomplete')
@@ -2877,14 +2887,9 @@ def _linked_stop_content(content):
     _require(content['publication_revision']==selected['revision']+1,'Linked selected publication transition changed')
 
 
-def _linked_stop_sources(pointer,authorities):
-    """Discover only existing typed source authorities; partial reads grant no stop basis."""
+def _linked_source_closure(roots,authorities):
     from runtime import changes
-    known={_raw(a):a for a in authorities};found=dict(known);observed={};pending=[pointer];seen=set()
-    content=_linked_source(pointer);_linked_stop_content(content)
-    for member in content['members']:found[_raw(member['task']['authority'])]=member['task']['authority']
-    pending.extend(_linked_source_refs(content['observations']))
-    pending.extend(dict(authority=row['task']['authority'],reference=row['verification']) for row in content['members'])
+    known={_raw(a):a for a in authorities};found=dict(known);observed={};pending=list(roots);seen=set()
     for authority in authorities:
         context=_reference_context(authority)
         # Authority discovery checks typed immutable history without recursively consuming its stop readers.
@@ -2908,7 +2913,26 @@ def _linked_stop_sources(pointer,authorities):
             elif edge['kind'] in {'assignment','recovery'}:pending.append(dict(authority=other,reference=target['assignment'] if edge['kind']=='assignment' else target['artifact']))
             else:_require(edge['kind']=='task','Linked stop source has unsupported dependencies')
     _require(len(found)<=4096,'Linked stop authority closure exceeds bound')
-    return content,sorted(found.values(),key=_raw),observed
+    return sorted(found.values(),key=_raw),observed
+
+
+def _linked_contract(pointer):
+    value=_linked_source(pointer)
+    if value.get('kind')=='linked-complete-stop' and value.get('version')==2:
+        _linked_capture_shape(value,common=True)
+        return value['content']
+    _linked_stop_content(value)
+    return value
+
+
+def _linked_stop_sources(pointer,authorities):
+    """Structural discovery grants no stop or closure authority."""
+    content=_linked_contract(pointer);roots=[pointer,*_linked_source_refs(content['observations'])]
+    for member in content['members']:
+        if member.get('plan') is not None:roots.append(dict(authority=member['task']['authority'],reference=member['plan']))
+        if member['verification'] is not None:roots.append(dict(authority=member['task']['authority'],reference=member['verification']))
+    expanded,observed=_linked_source_closure(roots,authorities)
+    return content,expanded,observed
 
 
 @contextmanager
@@ -2926,9 +2950,208 @@ def _linked_stop_guards(pointer,authorities):
     raise state.StateError('Linked stop authority closure did not converge')
 
 
+def _linked_execution_member(snapshot):
+    """Check actual current ownership separately from its known or unknown result."""
+    task=snapshot['task'];context=snapshot['context'];verification=snapshot['verification'];claims=snapshot.get('resource_closure',verification['resource_closure'] if verification is not None else None)
+    _require(not any(a['status'] in {'reserved','running','uncertain'} for a in task['evidence']['attempts']) and
+        not (task['turn_uncertain'] and task['turn_id'] is not None),'Linked execution/descendant ownership remains unresolved')
+    _require(not any(c['status']=='pending' and c['kind'] in {'blocker','decision'} for c in task['conditions']),
+        'Linked task authority/dependency conditions remain unresolved')
+    locator=_pinned_locator(task,context)
+    with _context_database(context) as db:
+        state._ready_stop_bindings(context,db,task)
+        _require(not _checkout_attempt_blockers(db,locator,task,context=context) and
+            not _ledger_blockers(locator,db,claims,context=context),
+            'Linked execution still has a relevant unresolved owner')
+
+
+
+def _linked_lifecycle_member(snapshot,content):
+    if content.get('kind')=='linked-verification' and content['implementation_verified']:
+        _require(not snapshot['blockers'],'Linked member verification remains blocked');return
+    _linked_execution_member(snapshot)
+
+
+def _linked_lifecycle_outcomes(content,snapshots,*,observed):
+    """Reproduce actual result facts without promoting them to passing readiness."""
+    result=_linked_outcomes(content['projection'],content['inputs_digest'],content['observations'],snapshots,
+        content['selected'],observed=observed,require_shared_support=True)
+    shared,delivered,_,deliveries=result;local=[]
+    for member in content['members']:
+        if member['verification'] is None:continue
+        verification=_linked_source(dict(authority=member['task']['authority'],reference=member['verification']),observed=observed)
+        _require(isinstance(verification['blockers'],list),'Original linked local result is unavailable')
+        local.extend(verification['blockers'])
+    if content.get('kind')=='linked-verification':
+        _require(sorted(set(shared+local))==content['blockers'] and delivered==content['delivery_complete'] and deliveries==content['deliveries'],
+            'Linked original result or required delivery observation changed')
+    return result
+
+
+def _linked_basis_root(basis):
+    _linked_stop_shape(basis)
+    return basis['aggregate'] if basis['version']==1 else basis['basis']
+
+
+def _linked_capture_shape(value,*,common=False):
+    state._fields(value,('version','kind','basis','aggregate','content','authorities','members','sources','delivery_complete','deliveries'))
+    _require(type(value['version']) is int and value['version']==2 and value['kind']=='linked-complete-stop' and value['aggregate'] is None,
+        'Unknown factual linked lifecycle basis')
+    _require((value['basis'] is None)==common,'A factual capture cannot substitute for an independently stopped member')
+    if not common:_authority_artifact(value['basis'])
+    content=value['content'];state._fields(content,('projection','inputs','inputs_digest','observations','members','selected'))
+    _require(1<=len(value['members'])<=65 and [m['task'] for m in value['members']]==[m['task'] for m in content['projection']['participants']] and
+        [m['task'] for m in content['members']]==[m['task'] for m in value['members']] and content['selected'] in [m['task'] for m in value['members']],
+        'Factual lifecycle basis omits an approved participant')
+    for member,row in zip(value['members'],content['members']):
+        state._fields(member,('task','state','revision','pins','created_at','plan','verification','candidate_digest','bindings','inputs'))
+        state._task_reference(member['task']);state._artifact_reference(member['plan'])
+        if member['verification'] is not None:state._artifact_reference(member['verification'])
+        _require(row==dict(task=member['task'],revision=member['revision'],generation=member['bindings']['generation'],plan=member['plan'],verification=member['verification']),
+            'Factual member contract/source snapshot changed')
+    _bounded(value,MAX_ARTIFACT)
+
+
+def _linked_require_absent_aggregate(context,db,task,reference):
+    """A plan change cannot turn an actual historical aggregate into missing evidence."""
+    evidence=task['evidence'];history=evidence.get('history',[])
+    _require(isinstance(history,list) and all(isinstance(item,dict) for item in history),'Unknown aggregate history remains protected')
+    _require(not any(item.get('linked_verification') for item in [evidence,*history]),
+        'Existing current or historical aggregate requires its actual v1 lifecycle source')
+    # Earlier plan-history records omit the aggregate pointer; its managed owner remains authoritative.
+    rows=db.execute("select name,digest from evidence_metadata where class='detail' limit 4097").fetchall()
+    _require(len(rows)<=4096,'Historical aggregate ownership lookup exceeds bound')
+    for name,digest in rows:
+        if state._metadata(db,name)['owner'].get('task')!=reference:continue
+        body=_read(None,dict(name=name,digest=digest),context=context,db=db)
+        _require(not isinstance(body,dict) or body.get('kind')!='linked-verification',
+            'Existing managed historical aggregate requires its actual v1 lifecycle source')
+
+
+def _linked_terminal_snapshot(reference):
+    context=_reference_context(reference['authority'])
+    with _context_database(context) as db:
+        task=state._task(db,reference['scope_id'],reference['client'],reference['session_id'],reference['task_id'])
+        _require(task is not None and task['state'] in {'ready','verifying','cancelled'},'Lifecycle member lacks an actual terminal reconciliation')
+        _linked_require_absent_aggregate(context,db,task,reference)
+        plan_ref=task['evidence']['plan'];plan=_read(None,plan_ref,context=context,db=db);_linked_projection(reference,plan)
+        verification_ref=_stop_verification(context,db,task,allow_absent=True)
+        verification=_read(None,verification_ref,context=context,db=db) if verification_ref is not None else None
+        bindings=state._ready_stop_bindings(context,db,task)
+    locator,candidate=_capture_pinned(context,task,plan)
+    _,claims,_=_verification_resources(locator,task,plan)
+    snapshot=dict(reference=reference,context=context,task=task,plan=plan,plan_ref=plan_ref,candidate=candidate,
+        generation=bindings['generation'],bindings=bindings,verification_ref=verification_ref,verification=verification,resource_closure=claims)
+    _linked_execution_member(snapshot)
+    return snapshot
+
+
+def _linked_terminal_facts(references,selected,acquired,authorities,*,original_authorities=None):
+    snapshots=[_linked_terminal_snapshot(ref) for ref in references];projection=_linked_projection(selected,next(s['plan'] for s in snapshots if s['reference']==selected))
+    _require([s['reference'] for s in snapshots]==[p['task'] for p in projection['participants']] and
+        all(_linked_projection(s['reference'],s['plan'])==projection for s in snapshots),'Lifecycle scope contracts are incomplete or divergent')
+    inputs=_linked_inputs(snapshots);observed={}
+    _,delivered,_,deliveries=_linked_outcomes(projection,_digest(inputs),acquired,snapshots,selected,observed=observed,require_shared_support=True)
+    roots=_linked_source_refs(acquired)
+    for snapshot in snapshots:
+        roots.append(dict(authority=snapshot['reference']['authority'],reference=snapshot['plan_ref']))
+        if snapshot['verification_ref'] is not None:roots.append(dict(authority=snapshot['reference']['authority'],reference=snapshot['verification_ref']))
+    expanded,observed=_linked_source_closure(roots,authorities)
+    _require({_raw(a) for a in expanded}<={_raw(a) for a in authorities},'Lifecycle source authority set is incomplete')
+    retained=sorted(original_authorities if original_authorities is not None else authorities,key=_raw)
+    required={_raw(s['reference']['authority']) for s in snapshots}
+    for reference,metadata in observed.values():
+        required.add(_raw(reference['authority']));required.update(_raw(edge['reference'].get('authority',reference['authority'])) for edge in metadata['dependencies'])
+    _require(required<={_raw(a) for a in retained},'Factual lifecycle omitted an original required authority')
+    members=[]
+    for snapshot in snapshots:
+        task=snapshot['task'];files=_stop_input_files(task,snapshot['candidate']);project=Path(task['accepted_identity']['project_root'])/state.PROJECT_FILE
+        files[str(project)]=_closure_file_stat(project)
+        members.append(dict(task=snapshot['reference'],state=task['state'],revision=task['revision'],pins=task['pins'],created_at=task['lifecycle']['created_at'],
+            plan=snapshot['plan_ref'],verification=snapshot['verification_ref'],candidate_digest=_digest(snapshot['candidate']),bindings=snapshot['bindings'],inputs=files))
+    content=dict(projection=projection,inputs=inputs,inputs_digest=_digest(inputs),observations=deepcopy(acquired),
+        members=[dict(task=m['task'],revision=m['revision'],generation=m['bindings']['generation'],plan=m['plan'],verification=m['verification']) for m in members],selected=selected)
+    sources=[dict(reference=reference,metadata=metadata,stat=_closure_file_stat(Path(metadata['managed']['path']))) for _,(reference,metadata) in sorted(observed.items())]
+    value=dict(version=2,kind='linked-complete-stop',basis=None,aggregate=None,content=content,authorities=retained,members=members,sources=sources,
+        delivery_complete=delivered,deliveries=deliveries)
+    _linked_capture_shape(value,common=True)
+    for member in members:_check_ready_inputs(member['inputs'])
+    return value
+
+
+def _linked_capture_dependencies(value):
+    selected=value['content']['selected'];refs=[dict(kind='task',reference=selected)]
+    refs.extend(dict(kind='task',reference=member['task']) for member in value['members'] if member['task']!=selected)
+    refs.extend(dict(kind='artifact',reference=dict(authority=source['reference']['authority'],artifact=source['reference']['reference'])) for source in value['sources'])
+    return refs
+
+
+def _linked_capture_record(pointer,*,writer=None):
+    context=_reference_context(pointer['authority'])
+    with _preparation_database(context,writer) as db:
+        metadata,raw=_managed_artifact(None,pointer['reference'],context=context,db=db);value=json.loads(raw)
+        _linked_capture_shape(value,common=True);selected=value['content']['selected']
+        task=_linked_raw_task(db,selected)
+        _require(task is not None,'Factual capture owner is no longer an open raw acquisition owner')
+        _require(pointer['authority']==selected['authority'] and metadata['class']=='detail' and metadata['status']=='live' and metadata['closed_at'] is None and
+            metadata['owner']==dict(kind='project',project_id=task['accepted_identity']['project_id'],task=selected) and metadata['dependencies']==_linked_capture_dependencies(value),
+            'Factual lifecycle basis lacks its exact registered owner/dependencies')
+    return value,metadata
+
+
+def _linked_bound_basis(pointer,authorities,*,writer=None):
+    original,metadata=_linked_capture_record(pointer,writer=writer)
+    actual=_linked_terminal_facts([m['task'] for m in original['members']],original['content']['selected'],original['content']['observations'],authorities,
+        original_authorities=original['authorities'])
+    _require(actual==original,'Factual lifecycle member/input/source snapshot changed')
+    bound=deepcopy(original);bound['basis']=deepcopy(pointer)
+    bound['sources'].append(dict(reference=deepcopy(pointer),metadata=metadata,stat=_closure_file_stat(Path(metadata['managed']['path']))))
+    bound['sources'].sort(key=lambda source:_raw(source['reference']));_linked_stop_shape(bound)
+    return bound
+
+
+def _acquire_linked_basis(scope,request,observations):
+    """Capture managed facts first; this never asserts that independent task stops exist."""
+    _request(request,('purpose',),('reuse','security_impact'))
+    _require(isinstance(scope,AcceptedScope) and scope.client=='codex' and request['purpose'] in {'completion','merge-evidence'},'Factual lifecycle capture needs its actual supported accepted scope')
+    selected,projection,members=_linked_members(scope,request,observations,lifecycle=True);references=[m['reference'] for m in members]
+    pending={_raw(ref['authority']):ref['authority'] for ref in references};acquired=None
+    from runtime import changes
+    for _ in range(4096):
+        with changes._authority_guards([Path(a['directory']) for a in pending.values()]):
+            snapshots=[_linked_terminal_snapshot(ref) for ref in references];inputs=_linked_inputs(snapshots)
+            if acquired is None:acquired=json_object(_raw(observations['observe'](_canonical_freeze(dict(projection=projection,projection_digest=_digest(projection),inputs=inputs,inputs_digest=_digest(inputs))))),limit=MAX_ARTIFACT)
+            roots=_linked_source_refs(acquired)+[dict(authority=s['reference']['authority'],reference=s['plan_ref']) for s in snapshots]
+            roots.extend(dict(authority=s['reference']['authority'],reference=s['verification_ref']) for s in snapshots if s['verification_ref'] is not None)
+            expanded,_=_linked_source_closure(roots,list(pending.values()))
+            if {_raw(a) for a in expanded}!=set(pending):
+                pending.update({_raw(a):a for a in expanded});continue
+            value=_linked_terminal_facts(references,selected,acquired,list(pending.values()));context=_reference_context(selected['authority']);found=[]
+            with _context_database(context,write=True) as db:
+                rows=db.execute("select name,digest from evidence_metadata where class='detail' limit 4097").fetchall();_require(len(rows)<=4096,'Factual basis lookup exceeds bound')
+                for name,digest in rows:
+                    if state._metadata(db,name)['owner'].get('task')!=selected:continue
+                    body=_read(None,dict(name=name,digest=digest),context=context,db=db)
+                    if body.get('kind')=='linked-complete-stop' and body.get('version')==2 and body.get('basis') is None:
+                        _require(body==value,'Prior factual lifecycle basis differs; preserve its incomplete owner');found.append(dict(name=name,digest=digest))
+                _require(len(found)<=1,'Duplicate logical factual lifecycle bases remain protected')
+                _require(_linked_terminal_facts(references,selected,acquired,list(pending.values()))==value,'Factual capture changed before registration')
+                if found:reference=found[0]
+                else:
+                    task=state._task(db,selected['scope_id'],selected['client'],selected['session_id'],selected['task_id'])
+                    owner=_LinkedOwner(_artifact_owner(scope,task),tuple(_canonical_freeze(edge) for edge in _linked_capture_dependencies(value)[1:]))
+                    reference=_artifact(scope,value,owner=owner,db=db)
+                _require(_linked_terminal_facts(references,selected,acquired,list(pending.values()))==value,'Factual capture changed during registration')
+            pointer=dict(authority=selected['authority'],reference=reference)
+            return dict(reference=pointer,basis=_linked_bound_basis(pointer,list(pending.values())))
+    raise state.StateError('Factual lifecycle authority discovery did not converge')
+
+
 def _linked_stop_basis(pointer,authorities):
     """Read-only exact linked-member basis under the complete existing authority guards."""
     from runtime import changes,delegation
+    value=_linked_source(pointer)
+    if value.get('kind')=='linked-complete-stop' and value.get('version')==2:return _linked_bound_basis(pointer,authorities)
     content,expanded,observed=_linked_stop_sources(pointer,authorities)
     _require(expanded==sorted(authorities,key=_raw),'Linked stop needs its complete source authority set')
     snapshots=[_linked_snapshot(row['task'],stopped=True) for row in content['members']]
@@ -2937,15 +3160,16 @@ def _linked_stop_basis(pointer,authorities):
         task=current['task'];selected=captured['task']==content['selected']
         if selected:_require(task['evidence'].get('linked_verification')==pointer,'Linked aggregate is not the selected original publication')
         expected=content['publication_revision'] if selected else captured['revision']
-        expected_state='ready' if selected and content['purpose']=='completion' else 'verifying'
+        expected_state='ready' if selected and content['purpose']=='completion' and content['implementation_verified'] else 'verifying'
         if task['state']=='cancelled':
             _require(task['retirement']['previous_revision']==expected and task['revision']==expected+1,
                 'Linked cancelled member does not match its original predecessor')
         else:_require(task['revision']==expected and task['state']==expected_state,'Linked original member state/revision changed')
         state._assert_open(task)
         _require(current['generation']==captured['generation'] and current['verification_ref']==captured['verification'] and
-            _linked_projection(current['reference'],current['plan'])==content['projection'] and not current['blockers'],
+            _linked_projection(current['reference'],current['plan'])==content['projection'],
             'Linked member contract/local verification/generation changed')
+        _linked_lifecycle_member(current,content)
         with _context_database(current['context']) as db:
             bindings=state._ready_stop_bindings(current['context'],db,task);barriers=[]
             for record in delegation._ledger(None,db,context=current['context']):
@@ -2963,9 +3187,7 @@ def _linked_stop_basis(pointer,authorities):
             bindings=bindings,inputs=inputs))
     inputs=_linked_inputs(snapshots)
     _require(inputs==content['inputs'] and _digest(inputs)==content['inputs_digest'],'Linked stop member inputs changed')
-    blockers,delivered,_,deliveries=_linked_outcomes(content['projection'],content['inputs_digest'],content['observations'],
-        snapshots,content['selected'],observed=observed)
-    _require(not blockers,'Linked stop shared scope/acceptance is unresolved')
+    blockers,delivered,_,deliveries=_linked_lifecycle_outcomes(content,snapshots,observed=observed)
     sources=[]
     for key,(reference,metadata) in sorted(observed.items()):
         path=Path(metadata['managed']['path'])
@@ -2991,6 +3213,8 @@ def _linked_stop_basis(pointer,authorities):
 
 
 def _linked_stop_shape(basis):
+    if basis.get('version')==2:
+        _linked_capture_shape(basis);return
     state._fields(basis,('version','kind','aggregate','content','authorities','members','sources','delivery_complete','deliveries'))
     _require(type(basis['version']) is int and basis['version']==1 and basis['kind']=='linked-complete-stop','Unknown linked stop basis')
     _authority_artifact(basis['aggregate']);_linked_stop_content(basis['content'])
@@ -3074,7 +3298,7 @@ def _linked_raw_task(db,reference):
 
 
 def _linked_component_closed(pointer,*,writer=None):
-    content=_linked_source(pointer);_linked_stop_content(content)
+    content=_linked_contract(pointer)
     for row in content['members']:
         ref=row['task'];context=_reference_context(ref['authority'])
         with _preparation_database(context,writer) as db:
@@ -3138,7 +3362,7 @@ def _linked_retained_assignments(context,db,reference,task,prepared,closed_at,ta
 def _linked_retained_component(pointer,authorities,*,writer=None):
     """Actual compact/marker successors only; never reconstruct removed task bodies."""
     from runtime import changes
-    content=_linked_source(pointer);_linked_stop_content(content);known={_raw(a):a for a in authorities};members=[];basis=None;digest=None;pending=[];discovered={};checked=set()
+    content=_linked_contract(pointer);known={_raw(a):a for a in authorities};members=[];basis=None;digest=None;pending=[];discovered={};checked=set()
     for row in content['members']:
         ref=row['task']
         if _raw(ref['authority']) not in known:discovered[_raw(ref['authority'])]=ref['authority'];continue
@@ -3151,8 +3375,8 @@ def _linked_retained_component(pointer,authorities,*,writer=None):
             prepared=_linked_owned_preparation(context,db,ref);body=prepared['content'];stopped=body['stopped'];changes._stopped_certificate_shape(stopped)
             retained=stopped['linked'];_linked_stop_shape(retained)
             if basis is None:basis=retained;digest=body['component_digest']
-            _require(retained==basis and basis['aggregate']==pointer and basis['content']==content and body['component_digest']==digest and
-                body['component']['basis_digest']==_digest(basis) and body['component']['aggregate']==pointer and body['component']['delivery_complete'] is True and
+            _require(retained==basis and _linked_basis_root(basis)==pointer and basis['content']==content and body['component_digest']==digest and
+                body['component']['basis_digest']==_digest(basis) and body['component']['aggregate']==basis['aggregate'] and body['component']['delivery_complete'] is True and
                 body['component']['acceptance']==content['projection']['acceptance'] and body['component']['deliveries']==basis['deliveries'] and
                 body['component']['members']==[dict(reference=m['task'],state=m['state'],revision=m['revision'],pins=m['pins'],created_at=m['created_at']) for m in basis['members']],
                 'Retained linked preparation complete membership/basis/acceptance/delivery changed')
@@ -3165,7 +3389,7 @@ def _linked_retained_component(pointer,authorities,*,writer=None):
             _ready_stop_shape(proof)
             _require(proof==stopped['proof'] and proof['linked_digest']==_digest(basis) and stop['proof']['digest']==_digest(proof) and
                 _digest(candidate)==proof['candidate_digest'] and stop['candidate']['digest']==proof['candidate_digest'] and
-                stop['verification']['digest']==proof['verification_digest'] and stop['task_revision']==body['revision'] and
+                (stop['verification']['digest'] if stop['verification'] is not None else None)==proof['verification_digest'] and stop['task_revision']==body['revision'] and
                 stop['generation']==original['bindings']['generation'] and all(proof[key]==original['bindings'][key] for key in
                     ('task_digest','attempts_digest','assignments_digest','generation')),
                 'Retained linked independent complete stop changed')
@@ -3178,9 +3402,15 @@ def _linked_retained_component(pointer,authorities,*,writer=None):
             assignments=_linked_retained_assignments(context,db,ref,task,prepared,closed_at,task_marker)
             barriers=[a['certificate'] for a in assignments if a['certificate'].get('version')==2 and
                 a['certificate']['reconciliation']['body']['verification']==original['verification']]
-            _require(barriers,'Retained linked local synchronous verification is unavailable')
-            assignment=_read(None,barriers[0]['reference']['assignment'],context=context,db=db)
-            plan=_read(None,assignment['d5_plan'],context=context,db=db)
+            if basis['version']==1:
+                _require(barriers,'Retained linked local synchronous verification is unavailable')
+                assignment=_read(None,barriers[0]['reference']['assignment'],context=context,db=db)
+                plan=_read(None,assignment['d5_plan'],context=context,db=db)
+            else:
+                _require((original['verification'] is None and not any(a['certificate'].get('version')==2 for a in assignments)) or
+                    original['verification'] is not None and barriers,'Factual member silently lost or invented original verifier support')
+                _require(stop['verification']==original['verification'],'Factual member verifier reference changed')
+                plan=_read(None,original['plan'],context=context,db=db)
             _require(_linked_projection(ref,plan)==content['projection'] and _digest(plan)==candidate['definitions_digest'],
                 'Retained linked approved local contract differs')
             members.append(dict(reference=ref,task=task,task_marker=task_marker,preparation=prepared,closure=closure,closed_at=closed_at,
@@ -3192,8 +3422,8 @@ def _linked_retained_component(pointer,authorities,*,writer=None):
     _require([dict(reference=reference,metadata=metadata,stat=_closure_file_stat(Path(metadata['managed']['path']))) for _,(reference,metadata) in sorted(observed.items())]==basis['sources'],
         'Retained linked original source facts changed')
     snapshots=[dict(reference=m['reference'],plan=m['plan'],candidate=m['candidate']) for m in members]
-    blockers,delivered,_,deliveries=_linked_outcomes(content['projection'],content['inputs_digest'],content['observations'],snapshots,content['selected'],observed=observed)
-    _require(not blockers and delivered and deliveries==basis['deliveries'],'Retained linked shared/exact delivery source support changed')
+    blockers,delivered,_,deliveries=_linked_lifecycle_outcomes(content,snapshots,observed=observed)
+    _require(delivered and deliveries==basis['deliveries'],'Retained linked shared/exact delivery source support changed')
     sources={}
     while pending:
         ref=pending.pop();key=_raw(ref)
@@ -3224,11 +3454,25 @@ def _linked_stopped_basis(pointer,authorities,*,writer=None,fresh=False):
         if fresh:
             _require(all(m['task'] is not None for m in retained['members']),'Retired linked owners cannot obtain fresh verification')
             for member,original in zip(retained['members'],retained['basis']['members']):
-                snapshot=_linked_snapshot(member['reference'],stopped=True)
-                _require(_digest(snapshot['candidate'])==original['candidate_digest'] and not snapshot['blockers'],'Closed linked current candidate changed')
+                snapshot=_linked_terminal_snapshot(member['reference']) if retained['basis']['version']==2 else _linked_snapshot(member['reference'],stopped=True)
+                _require(_digest(snapshot['candidate'])==original['candidate_digest'],'Closed linked current candidate changed')
+                _linked_lifecycle_member(snapshot,retained['basis']['content'])
                 _check_ready_inputs(original['inputs'])
         return retained['basis']
-    content=_linked_source(pointer);_linked_stop_content(content);rows=[]
+    capture=_linked_source(pointer)
+    if capture.get('kind')=='linked-complete-stop' and capture.get('version')==2:
+        basis=_linked_bound_basis(pointer,authorities,writer=writer)
+        for original in basis['members']:
+            ref=original['task'];context=_reference_context(ref['authority'])
+            with _preparation_database(context,writer) as db:
+                task=_linked_raw_task(db,ref)
+                _require(task is not None,'Partly closed factual component lost its original raw owner')
+                if task['lifecycle']['safe_closed_at'] is not None:
+                    prepared=_linked_owned_preparation(context,db,ref)
+                    _require(prepared['content']['stopped']['linked']==basis,'Closed factual member changed its original basis')
+                    _linked_closed_member(context,db,ref,task,prepared)
+        return basis
+    content=_linked_contract(pointer);rows=[]
     for member in content['members']:
         ref=member['task'];context=_reference_context(ref['authority'])
         with _preparation_database(context,writer) as db:
@@ -3243,12 +3487,12 @@ def _linked_stopped_basis(pointer,authorities,*,writer=None,fresh=False):
             stop=task.get('writer_stop');state._writer_stop_shape(stop)
             retained=_read(None,stop['linked'],context=context,db=db);_linked_stop_shape(retained)
             if basis is None:basis=retained
-            _require(retained==basis and basis['aggregate']==pointer and basis['content']==content,'Linked retained member basis changed')
+            _require(retained==basis and _linked_basis_root(basis)==pointer and basis['content']==content,'Linked retained member basis changed')
             prepared=_linked_owned_preparation(context,db,ref);body=prepared['content']
             if component_digest is None:component_digest=body['component_digest']
             expected=next(row for row in basis['members'] if row['task']==ref)
             bindings=state._ready_stop_bindings(context,db,task)
-            _require(body['component_digest']==component_digest and body['component']['aggregate']==pointer and
+            _require(body['component_digest']==component_digest and body['component']['aggregate']==basis['aggregate'] and
                 body['component']['basis_digest']==_digest(basis) and body['component']['delivery_complete'] is True and
                 body['component']['members']==[dict(reference=m['task'],state=m['state'],revision=m['revision'],pins=m['pins'],created_at=m['created_at']) for m in basis['members']], 'Linked preparation complete component changed')
             _require(body['identity']==ref and body['pins']==task['pins']==expected['pins'] and body['revision']==task['revision']==expected['revision'] and
@@ -3265,8 +3509,9 @@ def _linked_stopped_basis(pointer,authorities,*,writer=None,fresh=False):
         if fresh or task['lifecycle']['safe_closed_at'] is None:
             snapshot=_linked_snapshot(ref,stopped=True)
             _require(snapshot['generation']==expected['bindings']['generation'] and snapshot['verification_ref']==expected['verification'] and
-                _digest(snapshot['candidate'])==expected['candidate_digest'] and not snapshot['blockers'] and
+                _digest(snapshot['candidate'])==expected['candidate_digest'] and
                 _linked_projection(ref,snapshot['plan'])==content['projection'], 'Linked current participant/source changed')
+            _linked_lifecycle_member(snapshot,content)
             _check_ready_inputs(expected['inputs']);snapshots.append(snapshot)
         else:
             with _preparation_database(context,writer) as db:plan=_read(None,task['evidence']['plan'],context=context,db=db)
@@ -3278,8 +3523,8 @@ def _linked_stopped_basis(pointer,authorities,*,writer=None,fresh=False):
     actual=[dict(reference=reference,metadata=metadata,stat=_closure_file_stat(Path(metadata['managed']['path'])))
         for _,(reference,metadata) in sorted(observed.items())]
     _require(actual==basis['sources'],'Linked retained source support changed')
-    blockers,delivered,_,deliveries=_linked_outcomes(content['projection'],content['inputs_digest'],content['observations'],snapshots,content['selected'],observed=observed)
-    _require(not blockers and delivered and deliveries==basis['deliveries'],'Linked acceptance or exact required delivery changed')
+    blockers,delivered,_,deliveries=_linked_lifecycle_outcomes(content,snapshots,observed=observed)
+    _require(delivered and deliveries==basis['deliveries'],'Linked acceptance or exact required delivery changed')
     return basis
 
 
@@ -3315,13 +3560,13 @@ def _preparation_database(context,writer=None):
 def _linked_preparation_facts(pointer,authorities,*,writer=None):
     """Complete semantic/source facts; recovery interpretation belongs to the outer acquisition."""
     from runtime import changes,delegation
-    content=_linked_source(pointer);_linked_stop_content(content)
+    content=_linked_contract(pointer)
     selected=content['selected'];context=_reference_context(selected['authority'])
     with _preparation_database(context,writer) as db:
         task=state._task(db,selected['scope_id'],selected['client'],selected['session_id'],selected['task_id'])
         _require(task is not None and task.get('writer_stop',{}).get('linked'),'Linked preparation needs every independent stop')
         basis=_read(None,task['writer_stop']['linked'],context=context,db=db)
-    _require(basis['aggregate']==pointer and _linked_stopped_basis(pointer,basis['authorities'],writer=writer)==basis,
+    _require(_linked_basis_root(basis)==pointer and _linked_stopped_basis(pointer,basis['authorities'],writer=writer)==basis,
         'Linked preparation original basis changed')
     _require(basis['delivery_complete'] is True,'Linked preparation requires required merged or approved-null delivery')
     known={_raw(a):a for a in authorities};discovered={};members=[];pending=[]
@@ -3397,7 +3642,7 @@ def _preparation_content(facts,reference):
     member=_preparation_member(facts,reference);task=member['task'];basis=facts['basis']
     return dict(version=1,kind='linked-closure-preparation',identity=reference,pins=task['pins'],accepted_identity=task['accepted_identity'],
         created_at=task['lifecycle']['created_at'],revision=task['revision'],outcome=task['state'],stopped=member['certificate'],
-        component_digest=_digest(facts),component=dict(aggregate=facts['aggregate'],basis_digest=_digest(basis),
+        component_digest=_digest(facts),component=dict(aggregate=basis['aggregate'],basis_digest=_digest(basis),
             members=[dict(reference=m['reference'],state=m['task']['state'],revision=m['task']['revision'],pins=m['task']['pins'],
                 created_at=m['task']['lifecycle']['created_at']) for m in facts['members']],
             acceptance=basis['content']['projection']['acceptance'],deliveries=basis['deliveries'],delivery_complete=basis['delivery_complete'],receipts=facts['receipts']),
@@ -3543,7 +3788,7 @@ def _linked_prepared_replacements(certificates,contexts,*,writer=None):
     authorities=[_canonical_plain(c.authority_set[0]) for c in contexts];groups={};extra=[];routes={};result=[]
     for certificate in certificates:
         if 'linked' not in certificate:result.append(certificate);continue
-        pointer=certificate['linked']['aggregate'];key=_raw(pointer)
+        pointer=_linked_basis_root(certificate['linked']);key=_raw(pointer)
         if key not in groups:
             present=False
             for row in certificate['linked']['members']:
@@ -3560,7 +3805,7 @@ def _linked_prepared_replacements(certificates,contexts,*,writer=None):
             facts=_linked_retained_component(pointer,authorities,writer=writer) if historical else _linked_preparation_facts(pointer,authorities,writer=writer)
             _require(not facts.get('discovered_authorities'),'Prepared replacement authority coverage is incomplete')
             required={_raw(m['reference']) for m in facts['members']}
-            actual={_raw(c['reference']) for c in certificates if c.get('linked',{}).get('aggregate')==pointer}
+            actual={_raw(c['reference']) for c in certificates if c.get('linked') and _linked_basis_root(c['linked'])==pointer}
             _require(actual==required,'D4 prepared component omits an approved member')
             receipts={_raw(m['reference']):(dict(authority=m['reference']['authority'],artifact=m['preparation']['reference']) if historical else
                 _preparation_receipt(facts,m['reference'],writer=writer)) for m in facts['members']}
@@ -3610,7 +3855,7 @@ class _PreparationReader:
 
     def check(self,context,db,certificate):
         self._check_owner()
-        authorities=certificate['preparation']['authorities'];pointer=certificate['linked']['aggregate']
+        authorities=certificate['preparation']['authorities'];pointer=_linked_basis_root(certificate['linked'])
         _require({_raw(a) for a in authorities}<=self.authorities.keys() and
             _raw(_canonical_plain(context.authority_set[0])) in self.authorities,
             'Preparation reader physical authority set differs')
@@ -3671,10 +3916,10 @@ def _check_linked_preparation_certificate(context,db,certificate,*,preparation_r
         preparation_reader.check(context,db,certificate)
         return
     basis=certificate['linked'];authorities=certificate['preparation']['authorities']
-    if _linked_component_closed(basis['aggregate'],writer=(context,db)):
-        _check_retained_linked_certificate(_linked_retained_component(basis['aggregate'],authorities,writer=(context,db)),certificate)
+    if _linked_component_closed(_linked_basis_root(basis),writer=(context,db)):
+        _check_retained_linked_certificate(_linked_retained_component(_linked_basis_root(basis),authorities,writer=(context,db)),certificate)
         return
-    facts=_linked_preparation_facts(basis['aggregate'],authorities,writer=(context,db))
+    facts=_linked_preparation_facts(_linked_basis_root(basis),authorities,writer=(context,db))
     _require(not facts.get('discovered_authorities') and _digest(facts)==certificate['preparation']['component_digest'],
         'D4 prepared component facts changed')
     receipts=[_preparation_receipt(facts,m['reference'],writer=(context,db)) for m in facts['members']]
@@ -3689,7 +3934,7 @@ def _linked_inputs(snapshots):
         candidate_digest=_digest(row['candidate'])) for row in snapshots]
 
 
-def _linked_outcomes(projection, inputs_digest, acquired, snapshots, selected_ref, *, observed=None):
+def _linked_outcomes(projection, inputs_digest, acquired, snapshots, selected_ref, *, observed=None,require_shared_support=False):
     """Validate retained source correspondence; trusted acquisition owns its provenance/semantics."""
     state._fields(acquired, ('scope_decision','shared','deliveries'))
     _bounded(acquired, MAX_ARTIFACT)
@@ -3717,6 +3962,7 @@ def _linked_outcomes(projection, inputs_digest, acquired, snapshots, selected_re
                 state._integer(source.get('observed_at'),'original shared observation time')
                 state._text(source.get('reference'),'observed integration source')
                 supported=True
+        _require(supported or not require_shared_support,'Linked lifecycle shared result lacks its actual input-bound source')
         if row['status'] != 'passed' or not supported:
             blockers.append('Shared criterion is unresolved or unsupported: '+row['id'])
     required={_raw(row['delivery']):row['delivery'] for row in projection['participants'] if row['delivery'] is not None}

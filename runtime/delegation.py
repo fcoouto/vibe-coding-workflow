@@ -295,14 +295,14 @@ def _closure_guidance(context,db,records):
         if marker is None:continue
         compact=evidence._read(None,dict(name=row[0],digest=row[1]),context=context,db=db);linked=None
         if compact.get('kind')=='linked-closure-preparation':
-            support=evidence._linked_retained_component(compact['component']['aggregate'],compact['stopped']['linked']['authorities'],writer=(context,db))
+            support=evidence._linked_retained_component(evidence._linked_basis_root(compact['stopped']['linked']),compact['stopped']['linked']['authorities'],writer=(context,db))
             _require(not support.get('discovered_authorities'),'Retained guidance source guards are incomplete')
             member=next(m for m in support['members'] if m['reference']==owner)
             _require(member['preparation']['reference']==dict(name=row[0],digest=row[1]),'Retained guidance preparation is not its actual owner')
             continue
         owner_key=evidence._raw(owner);_require(owner_key not in owners,'Retained guidance owner has ambiguous compact receipts');owners.add(owner_key)
         if compact.get('stopped',{}).get('linked'):
-            support=evidence._linked_retained_component(compact['stopped']['linked']['aggregate'],compact['stopped']['linked']['authorities'],writer=(context,db))
+            support=evidence._linked_retained_component(evidence._linked_basis_root(compact['stopped']['linked']),compact['stopped']['linked']['authorities'],writer=(context,db))
             _require(not support.get('discovered_authorities'),'Retained guidance component source guards are incomplete')
             linked=next(m for m in support['members'] if m['reference']==owner)
             _require(linked['closure']['reference']==dict(name=row[0],digest=row[1]),'Retained guidance closure is not its actual owner')

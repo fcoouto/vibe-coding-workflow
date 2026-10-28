@@ -1938,12 +1938,16 @@ def _stopped_certificate_shape(value):
         d3._require(proof['identity']=={k:(ref[k] if k!='scope_ref' else value[k]) for k in ('client','session_id','task_id','scope_ref')} and
             proof['expected_pins']==value['pins'] and proof['expected_revision']==stop['task_revision']==value['revision'] and
             proof['observed_turn_id']==value['turn_id'] and proof['candidate_digest']==stop['candidate']['digest'] and
-            proof['verification_digest']==stop['verification']['digest'] and proof['generation']==stop['generation'] and
+            proof['verification_digest']==(stop['verification']['digest'] if stop['verification'] is not None else None) and proof['generation']==stop['generation'] and
             evidence._digest(proof)==stop['proof']['digest'] and all(proof[k]==stop[k] for k in ('observation_ref','coordinator_ref')),
             'Complete certificate changed original independent task stop')
         d3._require(('linked' in value)==('linked_digest' in proof),'Complete certificate lost its linked basis')
         if 'linked' in value:
             linked=value['linked'];evidence._linked_stop_shape(linked)
+            if stop['verification'] is None:
+                d3._require(linked['version']==2 and linked['aggregate'] is None and proof['verification_digest'] is None and
+                    any(row['task']==ref and row['verification'] is None for row in linked['members']),
+                    'Absent verifier needs its exact factual lifecycle member basis')
             d3._require(evidence._digest(linked)==proof['linked_digest']==stop['linked']['digest'] and
                 any(row['task']==ref and row['state']==value['state'] and row['revision']==value['revision'] and
                     row['pins']==value['pins'] and row['created_at']==value['created_at'] for row in linked['members']),
@@ -2015,12 +2019,12 @@ def _check_stopped_certificate(context,db,value,*,preparation_reader=None):
     from runtime import evidence
     _stopped_certificate_shape(value)
     ref=value['reference']
-    if value.get('linked') and evidence._linked_component_closed(value['linked']['aggregate'],writer=(context,db)):
+    if value.get('linked') and evidence._linked_component_closed(evidence._linked_basis_root(value['linked']),writer=(context,db)):
         if preparation_reader is not None and 'preparation' in value:
             evidence._check_linked_preparation_certificate(context,db,value,preparation_reader=preparation_reader)
         else:
             authorities=value.get('preparation',{}).get('authorities',value['linked']['authorities'])
-            support=evidence._linked_retained_component(value['linked']['aggregate'],authorities,writer=(context,db))
+            support=evidence._linked_retained_component(evidence._linked_basis_root(value['linked']),authorities,writer=(context,db))
             evidence._check_retained_linked_certificate(support,value)
         identity=task_state._lifecycle_identity(db,'task',ref)
         d3._require(identity['status']!='expired','Expired linked identity cannot validate historical support')
@@ -2065,7 +2069,7 @@ def _cut_recovery_content(content,certificates,contexts):
         if 'linked' in c and 'preparation' not in c:continue
         if c.get('writer_stop'):
             if c.get('state')=='cancelled':seeds.append(((d3._digest(c['reference']['authority']),d3._digest(c['retirement']['proof'])),c['reference']))
-            seeds.extend(((d3._digest(c['reference']['authority']),d3._digest(ref)),c['reference']) for ref in (c['writer_stop']['candidate'],c['writer_stop']['verification']))
+            seeds.extend(((d3._digest(c['reference']['authority']),d3._digest(ref)),c['reference']) for ref in (c['writer_stop']['candidate'],c['writer_stop']['verification']) if ref is not None)
     seeds.extend((key,json.loads(next(iter(owners)))) for key,owners in component_routes.items())
     for assignment in certified.values():
         authority=assignment['reference']['authority']; rec=assignment['reconciliation']
@@ -2138,7 +2142,7 @@ def _recovery_ready_inputs(content,contexts):
                 identity=task_state._lifecycle_identity(db,'task',ref)
                 if identity['status']!='live':continue
                 task=task_state._task(db,ref['scope_id'],ref['client'],ref['session_id'],ref['task_id'])
-                if certificate.get('linked') and task['lifecycle']['safe_closed_at'] is not None and evidence._linked_component_closed(certificate['linked']['aggregate'],writer=(context,db)):continue
+                if certificate.get('linked') and task['lifecycle']['safe_closed_at'] is not None and evidence._linked_component_closed(evidence._linked_basis_root(certificate['linked']),writer=(context,db)):continue
                 candidate=evidence._read(None,task['writer_stop']['candidate'],context=context,db=db)
                 files[d3._digest(ref)]=evidence._ready_stop_candidate(context,task,candidate)
     return _canonical_freeze(files)
@@ -2341,7 +2345,7 @@ def _check_recovery_source(source,context,db):
     for certificate in content.get('stopped',[]):
         if certificate['reference']['authority']!=authority:continue
         identity=_check_stopped_certificate(context,db,certificate)
-        historical=certificate.get('linked') and evidence._linked_component_closed(certificate['linked']['aggregate'],writer=(context,db))
+        historical=certificate.get('linked') and evidence._linked_component_closed(evidence._linked_basis_root(certificate['linked']),writer=(context,db))
         if certificate.get('writer_stop') and identity['status']=='live' and not historical:
             key=d3._digest(certificate['reference'])
             d3._require(source.ready_inputs is not None and key in source.ready_inputs,'Ready source needs its actual bounded input observation')
