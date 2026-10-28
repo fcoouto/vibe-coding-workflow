@@ -10,7 +10,7 @@ Use a successfully resolved, current canonical membership for an enrolled Projec
 
 Select one or more areas:
 
-- **Code quality:** lint, file size, duplication, responsibility, and maintainability.
+- **Code quality:** ordinary lint, file size, duplication, responsibility, and maintainability. Detailed source-structure or agent-context assessment needs matching explicit approval for the repositories, candidates, and analysis, even under Full Scan. Load [the focused assessment procedure](source-structure.md) only with that approval; Full Scan alone never starts it.
 - **Correctness and tests:** bugs, edge cases, missing important tests, and existing test/build evidence.
 - **Security and dependencies:** relevant risks and dependency findings supported by available inspection or tools.
 - **Architecture and performance:** boundaries, complexity, evidence-backed risks, and measured findings where available.
@@ -32,6 +32,8 @@ Use an installed review capability only when it fits the selected scope and is a
 Review approval permits inspection only. If a missing tool would materially help, name the package/tool, purpose, installation scope, and affected files including manifests and lockfiles. Install only after explicit approval for that exact package and scope; reuse a matching approval already recorded for this task without asking again. A declined or unavailable installation remains a coverage gap.
 
 Do not modify project content during review. Report the smallest useful fix and affected scope for each finding. Apply a fix only after separate explicit approval for that selected fix and scope; reuse an exact prior approval without asking again. Installation approval never approves a fix, and scan approval never approves either. Carry out approved changes through the project's ordinary workflow and checks; do not expand them to unrelated files.
+
+Approval for focused analysis permits inspection and reporting only. Accepting its findings does not authorize refactoring; obtain separate explicit approval for each selected change and use the normal development workflow.
 
 ## Findings, report, and retention
 
