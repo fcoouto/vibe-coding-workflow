@@ -1382,6 +1382,304 @@ class AssignedCancelledClosureTests(unittest.TestCase):
             self.assertEqual(f.changes._run_scoped(f.directory,request,operation)['exit_code'],0)
 
 
+class ReadyClosureTests(unittest.TestCase):
+    """Real ready verification and owner stop; fixture host authority is unqualified."""
+    setUp = CanonicalEvidenceTests.setUp
+
+    def ready(self):
+        from runtime.engine import RuntimeEvent
+        f=self.fixture
+        for kind in ('PreToolUse','PostToolUse'):
+            state.process_event(self.scope,RuntimeEvent(kind,'codex','parent',f.repo,turn_id='turn',tool_call_id='fixture-read',
+                tool_name='read_file',receipt_fingerprint='a'*64))
+        f.checked();f.review()
+        result=f.verify();self.assertEqual(result['task']['state'],'ready',result)
+        return result['task']
+
+    def stop_request(self,task,**proof_updates):
+        api=self.fixture.api;context=api._evidence_context(self.scope)
+        with api._context_database(context) as db:bindings=state._ready_stop_bindings(context,db,task)
+        verification=api._read(self.scope,task['evidence']['verification'])
+        proof=dict(version=2,kind='stopped-writer-reconciliation',identity=self.fixture.identity,
+            expected_revision=task['revision'],expected_pins=task['pins'],observed_turn_id=task['turn_id'],
+            stopped=True,descendants_stopped=True,attempt_ids=[a['id'] for a in task['evidence']['attempts']],
+            observation_ref='fixture:independent-complete-stop',coordinator_ref='fixture:host-checked',
+            candidate_digest=verification['candidate_digest'],verification_digest=task['evidence']['verification']['digest'],**bindings)
+        proof.update(proof_updates);raw=json.dumps(proof).encode();path=self.fixture.root/('ready-stop-'+hashlib.sha256(raw).hexdigest()+'.json')
+        path.write_bytes(raw);path.chmod(0o400)
+        return self.fixture.identity|dict(expected_revision=task['revision'],expected_pins=task['pins'],stop_proof=dict(path=str(path),sha256=hashlib.sha256(raw).hexdigest()))
+
+    def stopped(self):
+        task=self.ready();request=self.stop_request(task)
+        result=state._retain_ready_stop(self.scope,request)
+        self.assertEqual(result['task']['state'],'ready');self.assertEqual(result['task']['revision'],task['revision'])
+        self.assertEqual(result['task']['lifecycle'],task['lifecycle'])
+        return result['task'],request
+
+    def test_real_ready_stop_closes_and_atomically_retires_with_original_outcome(self):
+        api=self.fixture.api;task,request=self.stopped();context=api._evidence_context(self.scope)
+        ref=api._canonical_plain(api._artifact_owner(self.scope,task).task)
+        closed=api.close_task(self.scope,self.fixture.request(expected_pins=task['pins']),api._observe_closure((context,),ref))['task']
+        self.assertEqual(closed['state'],'ready');self.assertEqual(closed['revision'],task['revision'])
+        compact=api._read(self.scope,closed['lifecycle']['compact'])
+        self.assertEqual(compact['outcome'],'ready');self.assertEqual(compact['usage'],'unknown')
+        self.assertEqual(len(compact['stopped']['assignments']),3)
+        self.assertTrue(compact['reviews']);self.assertTrue(compact['numerical']);self.assertTrue(compact['verifications'])
+        api._retire_closed_task(context,ref)
+        with api._context_database(context) as db:
+            self.assertEqual(db.execute('select count(*) from tasks').fetchone()[0],0)
+            self.assertEqual(db.execute('select count(*) from assignments').fetchone()[0],0)
+            self.assertEqual(db.execute('select count(*) from turns').fetchone()[0],0)
+            self.assertEqual(db.execute('select count(*) from receipts').fetchone()[0],0)
+            self.assertIsNotNone(state._retired(db,'turn',dict(scope_id=ref['scope_id'],client='codex',session_id='parent',turn_id='turn')))
+            self.assertEqual(state._retired(db,'task',{k:ref[k] for k in ('scope_id','client','session_id','task_id')})['outcome'],'ready')
+            from runtime import changes
+            changes._check_stopped_certificate(context,db,compact['stopped'])
+
+    def test_ready_barrier_alone_is_not_stop_authority(self):
+        task=self.ready();api=self.fixture.api;context=api._evidence_context(self.scope)
+        ref=api._canonical_plain(api._artifact_owner(self.scope,task).task)
+        with self.assertRaises(StartupError):api._observe_closure((context,),ref)
+        from runtime import changes
+        with api._context_database(context) as db,self.assertRaises(StartupError):changes._stopped_certificate(context,db,dict(reference=ref,pins=task['pins']))
+
+
+    def test_ready_stop_rejects_incomplete_or_forged_independent_proof(self):
+        task=self.ready()
+        for delta in (dict(version=1),dict(stopped=False),dict(descendants_stopped=False),dict(attempt_ids=[]),
+            dict(assignments_digest='f'*64),dict(attempts_digest='f'*64),dict(task_digest='f'*64),dict(candidate_digest='f'*64),
+            dict(verification_digest='f'*64),dict(generation=True),dict(observed_turn_id='foreign-turn'),dict(expected_revision=task['revision']-1),
+            dict(expected_pins=task['pins']|dict(policy_digest='f'*64)),dict(native_authority=True)):
+            with self.subTest(delta=delta),self.assertRaises(StartupError):state._retain_ready_stop(self.scope,self.stop_request(task,**delta))
+        with state._database(self.scope) as db:
+            self.assertNotIn('writer_stop',state._task(db,state._scope_id(self.scope),'codex','parent','task'))
+
+    def test_ready_stop_exact_replay_and_generic_writers_preserve_original_envelope(self):
+        api=self.fixture.api;task,request=self.stopped();context=api._evidence_context(self.scope)
+        raw=Path(request['stop_proof']['path']).read_bytes();Path(request['stop_proof']['path']).unlink()
+        with patch.object(api,'_artifact',side_effect=AssertionError('Replay created new managed facts')),patch.object(api,'_read_host_proof',side_effect=AssertionError('Replay reread external authority')):
+            replay=state._retain_ready_stop(self.scope,request)
+        self.assertTrue(replay['replayed']);self.assertEqual(replay['task'],task)
+        bad=dict(request,stop_proof=dict(request['stop_proof'],path=str(self.fixture.root/'other-proof.json')))
+        Path(bad['stop_proof']['path']).write_bytes(raw);Path(bad['stop_proof']['path']).chmod(0o400)
+        with self.assertRaises(StartupError):state._retain_ready_stop(self.scope,bad)
+        for action in ('remove','replace'):
+            with api._context_database(context,write=True) as db,self.assertRaises(StartupError):
+                changed=json.loads(json.dumps(task))
+                if action=='remove':changed.pop('writer_stop')
+                else:changed['writer_stop']['request_digest']='f'*64
+                state._save(db,state._scope_id(self.scope),changed)
+
+    def test_ready_stop_becomes_stale_after_generation_or_resumed_task(self):
+        api=self.fixture.api;task,request=self.stopped();context=api._evidence_context(self.scope)
+        with api._context_database(context,write=True) as db:
+            db.execute('update checkouts set generation=generation+1')
+        with self.assertRaises(StartupError):state._retain_ready_stop(self.scope,request)
+        with api._context_database(context,write=True) as db:
+            db.execute('update checkouts set generation=generation-1')
+            changed=json.loads(json.dumps(task));changed.update(state='active',revision=task['revision']+1)
+            state._save(db,state._scope_id(self.scope),changed)
+        with self.assertRaises(StartupError):state._retain_ready_stop(self.scope,request)
+        from runtime import changes
+        ref=api._canonical_plain(api._artifact_owner(self.scope,task).task)
+        with api._context_database(context) as db,self.assertRaises(StartupError):changes._stopped_certificate(context,db,dict(reference=ref,pins=task['pins']))
+
+    def test_closed_ready_status_is_historical_and_new_owner_does_not_reopen_it(self):
+        api=self.fixture.api;task,_=self.stopped();context=api._evidence_context(self.scope)
+        ref=api._canonical_plain(api._artifact_owner(self.scope,task).task)
+        closed=api.close_task(self.scope,self.fixture.request(expected_pins=task['pins']),api._observe_closure((context,),ref))['task']
+        from runtime.engine import RuntimeEvent
+        state.process_event(self.scope,RuntimeEvent('PostToolUse','codex','parent',self.fixture.repo,turn_id='turn',tool_call_id='late',receipt_fingerprint='b'*64))
+        with patch.object(api,'capture_candidate',side_effect=AssertionError('Historical status captured current readiness')),            patch.object(api,'_capture',side_effect=AssertionError('Historical status captured current inputs')):
+            status=state.task_status(self.scope,'codex','parent');evidence=api.evidence_status(self.scope,'codex','parent')
+        self.assertEqual(status['task'],closed);self.assertTrue(status['historical']['historical'])
+        self.assertFalse(evidence['evidence']['implementation_verified']);self.assertFalse(evidence['evidence']['merge_authority'])
+        for purpose in ('completion','merge-evidence'):
+            with self.subTest(purpose=purpose),self.assertRaises(StartupError):api.verify_completion(self.scope,self.fixture.request(purpose=purpose))
+        self.fixture.readiness_owner(session='new-parent')
+        with api._context_database(context) as db:self.assertEqual(state._task(db,state._scope_id(self.scope),'codex','parent','task'),closed)
+
+    def test_actual_ready_d4_cut_precedes_closure_and_retired_raw_removal(self):
+        from tests.test_changes import ScopedChangesTests
+        from runtime import changes
+        api=self.fixture.api;task,_=self.stopped();context=api._evidence_context(self.scope)
+        ref=api._canonical_plain(api._artifact_owner(self.scope,task).task)
+        d4=ScopedChangesTests(methodName='runTest');d4.setUp();self.addCleanup(d4.doCleanups)
+        request=d4.scoped_request()
+        for repository in request['manifest']['enrollment']['record']['repositories']:
+            for checkout in repository['checkouts']:checkout['clients'][0]['configuration']['runtime']=dict(schema_version=3,state_dir=str(context.directory))
+        from runtime import onboarding
+        request['approval']['manifest_digest']=onboarding._digest(request['manifest'])
+        result=changes._run_scoped(d4.directory,request,'apply');self.assertEqual(result['exit_code'],0,result)
+        source=changes._observe_recovery_source(d4.directory,changes._load_journal(d4.directory),(context,),(ref,))
+        with api._context_database(context,write=True) as db:old=api._register_recovery_source(None,db,source,context=context)
+        with self.assertRaises(StartupError):api._observe_closure((context,),ref)
+        observed=changes._observe_recovery_release(context.authority_set,dict(source.content['identity']))
+        with api._context_database(context) as db:
+            originals=[r for r,_ in api._recovery_source_history(context,db,dict(old),dict(source.content['identity']))]
+        released=changes._register_recovery_release(observed);self.assertTrue(released['complete'],released)
+        with api._context_database(context) as db:
+            current=state._task(db,state._scope_id(self.scope),'codex','parent','task')
+            self.assertEqual(current['state'],'ready');self.assertEqual(current['revision'],task['revision']);self.assertIsNone(current['lifecycle']['safe_closed_at'])
+        closed=api.close_task(self.scope,self.fixture.request(expected_pins=task['pins']),api._observe_closure((context,),ref))['task']
+        compact=api._read(self.scope,closed['lifecycle']['compact'])
+        self.assertEqual(compact['outcome'],'ready');self.assertTrue(compact['scope_guidance'])
+        api._retire_closed_task(context,ref)
+        retained={a['artifact']['name'] for a in observed.content['artifacts']}
+        for item in list(source.content['artifacts']):
+            if item['artifact']['name'] not in retained:(context.directory/'evidence'/item['artifact']['name']).unlink(missing_ok=True)
+        for item in originals:(context.directory/'evidence'/item['name']).unlink(missing_ok=True)
+        self.assertTrue(changes.inspect_lifecycle_recovery(context.authority_set,(ref,))['complete'])
+        for operation in ('resume','rollback'):
+            result=changes._run_scoped(d4.directory,request,operation);self.assertEqual(result['exit_code'],0,result)
+
+
+    def test_ready_source_mutation_during_stop_rolls_back(self):
+        api=self.fixture.api;task=self.ready();request=self.stop_request(task);original=api._artifact
+        def move_stop(scope,value,**kwargs):
+            result=original(scope,value,**kwargs)
+            if value.get('kind')=='stopped-writer-reconciliation':(self.fixture.repo/'app.py').write_text('changed during stop\n')
+            return result
+        with patch.object(api,'_artifact',side_effect=move_stop),self.assertRaises(StartupError):state._retain_ready_stop(self.scope,request)
+        with state._database(self.scope) as db:self.assertNotIn('writer_stop',state._task(db,state._scope_id(self.scope),'codex','parent','task'))
+        # Disposable failed registration leaves its artifact an unknown protected orphan.
+
+    def test_ready_candidate_mutation_during_compact_registration_rolls_back(self):
+        api=self.fixture.api;task,_=self.stopped();context=api._evidence_context(self.scope)
+        ref=api._canonical_plain(api._artifact_owner(self.scope,task).task);observation=api._observe_closure((context,),ref)
+        original=api._artifact
+        def move_compact(scope,value,**kwargs):
+            result=original(scope,value,**kwargs)
+            if value.get('kind')=='task-closure':(self.fixture.repo/'app.py').write_text('changed during closure\n')
+            return result
+        with patch.object(api,'_artifact',side_effect=move_compact),self.assertRaises(StartupError):
+            api.close_task(self.scope,self.fixture.identity|dict(expected_revision=task['revision'],expected_pins=task['pins']),observation)
+        with api._context_database(context) as db:
+            current=state._task(db,state._scope_id(self.scope),'codex','parent','task')
+            self.assertEqual(current['state'],'ready');self.assertEqual(current['revision'],task['revision'])
+            self.assertIsNone(current['lifecycle']['safe_closed_at'])
+
+    def test_blocking_findings_stay_protected(self):
+        self.fixture.checked()
+        finding=dict(id='open',severity='high',scope='security',status='confirmed',location='app.py:1',
+            scenario='Unresolved reachable fixture path',evidence='Independent trace',counterevidence='None')
+        self.fixture.review(findings=[finding]);result=self.fixture.verify();task=result['task']
+        self.assertNotEqual(task['state'],'ready')
+        with self.assertRaises(StartupError):state._retain_ready_stop(self.scope,self.stop_request(task))
+
+    def test_cancelled_synchronous_barrier_without_complete_stop_stays_protected(self):
+        api=self.fixture.api;task=self.ready()
+        proof=dict(version=1,kind='stopped-writer-reconciliation',identity=self.fixture.identity,expected_revision=task['revision'],
+            expected_pins=task['pins'],observed_turn_id=task['turn_id'],stopped=True,descendants_stopped=True,attempt_ids=[],
+            observation_ref='fixture:legacy-stop',coordinator_ref='fixture:independent')
+        raw=json.dumps(proof).encode();path=self.fixture.root/'legacy-cancel.json';path.write_bytes(raw);path.chmod(0o400)
+        cancelled=state.retire_task(self.scope,self.fixture.request(expected_pins=task['pins'],reason='Cancelled',reference='fixture:cancel',
+            stop_proof=dict(path=str(path),sha256=hashlib.sha256(raw).hexdigest())))['task']
+        context=api._evidence_context(self.scope);ref=api._canonical_plain(api._artifact_owner(self.scope,cancelled).task)
+        with self.assertRaises(StartupError):api._observe_closure((context,),ref)
+
+
+    def test_ready_complete_older_barriers_and_verification_ages_are_retained(self):
+        api=self.fixture.api;self.ready();task=self.fixture.verify()['task']
+        task=state._retain_ready_stop(self.scope,self.stop_request(task))['task'];context=api._evidence_context(self.scope)
+        ref=api._canonical_plain(api._artifact_owner(self.scope,task).task)
+        closed=api.close_task(self.scope,self.fixture.request(expected_pins=task['pins']),api._observe_closure((context,),ref))['task']
+        compact=api._read(self.scope,closed['lifecycle']['compact'])
+        self.assertEqual(len(compact['stopped']['assignments']),4);self.assertEqual(len(compact['verifications']),2)
+        with api._context_database(context) as db:
+            for item in compact['verifications']:self.assertEqual(item['created_at'],state._metadata(db,item['source']['name'])['created_at'])
+
+    def test_ready_assignment_task_and_event_marker_fault_rolls_back_together(self):
+        api=self.fixture.api;task,_=self.stopped();context=api._evidence_context(self.scope)
+        ref=api._canonical_plain(api._artifact_owner(self.scope,task).task)
+        closed=api.close_task(self.scope,self.fixture.request(expected_pins=task['pins']),api._observe_closure((context,),ref))['task']
+        original=state._retired_record
+        def fail_task(kind,*args):
+            if kind=='task':raise state.StateError('fixture marker fault after assignment removal')
+            return original(kind,*args)
+        with patch.object(state,'_retired_record',side_effect=fail_task),self.assertRaises(StartupError):api._retire_closed_task(context,ref)
+        with api._context_database(context) as db:
+            self.assertEqual(state._task(db,state._scope_id(self.scope),'codex','parent','task'),closed)
+            self.assertEqual(db.execute('select count(*) from assignments').fetchone()[0],3)
+            self.assertEqual(db.execute('select count(*) from retired_identities').fetchone()[0],0)
+            self.assertEqual(db.execute('select count(*) from turns').fetchone()[0],1)
+            self.assertEqual(db.execute('select count(*) from receipts').fetchone()[0],2)
+
+
+    def test_unrelated_ancestor_sibling_during_compact_write_keeps_ready_candidate_valid(self):
+        api=self.fixture.api;task,_=self.stopped();context=api._evidence_context(self.scope)
+        ref=api._canonical_plain(api._artifact_owner(self.scope,task).task);observed=api._observe_closure((context,),ref)
+        original=api._artifact
+        def sibling(scope,value,**kwargs):
+            result=original(scope,value,**kwargs)
+            if value.get('kind')=='task-closure':(self.fixture.root/'unrelated.txt').write_text('Outside candidate repository')
+            return result
+        with patch.object(api,'_artifact',side_effect=sibling):
+            closed=api.close_task(self.scope,self.fixture.identity|dict(expected_revision=task['revision'],expected_pins=task['pins']),observed)['task']
+        self.assertEqual(closed['state'],'ready');self.assertEqual(closed['revision'],task['revision'])
+
+
+    def test_new_candidate_input_and_same_byte_replacement_protect_compact_commit(self):
+        for mutation in ('addition','same-bytes'):
+            with self.subTest(mutation=mutation):
+                scenario=ReadyClosureTests(methodName='runTest');scenario.setUp()
+                try:
+                    api=scenario.fixture.api;task,_=scenario.stopped();context=api._evidence_context(scenario.scope)
+                    ref=api._canonical_plain(api._artifact_owner(scenario.scope,task).task);observed=api._observe_closure((context,),ref)
+                    original=api._artifact
+                    def mutate(scope,value,**kwargs):
+                        result=original(scope,value,**kwargs)
+                        if value.get('kind')=='task-closure':
+                            if mutation=='addition':(scenario.fixture.repo/'new-input.py').write_text('new candidate input')
+                            else:
+                                path=scenario.fixture.repo/'app.py';replacement=path.with_name('replacement.py')
+                                replacement.write_bytes(path.read_bytes());os.replace(replacement,path)
+                        return result
+                    with patch.object(api,'_artifact',side_effect=mutate),self.assertRaises(StartupError):
+                        api.close_task(scenario.scope,scenario.fixture.identity|dict(expected_revision=task['revision'],expected_pins=task['pins']),observed)
+                finally:scenario.doCleanups()
+
+    def source_scenario(self,*,shared=False):
+        from tests.test_state import canonical_scope
+        from runtime.startup import _canonical_plain,_canonical_freeze
+        import shutil
+        scenario=ReadyClosureTests(methodName='runTest');scenario.fixture=EvidenceTests(methodName='runTest')
+        scenario.fixture.setUp();scenario.addCleanup(scenario.fixture.doCleanups)
+        original_package=state.PACKAGE;package=scenario.fixture.root/'installed'
+        for source in [*state._runtime_sources(),*(original_package/'policies').glob('*.md')]:
+            target=package/source.relative_to(original_package);target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(source,target)
+        patcher=patch.object(state,'PACKAGE',package);patcher.start();scenario.addCleanup(patcher.stop)
+        scope=canonical_scope(scenario.fixture.scope)
+        dependency=scenario.fixture.root/'shared-guide.md';dependency.write_text('accepted workflow')
+        if shared:
+            identity=_canonical_plain(scope.accepted_identity)
+            identity['shared_policy']=[dict(path=str(dependency),sha256=hashlib.sha256(dependency.read_bytes()).hexdigest())]
+            scope=replace(scope,accepted_identity=_canonical_freeze(identity),accepted_scope_digest=scenario.fixture.api._digest(identity))
+        scenario.scope=scope;scenario.fixture.scope=scope
+        state.start_task(scope,scenario.fixture.identity|dict(mode='editable',decision_ref='user:accepted'));scenario.fixture.plan()
+        return scenario,package,dependency
+
+    def test_required_shared_policy_and_installed_source_changes_block_final_writer(self):
+        for source_kind in ('shared','policy','runtime','policy-membership'):
+            with self.subTest(source=source_kind):
+                scenario,package,dependency=self.source_scenario(shared=source_kind=='shared')
+                try:
+                    api=scenario.fixture.api;task,_=scenario.stopped();context=api._evidence_context(scenario.scope)
+                    ref=api._canonical_plain(api._artifact_owner(scenario.scope,task).task);observed=api._observe_closure((context,),ref)
+                    original=api._artifact
+                    target=dependency if source_kind=='shared' else package/('runtime/engine.py' if source_kind=='runtime' else
+                        'policies/new-policy.md' if source_kind=='policy-membership' else 'policies/00-index.md')
+                    def mutate(scope,value,**kwargs):
+                        result=original(scope,value,**kwargs)
+                        if value.get('kind')=='task-closure':target.write_text('changed required source')
+                        return result
+                    with patch.object(api,'_artifact',side_effect=mutate),self.assertRaises(StartupError):
+                        api.close_task(scenario.scope,scenario.fixture.identity|dict(expected_revision=task['revision'],expected_pins=task['pins']),observed)
+                    with api._context_database(context) as db:
+                        self.assertIsNone(state._task(db,state._scope_id(scenario.scope),'codex','parent','task')['lifecycle']['safe_closed_at'])
+                finally:scenario.doCleanups()
+
+
 class CancelledClosureTests(unittest.TestCase):
     """Disposable owner-proof fixtures; no native stop authority is qualified here."""
     def setUp(self):

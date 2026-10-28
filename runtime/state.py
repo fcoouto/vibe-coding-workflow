@@ -59,12 +59,14 @@ class StateError(StartupError):
     """Sanitized task/state diagnostic, without private record contents."""
 
 
+def _runtime_sources():
+    return sorted([*(PACKAGE / "runtime").glob("*.py"), *(PACKAGE / "runtime/adapters").glob("*.py"), PACKAGE / "scripts/workflow.py"])
+
+
 def runtime_fingerprint():
     """Pin installed runtime sources, dispatcher and adapter contents, by relative path."""
     digest = hashlib.sha256()
-    paths = sorted((PACKAGE / "runtime").glob("*.py")) + sorted((PACKAGE / "runtime/adapters").glob("*.py"))
-    paths.append(PACKAGE / "scripts/workflow.py")
-    for path in sorted(paths):
+    for path in _runtime_sources():
         digest.update(str(path.relative_to(PACKAGE)).encode() + b"\0" + path.read_bytes() + b"\0")
     return digest.hexdigest()
 
@@ -220,7 +222,7 @@ def _retired_record(kind, digest, raw, assignment_id):
                         *(["assignment_id"] if kind == "assignment" else [])))
         if (type(value["version"]) is not int or value["version"] != 1
                 or _retired_identity(kind, value["identity"]) != digest
-                or value["outcome"] not in ("completed", "failed", "cancelled", "unknown")
+                or value["outcome"] not in ("completed", "failed", "cancelled", "unknown", "ready") or kind=="assignment" and value["outcome"]=="ready"
                 or type(value["evidence_expired"]) is not bool
                 or value["evidence_expired"] and value["outcome"] != "unknown"):
             raise StateError("Retired identity marker is corrupt")
@@ -510,6 +512,99 @@ def _assert_open(task):
         raise StateError('Safely closed task cannot admit mutations or new evidence')
 
 
+def _ready_stop_bindings(context,db,task):
+    """Actual complete original owner snapshot, without lifecycle or stop-envelope recursion."""
+    from runtime import delegation
+    scope_id=_digest([3,task['accepted_identity']['project_id'],task['accepted_identity']['repository_id'],task['accepted_identity']['checkout_id']])
+    records=[r for r in delegation._ledger(None,db,context=context) if r['owner']['scope_id']==scope_id and
+        all(r['owner'][k]==task[k] for k in ('client','session_id','task_id'))]
+    if any(r['data']['status']!='settled' for r in records):raise StateError('Unresolved original ready owner remains protected')
+    return dict(task_digest=_digest({k:v for k,v in task.items() if k not in {'lifecycle','writer_stop'}}),
+        attempts_digest=_digest(task.get('evidence',{}).get('attempts',[])),
+        assignments_digest=_digest(sorted(records,key=lambda r:r['id'])),
+        generation=db.execute('select generation from checkouts where scope_id=?',(scope_id,)).fetchone()[0])
+
+
+def _writer_stop_shape(value):
+    _fields(value,('version','task_revision','proof_digest','proof','observation_ref','coordinator_ref','generation','candidate','verification','request_digest','inputs'))
+    if type(value['version']) is not int or value['version']!=1:raise StateError('Unsupported retained ready stop')
+    _integer(value['task_revision'],'ready stop revision',1);_integer(value['generation'],'ready stop generation')
+    for key in ('proof_digest','request_digest'):_canonical_hash(value[key])
+    for key in ('proof','candidate','verification'):_artifact_reference(value[key])
+    for key in ('observation_ref','coordinator_ref'):_text(value[key],key)
+    if not isinstance(value['inputs'],dict) or len(value['inputs'])>4096:raise StateError('Ready input observation exceeds bound')
+    for path,info in value['inputs'].items():
+        _canonical_path(path)
+        if info is not None and (not isinstance(info,list) or len(info) not in (4,8) or any(type(n) is not int for n in info) or len(info)==4 and not stat.S_ISDIR(info[2])):
+            raise StateError('Ready input physical observation is corrupt')
+
+
+def _ready_stop(context,db,task,*,observe=False):
+    from runtime import evidence
+    stop=task.get('writer_stop');_writer_stop_shape(stop)
+    proof=evidence._read(None,stop['proof'],context=context,db=db)
+    bindings=_ready_stop_bindings(context,db,task)
+    candidate=evidence._read(None,stop['candidate'],context=context,db=db)
+    evidence._ready_stop_proof(task,proof,bindings,candidate)
+    if (stop['task_revision']!=task['revision'] or stop['generation']!=bindings['generation'] or
+        stop['verification']!=task['evidence']['verification'] or
+        any(proof[k]!=stop[k] for k in ('observation_ref','coordinator_ref'))):
+        raise StateError('Retained ready stop envelope changed')
+    evidence._candidate_projection(candidate,task)
+    evidence._check_ready_inputs(stop['inputs'],directory_identity=True)
+    verification=evidence._read(None,stop['verification'],context=context,db=db)
+    if verification['candidate_digest']!=proof['candidate_digest']:raise StateError('Retained ready verification changed')
+    if observe:evidence._ready_stop_candidate(context,task,candidate)
+    return proof
+
+
+def _retain_ready_stop(scope,request):
+    """Private independent host attestation, preserving readiness/revision and original age."""
+    from runtime import evidence,changes
+    if not isinstance(scope,AcceptedScope) or _scope_version(scope)!=3:raise StateError('Ready stop requires actual accepted schema3 scope')
+    _fields(request,('client','session_id','task_id','scope_ref','expected_revision','expected_pins','stop_proof'))
+    _identity(request);_integer(request['expected_revision'],'ready stop request revision',1);_validate_pins(request['expected_pins'])
+    context=evidence._evidence_context(scope)
+    with changes._authority_guards([context.directory]):
+        with evidence._context_database(context) as db:
+            task=_task(db,_scope_id(scope),request['client'],request['session_id'],request['task_id'])
+            _compatible(scope,task)
+            if task['revision']!=request['expected_revision'] or task['pins']!=request['expected_pins'] or task['scope_ref']!=request['scope_ref']:
+                raise StateError('Ready stop request changed original task pins/revision')
+            if task.get('writer_stop'):
+                _ready_stop(context,db,task,observe=True)
+                if task['writer_stop']['request_digest']!=_digest(request) or task['writer_stop']['proof_digest']!=request['stop_proof']['sha256']:
+                    raise StateError('Ready stop replay payload changed')
+                return dict(ok=True,task=task,replayed=True)
+            _assert_open(task)
+            if task['state']!='ready' or 'evidence' not in task or 'verification' not in task['evidence']:
+                raise StateError('Independent ready stop requires actual ordinary ready verification')
+            snapshot=_ready_stop_bindings(context,db,task)
+            plan=evidence._read(None,task['evidence']['plan'],context=context,db=db)
+        proof=evidence._read_host_proof(scope,request['stop_proof'])
+        candidate=evidence.capture_candidate(scope,plan)
+        files=evidence._ready_stop_candidate(context,task,candidate)
+        with evidence._context_database(context,write=True) as db:
+            current=_task(db,_scope_id(scope),request['client'],request['session_id'],request['task_id'])
+            if current!=task or _ready_stop_bindings(context,db,current)!=snapshot:raise StateError('Ready owner changed during stop capture')
+            evidence._check_ready_inputs(files)
+            owner=evidence._artifact_owner(scope,task)
+            # Validate before registering any artifact; the candidate ref digest is its actual canonical content.
+            evidence._ready_stop_proof(task,proof,snapshot,candidate)
+            stop=dict(version=1,task_revision=task['revision'],proof_digest=request['stop_proof']['sha256'],
+                proof=evidence._artifact(scope,proof,owner=owner,db=db),observation_ref=proof['observation_ref'],
+                coordinator_ref=proof['coordinator_ref'],generation=snapshot['generation'],
+                candidate=evidence._artifact(scope,candidate,owner=owner,db=db),verification=task['evidence']['verification'],request_digest=_digest(request),inputs=files)
+            task=dict(task,writer_stop=stop);_writer_stop_shape(stop)
+            raw=json.dumps(task,separators=(',',':'))
+            if len(raw.encode())>4*1024*1024:raise StateError('Ready stop exceeds the original task record bound')
+            db.execute('update tasks set data=? where scope_id=? and client=? and session_id=? and task_id=?',
+                (raw,_scope_id(scope),task['client'],task['session_id'],task['task_id']))
+            _ready_stop(context,db,task)
+            evidence._check_ready_inputs(files)
+            return dict(ok=True,task=task,replayed=False)
+
+
 def _close_lifecycle(db, task_ref, observations, compact):
     """Owner-only same-revision write; general _save never permits lifecycle changes."""
     from runtime import evidence
@@ -517,10 +612,11 @@ def _close_lifecycle(db, task_ref, observations, compact):
     facts=evidence._check_closure_observation(context,db,task_ref,observations,new_compact=compact)
     task=_task(db,task_ref['scope_id'],task_ref['client'],task_ref['session_id'],task_ref['task_id'])
     _assert_open(task)
-    if task['revision']!=facts['task']['revision'] or task['state']!='cancelled':
-        raise StateError('Closure original cancelled owner changed')
+    if task['revision']!=facts['task']['revision'] or task['state']!=facts['task']['state'] or task['state'] not in {'cancelled','ready'}:
+        raise StateError('Closure original stopped owner changed')
     closed_at=_owner_time()
-    original_age=max([task['lifecycle']['created_at']]+[item['created_at'] for item in facts['certificate'].get('assignments',[])])
+    original_age=max([task['lifecycle']['created_at']]+[item['created_at'] for item in facts['certificate'].get('assignments',[])]+
+        [item['created_at'] for item in facts['projection']['numerical']+facts['projection']['verifications']])
     if closed_at<original_age:raise StateError('Closure clock regressed before original owner age')
     task['lifecycle']=dict(created_at=task['lifecycle']['created_at'],safe_closed_at=closed_at,compact=compact,
         closure=dict(version=1,task_revision=task['revision'],dependency_digest=_digest(facts),observed_at=closed_at,evidence=facts['artifacts']))
@@ -553,7 +649,7 @@ def retire_closed(db, task_ref, closure):
     def marker(kind,key,request_digest=None):
         if _retired(db,kind,key):raise StateError('Live identity conflicts with its retired marker')
         data=dict(version=1,identity=key,pins_digest=pins_digest,request_digest=request_digest,
-            created_at=age,retired_at=retired_at,outcome='cancelled',evidence_expired=False)
+            created_at=age,retired_at=retired_at,outcome=task['state'],evidence_expired=False)
         digest=_retired_identity(kind,key);raw=json.dumps(data,separators=(',',':'))
         _retired_record(kind,digest,raw,None)
         db.execute('insert into retired_identities values(?,?,?,NULL)',(kind,digest,raw))
@@ -576,7 +672,7 @@ def retire_closed(db, task_ref, closure):
     if any(_retired_assignment(db,identity)!=marker for identity,marker in assignment_markers):
         raise StateError('Assignment retirement marker changed before commit')
     evidence._check_context(context,db)
-    return dict(retired=True,identity=identity,outcome='cancelled')
+    return dict(retired=True,identity=identity,outcome=task['state'])
 
 
 def _scope_version(scope):
@@ -962,7 +1058,7 @@ def _task(db, scope_id, client, session, task_id=None):
     version = db.execute("pragma user_version").fetchone()[0]
     task = json_object(row[0], limit=4 * 1024 * 1024) if version == 3 else json.loads(row[0])
     _fields(task, ("client", "session_id", "task_id", "scope_ref", "mode", "decision_ref", "state", "revision",
-                   "pins", "reason", "reference", "conditions", "turn_id", "turn_uncertain", *(["accepted_identity"] if version == 3 else [])), ("resolution_ref", "evidence", "retirement", "delegation", *(["lifecycle"] if version == 3 else [])))
+                   "pins", "reason", "reference", "conditions", "turn_id", "turn_uncertain", *(["accepted_identity"] if version == 3 else [])), ("resolution_ref", "evidence", "retirement", "delegation", *(["lifecycle","writer_stop"] if version == 3 else [])))
     stored_claude = (version == 3 and task.get("client") == "claude-code" and
                      isinstance(task.get("accepted_identity"), dict) and
                      task["accepted_identity"].get("client") == "claude-code")
@@ -979,7 +1075,7 @@ def _task(db, scope_id, client, session, task_id=None):
     if task["turn_id"] is not None:
         _text(task["turn_id"], "stored turn_id", 4096)
     _task_projection(db, scope_id, task)
-    if task["client"] == "claude-code" and any(field in task for field in ("evidence", "delegation", "retirement")):
+    if task["client"] == "claude-code" and any(field in task for field in ("evidence", "delegation", "retirement", "writer_stop")):
         raise StateError("Claude Code task records do not support evidence, delegation or retirement")
     if version == 3:
         _task_lifecycle(task)
@@ -1010,6 +1106,7 @@ def _task(db, scope_id, client, session, task_id=None):
     if "delegation" in task:
         from runtime.delegation import validate_delegation
         validate_delegation(task["delegation"])
+    if "writer_stop" in task:_writer_stop_shape(task["writer_stop"])
     if "retirement" in task:
         retirement = task["retirement"]
         _fields(retirement, ("proof_digest", "proof", "observation_ref", "coordinator_ref", "previous_revision"))
@@ -1031,10 +1128,12 @@ def _save(db, scope_id, task):
             _assert_open(old)
             if old["accepted_identity"] != task["accepted_identity"] or old["pins"] != task["pins"]:
                 raise StateError("Stored task identity and pins are immutable")
+            if old.get("writer_stop")!=task.get("writer_stop") or ("writer_stop" in old)!=("writer_stop" in task):
+                raise StateError("Ready stop belongs to its independent owner writer")
             if old.get("lifecycle") != task.get("lifecycle") or ("lifecycle" in old) != ("lifecycle" in task):
                 raise StateError("Original lifecycle age/closure is immutable until owner integration")
         else:
-            if "lifecycle" in task:
+            if "lifecycle" in task or "writer_stop" in task:
                 raise StateError("Caller cannot supply task lifecycle age or closure")
             task["lifecycle"] = dict(created_at=_owner_time(), safe_closed_at=None, closure=None, compact=None)
         _task_lifecycle(task)
@@ -1080,6 +1179,9 @@ def task_status(scope, client, session_id):
         status = _status(db, scope, client, session_id)
         if client == "claude-code" and status["task"] is not None and status["task"]["state"] == "ready":
             raise StateError("Claude Code task readiness is unverified by the available evidence adapter")
+        if status['task'] is not None and status['task'].get('lifecycle',{}).get('safe_closed_at') is not None:
+            from runtime.evidence import _closed_status
+            status['historical']=_closed_status(scope,status['task'])
         return status
 
 

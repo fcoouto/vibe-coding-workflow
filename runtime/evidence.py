@@ -447,10 +447,15 @@ def _closure_assignment_projection(context,db,task,records):
         workers.append(dict(assignment_id=record['id'],role=record['data']['role'],outcome=record['data']['result']['outcome'],
             observations=[dict(source=ref,status=value['status'],report=value['report'],receipt=value['receipt'],
                 error=value['error'],conflict=value['conflict'],revision=value['revision']) for ref,value in history]))
-    verifications=[]
-    for entry in task.get('evidence',{}).get('history',[])+[task.get('evidence',{})]:
-        if 'verification' in entry:
-            verifications.append(dict(source=entry['verification'],result=read(entry['verification'])))
+    verification_refs={_raw(entry['verification']):entry['verification'] for entry in
+        task.get('evidence',{}).get('history',[])+[task.get('evidence',{})] if 'verification' in entry}
+    for record in records:
+        if record['data']['role']=='coordinator':
+            reconciled=read(record['data']['reconciliation'])
+            if reconciled.get('kind')=='synchronous-verification':
+                reference=reconciled['verification'];verification_refs[_raw(reference)]=reference
+    verifications=[dict(source=ref,result=read(ref),created_at=state._metadata(db,ref['name'])['created_at'])
+        for _,ref in sorted(verification_refs.items())]
     return dict(outcomes=outcomes,reviews=reviews,workers=workers,numerical=numerical,verifications=verifications)
 
 
@@ -527,6 +532,89 @@ def _closure_recovery(context,task_ref):
     return result,before
 
 
+def _ready_stop_shape(proof):
+    _bounded(proof)
+    state._fields(proof,('version','kind','identity','expected_revision','expected_pins','observed_turn_id','stopped','descendants_stopped',
+        'attempt_ids','observation_ref','coordinator_ref','candidate_digest','verification_digest','task_digest','attempts_digest','assignments_digest','generation'))
+    state._integer(proof['expected_revision'],'ready proof revision',1);state._validate_pins(proof['expected_pins'])
+    state._fields(proof['identity'],IDENTITY[:4]);state._identity(proof['identity'])
+    _require(isinstance(proof['attempt_ids'],list) and len(proof['attempt_ids'])<=MAX_ATTEMPTS and
+        all(isinstance(item,str) for item in proof['attempt_ids']) and len(set(proof['attempt_ids']))==len(proof['attempt_ids']),
+        'Ready stop attempt identity set is malformed')
+    if proof['observed_turn_id'] is not None:state._text(proof['observed_turn_id'],'ready stop turn',4096)
+    for key in ('observation_ref','coordinator_ref'):state._text(proof[key],key)
+    for key in ('candidate_digest','verification_digest','task_digest','attempts_digest','assignments_digest'):state._canonical_hash(proof[key])
+    state._integer(proof['generation'],'ready proof generation')
+    _require(type(proof['version']) is int and proof['version']==2 and proof['kind']=='stopped-writer-reconciliation' and
+        proof['stopped'] is True and proof['descendants_stopped'] is True,'Independent complete ready stop remains missing')
+
+
+def _ready_stop_proof(task,proof,bindings,candidate):
+    _ready_stop_shape(proof)
+    attempts=task.get('evidence',{}).get('attempts',[])
+    _require(task['state']=='ready' and task['pins']['schema_version']==3 and type(proof['version']) is int and proof['version']==2 and
+        proof['kind']=='stopped-writer-reconciliation' and proof['stopped'] is True and proof['descendants_stopped'] is True and
+        proof['identity']=={k:task[k] for k in ('client','session_id','task_id','scope_ref')} and
+        proof['expected_revision']==task['revision'] and proof['expected_pins']==task['pins'] and proof['observed_turn_id']==task['turn_id'] and
+        proof['attempt_ids']==[a['id'] for a in attempts] and not any(a['status'] in {'reserved','running','uncertain'} for a in attempts) and
+        all(proof[k]==v for k,v in bindings.items()) and proof['candidate_digest']==_digest(candidate) and
+        proof['verification_digest']==task['evidence']['verification']['digest'],
+        'Independent ready stop does not bind the complete current original owner snapshot')
+
+
+def _check_ready_inputs(files,*,directory_identity=False):
+    for path,value in files.items():
+        current=_closure_file_stat(Path(path)) if os.path.lexists(path) else None
+        if value is not None and stat.S_ISDIR(value[2]) and (directory_identity or len(value)==4):
+            _require(current is not None and current[:4]==value[:4],'Ready input directory identity changed')
+        else:_require(current==value,'Ready candidate inputs changed before owner commit')
+
+
+def _ready_stop_candidate(context,task,candidate):
+    """Read-only freshness from original pinned context; never reserve another verifier."""
+    with _context_database(context) as db:
+        plan=_read(None,task['evidence']['plan'],context=context,db=db)
+        verification=_read(None,task['evidence']['verification'],context=context,db=db)
+    _require(task['state']=='ready' and plan['version']==1 and 'linked_verification' not in task['evidence'] and
+        verification['purpose']=='completion' and not verification['blockers'] and verification['plan_digest']==_digest(plan) and
+        verification['candidate_digest']==_digest(candidate),'Ready verification is missing, linked or stale')
+    _candidate_projection(candidate,task)
+    _require(state.runtime_fingerprint()==task['pins']['runtime_digest'] and policy_digest(state.PACKAGE)==task['pins']['policy_digest'],
+        'Installed ready source pins changed')
+    locator=_pinned_locator(task,context)
+    first=_capture(locator,plan,pinned=(task['accepted_identity'],task['pins']))
+    second=_capture(locator,plan,pinned=(task['accepted_identity'],task['pins']))
+    _require(first==second==candidate,'Ready candidate changed after independent stop')
+    _require(not _blockers(locator,task,plan,candidate,'completion',verification.get('reuse',[]),verification.get('security_impact'),
+        resource_closure=verification['resource_closure'],context=context),'Ready findings/resources remain blocked')
+    # Stat snapshots supplement the complete capture at the last short writer.
+    root=Path(task['accepted_identity']['repository_root']);git=Path(task['accepted_identity']['git_dir'])
+    common=Path(task['accepted_identity']['git_common_dir'])
+    paths={root,root/'.git',git,common,git/'HEAD',git/'index',git/'commondir',common/'HEAD',common/'packed-refs'}
+    policy=state.PACKAGE/'policies';runtime=state.PACKAGE/'runtime';adapters=runtime/'adapters'
+    paths.update((policy,runtime,adapters,*state._runtime_sources(),*policy.glob('*.md')))
+    for dependency in task['accepted_identity']['shared_policy']:
+        path=Path(dependency['path']);paths.update((path,path.parent))
+    for name in candidate['fingerprints']:
+        path=Path(name[len('instruction:'):]) if name.startswith('instruction:') else root/name
+        paths.update((path,path.parent))
+        paths.update(parent for parent in path.parents if parent==root or parent.is_relative_to(root))
+    for tool in candidate['tools'].values():paths.update((Path(tool['path']),Path(tool['path']).parent))
+    pending=list({git/'refs',common/'refs'})
+    while pending:
+        path=pending.pop();paths.add(path)
+        if path.is_dir():pending.extend(path.iterdir())
+        _require(len(paths)<4096,'Ready physical input observation exceeds bound')
+    files={}
+    for path in sorted(paths):
+        value=_closure_file_stat(path) if os.path.lexists(path) else None
+        # Ancestor/tool sibling activity is not a candidate change; their identity still binds lookup.
+        if value is not None and stat.S_ISDIR(value[2]) and not any(path.is_relative_to(base) for base in (root,git,common,policy,runtime)):
+            value=value[:4]
+        files[str(path)]=value
+    return files
+
+
 def _closure_facts(context, task_ref, db, recovery, *, recovery_files=None):
     from runtime import changes,delegation
     _check_context(context,db)
@@ -537,10 +625,13 @@ def _closure_facts(context, task_ref, db, recovery, *, recovery_files=None):
     observed=state.inspect_dependencies(db,task_ref);task=observed['task']
     assignment_blocker='Assignment body requires original task; exact assignment certificate integration is required'
     _require(not [blocker for blocker in observed['blockers'] if blocker!=assignment_blocker],'; '.join(observed['blockers']))
-    _require(task['pins']['schema_version']==3 and task['state']=='cancelled' and task.get('retirement')
-        and task.get('lifecycle'),'Closure needs a dated actually cancelled stopped owner')
+    ready=task['state']=='ready'
+    _require(task['pins']['schema_version']==3 and task.get('lifecycle') and
+        (ready and task.get('writer_stop') or task['state']=='cancelled' and task.get('retirement')),
+        'Closure needs a dated independently stopped owner')
+    ready_files=_ready_stop_candidate(context,task,_read(None,task['writer_stop']['candidate'],context=context,db=db)) if ready else {}
     certificate=changes._stopped_certificate(context,db,dict(reference=task_ref,pins=task['pins']))
-    _require(not certificate['proof']['attempt_ids'],'Stopped unresolved attempts require assignment certificate integration')
+    _require(ready or not certificate['proof']['attempt_ids'],'Stopped unresolved attempts require assignment certificate integration')
     records=delegation._closure_assignments(context,db,task_ref,task,certificate)
     all_records=delegation._ledger(None,db,context=context)
     guidance=delegation._closure_guidance(context,db,all_records)
@@ -614,7 +705,7 @@ def _closure_facts(context, task_ref, db, recovery, *, recovery_files=None):
     bindings.update({original[k]:original['bindings'][label] for k,label in (('repository_root','root'),('primary_root','primary_root'),('git_dir','git_dir'),('git_common_dir','git_common_dir'))})
     _require(all(_binding(Path(path))==binding for path,binding in bindings.items()),'Historical checkout physical identity changed')
     return dict(version=1,task_ref=task_ref,task=task,certificate=certificate,bindings=bindings,recovery_files=recovery_files or {},
-        observed=normalized,physical=physical,requirements=sorted(requirements,key=_raw),recovery=recovery,
+        observed=normalized,physical=physical,ready_files=ready_files,requirements=sorted(requirements,key=_raw),recovery=recovery,
         artifacts=sorted(own_refs,key=_raw),projection=projection,guidance=guidance)
 
 
@@ -633,9 +724,9 @@ def _observe_closure(contexts, task_ref):
 def _closure_content(facts):
     task=facts['task']
     return dict(version=1,kind='task-closure',identity=facts['task_ref'],pins=task['pins'],accepted_identity=task['accepted_identity'],
-        created_at=task['lifecycle']['created_at'],revision=task['revision'],outcome='cancelled',coverage='stopped-owner-only',
+        created_at=task['lifecycle']['created_at'],revision=task['revision'],outcome=task['state'],coverage='historical-ready' if task['state']=='ready' else 'stopped-owner-only',
         stopped=facts['certificate'],artifacts=facts['artifacts'],**facts['projection'],usage='unknown',
-        dependency_digest=_digest(facts),limitations=['Cancellation is not implementation success or delivery evidence',
+        dependency_digest=_digest(facts),limitations=['Closure preserves historical outcome; it creates no current readiness or delivery authority',
             'Command values describe original local executions; native usage remains unknown'])
 
 
@@ -684,6 +775,7 @@ def _check_closure_observation(context, db, task_ref, observations, *, new_compa
         for path,binding in item['metadata']['managed']['parents'].items():
             _require(_binding(Path(path))==binding,'Closure content parent changed')
     _require(all(_closure_file_stat(Path(path))==value for path,value in facts['recovery_files'].items()),'Recovery source changed before closure commit')
+    _check_ready_inputs(facts['ready_files'])
     guidance=facts['guidance']
     for support in guidance['retained']:
         _require(state._retired(db,'task',{key:support['identity'][key] for key in ('scope_id','client','session_id','task_id')})==support['marker']
@@ -2520,12 +2612,24 @@ def _revalidate_linked(scope, task, *, update_ready=False):
     return result
 
 
+def _closed_status(scope,task):
+    result=dict(historical=True,outcome=task['state'],current=False,implementation_verified=False,delivery_complete=False,
+        merge_authority=False,status='unavailable',compact=task['lifecycle']['compact'])
+    try:
+        content=_read(scope,task['lifecycle']['compact'])
+        _require(content['kind']=='task-closure' and content['revision']==task['revision'] and content['outcome']==task['state'] and
+            content['pins']==task['pins'] and content['created_at']==task['lifecycle']['created_at'],'Historical closure support changed')
+        result['status']='retained'
+    except (StartupError,OSError,KeyError,TypeError):pass
+    return result
+
+
 def revalidate_ready(scope, client, session_id):
     """Status captures actual freshness and rechecks shared ownership before returning ready."""
     from runtime import delegation
     with state._database(scope) as db:
         task = state._task(db, state._scope_id(scope), client, session_id) if db else None
-        if task is None or task['state'] != 'ready':
+        if task is None or task['state'] != 'ready' or task.get('lifecycle',{}).get('safe_closed_at') is not None:
             return
         state._compatible(scope, task)
         request = {key: task[key] for key in IDENTITY[:4]} | dict(expected_revision=task['revision'])
@@ -2561,6 +2665,8 @@ def evidence_status(scope, client, session_id):
     result = state.task_status(scope, client, session_id)
     result['scope_id'] = state._scope_id(scope)
     task = result['task']
+    if task and task.get('lifecycle',{}).get('safe_closed_at') is not None:
+        result['evidence']=result['historical'];return result
     if task and 'evidence' in task:
         plan = _read(scope, task['evidence']['plan'])
         if plan.get('version') == 2:

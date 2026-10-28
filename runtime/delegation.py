@@ -1013,7 +1013,7 @@ def _invalidate_ready(db, scope, task, claims):
         if (scope_id, client, session, task_id) == owner:
             continue
         current = state._task(db, scope_id, client, session, task_id)
-        if current['state'] != 'ready':
+        if current['state'] != 'ready' or current.get('lifecycle',{}).get('safe_closed_at') is not None:
             continue
         closure = _ready_closure(scope, current)
         if closure is None or _held_conflict(claims, closure):

@@ -1703,6 +1703,8 @@ def _scoped_writers(locations, affected_roots, git_roots=(), *, changed_paths=()
                         and proof.get("expected_pins") == task["pins"] and proof.get("expected_revision") == retirement["previous_revision"] == task["revision"] - 1
                         and proof.get("observed_turn_id") == task["turn_id"] and proof.get("attempt_ids") == [a["id"] for a in unresolved],
                         "Historical stopped-writer proof does not match original pins/identity")
+                elif task.get('writer_stop') and (relevant or unresolved):
+                    task_state._ready_stop(context,db,task,observe=True)
                 elif relevant and task["mode"] == "editable":
                     raise Pending("Affected editable task lacks exact stopped-writer retirement proof")
                 elif any(delegation._linked_attempt(locator, scope_id, task, a, records, context=context, db=db) is None for a in unresolved):
@@ -1720,11 +1722,46 @@ class _RecoverySourceObservation:
     created_at: int
     issuer: object
     release: object = None
+    ready_inputs: object = None
+
+
+def _stop_revision(task):
+    return task['writer_stop']['task_revision'] if task.get('writer_stop') and task.get('state')=='ready' else task['retirement']['previous_revision']
+
+
+def _stop_envelope(task):
+    return task['writer_stop'] if task.get('writer_stop') and task.get('state')=='ready' else task['retirement']
+
+
+def _barrier_certificate(context,db,task,record,rec):
+    from runtime import evidence
+    task_state._ready_stop(context,db,task)
+    task_state._fields(rec,('version','kind','barrier_id','verification','revision'))
+    task_state._integer(rec['revision'],'original synchronous revision',2)
+    verification=evidence._read(None,rec['verification'],context=context,db=db)
+    operation=evidence._read(None,record['body']['operation'],context=context,db=db)
+    task_state._fields(verification,('version','candidate_digest','plan_digest','purpose','generation','blockers','reuse','security_impact','resource_closure','barrier_id'))
+    task_state._integer(verification['generation'],'original verification generation')
+    d3._hash(verification['candidate_digest']);d3._hash(verification['plan_digest'])
+    d3._require(type(verification['version']) is int and verification['version']==1 and
+        verification['purpose'] in {'completion','merge-evidence'} and isinstance(verification['blockers'],list) and
+        verification['plan_digest']==record['data']['plan_digest'] and rec['revision']==record['data']['revision']+1,
+        'Synchronous barrier does not retain its actual original verification transition')
+    outcome='failed' if verification['blockers'] else 'completed'
+    d3._require(type(rec['version']) is int and rec['version']==1 and rec['kind']=='synchronous-verification' and
+        rec['barrier_id']==record['id']==verification['barrier_id'] and rec['revision']<=_stop_revision(task) and
+        operation['kind']=='completion-verification' and verification['resource_closure']==record['data']['claims'] and
+        record['data']['result']==dict(outcome=outcome),'Original synchronous barrier differs from independent stopped owner')
+    data=record['data']
+    return dict(version=2,reference=dict(authority=_canonical_plain(context.authority_set[0]),id=record['id'],owner=record['owner'],assignment=data['assignment']),
+        created_at=data['lifecycle']['created_at'],request_digest=data['request_digest'],role=data['role'],claims=data['claims'],
+        reconciliation=dict(version=2,kind='synchronous-verification-stop',reference=data['reconciliation'],body=rec,outcome=outcome,
+            stop_digest=task['writer_stop']['proof']['digest'],bindings=dict(operation=record['body']['operation'],verification=rec['verification'],candidate=data['candidate'])))
 
 
 def _assignment_certificate_shape(value, task):
     from runtime import delegation, evidence
-    task_state._fields(value,('reference','created_at','request_digest','role','claims','reconciliation'))
+    task_state._fields(value,('reference','created_at','request_digest','role','claims','reconciliation'),('version',))
     ref=value['reference']; task_state._fields(ref,('authority','id','owner','assignment'))
     owner=ref['owner']; task_state._retired_identity('assignment',owner); task_state._artifact_reference(ref['assignment'])
     d3._require(isinstance(ref['id'],str) and re.fullmatch(r'[0-9a-f]{32}',ref['id']) and
@@ -1733,10 +1770,27 @@ def _assignment_certificate_shape(value, task):
     task_state._integer(value['created_at'],'original stopped assignment age'); d3._hash(value['request_digest'])
     delegation._stored_claims(value['claims'],maximum=delegation.MAX_VERIFICATION_CLAIMS)
     role=value['role']; d3._require(role in {'coordinator','check','worker','review'},'Unknown stopped assignment role')
-    rec=value['reconciliation']; task_state._fields(rec,('reference','source_digest','request_digest','revision','outcome','assessment','proof','bindings'))
+    rec=value['reconciliation']
+    if 'version' in value:
+        d3._require(type(value['version']) is int and value['version']==2 and task.get('state')=='ready' and role=='coordinator',
+            'Barrier certificate needs its independently stopped ready owner')
+        task_state._fields(rec,('version','kind','reference','body','outcome','stop_digest','bindings'))
+        task_state._artifact_reference(rec['reference']);body=rec['body']
+        task_state._fields(body,('version','kind','barrier_id','verification','revision'))
+        task_state._integer(body['revision'],'synchronous barrier revision',2)
+        task_state._fields(rec['bindings'],('operation','verification','candidate'))
+        for ref in rec['bindings'].values():
+            if ref is not None:task_state._artifact_reference(ref)
+        d3._require(type(rec['version']) is int and rec['version']==2 and rec['kind']=='synchronous-verification-stop' and
+            type(body['version']) is int and body['version']==1 and body['kind']=='synchronous-verification' and
+            body['barrier_id']==value['reference']['id'] and body['revision']<=_stop_revision(task) and
+            body['verification']==rec['bindings']['verification'] and rec['stop_digest']==task['writer_stop']['proof']['digest'] and
+            rec['outcome'] in {'completed','failed'},'Barrier stop certificate changed original facts')
+        return value
+    task_state._fields(rec,('reference','source_digest','request_digest','revision','outcome','assessment','proof','bindings'))
     task_state._artifact_reference(rec['reference']); d3._hash(rec['source_digest']); d3._hash(rec['request_digest'])
     task_state._integer(rec['revision'],'assignment reconciliation revision',2)
-    d3._require(rec['revision']<=task['retirement']['previous_revision'] and rec['outcome'] in {'completed','failed','cancelled'},
+    d3._require(rec['revision']<=_stop_revision(task) and rec['outcome'] in {'completed','failed','cancelled'},
         'Assignment reconciliation does not precede exact stopped transition')
     proof=rec['proof']; evidence._bounded(proof)
     d3._require(proof.get('version')==2 and type(proof['version']) is int and
@@ -1791,7 +1845,9 @@ def _assignment_certificate(context,db,task,record):
     data,body,owner=record['data'],record['body'],record['owner']
     d3._require(data['status']=='settled' and data.get('lifecycle'),'Recovery assignment lacks dated reconciled stop proof')
     read=lambda ref:evidence._read(None,ref,context=context,db=db)
-    rec=read(data['reconciliation']); d3._require(type(rec.get('version')) is int and rec['version']==2,'Recovery assignment requires version2 role proof')
+    rec=read(data['reconciliation'])
+    if rec.get('kind')=='synchronous-verification':return _barrier_certificate(context,db,task,record,rec)
+    d3._require(type(rec.get('version')) is int and rec['version']==2,'Recovery assignment requires version2 role proof')
     role=data['role']
     task_state._fields(rec,('version','proof','source_digest','request_digest','current_candidate',*(() if role=='check' else ('assessment','revision','reservation_snapshot_digest'))))
     d3._hash(rec['source_digest']);d3._hash(rec['request_digest'])
@@ -1813,7 +1869,7 @@ def _assignment_certificate(context,db,task,record):
         assessment=rec['assessment']; task_state._fields(assessment,('outcome','changed_paths','result_assessment','partial_change_assessment','evidence','coordinator_ref'))
         outcome=assessment['outcome']; assessment={k:assessment[k] for k in ('outcome','changed_paths','evidence','coordinator_ref')}
     task_state._integer(revision,'historical reconciliation revision',2)
-    d3._require(revision<=task['retirement']['previous_revision'] and data['result']==dict(outcome=outcome),
+    d3._require(revision<=_stop_revision(task) and data['result']==dict(outcome=outcome),
         'Recovery role outcome/revision differs from stopped owner')
     delegation._validate_role_proof(record,task,proof,scope_id=owner['scope_id'],revision=revision-1,read=read,
         linked_review=lambda a:delegation._linked_review(None,owner['scope_id'],task,a,[record],context=context,db=db),
@@ -1852,7 +1908,9 @@ def _assignment_certificate(context,db,task,record):
 
 
 def _stopped_certificate_shape(value):
-    task_state._fields(value,('reference','created_at','revision','pins','accepted_identity','scope_ref','turn_id','retirement','proof'),('assignments',))
+    ready=value.get('state')=='ready'
+    task_state._fields(value,('reference','created_at','revision','pins','accepted_identity','scope_ref','turn_id','proof',
+        *(('version','state','writer_stop') if ready else ('retirement',))),('assignments',))
     task_state._task_reference(value['reference']); task_state._integer(value['created_at'],'original stopped task age')
     task_state._integer(value['revision'],'stopped task revision',2); task_state._text(value['scope_ref'],'stopped scope')
     d3._require(task_state._validate_pins(value['pins'])==3,'Stopped certificate requires canonical pins')
@@ -1861,20 +1919,32 @@ def _stopped_certificate_shape(value):
     d3._require(task_state._digest(accepted)==value['pins']['accepted_scope_digest'] and accepted['client']==ref['client']
         and task_state._digest([3,accepted['project_id'],accepted['repository_id'],accepted['checkout_id']])==ref['scope_id'],
         'Stopped certificate original accepted identity differs')
-    retirement=value['retirement']; proof=value['proof']
-    task_state._fields(retirement,('proof_digest','proof','observation_ref','coordinator_ref','previous_revision'))
-    task_state._artifact_reference(retirement['proof']); d3._hash(retirement['proof_digest'])
-    task_state._fields(proof,('version','kind','identity','expected_revision','expected_pins','observed_turn_id','stopped','descendants_stopped','attempt_ids','observation_ref','coordinator_ref'))
-    d3._require(type(proof['version']) is int and proof['version']==1 and proof['kind']=='stopped-writer-reconciliation'
-        and proof['stopped'] is True and proof['descendants_stopped'] is True
-        and proof['identity']=={k:(ref[k] if k!='scope_ref' else value[k]) for k in ('client','session_id','task_id','scope_ref')}
-        and proof['expected_pins']==value['pins'] and proof['expected_revision']==retirement['previous_revision']==value['revision']-1
-        and proof['observed_turn_id']==value['turn_id'] and all(proof[k]==retirement[k] for k in ('observation_ref','coordinator_ref')),
-        'Stopped certificate exact reconciliation differs')
-    d3._require(isinstance(proof['attempt_ids'],list) and len(proof['attempt_ids'])<=4096 and len(set(proof['attempt_ids']))==len(proof['attempt_ids']),
-        'Stopped certificate attempt set differs')
-    for attempt in proof['attempt_ids']: task_state._text(attempt,'stopped attempt ID')
-    for key in ('observation_ref','coordinator_ref'): task_state._text(proof[key],key)
+    if ready:
+        from runtime import evidence
+        d3._require(type(value['version']) is int and value['version']==2,'Unknown ready stop certificate')
+        stop=value['writer_stop'];task_state._writer_stop_shape(stop);proof=value['proof']
+        evidence._ready_stop_shape(proof)
+        d3._require(proof['identity']=={k:(ref[k] if k!='scope_ref' else value[k]) for k in ('client','session_id','task_id','scope_ref')} and
+            proof['expected_pins']==value['pins'] and proof['expected_revision']==stop['task_revision']==value['revision'] and
+            proof['observed_turn_id']==value['turn_id'] and proof['candidate_digest']==stop['candidate']['digest'] and
+            proof['verification_digest']==stop['verification']['digest'] and proof['generation']==stop['generation'] and
+            evidence._digest(proof)==stop['proof']['digest'] and all(proof[k]==stop[k] for k in ('observation_ref','coordinator_ref')),
+            'Ready certificate changed original independent task stop')
+    else:
+        retirement=value['retirement']; proof=value['proof']
+        task_state._fields(retirement,('proof_digest','proof','observation_ref','coordinator_ref','previous_revision'))
+        task_state._artifact_reference(retirement['proof']); d3._hash(retirement['proof_digest'])
+        task_state._fields(proof,('version','kind','identity','expected_revision','expected_pins','observed_turn_id','stopped','descendants_stopped','attempt_ids','observation_ref','coordinator_ref'))
+        d3._require(type(proof['version']) is int and proof['version']==1 and proof['kind']=='stopped-writer-reconciliation'
+            and proof['stopped'] is True and proof['descendants_stopped'] is True
+            and proof['identity']=={k:(ref[k] if k!='scope_ref' else value[k]) for k in ('client','session_id','task_id','scope_ref')}
+            and proof['expected_pins']==value['pins'] and proof['expected_revision']==retirement['previous_revision']==value['revision']-1
+            and proof['observed_turn_id']==value['turn_id'] and all(proof[k]==retirement[k] for k in ('observation_ref','coordinator_ref')),
+            'Stopped certificate exact reconciliation differs')
+        d3._require(isinstance(proof['attempt_ids'],list) and len(proof['attempt_ids'])<=4096 and len(set(proof['attempt_ids']))==len(proof['attempt_ids']),
+            'Stopped certificate attempt set differs')
+        for attempt in proof['attempt_ids']: task_state._text(attempt,'stopped attempt ID')
+        for key in ('observation_ref','coordinator_ref'): task_state._text(proof[key],key)
     if 'assignments' in value:
         d3._require(isinstance(value['assignments'],list) and len(value['assignments'])<=4096,'Stopped assignment certificate bound exceeded')
         for assignment in value['assignments']: _assignment_certificate_shape(assignment,value)
@@ -1885,14 +1955,18 @@ def _stopped_certificate_shape(value):
 def _stopped_certificate(context,db,item):
     from runtime import evidence
     ref=item['reference']; task=task_state._task(db,ref['scope_id'],ref['client'],ref['session_id'],ref['task_id'])
-    d3._require(task is not None and task['state']=='cancelled' and task.get('retirement') and task.get('lifecycle'),
-        'Recovery release requires a dated cancelled exact stopped owner')
-    d3._require(task['pins']==item['pins'],'Recovery stopped original pins changed')
-    proof=evidence._read(None,task['retirement']['proof'],context=context,db=db)
-    unresolved=[a['id'] for a in task.get('evidence',{}).get('attempts',[]) if a['status'] in {'reserved','running','uncertain'}]
-    d3._require(proof.get('attempt_ids')==unresolved,'Recovery stopped attempt ownership differs')
-    result=dict(reference=ref,created_at=task['lifecycle']['created_at'],**{k:task[k] for k in
-        ('revision','pins','accepted_identity','scope_ref','turn_id','retirement')},proof=proof)
+    d3._require(task is not None and task.get('lifecycle') and task['pins']==item['pins'],'Recovery original stopped owner/age/pins changed')
+    if task['state']=='ready':
+        proof=task_state._ready_stop(context,db,task,observe=True)
+        result=dict(reference=ref,created_at=task['lifecycle']['created_at'],version=2,state='ready',writer_stop=task['writer_stop'],
+            **{k:task[k] for k in ('revision','pins','accepted_identity','scope_ref','turn_id')},proof=proof)
+    else:
+        d3._require(task['state']=='cancelled' and task.get('retirement'),'Recovery release requires exact cancelled or independently stopped ready owner')
+        proof=evidence._read(None,task['retirement']['proof'],context=context,db=db)
+        unresolved=[a['id'] for a in task.get('evidence',{}).get('attempts',[]) if a['status'] in {'reserved','running','uncertain'}]
+        d3._require(proof.get('attempt_ids')==unresolved,'Recovery stopped attempt ownership differs')
+        result=dict(reference=ref,created_at=task['lifecycle']['created_at'],**{k:task[k] for k in
+            ('revision','pins','accepted_identity','scope_ref','turn_id','retirement')},proof=proof)
     from runtime import delegation
     records=delegation._ledger(None,db,context=context)
     result['assignments']=[_assignment_certificate(context,db,task,r) for r in records if all(r['owner'][k]==ref[k] for k in ('scope_id','client','session_id','task_id'))]
@@ -1916,9 +1990,11 @@ def _check_stopped_certificate(context,db,value):
         and identity['identity']=={k:ref[k] for k in ('scope_id','client','session_id','task_id')},'Recovery stopped identity support differs')
     if identity['status']=='live':
         task=task_state._task(db,ref['scope_id'],ref['client'],ref['session_id'],ref['task_id'])
-        d3._require(task['state']=='cancelled' and all(task[k]==value[k] for k in
-            ('revision','pins','accepted_identity','scope_ref','turn_id','retirement')),'Recovery live stopped owner changed')
-        attempts=[a['id'] for a in task.get('evidence',{}).get('attempts',[]) if a['status'] in {'reserved','running','uncertain'}]
+        ready=value.get('state')=='ready'
+        d3._require(task['state']==('ready' if ready else 'cancelled') and all(task[k]==value[k] for k in
+            ('revision','pins','accepted_identity','scope_ref','turn_id',*(['writer_stop'] if ready else ['retirement']))),'Recovery live stopped owner changed')
+        if ready:task_state._ready_stop(context,db,task)
+        attempts=[a['id'] for a in task.get('evidence',{}).get('attempts',[]) if ready or a['status'] in {'reserved','running','uncertain'}]
         d3._require(attempts==value['proof']['attempt_ids'],'Recovery live stopped attempts changed')
     for assignment in value.get('assignments',[]):
         observed=task_state._lifecycle_identity(db,'assignment',assignment['reference'])
@@ -1938,7 +2014,10 @@ def _cut_recovery_content(content,certificates,contexts):
     from runtime import evidence
     content=deepcopy(content); certificates=sorted(certificates,key=d3._digest)
     certified={d3._digest(a['reference']):a for c in certificates for a in c.get('assignments',[])}
-    seeds=[((d3._digest(c['reference']['authority']),d3._digest(c['retirement']['proof'])),c['reference']) for c in certificates]
+    seeds=[((d3._digest(c['reference']['authority']),d3._digest(_stop_envelope(c)['proof'])),c['reference']) for c in certificates]
+    for c in certificates:
+        if c.get('state')=='ready':
+            seeds.extend(((d3._digest(c['reference']['authority']),d3._digest(ref)),c['reference']) for ref in (c['writer_stop']['candidate'],c['writer_stop']['verification']))
     for assignment in certified.values():
         authority=assignment['reference']['authority']; rec=assignment['reconciliation']
         refs=[assignment['reference']['assignment'],rec['reference']]
@@ -1996,6 +2075,23 @@ def _cut_recovery_content(content,certificates,contexts):
     return content
 
 
+def _recovery_ready_inputs(content,contexts):
+    from runtime import evidence
+    files={}
+    for context in contexts:
+        authority=_canonical_plain(context.authority_set[0])
+        with evidence._context_database(context) as db:
+            for certificate in content.get('stopped',[]):
+                ref=certificate['reference']
+                if certificate.get('state')!='ready' or ref['authority']!=authority:continue
+                identity=task_state._lifecycle_identity(db,'task',ref)
+                if identity['status']!='live':continue
+                task=task_state._task(db,ref['scope_id'],ref['client'],ref['session_id'],ref['task_id'])
+                candidate=evidence._read(None,task['writer_stop']['candidate'],context=context,db=db)
+                files[d3._digest(ref)]=evidence._ready_stop_candidate(context,task,candidate)
+    return _canonical_freeze(files)
+
+
 def _recovery_generation(db,tasks,assignments):
     rows=[]
     for item in tasks:
@@ -2030,12 +2126,13 @@ def _recovery_owner_refs(manifest,context,task_refs):
             unresolved=[a for a in task.get('evidence',{}).get('attempts',[]) if a['status'] in {'reserved','running','uncertain'}]
             ref=dict(authority=authority,scope_id=scope_id,client=client,session_id=session,task_id=task_id)
             named=any(_canonical_plain(r)==ref for r in task_refs)
-            if not (named or unresolved or relevant and task.get('retirement')): continue
+            if not (named or unresolved or relevant and (task.get('retirement') or task.get('writer_stop'))): continue
             tasks.append(dict(reference=ref,revision=task['revision'],pins=task['pins'],turn_id=task['turn_id']))
             for record in records:
                 if all(record['owner'][k]==ref[k] for k in ('scope_id','client','session_id','task_id')): assignments[record['id']]=record
-            if task.get('retirement'):
-                proof=task['retirement']['proof']; task_state._artifact_reference(proof); references.append(proof)
+            if task.get('retirement') or task.get('writer_stop'):
+                envelope=_stop_envelope(task)
+                references.extend(edge['reference'] for edge in evidence._artifact_dependencies(envelope))
             else:
                 for attempt in unresolved:
                     record=delegation._linked_attempt(None,scope_id,task,attempt,records,context=context,db=db,artifact_refs=references)
@@ -2170,7 +2267,8 @@ def _observe_recovery_source(path, journal, contexts, task_refs):
             generations[d3._digest(authority)]=_recovery_generation(db,selected,[a for a in content['assignments'] if a['authority']==authority])
     created_at=_existing_recovery_age(contexts,content['identity'])
     if created_at is None: created_at=task_state._owner_time()
-    return _RecoverySourceObservation(_canonical_freeze(content),contexts,_canonical_freeze(generations),created_at,_RECOVERY_ISSUER)
+    return _RecoverySourceObservation(_canonical_freeze(content),contexts,_canonical_freeze(generations),created_at,_RECOVERY_ISSUER,
+        ready_inputs=_recovery_ready_inputs(content,contexts))
 
 
 def _check_recovery_source(source,context,db):
@@ -2189,7 +2287,12 @@ def _check_recovery_source(source,context,db):
         if item['authority']==authority:
             evidence._managed_artifact(None,item['artifact'],context=context,db=db)
     for certificate in content.get('stopped',[]):
-        if certificate['reference']['authority']==authority: _check_stopped_certificate(context,db,certificate)
+        if certificate['reference']['authority']!=authority:continue
+        identity=_check_stopped_certificate(context,db,certificate)
+        if certificate.get('state')=='ready' and identity['status']=='live':
+            key=d3._digest(certificate['reference'])
+            d3._require(source.ready_inputs is not None and key in source.ready_inputs,'Ready source needs its actual bounded input observation')
+            evidence._check_ready_inputs(_canonical_plain(source.ready_inputs[key]))
     if source.release is not None:
         baseline=task_state._source_baseline(None,db,context=context)
         matches=[edge for edge in baseline['dependencies'] if _canonical_plain(edge['reference']['identity'])==content['identity']]
@@ -2436,7 +2539,8 @@ def _observe_recovery_release(authorities,identity):
             supersedes=canonical(list({d3._digest(row):row for row in supersedes}.values())))
         content=_cut_recovery_content(content,list(certificates.values()),contexts)
         original=dict(heads=heads,tasks=list(tasks.values()),assignments=list(assignments.values()))
-        return _RecoverySourceObservation(_canonical_freeze(content),tuple(contexts),_canonical_freeze(generations),next(iter(ages)),_RECOVERY_ISSUER,_canonical_freeze(original))
+        return _RecoverySourceObservation(_canonical_freeze(content),tuple(contexts),_canonical_freeze(generations),next(iter(ages)),_RECOVERY_ISSUER,_canonical_freeze(original),
+            _recovery_ready_inputs(content,contexts))
 
 
 def _register_recovery_release(observation):
