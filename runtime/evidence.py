@@ -898,6 +898,13 @@ def _retire_closed_task(context, task_ref):
 
 
 def _registered_owner(scope, context, owner, db):
+    if isinstance(owner,_PreparationOwner):
+        ref=_canonical_plain(owner.reference);facts=_check_preparation_observation(owner.observation,writer=(context,db))
+        member=_preparation_member(facts,ref)
+        _require(ref['authority']==_canonical_plain(context.authority_set[0]) and _canonical_plain(owner.content)==_preparation_content(facts,ref) and
+            owner.created_at==member['task']['lifecycle']['created_at'] and
+            [_canonical_plain(edge) for edge in owner.dependencies]==_preparation_dependencies(facts),'Preparation owner content/age/dependencies changed')
+        return dict(kind='project',project_id=member['task']['accepted_identity']['project_id'],task=ref),ref
     if isinstance(owner,_ClosureOwner):
         ref=_canonical_plain(owner.reference)
         facts=_check_closure_observation(context,db,ref,owner.facts)
@@ -1003,13 +1010,13 @@ def _artifact_registered(scope, value, context, owner, db):
         os.close(directory_fd)
     digest = hashlib.sha256(raw).hexdigest()
     recovery = isinstance(owner, _RecoveryOwner)
-    if recovery or isinstance(owner,_ClosureOwner): _require(value == _canonical_plain(owner.content), 'Artifact differs from owner-derived content')
-    dependencies = [_canonical_plain(d) for d in owner.dependencies] if recovery or isinstance(owner, (_LinkedOwner,_ClosureOwner)) else _artifact_dependencies(value)
-    if task_ref is not None:
+    if recovery or isinstance(owner,(_ClosureOwner,_PreparationOwner)): _require(value == _canonical_plain(owner.content), 'Artifact differs from owner-derived content')
+    dependencies = [_canonical_plain(d) for d in owner.dependencies] if recovery or isinstance(owner, (_LinkedOwner,_ClosureOwner,_PreparationOwner)) else _artifact_dependencies(value)
+    if task_ref is not None and not isinstance(owner,_PreparationOwner):
         dependencies.insert(0, dict(kind='task', reference=task_ref))
     baseline = isinstance(owner, _BaselineOwner)
-    created = owner.creation.created_at if baseline else owner.created_at if recovery or isinstance(owner,_ClosureOwner) else state._owner_time()
-    content_class = 'compact' if baseline or recovery or isinstance(owner,_ClosureOwner) else 'detail'
+    created = owner.creation.created_at if baseline else owner.created_at if recovery or isinstance(owner,(_ClosureOwner,_PreparationOwner)) else state._owner_time()
+    content_class = 'compact' if baseline or recovery or isinstance(owner,(_ClosureOwner,_PreparationOwner)) else 'detail'
     if baseline:
         expected = dict(version=1, kind='authority-source-baseline', source_contract=2,
             authority=_canonical_plain(owner.creation.authority), project_id=owner.project_id,
@@ -2558,6 +2565,307 @@ def _linked_stop_shape(basis):
     _require([row['task'] for row in basis['members']]==[row['task'] for row in basis['content']['members']],
         'Linked stop basis member set differs from actual aggregate')
     _bounded(basis,MAX_ARTIFACT)
+
+
+_PREPARATION_ISSUER=object()
+
+
+@dataclass(frozen=True)
+class _PreparationObservation:
+    facts: object
+    authorities: object
+    recovery: object
+    recovery_files: object
+    issuer: object
+
+
+@dataclass(frozen=True)
+class _PreparationOwner:
+    reference: object
+    observation: object
+    content: object
+    dependencies: tuple
+    created_at: int
+
+
+@contextmanager
+def _preparation_database(context,writer=None):
+    if writer is not None and writer[0].database==context.database:
+        _check_context(context,writer[1]);yield writer[1]
+    else:
+        with _context_database(context) as db:yield db
+
+
+def _linked_preparation_facts(pointer,authorities,*,writer=None):
+    """Complete semantic/source facts; recovery interpretation belongs to the outer acquisition."""
+    from runtime import changes,delegation
+    content=_linked_source(pointer);_linked_stop_content(content)
+    selected=content['selected'];context=_reference_context(selected['authority'])
+    with _preparation_database(context,writer) as db:
+        task=state._task(db,selected['scope_id'],selected['client'],selected['session_id'],selected['task_id'])
+        _require(task is not None and task.get('writer_stop',{}).get('linked'),'Linked preparation needs every independent stop')
+        basis=_read(None,task['writer_stop']['linked'],context=context,db=db)
+    _require(basis['aggregate']==pointer and _linked_stop_basis(pointer,basis['authorities'])==basis,
+        'Linked preparation original basis changed')
+    _require(basis['delivery_complete'] is True,'Linked preparation requires required merged or approved-null delivery')
+    known={_raw(a):a for a in authorities};discovered={};members=[];pending=[]
+    for row in basis['members']:
+        ref=row['task'];context=_reference_context(ref['authority'])
+        _require(_raw(ref['authority']) in known,'Linked preparation member authority is unguarded')
+        with _preparation_database(context,writer) as db:
+            task=state._task(db,ref['scope_id'],ref['client'],ref['session_id'],ref['task_id'])
+            _require(task is not None and task.get('writer_stop',{}).get('linked'),'Linked preparation needs every independent stop')
+            own_basis=_read(None,task['writer_stop']['linked'],context=context,db=db)
+            _require(own_basis==basis,'Linked independent member bases differ')
+            certificate=changes._stopped_certificate(context,db,dict(reference=ref,pins=task['pins']))
+            records=delegation._closure_assignments(context,db,ref,task,certificate)
+            all_records=delegation._ledger(None,db,context=context);guidance=delegation._closure_guidance(context,db,all_records)
+            projection=_closure_assignment_projection(context,db,task,records);ids={r['id'] for r in records}
+            projection.update(native_guidance=[item for item in guidance['native'] if item['reference']['id'] in ids],scope_guidance=guidance['sources'])
+            local=deepcopy(task);local.pop('lifecycle',None);local['evidence'].pop('linked_verification',None)
+            refs=[edge['reference'] for edge in _artifact_dependencies(local)]+guidance['references']
+            for record in records:refs.extend(edge['reference'] for edge in _artifact_dependencies(record))
+            pending.extend(dict(authority=ref['authority'],artifact=source) for source in refs)
+            members.append(dict(reference=ref,task=task,certificate=certificate,projection=projection,guidance=guidance))
+            metadata=[state._metadata_record(r) for r in db.execute('select name,digest,owner_key,class,created_at,closed_at,status,bytes,data from evidence_metadata limit 4097')]
+            _require(len(metadata)<=4096,'Preparation evidence metadata exceeds bound')
+            folder=context.directory/'evidence'
+            _require(sorted(path.name for path in folder.iterdir())==sorted(Path(m['managed']['path']).name for m in metadata),
+                'Unaccounted evidence content protects preparation')
+    pending.append(dict(authority=pointer['authority'],artifact=pointer['reference']));sources={}
+    while pending:
+        ref=pending.pop();key=_raw(ref)
+        if key in sources:continue
+        _require(len(sources)<4096,'Preparation source traversal exceeds bound')
+        authority=ref['authority']
+        if _raw(authority) not in known:
+            discovered[_raw(authority)]=authority;continue
+        context=_reference_context(authority)
+        with _preparation_database(context,writer) as db:
+            metadata,raw=_managed_artifact(None,ref['artifact'],context=context,db=db)
+        sources[key]=dict(reference=ref,metadata=metadata,stat=_closure_file_stat(Path(metadata['managed']['path'])))
+        for edge in metadata['dependencies']:
+            target=edge['reference'];other=target.get('authority',authority)
+            if _raw(other) not in known:discovered[_raw(other)]=other
+            if edge['kind']=='artifact':pending.append(dict(authority=other,artifact=target.get('artifact',target)))
+            elif edge['kind'] in {'assignment','recovery'}:pending.append(dict(authority=other,artifact=target['assignment'] if edge['kind']=='assignment' else target['artifact']))
+            else:_require(edge['kind']=='task','Preparation source dependency is unsupported')
+    if discovered:return dict(discovered_authorities=sorted(discovered.values(),key=_raw))
+    sources=[sources[key] for key in sorted(sources)]
+    for member in members:
+        own=member['reference'];guidance_refs=member['guidance']['references']
+        member['projection']['sources']=[dict(reference=source['reference'],created_at=source['metadata']['created_at'],
+            owner=source['metadata']['owner'],bytes=source['metadata']['bytes'],unit='bytes') for source in sources
+            if source['metadata']['owner'].get('task')==own or source['reference']['authority']==own['authority'] and source['reference']['artifact'] in guidance_refs]
+    receipts=[]
+    fields={'linked-scope-decision':('version','kind','projection_digest','decision_ref','reference','observed_at'),
+        'linked-integration-observation':('version','kind','inputs_digest','criteria','observed_at','reference'),
+        'linked-delivery-observation':('version','kind','delivery','status','revision','observed_at','reference')}
+    for source in _linked_source_refs(content['observations']):
+        body=_linked_source(source);kind=body.get('kind');ref=dict(authority=source['authority'],artifact=source['reference'])
+        metadata=next(item['metadata'] for item in sources if item['reference']==ref)
+        receipts.append(dict(reference=ref,created_at=metadata['created_at'],owner=metadata['owner'],
+            facts={key:body[key] for key in fields.get(kind,()) if key in body}))
+    facts=dict(version=1,aggregate=pointer,basis=basis,members=members,sources=sources,receipts=receipts)
+    _bounded(facts,MAX_ARTIFACT)
+    return facts
+
+
+def _preparation_member(facts,reference):
+    matches=[m for m in facts['members'] if m['reference']==reference]
+    _require(len(matches)==1,'Preparation member is outside the exact approved set')
+    return matches[0]
+
+
+def _preparation_content(facts,reference):
+    member=_preparation_member(facts,reference);task=member['task'];basis=facts['basis']
+    return dict(version=1,kind='linked-closure-preparation',identity=reference,pins=task['pins'],accepted_identity=task['accepted_identity'],
+        created_at=task['lifecycle']['created_at'],revision=task['revision'],outcome=task['state'],stopped=member['certificate'],
+        component_digest=_digest(facts),component=dict(aggregate=facts['aggregate'],basis_digest=_digest(basis),
+            members=[dict(reference=m['reference'],state=m['task']['state'],revision=m['task']['revision'],pins=m['task']['pins'],
+                created_at=m['task']['lifecycle']['created_at']) for m in facts['members']],
+            acceptance=basis['content']['projection']['acceptance'],deliveries=basis['deliveries'],delivery_complete=basis['delivery_complete'],receipts=facts['receipts']),
+        **member['projection'],usage='unknown',limitations=['Preparation preserves historical facts; it grants no safe closure, current readiness or delivery permission'])
+
+
+def _preparation_dependencies(facts):
+    owners={_raw(m['reference']) for m in facts['members']}
+    assignments={_raw(a['reference']) for m in facts['members'] for a in m['certificate'].get('assignments',[])}
+    sources={_raw(source['reference']):source for source in facts['sources']};raw=set();children={}
+    for key,source in sources.items():
+        authority=source['reference']['authority'];children[key]=[]
+        for edge in source['metadata']['dependencies']:
+            kind=edge['kind'];ref=edge['reference']
+            if kind=='artifact':
+                child=_raw(dict(authority=ref.get('authority',authority),artifact=ref.get('artifact',ref)))
+                children[key].append(child)
+                if child not in sources:raw.add(key)
+            elif kind=='task':
+                if _raw(ref) not in owners:raw.add(key)
+            elif kind=='assignment':
+                if _raw(ref) not in assignments:raw.add(key)
+            else:raw.add(key)  # Recovery and unknown raw routes need their original owner support.
+    pending=True
+    while pending:
+        expanded={key for key,refs in children.items() if any(child in raw for child in refs)}-raw
+        pending=bool(expanded);raw.update(expanded)
+    return [dict(kind='artifact',reference=source['reference']) for key,source in sources.items()
+        if key in raw or _raw(source['metadata']['owner'].get('task')) not in owners]
+
+
+def _preparation_receipt(facts,reference,*,writer=None):
+    context=_reference_context(reference['authority']);expected=_preparation_content(facts,reference);found=[]
+    with _preparation_database(context,writer) as db:
+        rows=db.execute("select name,digest,owner_key,class,created_at,closed_at,status,bytes,data from evidence_metadata where class='compact' limit 4097").fetchall()
+        _require(len(rows)<=4096,'Preparation receipt lookup exceeds bound')
+        for row in rows:
+            metadata=state._metadata_record(row)
+            if metadata['owner'].get('task')!=reference:continue
+            ref=dict(name=row[0],digest=row[1]);body=_read(None,ref,context=context,db=db)
+            if body.get('kind')!='linked-closure-preparation':continue
+            _require(body==expected and metadata['created_at']==expected['created_at'] and metadata['closed_at'] is None and
+                metadata['status']=='live' and metadata['dependencies']==_preparation_dependencies(facts) and not metadata['targets'] and metadata['export'] is None,
+                'Retained preparation differs from original component facts/age/dependencies')
+            found.append(dict(authority=reference['authority'],artifact=ref))
+    _require(len(found)<=1,'Duplicate logical preparation receipts remain protected')
+    return found[0] if found else None
+
+
+def _observe_linked_preparation(pointer,authorities):
+    from runtime import changes
+    pending=list(authorities)
+    for _ in range(4096):
+        with _linked_stop_guards(pointer,pending) as complete:
+            facts=_linked_preparation_facts(pointer,complete)
+            if facts.get('discovered_authorities'):
+                pending=sorted({_raw(a):a for a in [*complete,*facts['discovered_authorities']]}.values(),key=_raw);continue
+            refs=[m['reference'] for m in facts['members']]
+            recovery=_canonical_plain(changes._inspect_lifecycle_recovery_guarded(complete,refs))
+            if recovery['discovered_authorities']:
+                pending=sorted({_raw(a):a for a in [*complete,*recovery['discovered_authorities']]}.values(),key=_raw);continue
+            _require(recovery['complete'] and not recovery['blockers'],'Preparation recovery/source coverage is incomplete')
+            files=_closure_recovery_files(recovery)
+            return _PreparationObservation(_canonical_freeze(facts),_canonical_freeze(complete),_canonical_freeze(recovery),_canonical_freeze(files),_PREPARATION_ISSUER)
+    raise state.StateError('Preparation authority closure did not converge')
+
+
+def _check_preparation_inputs(facts,*,writer=None):
+    """Last bounded writer check, after complete semantic/recovery interpretation."""
+    from runtime import delegation
+    checked=set()
+    for member in facts['members']:
+        ref=member['reference'];context=_reference_context(ref['authority'])
+        original=next(row for row in facts['basis']['members'] if row['task']==ref)
+        with _preparation_database(context,writer) as db:
+            task=state._task(db,ref['scope_id'],ref['client'],ref['session_id'],ref['task_id'])
+            _require(task==member['task'] and state._ready_stop_bindings(context,db,task)==original['bindings'],
+                'Preparation rows, assignments or generation changed before commit')
+            for support in member['guidance']['retained']:
+                _require(state._retired(db,'task',{key:support['identity'][key] for key in ('scope_id','client','session_id','task_id')})==support['marker'] and
+                    all(state._retired_assignment(db,identity)==marker for identity,marker in support['assignments']),
+                    'Preparation retained guidance ownership changed')
+            authority=_raw(ref['authority'])
+            if authority not in checked:
+                checked.add(authority)
+                names=[row[0] for row in db.execute('select name from evidence_metadata limit 4097')]
+                _require(len(names)<=4096 and sorted(path.name for path in (context.directory/'evidence').iterdir())==sorted(names),
+                    'Unaccounted preparation content appeared before commit')
+        _check_ready_inputs(original['inputs'])
+        guidance=member['guidance']
+        if guidance['folder'] is not None:_require(_binding(Path(guidance['folder']['path']))==guidance['folder']['binding'],'Preparation guidance folder changed')
+        for path,source in guidance['files'].items():
+            _require(_closure_file_stat(Path(path))==source['stat'] and hashlib.sha256(delegation._read_bytes(Path(path))).hexdigest()==source['digest'],
+                'Preparation guidance source changed before commit')
+    for source in facts['sources']:
+        ref=source['reference'];context=_reference_context(ref['authority']);metadata=source['metadata']
+        with _preparation_database(context,writer) as db:_require(state._metadata(db,ref['artifact']['name'])==metadata,'Preparation source metadata changed')
+        _require(_closure_file_stat(Path(metadata['managed']['path']))==source['stat'] and
+            all(_binding(Path(path))==binding for path,binding in metadata['managed']['parents'].items()),
+            'Preparation source bytes or physical identity changed before commit')
+
+
+def _check_preparation_observation(observation,*,writer=None):
+    from runtime import changes
+    _require(isinstance(observation,_PreparationObservation) and observation.issuer is _PREPARATION_ISSUER and
+        state._frozen_snapshot(observation.facts),'Preparation requires immutable actual owner acquisition')
+    facts=_canonical_plain(observation.facts);authorities=_canonical_plain(observation.authorities)
+    _require(_linked_preparation_facts(facts['aggregate'],authorities,writer=writer)==facts,'Preparation component/source facts changed')
+    recovery=_canonical_plain(changes._inspect_lifecycle_recovery_guarded(authorities,[m['reference'] for m in facts['members']]))
+    _require(recovery==_canonical_plain(observation.recovery) and _closure_recovery_files(recovery)==_canonical_plain(observation.recovery_files),
+        'Preparation recovery observation changed before owner commit')
+    _check_preparation_inputs(facts,writer=writer)
+    return facts
+
+
+def _prepare_linked_closure(observation):
+    _require(isinstance(observation,_PreparationObservation) and observation.issuer is _PREPARATION_ISSUER,'Preparation requires owner observation')
+    original=_canonical_plain(observation.facts);receipts=[]
+    with _linked_stop_guards(original['aggregate'],_canonical_plain(observation.authorities)):
+        facts=_check_preparation_observation(observation)
+        for member in facts['members']:
+            ref=member['reference'];context=_reference_context(ref['authority'])
+            with _context_database(context,write=True) as db:
+                _check_preparation_observation(observation,writer=(context,db))
+                receipt=_preparation_receipt(facts,ref,writer=(context,db))
+                if receipt is None:
+                    content=_preparation_content(facts,ref);deps=tuple(_canonical_freeze(edge) for edge in _preparation_dependencies(facts))
+                    owner=_PreparationOwner(_canonical_freeze(ref),observation,_canonical_freeze(content),deps,member['task']['lifecycle']['created_at'])
+                    artifact=_artifact(None,content,context=context,owner=owner,db=db)
+                    receipt=dict(authority=ref['authority'],artifact=artifact)
+                    _check_preparation_observation(observation,writer=(context,db))
+                    _require(_preparation_receipt(facts,ref,writer=(context,db))==receipt,'Prepared replacement was not registered exactly')
+                _check_preparation_inputs(facts,writer=(context,db))
+                receipts.append(dict(task=ref,reference=receipt,created_at=member['task']['lifecycle']['created_at']))
+        return dict(complete=True,preparations=receipts)
+
+
+def _linked_prepared_replacements(certificates,contexts,*,writer=None):
+    """Prove all owned replacements before any linked raw route can be released."""
+    authorities=[_canonical_plain(c.authority_set[0]) for c in contexts];groups={};extra=[];routes={};result=[]
+    for certificate in certificates:
+        if 'linked' not in certificate:result.append(certificate);continue
+        pointer=certificate['linked']['aggregate'];key=_raw(pointer)
+        if key not in groups:
+            present=False
+            for row in certificate['linked']['members']:
+                ref=row['task'];ctx=_reference_context(ref['authority'])
+                with _preparation_database(ctx,writer) as db:
+                    rows=db.execute("select name,digest,owner_key,class,created_at,closed_at,status,bytes,data from evidence_metadata where class='compact' limit 4097").fetchall()
+                    _require(len(rows)<=4096,'Preparation discovery exceeds bound')
+                    for item in rows:
+                        metadata=state._metadata_record(item)
+                        if metadata['owner'].get('task')==ref and _read(None,dict(name=item[0],digest=item[1]),context=ctx,db=db).get('kind')=='linked-closure-preparation':present=True
+            if not present:
+                groups[key]=(None,None);result.append(certificate);continue
+            facts=_linked_preparation_facts(pointer,authorities,writer=writer)
+            _require(not facts.get('discovered_authorities'),'Prepared replacement authority coverage is incomplete')
+            required={_raw(m['reference']) for m in facts['members']}
+            actual={_raw(c['reference']) for c in certificates if c.get('linked',{}).get('aggregate')==pointer}
+            _require(actual==required,'D4 prepared component omits an approved member')
+            receipts={_raw(m['reference']):_preparation_receipt(facts,m['reference'],writer=writer) for m in facts['members']}
+            groups[key]=(facts,receipts if all(receipts.values()) else None)
+            if all(receipts.values()):
+                extra.extend(receipts.values());extra.extend(s['reference'] for s in facts['sources'])
+                for source in facts['sources']:
+                    if _raw(source['metadata']['owner'].get('task')) in required:
+                        routes[_raw(source['reference'])]=required
+        facts,receipts=groups[key]
+        if receipts is not None:
+            certificate=dict(certificate,preparation=dict(reference=receipts[_raw(certificate['reference'])]['artifact'],component_digest=_digest(facts),authorities=authorities))
+        result.append(certificate)
+    return result,extra,routes
+
+
+def _check_linked_preparation_certificate(context,db,certificate):
+    basis=certificate['linked'];authorities=certificate['preparation']['authorities']
+    facts=_linked_preparation_facts(basis['aggregate'],authorities,writer=(context,db))
+    _require(not facts.get('discovered_authorities') and _digest(facts)==certificate['preparation']['component_digest'],
+        'D4 prepared component facts changed')
+    receipts=[_preparation_receipt(facts,m['reference'],writer=(context,db)) for m in facts['members']]
+    _require(all(receipts),'D4 requires every actual prepared replacement')
+    own=_preparation_receipt(facts,certificate['reference'],writer=(context,db))
+    _require(own['artifact']==certificate['preparation']['reference'],'D4 preparation pointer differs from actual owner receipt')
+    _check_preparation_inputs(facts,writer=(context,db))
 
 
 def _linked_inputs(snapshots):

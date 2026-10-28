@@ -1917,7 +1917,7 @@ def _stopped_certificate_shape(value):
     cancelled=complete and value.get('state')=='cancelled'
     task_state._fields(value,('reference','created_at','revision','pins','accepted_identity','scope_ref','turn_id','proof',
         *(('version','state','writer_stop',*(['retirement','retirement_proof'] if cancelled else []),
-            *(['linked'] if value.get('writer_stop',{}).get('linked') else [])) if complete else ('retirement',))),('assignments',))
+            *(['linked'] if value.get('writer_stop',{}).get('linked') else [])) if complete else ('retirement',))),('assignments','preparation'))
     task_state._task_reference(value['reference']); task_state._integer(value['created_at'],'original stopped task age')
     task_state._integer(value['revision'],'stopped task revision',2); task_state._text(value['scope_ref'],'stopped scope')
     d3._require(task_state._validate_pins(value['pins'])==3,'Stopped certificate requires canonical pins')
@@ -1961,6 +1961,12 @@ def _stopped_certificate_shape(value):
         for key in ('observation_ref','coordinator_ref'): task_state._text(proof[key],key)
         if complete:d3._require(evidence._digest(proof)==retirement['proof']['digest'],
             'Complete certificate changed original cancellation proof')
+    if 'preparation' in value:
+        d3._require('linked' in value,'Preparation needs an actual stopped linked member')
+        prepared=value['preparation'];task_state._fields(prepared,('reference','component_digest','authorities'))
+        task_state._artifact_reference(prepared['reference']);d3._hash(prepared['component_digest'])
+        d3._require(isinstance(prepared['authorities'],list) and 0<len(prepared['authorities'])<=4096,'Prepared authority set is incomplete')
+        for authority in prepared['authorities']:task_state._task_reference(dict(value['reference'],authority=authority))
     if 'assignments' in value:
         d3._require(isinstance(value['assignments'],list) and len(value['assignments'])<=4096,'Stopped assignment certificate bound exceeded')
         for assignment in value['assignments']: _assignment_certificate_shape(assignment,value)
@@ -2002,6 +2008,7 @@ def _stopped_assignment_certificate(value,reference):
 
 
 def _check_stopped_certificate(context,db,value):
+    from runtime import evidence
     _stopped_certificate_shape(value)
     ref=value['reference']
     identity=task_state._lifecycle_identity(db,'task',ref)
@@ -2025,21 +2032,27 @@ def _check_stopped_certificate(context,db,value):
             row=db.execute('select id,scope_id,client,session_id,task_id,dispatch_id,data from assignments where id=?',(assignment['reference']['id'],)).fetchone()
             record=delegation._record(None,row,context=context,db=db)
             d3._require(_assignment_certificate(context,db,task,record)==assignment,'Recovery live stopped assignment changed')
+    if 'preparation' in value:evidence._check_linked_preparation_certificate(context,db,value)
     return identity
 
 
 def _cut_recovery_content(content,certificates,contexts):
     # Preserve independent artifact/assignment raw routes; only the issued proof route is cut.
     from runtime import evidence
-    content=deepcopy(content); certificates=sorted(certificates,key=d3._digest)
-    certified={d3._digest(a['reference']):a for c in certificates if 'linked' not in c for a in c.get('assignments',[])}
-    # Linked raw routes await companion compact composition in the lifecycle owner.
-    seeds=[((d3._digest(c['reference']['authority']),d3._digest(_stop_envelope(c)['proof'])),c['reference']) for c in certificates if 'linked' not in c]
+    content=deepcopy(content);certificates,extra,component_routes=evidence._linked_prepared_replacements(certificates,contexts)
+    content['artifacts']=list({evidence._raw(row):row for row in [*content['artifacts'],*extra]}.values())
+    certificates=sorted(certificates,key=d3._digest)
+    component_routes={(d3._digest(ref['authority']),d3._digest(ref['artifact'])):owners
+        for raw,owners in component_routes.items() for ref in [json.loads(raw)]}
+    certified={d3._digest(a['reference']):a for c in certificates if 'linked' not in c or 'preparation' in c for a in c.get('assignments',[])}
+    # Linked raw routes need every exact prepared replacement; no safe closure is implied.
+    seeds=[((d3._digest(c['reference']['authority']),d3._digest(_stop_envelope(c)['proof'])),c['reference']) for c in certificates if 'linked' not in c or 'preparation' in c]
     for c in certificates:
-        if 'linked' in c:continue
+        if 'linked' in c and 'preparation' not in c:continue
         if c.get('writer_stop'):
             if c.get('state')=='cancelled':seeds.append(((d3._digest(c['reference']['authority']),d3._digest(c['retirement']['proof'])),c['reference']))
             seeds.extend(((d3._digest(c['reference']['authority']),d3._digest(ref)),c['reference']) for ref in (c['writer_stop']['candidate'],c['writer_stop']['verification']))
+    seeds.extend((key,json.loads(next(iter(owners)))) for key,owners in component_routes.items())
     for assignment in certified.values():
         authority=assignment['reference']['authority']; rec=assignment['reconciliation']
         refs=[assignment['reference']['assignment'],rec['reference']]
@@ -2059,7 +2072,9 @@ def _cut_recovery_content(content,certificates,contexts):
         key,owner=pending.pop();route=(key,d3._digest(owner))
         if route in seen or key not in metadata_by_key: continue
         seen.add(route);authority,metadata=metadata_by_key[key]
-        if authority!=owner['authority'] or metadata['owner'].get('task')!=owner:
+        component=component_routes.get(key)
+        owned=component is not None and evidence._raw(owner) in component and evidence._raw(metadata['owner'].get('task')) in component
+        if not owned and (authority!=owner['authority'] or metadata['owner'].get('task')!=owner):
             foreign.add(key);continue
         support.add(key)
         for edge in metadata['dependencies']:

@@ -2555,6 +2555,379 @@ class LinkedVerificationTests(unittest.TestCase):
             state._retain_ready_stop(f.scope,request)
         self.assertTrue(phase['moved']);self.assertEqual(scenario.task(f),before)
 
+    def preparation_fixture(self, *, delivery=None, delivery_status='merged', stopped=True):
+        from runtime import changes,onboarding
+        from tests.test_changes import ScopedChangesTests
+        if delivery is not None:self.establish(delivery)
+        from runtime.engine import RuntimeEvent
+        for f in self.members:
+            for kind in ('PreToolUse','PostToolUse'):
+                state.process_event(f.scope,RuntimeEvent(kind,'codex','parent',f.repo,turn_id='turn',tool_call_id='preparation-read',tool_name='read_file',receipt_fingerprint='a'*64))
+        pointer=self.verify(self.observations(delivery=delivery,delivery_status=delivery_status))['verification']
+        contexts=tuple(self.api._evidence_context(f.scope) for f in self.members);refs=tuple(self.reference(f) for f in self.members)
+        d4=ScopedChangesTests(methodName='runTest');d4.setUp();self.addCleanup(d4.doCleanups)
+        request=d4.scoped_request()
+        for repository in request['manifest']['enrollment']['record']['repositories']:
+            for checkout in repository['checkouts']:checkout['clients'][0]['configuration']['runtime']=dict(schema_version=3,state_dir=str(contexts[0].directory))
+        request['approval']['manifest_digest']=onboarding._digest(request['manifest'])
+        self.assertEqual(changes._run_scoped(d4.directory,request,'apply')['exit_code'],0)
+        source=changes._observe_recovery_source(d4.directory,changes._load_journal(d4.directory),contexts,refs)
+        for context in contexts:
+            with self.api._context_database(context,write=True) as db:self.api._register_recovery_source(None,db,source,context=context)
+        if stopped:
+            for f in self.members:state._retain_ready_stop(f.scope,self.stop_request(f,pointer))
+        return pointer,d4,source,contexts,refs
+
+    def raw_rows(self,contexts):
+        result=[]
+        for context in contexts:
+            with self.api._context_database(context) as db:
+                result.append({name:db.execute('select * from '+name+' order by rowid').fetchall() for name in ('tasks','assignments','turns','receipts','bindings','retired_identities')})
+        return result
+
+    def test_linked_preparation_compacts_precede_d4_cut_without_closure_or_raw_retirement(self):
+        from runtime import changes
+        delivery=dict(provider='fixture',repository='owner/repo',target='main',pull_request='fixture:required')
+        pointer,_,source,contexts,refs=self.preparation_fixture(delivery=delivery)
+        profile={};phase=['observe-preparation']
+        for name in ('_linked_preparation_facts','_linked_stop_basis'):
+            original=getattr(self.api,name)
+            def counted(*args,_original=original,_name=name,**kwargs):
+                start=time.monotonic();result=_original(*args,**kwargs)
+                row=profile.setdefault(phase[0],{}).setdefault(_name,dict(count=0,seconds=0,digests=set()))
+                row['count']+=1;row['seconds']+=time.monotonic()-start;row['digests'].add(self.api._digest(result));return result
+            patcher=patch.object(self.api,name,side_effect=counted);patcher.start();self.addCleanup(patcher.stop)
+        before=self.raw_rows(contexts);tasks=[self.task(f) for f in self.members]
+        self.assertTrue(all(rows['turns'] and rows['receipts'] for rows in before))
+        observed=self.api._observe_linked_preparation(pointer,self.api._canonical_plain(source.content['authorities']))
+        phase[0]='prepare-compacts';prepared=self.api._prepare_linked_closure(observed)
+        self.assertTrue(prepared['complete']);self.assertEqual(len(prepared['preparations']),len(refs))
+        for f,original in zip(self.members,tasks):
+            receipt=next(row for row in prepared['preparations'] if row['task']==self.reference(f))
+            compact=self.api._linked_source(dict(authority=receipt['reference']['authority'],reference=receipt['reference']['artifact']))
+            self.assertEqual(compact['outcome'],original['state']);self.assertEqual(compact['created_at'],original['lifecycle']['created_at'])
+            self.assertTrue(compact['numerical']);self.assertTrue(compact['verifications']);self.assertEqual(compact['usage'],'unknown')
+            ctx=self.api._evidence_context(f.scope)
+            for number in compact['numerical']:
+                attempt=next(a for a in original['evidence']['attempts'] if a['id']==number['assignment_id'])
+                with self.api._context_database(ctx) as db:age=state._metadata(db,attempt['execution']['name'])['created_at']
+                self.assertEqual(number['value'],attempt[number['field']]);self.assertEqual(number['created_at'],age)
+                self.assertEqual(number['source'],attempt['execution'])
+                self.assertEqual(number['unit'],{'exit_code':'exit-code','output_bytes':'bytes'}[number['field']])
+            self.assertEqual(self.task(f),original)
+        phase[0]='observe-d4-release';release=changes._observe_recovery_release(source.content['authorities'],dict(source.content['identity']))
+        phase[0]='register-d4-release';released=changes._register_recovery_release(release)
+        self.assertTrue(released['complete'],released)
+        phase[0]='inspect-own-release';inspected=changes.inspect_lifecycle_recovery(source.content['authorities'],refs)
+        self.assertTrue(inspected['complete'],inspected)
+        self.assertFalse(any(r['kind']=='task' and r['reference'] in refs and r['need']=='raw' for r in inspected['requirements']))
+        self.assertEqual(self.raw_rows(contexts),before)
+        phase[0]='independent-recovery-root'
+        from tests.test_changes import ScopedChangesTests
+        from runtime import onboarding
+        other=ScopedChangesTests(methodName='runTest');other.setUp();self.addCleanup(other.doCleanups);request=other.scoped_request()
+        for repository in request['manifest']['enrollment']['record']['repositories']:
+            for checkout in repository['checkouts']:checkout['clients'][0]['configuration']['runtime']=dict(schema_version=3,state_dir=str(contexts[0].directory))
+        request['approval']['manifest_digest']=onboarding._digest(request['manifest'])
+        self.assertEqual(changes._run_scoped(other.directory,request,'apply')['exit_code'],0)
+        independent=changes._observe_recovery_source(other.directory,changes._load_journal(other.directory),contexts,refs)
+        for context in contexts:
+            with self.api._context_database(context,write=True) as db:self.api._register_recovery_source(None,db,independent,context=context)
+        inspected=changes.inspect_lifecycle_recovery(source.content['authorities'],refs)
+        self.assertTrue(inspected['complete'],inspected)
+        for ref in refs:
+            self.assertTrue(any(r['kind']=='task' and r['reference']==ref and r['need']=='identity' and r['root']['identity']==dict(source.content['identity']) for r in inspected['requirements']))
+            self.assertTrue(any(r['kind']=='task' and r['reference']==ref and r['need']=='raw' and r['root']['identity']==dict(independent.content['identity']) for r in inspected['requirements']))
+        self.assertEqual(self.raw_rows(contexts),before)
+        for context,ref in zip(contexts,refs):
+            with self.assertRaises(StartupError):self.api._observe_closure((context,),ref)
+        print('PREPARATION_CAPTURE_PROFILE '+json.dumps({stage:{name:dict(count=row['count'],inclusive_seconds=row['seconds'],distinct_facts=len(row['digests'])) for name,row in values.items()} for stage,values in profile.items()}),flush=True)
+
+    def preparation_stops(self,pointer,skip=None):
+        for index,f in enumerate(self.members):
+            if index!=skip:state._retain_ready_stop(f.scope,self.stop_request(f,pointer))
+        return list({self.api._raw(self.reference(f)['authority']):self.reference(f)['authority'] for f in self.members}.values())
+
+    def preparation_receipts(self,contexts):
+        receipts=[]
+        for context in contexts:
+            with self.api._context_database(context) as db:
+                for row in db.execute("select name,digest,owner_key,class,created_at,closed_at,status,bytes,data from evidence_metadata where class='compact'"):
+                    ref=dict(name=row[0],digest=row[1]);body=self.api._read(None,ref,context=context,db=db)
+                    if body.get('kind')=='linked-closure-preparation':receipts.append(dict(reference=ref,metadata=state._metadata_record(row),body=body))
+        return receipts
+
+    def test_linked_preparation_second_write_failure_and_replay_preserve_exact_receipts_and_age(self):
+        pointer=self.verify()['verification'];authorities=self.preparation_stops(pointer)
+        contexts=tuple(self.api._evidence_context(f.scope) for f in self.members);before=self.raw_rows(contexts)
+        observed=self.api._observe_linked_preparation(pointer,authorities);artifact=self.api._artifact;count=[0]
+        def fail(scope,value,**kwargs):
+            if value.get('kind')=='linked-closure-preparation':
+                count[0]+=1
+                if count[0]==2:raise state.StateError('fixture: before second preparation')
+            return artifact(scope,value,**kwargs)
+        with patch.object(self.api,'_artifact',side_effect=fail),self.assertRaises(StartupError):self.api._prepare_linked_closure(observed)
+        partial=self.preparation_receipts(contexts);self.assertEqual(len(partial),1);self.assertEqual(self.raw_rows(contexts),before)
+        original=partial[0]
+        completed=self.api._prepare_linked_closure(self.api._observe_linked_preparation(pointer,authorities))
+        self.assertEqual(len(completed['preparations']),2)
+        self.assertIn(original,self.preparation_receipts(contexts))
+        with patch.object(self.api,'_artifact',side_effect=AssertionError('Replay wrote duplicate support')):
+            replay=self.api._prepare_linked_closure(self.api._observe_linked_preparation(pointer,authorities))
+        self.assertEqual(replay,completed);self.assertEqual(len(self.preparation_receipts(contexts)),2)
+        self.assertEqual(self.raw_rows(contexts),before)
+
+    def test_linked_preparation_required_open_unknown_and_wrong_head_deliveries_stay_protected(self):
+        delivery=dict(provider='fixture',repository='owner/repo',target='main',pull_request='fixture:required')
+        for status in ('open','unknown','wrong-head'):
+            with self.subTest(status=status):
+                scenario=LinkedVerificationTests(methodName='runTest');scenario.setUp();self.addCleanup(scenario.doCleanups)
+                scenario.establish(delivery);observations=scenario.observations(delivery=delivery,delivery_status='merged' if status=='wrong-head' else status)
+                if status=='wrong-head':
+                    observe=observations['observe']
+                    def wrong(facts):
+                        value=observe(facts);row=value['deliveries'][0];source=scenario.api._linked_source(row['source'])
+                        source['revision']='f'*40;row['revision']='f'*40;row['source']=scenario.retained(scenario.selected,source);return value
+                    observations['observe']=wrong
+                result=scenario.verify(observations);self.assertFalse(result['delivery_complete'])
+                authorities=scenario.preparation_stops(result['verification'])
+                with self.assertRaisesRegex(StartupError,'merged or approved-null'):scenario.api._observe_linked_preparation(result['verification'],authorities)
+                self.assertEqual(scenario.preparation_receipts(tuple(scenario.api._evidence_context(f.scope) for f in scenario.members)),[])
+
+    def test_linked_preparation_changed_peer_and_incomplete_observation_cannot_write(self):
+        pointer=self.verify()['verification'];authorities=self.preparation_stops(pointer,skip=1)
+        with self.assertRaises(StartupError):self.api._observe_linked_preparation(pointer,authorities)
+        state._retain_ready_stop(self.members[1].scope,self.stop_request(self.members[1],pointer))
+        observed=self.api._observe_linked_preparation(pointer,authorities)
+        wrong=self.api._canonical_plain(observed.facts);wrong['members'].pop()
+        with self.assertRaises(StartupError):self.api._prepare_linked_closure(replace(observed,facts=self.api._canonical_freeze(wrong)))
+        peer=self.members[1]
+        with state._database(peer.scope,write=True) as db:
+            task=self.task(peer);task['revision']+=1;state._save(db,state._scope_id(peer.scope),task)
+        with self.assertRaises(StartupError):self.api._prepare_linked_closure(observed)
+        self.assertEqual(self.preparation_receipts(tuple(self.api._evidence_context(f.scope) for f in self.members)),[])
+
+    def test_linked_preparation_changed_shared_source_after_observation_cannot_write(self):
+        pointer=self.verify()['verification'];authorities=self.preparation_stops(pointer)
+        observed=self.api._observe_linked_preparation(pointer,authorities);content=self.api._linked_source(pointer)
+        source=content['observations']['scope_decision'];context=self.api._reference_context(source['authority'])
+        path=context.directory/'evidence'/source['reference']['name'];path.chmod(0o600);path.write_bytes(path.read_bytes()+b' ');path.chmod(0o400)
+        with self.assertRaises(StartupError):self.api._prepare_linked_closure(observed)
+        self.assertEqual(self.preparation_receipts(tuple(self.api._evidence_context(f.scope) for f in self.members)),[])
+
+    def test_linked_preparation_forged_owner_generic_artifact_and_unregistered_copy_are_not_replacements(self):
+        from runtime import changes
+        pointer=self.verify()['verification'];authorities=self.preparation_stops(pointer)
+        observed=self.api._observe_linked_preparation(pointer,authorities);facts=self.api._canonical_plain(observed.facts)
+        f=self.selected;ref=self.reference(f);context=self.api._evidence_context(f.scope);content=self.api._preparation_content(facts,ref)
+        with self.assertRaises(StartupError):self.api._prepare_linked_closure(dict(complete=True,facts=facts))
+        owner=self.api._PreparationOwner(self.api._canonical_freeze(ref),dict(complete=True),self.api._canonical_freeze(content),(),content['created_at'])
+        with self.assertRaises(StartupError):self.api._artifact(None,content,context=context,owner=owner)
+        generic=self.api._artifact(f.scope,content,owner=self.api._artifact_owner(f.scope,self.task(f)))
+        with self.api._context_database(context) as db:
+            metadata=state._metadata(db,generic['name']);self.assertEqual(metadata['class'],'detail')
+            self.assertIn(dict(kind='task',reference=ref),metadata['dependencies'])
+        contexts=tuple(self.api._evidence_context(member.scope) for member in self.members)
+        certificates=[]
+        for member,ctx in zip(self.members,contexts):
+            with self.api._context_database(ctx) as db:certificates.append(changes._stopped_certificate(ctx,db,dict(reference=self.reference(member),pins=self.task(member)['pins'])))
+        with self.api._linked_stop_guards(pointer,authorities):
+            issued,_,_=self.api._linked_prepared_replacements(certificates,contexts)
+        self.assertFalse(any('preparation' in c for c in issued))
+        orphan=context.directory/'evidence'/'unregistered-preparation.json';orphan.write_bytes(self.api._raw(content));orphan.chmod(0o400)
+        with self.assertRaisesRegex(StartupError,'Unaccounted'):self.api._prepare_linked_closure(observed)
+        self.assertEqual(self.preparation_receipts(contexts),[])
+
+    def test_linked_preparation_post_release_observation_substitution_keeps_raw_source(self):
+        from runtime import changes
+        pointer,_,source,contexts,refs=self.preparation_fixture();before=self.raw_rows(contexts)
+        self.api._prepare_linked_closure(self.api._observe_linked_preparation(pointer,self.api._canonical_plain(source.content['authorities'])))
+        observed=changes._observe_recovery_release(source.content['authorities'],dict(source.content['identity']))
+        old_heads=[]
+        for context in contexts:
+            with self.api._context_database(context) as db:old_heads.append(state._source_baseline(None,db,context=context))
+        compact=self.preparation_receipts(contexts)[0];path=Path(compact['metadata']['managed']['path'])
+        replacement=path.with_name('replacement.json');replacement.write_bytes(path.read_bytes());replacement.chmod(0o400);os.replace(replacement,path)
+        released=changes._register_recovery_release(observed);self.assertFalse(released['complete'])
+        for context,old in zip(contexts,old_heads):
+            with self.api._context_database(context) as db:self.assertEqual(state._source_baseline(None,db,context=context),old)
+        self.assertEqual(self.raw_rows(contexts),before)
+
+    def test_linked_preparation_interrupted_and_complete_receipts_do_not_block_unrelated_ordinary_closure(self):
+        from tests import test_state
+        shared=tempfile.TemporaryDirectory(prefix='linked-preparation-shared-');self.addCleanup(shared.cleanup)
+        canonical=test_state.canonical_scope;counter=[0]
+        def scope(legacy,**kwargs):
+            number=counter[0];counter[0]+=1;legacy=replace(legacy,runtime=RuntimeSettings(2,Path(shared.name).resolve()/'state'))
+            return canonical(legacy,repository_id='repository-'+str(number),checkout_id='checkout-'+str(number),**kwargs)
+        scenario=LinkedVerificationTests(methodName='runTest')
+        with patch.object(test_state,'canonical_scope',side_effect=scope):scenario.setUp()
+        self.addCleanup(scenario.doCleanups)
+        pointer=scenario.verify()['verification'];authorities=scenario.preparation_stops(pointer)
+        observed=self.api._observe_linked_preparation(pointer,authorities);artifact=self.api._artifact;count=[0]
+        def fail(scope,value,**kwargs):
+            if value.get('kind')=='linked-closure-preparation':
+                count[0]+=1
+                if count[0]==2:raise state.StateError('fixture: before second preparation')
+            return artifact(scope,value,**kwargs)
+        with patch.object(self.api,'_artifact',side_effect=fail),self.assertRaises(StartupError):self.api._prepare_linked_closure(observed)
+        f=scenario.selected;context=self.api._evidence_context(f.scope)
+        for stage in ('interrupted','complete'):
+            if stage=='complete':self.api._prepare_linked_closure(self.api._observe_linked_preparation(pointer,authorities))
+            identity=dict(client='codex',session_id='ordinary-'+stage,task_id='ordinary-'+stage,scope_ref='user:ordinary')
+            task=state.start_task(f.scope,identity|dict(mode='editable',decision_ref='user:accepted'))['task']
+            proof=dict(version=1,kind='stopped-writer-reconciliation',identity=identity,expected_revision=task['revision'],expected_pins=task['pins'],
+                observed_turn_id=task['turn_id'],stopped=True,descendants_stopped=True,attempt_ids=[],observation_ref='fixture:ordinary-stop',coordinator_ref='fixture:independent')
+            raw=json.dumps(proof).encode();path=f.root/(stage+'-ordinary-stop.json');path.write_bytes(raw);path.chmod(0o400)
+            task=state.retire_task(f.scope,identity|dict(expected_revision=task['revision'],expected_pins=task['pins'],reason='Cancelled',reference='fixture:cancel',
+                stop_proof=dict(path=str(path),sha256=hashlib.sha256(raw).hexdigest())))['task']
+            ref=self.api._canonical_plain(self.api._artifact_owner(f.scope,task).task)
+            closed=self.api.close_task(f.scope,identity|dict(expected_revision=task['revision'],expected_pins=task['pins']),self.api._observe_closure((context,),ref))['task']
+            self.assertIsNotNone(closed['lifecycle']['safe_closed_at'])
+            for member in scenario.members:self.assertIsNone(scenario.task(member)['lifecycle']['safe_closed_at'])
+
+    def test_linked_preparation_missing_approved_third_stop_and_member_stay_protected(self):
+        from types import SimpleNamespace
+        from tests.test_state import canonical_scope
+        from tests.test_startup import CanonicalAcquisitionTests
+        third=EvidenceTests(methodName='runTest');third.setUp();self.addCleanup(third.doCleanups)
+        third.scope=canonical_scope(third.scope)
+        state.start_task(third.scope,third.identity|dict(mode='editable',decision_ref='user:accepted'))
+        record,path=CanonicalAcquisitionTests.record(SimpleNamespace(repo=third.repo,base=third.root,assertIsNone=self.assertIsNone))
+        identity=self.api._canonical_plain(third.scope.accepted_identity);record['project_id']=identity['project_id']
+        record['repositories'][0]['repository_id']=identity['repository_id'];record['repositories'][0]['checkouts'][0]['checkout_id']=identity['checkout_id']
+        record['repositories'][0]['checkouts'][0]['clients'][0]['configuration'].update(identity['configuration'])
+        path.write_text(json.dumps(record));self.members.append(third);self.establish()
+        pointer=self.verify()['verification'];authorities=self.preparation_stops(pointer,skip=2)
+        with self.assertRaises(StartupError):self.api._observe_linked_preparation(pointer,authorities[:2])
+        state._retain_ready_stop(third.scope,self.stop_request(third,pointer))
+        observed=self.api._observe_linked_preparation(pointer,authorities[:2])
+        self.assertEqual(len(observed.facts['members']),3)
+        incomplete=self.api._canonical_plain(observed.facts);incomplete['members'].pop()
+        with self.assertRaises(StartupError):self.api._prepare_linked_closure(replace(observed,facts=self.api._canonical_freeze(incomplete)))
+        self.assertEqual(self.preparation_receipts(tuple(self.api._evidence_context(f.scope) for f in self.members)),[])
+
+    def test_linked_preparation_preserves_bound_review_findings_dispositions_and_guidance_without_prompt_copy(self):
+        finding=dict(id='optional-note',severity='info',scope='general',status='optional',location='app.py:1',
+            scenario='Optional fixture suggestion',evidence='Original code trace',counterevidence='No correctness defect')
+        for f in self.members:
+            reviewed=f.review(findings=[finding]);task=self.task(f)
+            attempt=next(a for a in task['evidence']['attempts'] if a['id']==reviewed['attempt_id'])
+            assessment=self.api._read(f.scope,attempt['assessment'])['assessment']
+            assessment['dispositions']=[dict(finding_id=finding['id'],status='accepted',reference='user:accepted-optional')]
+            self.api.assess_review(f.scope,f.request(attempt_id=reviewed['attempt_id'],assessment=assessment))
+        pointer=self.verify()['verification'];authorities=self.preparation_stops(pointer)
+        prepared=self.api._prepare_linked_closure(self.api._observe_linked_preparation(pointer,authorities))
+        for receipt in prepared['preparations']:
+            compact=self.api._linked_source(dict(authority=receipt['reference']['authority'],reference=receipt['reference']['artifact']))
+            self.assertEqual(compact['reviews'][0]['report']['findings'],[finding])
+            self.assertTrue(any(a['assessment']['dispositions']==[dict(finding_id=finding['id'],status='accepted',reference='user:accepted-optional')] for a in compact['reviews'][0]['assessments']))
+            self.assertTrue(compact['native_guidance']);self.assertTrue(compact['scope_guidance']);self.assertTrue(compact['workers'])
+            self.assertEqual(compact['usage'],'unknown')
+            self.assertNotIn('Review read-only; inspect app.py and callers. Return the bound report.',json.dumps(compact))
+
+    def test_linked_preparation_final_recovery_read_movement_rejects(self):
+        from runtime import changes, onboarding
+        from tests.test_state import canonical_scope
+        from tests.test_changes import ScopedChangesTests
+        api = self.api
+        pointer = self.verify()['verification']
+        authorities = self.preparation_stops(pointer)
+        observed = api._observe_linked_preparation(pointer, authorities)
+        artifact = api._artifact
+        inspect = changes._inspect_lifecycle_recovery_guarded
+        phase = dict(prepared=0, armed=False, moved=False)
+
+        def arm(scope, value, **kwargs):
+            result = artifact(scope, value, **kwargs)
+            if value.get('kind') == 'linked-closure-preparation':
+                phase['prepared'] += 1
+                if phase['prepared'] == 2:
+                    phase['armed'] = True
+            return result
+
+        def move_after_inspection(*args, **kwargs):
+            result = inspect(*args, **kwargs)
+            if phase['armed'] and (not phase['moved']):
+                (self.members[1].repo / 'app.py').write_text('Changed participant after final recovery inspection\n')
+                phase['moved'] = True
+                print('LATE_PARTICIPANT_MOVE_AFTER_FINAL_INSPECTION True', flush=True)
+            return result
+        rejected = False
+        result = None
+        try:
+            with patch.object(api, '_artifact', side_effect=arm), patch.object(changes, '_inspect_lifecycle_recovery_guarded', side_effect=move_after_inspection):
+                result = api._prepare_linked_closure(observed)
+        except StartupError:
+            rejected = True
+        self.assertTrue(phase['moved'], 'Probe must reach second-artifact final inspection')
+        with self.assertRaises(StartupError):
+            api._linked_stop_basis(pointer, authorities)
+        print('PREPARATION_REJECTED ' + str(rejected), flush=True)
+        print('PREPARATION_RESULT ' + json.dumps(result), flush=True)
+        self.assertTrue(rejected, 'Preparation reports complete with receipts despite a late participant input change')
+
+    def test_linked_preparation_component_owned_source_keeps_explicit_foreign_raw_demand(self):
+        from runtime import changes, onboarding
+        from tests.test_state import canonical_scope
+        from tests.test_changes import ScopedChangesTests
+        api = self.api
+        extra = EvidenceTests(methodName='runTest')
+        extra.setUp()
+        self.addCleanup(extra.doCleanups)
+        extra.scope = canonical_scope(extra.scope)
+        task = state.start_task(extra.scope, extra.identity | dict(mode='editable', decision_ref='user:accepted'))['task']
+        proof = dict(version=1, kind='stopped-writer-reconciliation', identity=extra.identity, expected_revision=task['revision'], expected_pins=task['pins'], observed_turn_id=task['turn_id'], stopped=True, descendants_stopped=True, attempt_ids=[], observation_ref='fixture:independent-extra-stop', coordinator_ref='fixture:checked')
+        raw = json.dumps(proof).encode()
+        path = extra.root / 'foreign-stop.json'
+        path.write_bytes(raw)
+        path.chmod(256)
+        state.retire_task(extra.scope, extra.request(expected_pins=task['pins'], reason='Cancelled', reference='fixture:cancel', stop_proof=dict(path=str(path), sha256=hashlib.sha256(raw).hexdigest())))
+        foreign = self.reference(extra)
+        observations = self.observations()
+        observe = observations['observe']
+        retained = []
+
+        def acquire(facts):
+            value = observe(facts)
+            body = api._linked_source(value['shared'][0]['evidence'][0])
+            owner = api._LinkedOwner(api._artifact_owner(self.selected.scope, self.task(self.selected)), (api._canonical_freeze(dict(kind='task', reference=foreign)),))
+            reference = api._artifact(self.selected.scope, body, owner=owner)
+            source = dict(authority=self.reference(self.selected)['authority'], reference=reference)
+            value['shared'][0]['evidence'] = [source]
+            retained.append(source)
+            return value
+        observations['observe'] = acquire
+        pointer = self.verify(observations)['verification']
+        contexts = tuple((api._evidence_context(f.scope) for f in [*self.members, extra]))
+        refs = tuple((self.reference(f) for f in self.members))
+        d4 = ScopedChangesTests(methodName='runTest')
+        d4.setUp()
+        self.addCleanup(d4.doCleanups)
+        request = d4.scoped_request()
+        for repository in request['manifest']['enrollment']['record']['repositories']:
+            for checkout in repository['checkouts']:
+                checkout['clients'][0]['configuration']['runtime'] = dict(schema_version=3, state_dir=str(contexts[0].directory))
+        request['approval']['manifest_digest'] = onboarding._digest(request['manifest'])
+        self.assertEqual(changes._run_scoped(d4.directory, request, 'apply')['exit_code'], 0)
+        source = changes._observe_recovery_source(d4.directory, changes._load_journal(d4.directory), contexts, (*refs, foreign))
+        for context in contexts:
+            with api._context_database(context, write=True) as db:
+                api._register_recovery_source(None, db, source, context=context)
+        for member in self.members:
+            state._retain_ready_stop(member.scope, self.stop_request(member, pointer))
+        prepared = api._prepare_linked_closure(api._observe_linked_preparation(pointer, api._canonical_plain(source.content['authorities'])))
+        self.assertTrue(prepared['complete'])
+        observed = changes._observe_recovery_release(source.content['authorities'], dict(source.content['identity']))
+        semantic = dict(authority=retained[0]['authority'], artifact=retained[0]['reference'])
+        original = next((row for row in source.content['tasks'] if dict(row['reference']) == foreign))
+        present = any((dict(row['reference']) == foreign for row in observed.content['tasks']))
+        print('EXPLICIT_FOREIGN_RAW_REFERENCE ' + json.dumps(foreign), flush=True)
+        print('SEMANTIC_SOURCE_RETAINED ' + str(any((api._canonical_plain(row) == semantic for row in observed.content['artifacts']))), flush=True)
+        print('FOREIGN_RAW_TASK_RETAINED ' + str(present), flush=True)
+        print('ORIGINAL_SOURCE_REQUIRED_FOREIGN_RAW_TASK ' + str(bool(original)), flush=True)
+        self.assertTrue(present, 'D4 erases an explicit foreign raw-task demand merely because its semantic source owner belongs to the prepared component')
+
     def test_multi_member_current_proof_sets_only_selected_implementation_ready(self):
         peer_before=self.task(self.members[1])
         result=self.verify()
