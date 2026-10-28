@@ -2007,7 +2007,7 @@ def _stopped_assignment_certificate(value,reference):
     return matches[0]
 
 
-def _check_stopped_certificate(context,db,value):
+def _check_stopped_certificate(context,db,value,*,preparation_reader=None):
     from runtime import evidence
     _stopped_certificate_shape(value)
     ref=value['reference']
@@ -2032,7 +2032,7 @@ def _check_stopped_certificate(context,db,value):
             row=db.execute('select id,scope_id,client,session_id,task_id,dispatch_id,data from assignments where id=?',(assignment['reference']['id'],)).fetchone()
             record=delegation._record(None,row,context=context,db=db)
             d3._require(_assignment_certificate(context,db,task,record)==assignment,'Recovery live stopped assignment changed')
-    if 'preparation' in value:evidence._check_linked_preparation_certificate(context,db,value)
+    if 'preparation' in value:evidence._check_linked_preparation_certificate(context,db,value,preparation_reader=preparation_reader)
     return identity
 
 
@@ -2364,7 +2364,7 @@ def _recovery_context(authority):
         return evidence._existing_authority_context(authority,db=db)
 
 
-def _recovery_sources(context,*,validate_stops=True):
+def _recovery_sources(context,*,validate_stops=True,preparation_reader=None):
     from runtime import evidence
     with evidence._context_database(context) as db:
         baseline=task_state._source_baseline(None,db,context=context)
@@ -2376,7 +2376,7 @@ def _recovery_sources(context,*,validate_stops=True):
             metadata=task_state._metadata(db,reference['name'])
             d3._require(metadata['class']=='compact' and metadata['owner']==dict(kind='project',project_id=baseline['content']['project_id'],task=None)
                 and metadata['closed_at'] is None and not metadata['targets'] and metadata['export'] is None,'Recovery source metadata owner differs')
-            evidence._recovery_source_history(context,db,reference,_canonical_plain(edge['reference']['identity']),validate_stops=validate_stops)
+            evidence._recovery_source_history(context,db,reference,_canonical_plain(edge['reference']['identity']),validate_stops=validate_stops,preparation_reader=preparation_reader)
             evidence._recovery_source_shape(content,_canonical_plain(edge['reference']['identity']))
             sources.append((reference,content))
         return baseline,sources
@@ -2386,7 +2386,7 @@ def _recovery_foreign_authorities(context,manifest):
     return _collect_recovery_references(manifest,(context,))[3]
 
 
-def _validate_recovery_references(content,contexts):
+def _validate_recovery_references(content,contexts,*,preparation_reader=None):
     from runtime import evidence,delegation
     by_authority={d3._digest(_canonical_plain(c.authority_set[0])):c for c in contexts}
     generations={}
@@ -2414,7 +2414,7 @@ def _validate_recovery_references(content,contexts):
                 if item['authority']==authority:
                     evidence._managed_artifact(None,item['artifact'],context=context,db=db)
             for certificate in content.get('stopped',[]):
-                if certificate['reference']['authority']==authority: _check_stopped_certificate(context,db,certificate)
+                if certificate['reference']['authority']==authority: _check_stopped_certificate(context,db,certificate,preparation_reader=preparation_reader)
     for item in [*[t['reference'] for t in content['tasks']],*content['assignments'],*content['artifacts']]:
         d3._require(d3._digest(item['authority']) in by_authority,'Recovery reference physical authority unavailable')
     return generations
@@ -2621,6 +2621,13 @@ def _recovery_current_requirements(root,history):
 
 
 def _inspect_lifecycle_recovery_guarded(authorities,task_refs):
+    """One reader lifetime stays inside this read-only, caller-guarded invocation."""
+    from runtime import evidence
+    with evidence._linked_preparation_reader(authorities) as preparation_reader:
+        return _inspect_lifecycle_recovery_read(authorities,task_refs,preparation_reader)
+
+
+def _inspect_lifecycle_recovery_read(authorities,task_refs,preparation_reader):
     """Inspect one fixed set under caller-held complete guards; never acquire/expand locks."""
     from runtime import evidence
     dependencies=[];blockers=[];roots=[];requirements=[];discovered={};contexts=[];observed=[];pending={};journals={}
@@ -2640,12 +2647,12 @@ def _inspect_lifecycle_recovery_guarded(authorities,task_refs):
                     blockers.append(dict(reason='active_or_uncertain_operation',authority=authority,owner=marker))
                     dependencies.append(dict(authority=authority,**marker,source_artifact=None,journal=None,task_refs=[]))
             context=_recovery_context(authority); contexts.append(context)
-            baseline,sources=_recovery_sources(context)
+            baseline,sources=_recovery_sources(context,validate_stops=False)
             if baseline is None or baseline['content']['source_contract']!=2:
                 blockers.append(dict(reason='unknown_creation_time_d4_coverage',authority=authority))
             for reference,content in sources:
                 with evidence._context_database(context) as db:
-                    history=evidence._recovery_source_history(context,db,reference,content['identity'])
+                    history=evidence._recovery_source_history(context,db,reference,content['identity'],validate_stops=False)
                 for _,prior in history:
                     for other in prior['authorities']:
                         key=d3._digest(other)
@@ -2666,11 +2673,11 @@ def _inspect_lifecycle_recovery_guarded(authorities,task_refs):
                 'Recovery journal stable identity differs')
             if hashlib.sha256(raw).hexdigest()!=content['journal']['sha256'] or journal['state']!=content['journal']['state']:
                 blockers.append(dict(reason='journal_snapshot_requires_reconciliation',identity=content['identity']))
-            generations=_validate_recovery_references(content,contexts)
+            generations=_validate_recovery_references(content,contexts,preparation_reader=preparation_reader)
             with evidence._context_database(context) as db:
-                history=evidence._recovery_source_history(context,db,reference,content['identity'])
+                history=evidence._recovery_source_history(context,db,reference,content['identity'],preparation_reader=preparation_reader)
             for _,prior in history:
-                _validate_recovery_references(prior,contexts)
+                _validate_recovery_references(prior,contexts,preparation_reader=preparation_reader)
             current_root=dict(authority=authority,identity=content['identity'],source_artifact=reference)
             roots.append(current_root);requirements.extend(_recovery_current_requirements(current_root,history))
             d3._require(len(requirements)<=4096,'Recovery current-root requirements exceed bound')
@@ -2685,14 +2692,15 @@ def _inspect_lifecycle_recovery_guarded(authorities,task_refs):
                 if identity['status']!='live':
                     certificates=[certificate for _,_,value in observed for certificate in value.get('stopped',[]) if certificate['reference']==ref]
                     d3._require(certificates,'Named retired recovery task lacks retained stopped support')
-                    for certificate in certificates: _check_stopped_certificate(context,db,certificate)
+                    for certificate in certificates: _check_stopped_certificate(context,db,certificate,preparation_reader=preparation_reader)
         # Sources/physical bindings must still be the exact point observations before return.
         for context,reference,content in observed:
-            _,latest=_recovery_sources(context)
+            _,latest=_recovery_sources(context,preparation_reader=preparation_reader)
             d3._require(any(ref==reference and value==content for ref,value in latest),'Recovery source edge changed during inspection')
         for path,digest in journals.items():
             d3._require(hashlib.sha256(d3._read_file(path/'transaction.json',MAX_JOURNAL,private=True)).hexdigest()==digest,
                 'Recovery journal changed during inspection')
+        preparation_reader.finish()
         return result()
     except (StartupError,task_state.StateError,OSError,sqlite3.Error,ValueError,TypeError,KeyError) as error:
         blockers.append(dict(reason=str(error) if isinstance(error,(StartupError,task_state.StateError)) else 'recovery_source_unavailable'))

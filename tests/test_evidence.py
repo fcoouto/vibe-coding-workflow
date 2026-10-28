@@ -2928,6 +2928,127 @@ class LinkedVerificationTests(unittest.TestCase):
         print('ORIGINAL_SOURCE_REQUIRED_FOREIGN_RAW_TASK ' + str(bool(original)), flush=True)
         self.assertTrue(present, 'D4 erases an explicit foreign raw-task demand merely because its semantic source owner belongs to the prepared component')
 
+    def preparation_reader_fixture(self):
+        pointer=self.verify()['verification'];authorities=self.preparation_stops(pointer)
+        observed=self.api._observe_linked_preparation(pointer,authorities)
+        prepared=self.api._prepare_linked_closure(observed);self.assertTrue(prepared['complete'])
+        facts=self.api._canonical_plain(observed.facts);member=facts['members'][0]
+        receipt=self.api._preparation_receipt(facts,member['reference'])
+        certificate=dict(member['certificate'],preparation=dict(reference=receipt['artifact'],
+            component_digest=self.api._digest(facts),authorities=authorities))
+        return pointer,authorities,facts,self.api._reference_context(member['reference']['authority']),certificate
+
+    def test_preparation_reuse_reader_lifetime_authority_pointer_and_default_semantics(self):
+        from runtime import changes
+        pointer,authorities,facts,context,certificate=self.preparation_reader_fixture()
+        with self.api._linked_stop_guards(pointer,authorities),self.api._context_database(context) as db:
+            with self.api._linked_preparation_reader(authorities) as reader, \
+                    patch.object(self.api,'_linked_preparation_facts',wraps=self.api._linked_preparation_facts) as captures:
+                for _ in range(2):changes._check_stopped_certificate(context,db,certificate,preparation_reader=reader)
+                self.assertEqual(captures.call_count,1)
+                wrong=self.api._canonical_plain(self.api._canonical_freeze(certificate));wrong['preparation']['reference']['digest']='0'*64
+                with self.assertRaises(state.StateError):changes._check_stopped_certificate(context,db,wrong,preparation_reader=reader)
+                wrong=self.api._canonical_plain(self.api._canonical_freeze(certificate));wrong['preparation']['component_digest']='0'*64
+                with self.assertRaises(state.StateError):changes._check_stopped_certificate(context,db,wrong,preparation_reader=reader)
+                wrong=self.api._canonical_plain(self.api._canonical_freeze(certificate));wrong['preparation']['authorities']=authorities[:1]
+                with self.assertRaises(state.StateError):changes._check_stopped_certificate(context,db,wrong,preparation_reader=reader)
+                with self.api._linked_preparation_reader(authorities):
+                    with self.assertRaises(state.StateError):changes._check_stopped_certificate(context,db,certificate,preparation_reader=reader)
+                reader.finish()
+            self.assertFalse(reader.active);self.assertEqual(reader.entries,{})
+            with self.assertRaises(state.StateError):changes._check_stopped_certificate(context,db,certificate,preparation_reader=reader)
+            with self.api._linked_preparation_reader(authorities[:1]) as foreign:
+                with self.assertRaises(state.StateError):changes._check_stopped_certificate(context,db,certificate,preparation_reader=foreign)
+            with patch.object(self.api,'_linked_preparation_facts',wraps=self.api._linked_preparation_facts) as captures:
+                for _ in range(2):changes._check_stopped_certificate(context,db,certificate)
+                self.assertEqual(captures.call_count,2,'Absent reader must retain full semantic validation')
+            with self.api._linked_preparation_reader(authorities) as fresh, \
+                    patch.object(self.api,'_linked_preparation_facts',wraps=self.api._linked_preparation_facts) as captures:
+                changes._check_stopped_certificate(context,db,certificate,preparation_reader=fresh);fresh.finish()
+                self.assertEqual(captures.call_count,1,'A separate inspection must capture again')
+        from tests.test_state import canonical_scope
+        extra=EvidenceTests(methodName='runTest');extra.setUp();self.addCleanup(extra.doCleanups)
+        extra.scope=canonical_scope(extra.scope);state.start_task(extra.scope,extra.identity|dict(mode='editable',decision_ref='user:accepted'))
+        expanded=[*authorities,self.api._canonical_plain(self.api._evidence_context(extra.scope).authority_set[0])]
+        superset=self.api._canonical_plain(self.api._canonical_freeze(certificate));superset['preparation']['authorities']=expanded
+        incomplete=self.api._canonical_plain(self.api._canonical_freeze(certificate));incomplete['preparation']['authorities']=[authorities[0],expanded[-1]]
+        with self.api._linked_stop_guards(pointer,expanded),self.api._context_database(context) as db:
+            for valid in (certificate,superset):changes._check_stopped_certificate(context,db,valid)
+            with self.assertRaises(state.StateError):changes._check_stopped_certificate(context,db,incomplete)
+            with self.api._linked_preparation_reader(expanded) as reader, \
+                    patch.object(self.api,'_linked_preparation_facts',wraps=self.api._linked_preparation_facts) as captures:
+                for valid in (certificate,superset):changes._check_stopped_certificate(context,db,valid,preparation_reader=reader)
+                self.assertEqual(captures.call_count,1,'Complete held set and aggregate identify the capture across valid supersets')
+                with self.assertRaises(state.StateError):changes._check_stopped_certificate(context,db,incomplete,preparation_reader=reader)
+                reader.finish()
+
+    def preparation_reader_late_change(self,kind):
+        from runtime import changes
+        pointer,authorities,facts,context,certificate=self.preparation_reader_fixture()
+        with self.api._linked_stop_guards(pointer,authorities),self.api._context_database(context) as db, \
+                self.api._linked_preparation_reader(authorities) as reader:
+            changes._check_stopped_certificate(context,db,certificate,preparation_reader=reader)
+            if kind=='peer':(self.members[1].repo/'late-reader-input.py').write_text('changed = True\n')
+            elif kind=='source':
+                path=Path(facts['sources'][0]['metadata']['managed']['path'])
+            else:
+                receipt=self.api._preparation_receipt(facts,facts['members'][1]['reference'])
+                peer_context=self.api._reference_context(receipt['authority'])
+                path=peer_context.directory/'evidence'/receipt['artifact']['name']
+            if kind!='peer':
+                replacement=path.with_name(path.name+'.replacement');replacement.write_bytes(path.read_bytes()+b'\n');os.replace(replacement,path)
+            with self.assertRaises((state.StateError,StartupError)):reader.finish()
+        self.assertFalse(reader.active);self.assertEqual(reader.entries,{})
+
+    def test_preparation_reuse_late_peer_change_rejected(self):self.preparation_reader_late_change('peer')
+
+    def test_preparation_reuse_late_source_change_rejected(self):self.preparation_reader_late_change('source')
+
+    def test_preparation_reuse_late_receipt_change_rejected(self):self.preparation_reader_late_change('receipt')
+
+    def test_preparation_reuse_inspection_captures_once_and_preserves_requirements_and_rows(self):
+        from runtime import changes
+        pointer,_,source,contexts,refs=self.preparation_fixture()
+        self.api._prepare_linked_closure(self.api._observe_linked_preparation(pointer,self.api._canonical_plain(source.content['authorities'])))
+        released=changes._register_recovery_release(changes._observe_recovery_release(source.content['authorities'],dict(source.content['identity'])))
+        self.assertTrue(released['complete'],released);before=self.raw_rows(contexts)
+        with patch.object(self.api,'_linked_preparation_facts',wraps=self.api._linked_preparation_facts) as captures, \
+                patch.object(self.api,'_artifact',side_effect=AssertionError('Inspection attempted artifact registration')):
+            inspected=changes.inspect_lifecycle_recovery(source.content['authorities'],refs)
+        self.assertTrue(inspected['complete'],inspected);self.assertEqual(self.raw_rows(contexts),before)
+        for ref in refs:
+            self.assertTrue(any(r['kind']=='task' and r['reference']==ref and r['need']=='identity' for r in inspected['requirements']))
+            self.assertFalse(any(r['kind']=='task' and r['reference']==ref and r['need']=='raw' for r in inspected['requirements']))
+        print('INSPECTION_PREPARATION_FACTS_CAPTURES '+str(captures.call_count),flush=True)
+        self.assertEqual(captures.call_count,1,'One read-only inspection must fully capture each actual prepared component once')
+        readers=[];factory=self.api._linked_preparation_reader
+        from contextlib import contextmanager
+        @contextmanager
+        def record(authorities):
+            with factory(authorities) as reader:
+                readers.append(reader);yield reader
+        with changes._authority_guards([context.directory for context in contexts],observe=True), \
+                patch.object(self.api,'_linked_preparation_reader',side_effect=record), \
+                patch.object(self.api,'_linked_preparation_facts',wraps=self.api._linked_preparation_facts) as captures:
+            partial=changes._inspect_lifecycle_recovery_guarded(source.content['authorities'][:1],refs)
+        self.assertFalse(partial['complete']);self.assertTrue(partial['discovered_authorities'])
+        self.assertEqual(captures.call_count,0);self.assertFalse(readers[-1].active);self.assertEqual(readers[-1].entries,{})
+        with patch.object(self.api,'_linked_preparation_reader',side_effect=record), \
+                patch.object(self.api,'_linked_preparation_facts',wraps=self.api._linked_preparation_facts) as captures:
+            again=changes.inspect_lifecycle_recovery(source.content['authorities'],refs)
+        self.assertEqual(again,inspected);self.assertEqual(captures.call_count,1)
+        self.assertFalse(readers[-1].active);self.assertEqual(readers[-1].entries,{})
+        finish=self.api._PreparationReader.finish;changed=[]
+        def late_peer(reader):
+            (self.members[1].repo/'late-foreign-stop-input.py').write_text('changed = True\n');changed.append(True)
+            return finish(reader)
+        with patch.object(self.api,'_linked_preparation_reader',side_effect=record), \
+                patch.object(self.api._PreparationReader,'finish',late_peer):
+            stale=changes.inspect_lifecycle_recovery(source.content['authorities'],refs)
+        self.assertTrue(changed,'Mutation must follow final source/journal rereads')
+        self.assertFalse(stale['complete']);self.assertTrue(stale['blockers']);self.assertEqual(self.raw_rows(contexts),before)
+        self.assertFalse(readers[-1].active);self.assertEqual(readers[-1].entries,{})
+
     def test_multi_member_current_proof_sets_only_selected_implementation_ready(self):
         peer_before=self.task(self.members[1])
         result=self.verify()

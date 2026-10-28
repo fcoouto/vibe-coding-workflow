@@ -4,6 +4,7 @@ Coordinator decisions describe semantic coverage and existing authorization. The
 not authenticate review execution or grant permission for a command's effects.
 """
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from copy import deepcopy
 import hashlib
@@ -169,7 +170,7 @@ def _recovery_source_dependencies(content,authority):
     return dependencies
 
 
-def _recovery_source_history(context,db,reference,identity,*,validate_stops=True):
+def _recovery_source_history(context,db,reference,identity,*,validate_stops=True,preparation_reader=None):
     """Point-follow owned snapshots; missing prior support cannot be silently replaced."""
     history=[]; seen=set(); age=None; owner=None
     while reference is not None:
@@ -188,7 +189,7 @@ def _recovery_source_history(context,db,reference,identity,*,validate_stops=True
             from runtime import changes
             for certificate in value['stopped']:
                 if certificate['reference']['authority']==_canonical_plain(context.authority_set[0]):
-                    changes._check_stopped_certificate(context,db,certificate)
+                    changes._check_stopped_certificate(context,db,certificate,preparation_reader=preparation_reader)
         history.append((dict(reference),value))
         reference=value['previous']
         if reference is not None: state._artifact_reference(reference)
@@ -2856,7 +2857,70 @@ def _linked_prepared_replacements(certificates,contexts,*,writer=None):
     return result,extra,routes
 
 
-def _check_linked_preparation_certificate(context,db,certificate):
+_PREPARATION_READER = ContextVar('linked_preparation_inspection_reader', default=None)
+
+
+class _PreparationReader:
+    """Ephemeral semantic observations owned by one read-only guarded inspection."""
+    def __init__(self,authorities):
+        self.authorities={_raw(_canonical_plain(a)):_canonical_plain(a) for a in authorities}
+        self.entries={}
+        self.active=True
+
+    def _check_owner(self):
+        _require(self.active and _PREPARATION_READER.get() is self,
+            'Preparation reader is foreign or expired')
+
+    def check(self,context,db,certificate):
+        self._check_owner()
+        authorities=certificate['preparation']['authorities'];pointer=certificate['linked']['aggregate']
+        _require({_raw(a) for a in authorities}<=self.authorities.keys() and
+            _raw(_canonical_plain(context.authority_set[0])) in self.authorities,
+            'Preparation reader physical authority set differs')
+        key=_raw(dict(aggregate=pointer,authorities=[self.authorities[a] for a in sorted(self.authorities)]))
+        if key not in self.entries:
+            facts=_linked_preparation_facts(pointer,list(self.authorities.values()),writer=(context,db))
+            _require(not facts.get('discovered_authorities'),'D4 prepared component authority set is incomplete')
+            receipts={_raw(m['reference']).decode():_preparation_receipt(facts,m['reference'],writer=(context,db)) for m in facts['members']}
+            _require(all(receipts.values()),'D4 requires every actual prepared replacement')
+            self.entries[key]=(_canonical_freeze(facts),_canonical_freeze(receipts))
+        captured,retained=self.entries[key];facts=_canonical_plain(captured);receipts=_canonical_plain(retained)
+        required={_raw(a) for a in facts['basis']['authorities']}
+        required.update(_raw(m['reference']['authority']) for m in facts['members'])
+        for source in facts['sources']:
+            authority=source['reference']['authority'];required.add(_raw(authority))
+            required.update(_raw(edge['reference'].get('authority',authority)) for edge in source['metadata']['dependencies'])
+        _require(required<={_raw(a) for a in authorities},'D4 prepared component authority set is incomplete')
+        _require(_digest(facts)==certificate['preparation']['component_digest'],'D4 prepared component facts changed')
+        own=receipts.get(_raw(certificate['reference']).decode())
+        _require(own is not None and own['artifact']==certificate['preparation']['reference'],
+            'D4 preparation pointer differs from actual owner receipt')
+
+    def finish(self):
+        self._check_owner()
+        for captured,retained in self.entries.values():
+            facts=_canonical_plain(captured);receipts=_canonical_plain(retained)
+            _check_preparation_inputs(facts)
+            _require(all(_preparation_receipt(facts,m['reference'])==receipts[_raw(m['reference']).decode()] for m in facts['members']),
+                'D4 prepared replacement changed during inspection')
+            _check_preparation_inputs(facts)
+
+
+@contextmanager
+def _linked_preparation_reader(authorities):
+    reader=_PreparationReader(authorities);token=_PREPARATION_READER.set(reader)
+    try:
+        yield reader
+    finally:
+        reader.active=False;reader.entries.clear()
+        _PREPARATION_READER.reset(token)
+
+
+def _check_linked_preparation_certificate(context,db,certificate,*,preparation_reader=None):
+    if preparation_reader is not None:
+        _require(type(preparation_reader) is _PreparationReader,'Preparation reader is foreign or expired')
+        preparation_reader.check(context,db,certificate)
+        return
     basis=certificate['linked'];authorities=certificate['preparation']['authorities']
     facts=_linked_preparation_facts(basis['aggregate'],authorities,writer=(context,db))
     _require(not facts.get('discovered_authorities') and _digest(facts)==certificate['preparation']['component_digest'],
