@@ -81,10 +81,10 @@
 **Files:** all pilot files; no unrelated source changes.
 
 - [x] Run the focused helper suite, `python3 -B scripts/validate.py`, skill validation and `git diff --check` on a stable candidate.
-- [ ] Obtain one independent native general/security review, including the instruction-path cases. Address evidenced findings and rerun affected checks.
+- [x] Obtain one independent native general/security review, including the instruction-path cases. Address evidenced findings and rerun affected checks.
 - [ ] Reconcile current Genesis integration HEAD and overlapping documentation changes. Integrate serially only when the shared checkout is not frozen for Genesis validation; never alter its worktree or progress records.
-- [ ] Report package checks, instruction walkthroughs and observed MCP/client execution separately. Do not claim live proposal qualification without an actual observed call and native verification.
-- [ ] No release archive or global activation is needed. Keep push/publication distinct from source implementation and follow the user's concrete delivery instructions.
+- [x] Report package checks, instruction walkthroughs and observed MCP/client execution separately. Do not claim live proposal qualification without an actual observed call and native verification.
+- [x] No release archive or global activation is needed. Keep push/publication distinct from source implementation and follow the user's concrete delivery instructions.
 
 ## Execution notes
 
@@ -92,6 +92,16 @@
 - Root owns Git, instructions and integration. A bounded native worker may own the two new helper/test files; reviewer remains read-only. Native coordinator settings remain unchanged.
 - The user approved implementation. No repeated design approval is needed for these bounded implementation choices. The user explicitly authorized coordination with Genesis; both chats agreed to keep source work isolated and integrate shared documentation serially after review.
 
-- Helper task review found four P2 issues; one correction round and scoped re-review cleared all four. Final focused suite: 19 tests passed, including actual process contention.
+- Helper task review found four P2 issues; one correction round and scoped re-review cleared all four. Task 1 focused suite: 19 tests passed, including actual process contention.
 - Package validation passed; the new entry point contains 134 words. Direct skill-creator validation passed with user-approved global PyYAML 6.0.3; no runtime dependency was added.
 - Six instruction scenarios passed review after concrete payload examples were added. A synthetic CLI walkthrough completed discovery, triage, bound admission and repaired-outcome recording. No live OpenRouter inference was performed.
+
+## Implementation result
+
+Source implementation is complete on `codex/openrouter-proposals`, based on `a88856a`. Shared integration remains pending the agreed Genesis validation window. No core runtime or lifecycle tests were changed.
+
+Final general/security review found two P2 issues: the loaded procedure omitted the approved native-only task restriction, and repeated candidate evidence could multiply triage output beyond its input bound. Commit `162263b` fixes both. A scoped independent re-review marked both addressed with no new findings. Triage now stops before exceeding a 1 MiB response, preserves cache/history and returns native fallback.
+
+Coordinator-observed final checks: 22 focused helper tests passed in 0.661 seconds, including genuine process contention and the output-size regression; package validation passed; direct skill validation and whitespace checks passed. Instruction checks include the synthetic discovery-to-record flow, ordinary native and missing-MCP paths, and the first-pilot security/architecture restriction. These are package and instruction evidence, not observed provider execution.
+
+OpenRouter remains configured with OAuth, but its MCP tools are not exposed to this running chat. No live proposal inference, model qualification, measured savings, release archive or global activation is claimed. Unrelated core lifecycle testing remains with Genesis.
