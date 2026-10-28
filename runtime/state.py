@@ -526,11 +526,11 @@ def _ready_stop_bindings(context,db,task):
 
 
 def _writer_stop_shape(value):
-    _fields(value,('version','task_revision','proof_digest','proof','observation_ref','coordinator_ref','generation','candidate','verification','request_digest','inputs'))
+    _fields(value,('version','task_revision','proof_digest','proof','observation_ref','coordinator_ref','generation','candidate','verification','request_digest','inputs'),('linked',))
     if type(value['version']) is not int or value['version']!=1:raise StateError('Unsupported retained ready stop')
     _integer(value['task_revision'],'ready stop revision',1);_integer(value['generation'],'ready stop generation')
     for key in ('proof_digest','request_digest'):_canonical_hash(value[key])
-    for key in ('proof','candidate','verification'):_artifact_reference(value[key])
+    for key in ('proof','candidate','verification',*(['linked'] if 'linked' in value else [])):_artifact_reference(value[key])
     for key in ('observation_ref','coordinator_ref'):_text(value[key],key)
     if not isinstance(value['inputs'],dict) or len(value['inputs'])>4096:raise StateError('Ready input observation exceeds bound')
     for path,info in value['inputs'].items():
@@ -546,7 +546,11 @@ def _ready_stop(context,db,task,*,observe=False):
     bindings=_ready_stop_bindings(context,db,task)
     candidate=evidence._read(None,stop['candidate'],context=context,db=db)
     verification_ref=evidence._stop_verification(context,db,task)
-    evidence._ready_stop_proof(task,proof,bindings,candidate,verification_ref)
+    linked=evidence._read(None,stop['linked'],context=context,db=db) if 'linked' in stop else None
+    if linked is not None:
+        evidence._linked_stop_shape(linked)
+        if evidence._linked_stop_basis(linked['aggregate'],linked['authorities'])!=linked:raise StateError('Linked complete-stop basis changed')
+    evidence._ready_stop_proof(task,proof,bindings,candidate,verification_ref,linked)
     if (stop['task_revision']!=task['revision'] or stop['generation']!=bindings['generation'] or
         stop['verification']!=verification_ref or
         any(proof[k]!=stop[k] for k in ('observation_ref','coordinator_ref'))):
@@ -555,7 +559,7 @@ def _ready_stop(context,db,task,*,observe=False):
     evidence._check_ready_inputs(stop['inputs'],directory_identity=True)
     verification=evidence._read(None,stop['verification'],context=context,db=db)
     if task['state']=='ready' and verification['candidate_digest']!=proof['candidate_digest']:raise StateError('Retained ready verification changed')
-    if observe:evidence._ready_stop_candidate(context,task,candidate)
+    if observe and linked is None:evidence._ready_stop_candidate(context,task,candidate)
     return proof
 
 
@@ -563,10 +567,12 @@ def _retain_ready_stop(scope,request):
     """Private complete host stop, preserving original outcome/revision and age."""
     from runtime import evidence,changes
     if not isinstance(scope,AcceptedScope) or _scope_version(scope)!=3:raise StateError('Ready stop requires actual accepted schema3 scope')
-    _fields(request,('client','session_id','task_id','scope_ref','expected_revision','expected_pins','stop_proof'))
+    _fields(request,('client','session_id','task_id','scope_ref','expected_revision','expected_pins','stop_proof'),('linked_verification',))
     _identity(request);_integer(request['expected_revision'],'ready stop request revision',1);_validate_pins(request['expected_pins'])
     context=evidence._evidence_context(scope)
-    with changes._authority_guards([context.directory]):
+    pointer=request.get('linked_verification')
+    guards=evidence._linked_stop_guards(pointer,_canonical_plain(context.authority_set)) if pointer is not None else changes._authority_guards([context.directory])
+    with guards as authorities:
         with evidence._context_database(context) as db:
             task=_task(db,_scope_id(scope),request['client'],request['session_id'],request['task_id'])
             _compatible(scope,task)
@@ -578,25 +584,36 @@ def _retain_ready_stop(scope,request):
                     raise StateError('Ready stop replay payload changed')
                 return dict(ok=True,task=task,replayed=True)
             _assert_open(task)
-            if task['state'] not in {'ready','cancelled'} or 'evidence' not in task:
+            if task['state'] not in ({'ready','verifying','cancelled'} if pointer is not None else {'ready','cancelled'}) or 'evidence' not in task:
                 raise StateError('Independent ready stop requires actual ordinary ready verification')
             snapshot=_ready_stop_bindings(context,db,task)
             verification_ref=evidence._stop_verification(context,db,task)
             plan=evidence._read(None,task['evidence']['plan'],context=context,db=db)
         proof=evidence._read_host_proof(scope,request['stop_proof'])
+        linked=evidence._linked_stop_basis(pointer,authorities) if pointer is not None else None
+        if linked is not None:
+            selected=[row for row in linked['members'] if row['task']['authority']==_canonical_plain(context.authority_set[0]) and
+                row['task']['scope_id']==_scope_id(scope) and all(row['task'][k]==task[k] for k in ('client','session_id','task_id'))]
+            if len(selected)!=1:raise StateError('Linked stop task is outside the complete approved set')
         candidate=evidence.capture_candidate(scope,plan)
-        files=evidence._ready_stop_candidate(context,task,candidate)
+        files=selected[0]['inputs'] if linked is not None else evidence._ready_stop_candidate(context,task,candidate)
         with evidence._context_database(context,write=True) as db:
             current=_task(db,_scope_id(scope),request['client'],request['session_id'],request['task_id'])
             if current!=task or _ready_stop_bindings(context,db,current)!=snapshot:raise StateError('Ready owner changed during stop capture')
             evidence._check_ready_inputs(files)
             owner=evidence._artifact_owner(scope,task)
             # Validate before registering any artifact; the candidate ref digest is its actual canonical content.
-            evidence._ready_stop_proof(task,proof,snapshot,candidate,verification_ref)
+            evidence._ready_stop_proof(task,proof,snapshot,candidate,verification_ref,linked)
+            if linked is not None and evidence._linked_stop_basis(pointer,authorities)!=linked:raise StateError('Linked stop changed before owner commit')
             stop=dict(version=1,task_revision=task['revision'],proof_digest=request['stop_proof']['sha256'],
                 proof=evidence._artifact(scope,proof,owner=owner,db=db),observation_ref=proof['observation_ref'],
                 coordinator_ref=proof['coordinator_ref'],generation=snapshot['generation'],
                 candidate=evidence._artifact(scope,candidate,owner=owner,db=db),verification=verification_ref,request_digest=_digest(request),inputs=files)
+            if linked is not None:
+                dependencies=[dict(kind='artifact',reference=dict(authority=pointer['authority'],artifact=pointer['reference']))]
+                dependencies += [dict(kind='task',reference=row['task']) for row in linked['members']]
+                retained_owner=evidence._LinkedOwner(owner,tuple(_canonical_freeze(d) for d in dependencies))
+                stop['linked']=evidence._artifact(scope,linked,owner=retained_owner,db=db)
             task=dict(task,writer_stop=stop);_writer_stop_shape(stop)
             raw=json.dumps(task,separators=(',',':'))
             if len(raw.encode())>4*1024*1024:raise StateError('Ready stop exceeds the original task record bound')
@@ -604,6 +621,7 @@ def _retain_ready_stop(scope,request):
                 (raw,_scope_id(scope),task['client'],task['session_id'],task['task_id']))
             _ready_stop(context,db,task)
             evidence._check_ready_inputs(files)
+            if linked is not None and evidence._linked_stop_basis(pointer,authorities)!=linked:raise StateError('Linked stop source changed during registration')
             return dict(ok=True,task=task,replayed=False)
 
 

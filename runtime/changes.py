@@ -1726,7 +1726,7 @@ class _RecoverySourceObservation:
 
 
 def _stop_revision(task):
-    return task['writer_stop']['task_revision'] if task.get('writer_stop') and task.get('state')=='ready' else task['retirement']['previous_revision']
+    return task['retirement']['previous_revision'] if task.get('state')=='cancelled' else task.get('writer_stop',{}).get('task_revision',task['revision'])
 
 
 def _stop_envelope(task):
@@ -1777,7 +1777,7 @@ def _assignment_certificate_shape(value, task):
     role=value['role']; d3._require(role in {'coordinator','check','worker','review'},'Unknown stopped assignment role')
     rec=value['reconciliation']
     if 'version' in value:
-        d3._require(type(value['version']) is int and value['version']==2 and task.get('writer_stop') and task.get('state') in {'ready','cancelled'} and role=='coordinator',
+        d3._require(type(value['version']) is int and value['version']==2 and task.get('writer_stop') and task.get('state') in {'ready','verifying','cancelled'} and role=='coordinator',
             'Barrier certificate needs its independently stopped complete owner')
         task_state._fields(rec,('version','kind','reference','body','outcome','stop_digest','bindings'))
         task_state._artifact_reference(rec['reference']);body=rec['body']
@@ -1916,7 +1916,8 @@ def _stopped_certificate_shape(value):
     complete='writer_stop' in value
     cancelled=complete and value.get('state')=='cancelled'
     task_state._fields(value,('reference','created_at','revision','pins','accepted_identity','scope_ref','turn_id','proof',
-        *(('version','state','writer_stop',*(['retirement','retirement_proof'] if cancelled else [])) if complete else ('retirement',))),('assignments',))
+        *(('version','state','writer_stop',*(['retirement','retirement_proof'] if cancelled else []),
+            *(['linked'] if value.get('writer_stop',{}).get('linked') else [])) if complete else ('retirement',))),('assignments',))
     task_state._task_reference(value['reference']); task_state._integer(value['created_at'],'original stopped task age')
     task_state._integer(value['revision'],'stopped task revision',2); task_state._text(value['scope_ref'],'stopped scope')
     d3._require(task_state._validate_pins(value['pins'])==3,'Stopped certificate requires canonical pins')
@@ -1927,7 +1928,7 @@ def _stopped_certificate_shape(value):
         'Stopped certificate original accepted identity differs')
     if complete:
         from runtime import evidence
-        d3._require(value['state'] in {'ready','cancelled'} and type(value['version']) is int and value['version']==2,'Unknown complete stop certificate')
+        d3._require(value['state'] in {'ready','cancelled','verifying'} and (value['state']!='verifying' or 'linked' in value) and type(value['version']) is int and value['version']==2,'Unknown complete stop certificate')
         stop=value['writer_stop'];task_state._writer_stop_shape(stop);proof=value['proof']
         evidence._ready_stop_shape(proof)
         d3._require(proof['identity']=={k:(ref[k] if k!='scope_ref' else value[k]) for k in ('client','session_id','task_id','scope_ref')} and
@@ -1936,6 +1937,13 @@ def _stopped_certificate_shape(value):
             proof['verification_digest']==stop['verification']['digest'] and proof['generation']==stop['generation'] and
             evidence._digest(proof)==stop['proof']['digest'] and all(proof[k]==stop[k] for k in ('observation_ref','coordinator_ref')),
             'Complete certificate changed original independent task stop')
+        d3._require(('linked' in value)==('linked_digest' in proof),'Complete certificate lost its linked basis')
+        if 'linked' in value:
+            linked=value['linked'];evidence._linked_stop_shape(linked)
+            d3._require(evidence._digest(linked)==proof['linked_digest']==stop['linked']['digest'] and
+                any(row['task']==ref and row['state']==value['state'] and row['revision']==value['revision'] and
+                    row['pins']==value['pins'] and row['created_at']==value['created_at'] for row in linked['members']),
+                'Complete certificate changed its actual linked-member basis')
     if not complete or cancelled:
         retirement=value['retirement']; proof=value['retirement_proof'] if complete else value['proof']
         task_state._fields(retirement,('proof_digest','proof','observation_ref','coordinator_ref','previous_revision'))
@@ -1968,6 +1976,7 @@ def _stopped_certificate(context,db,item):
         proof=task_state._ready_stop(context,db,task,observe=True)
         result=dict(reference=ref,created_at=task['lifecycle']['created_at'],version=2,state=task['state'],writer_stop=task['writer_stop'],
             **{k:task[k] for k in ('revision','pins','accepted_identity','scope_ref','turn_id')},proof=proof)
+        if 'linked' in task['writer_stop']:result['linked']=evidence._read(None,task['writer_stop']['linked'],context=context,db=db)
         if task['state']=='cancelled':result.update(retirement=task['retirement'],
             retirement_proof=evidence._read(None,task['retirement']['proof'],context=context,db=db))
     else:
@@ -2023,9 +2032,11 @@ def _cut_recovery_content(content,certificates,contexts):
     # Preserve independent artifact/assignment raw routes; only the issued proof route is cut.
     from runtime import evidence
     content=deepcopy(content); certificates=sorted(certificates,key=d3._digest)
-    certified={d3._digest(a['reference']):a for c in certificates for a in c.get('assignments',[])}
-    seeds=[((d3._digest(c['reference']['authority']),d3._digest(_stop_envelope(c)['proof'])),c['reference']) for c in certificates]
+    certified={d3._digest(a['reference']):a for c in certificates if 'linked' not in c for a in c.get('assignments',[])}
+    # Linked raw routes await companion compact composition in the lifecycle owner.
+    seeds=[((d3._digest(c['reference']['authority']),d3._digest(_stop_envelope(c)['proof'])),c['reference']) for c in certificates if 'linked' not in c]
     for c in certificates:
+        if 'linked' in c:continue
         if c.get('writer_stop'):
             if c.get('state')=='cancelled':seeds.append(((d3._digest(c['reference']['authority']),d3._digest(c['retirement']['proof'])),c['reference']))
             seeds.extend(((d3._digest(c['reference']['authority']),d3._digest(ref)),c['reference']) for ref in (c['writer_stop']['candidate'],c['writer_stop']['verification']))
@@ -2338,7 +2349,7 @@ def _recovery_context(authority):
         return evidence._existing_authority_context(authority,db=db)
 
 
-def _recovery_sources(context):
+def _recovery_sources(context,*,validate_stops=True):
     from runtime import evidence
     with evidence._context_database(context) as db:
         baseline=task_state._source_baseline(None,db,context=context)
@@ -2350,7 +2361,7 @@ def _recovery_sources(context):
             metadata=task_state._metadata(db,reference['name'])
             d3._require(metadata['class']=='compact' and metadata['owner']==dict(kind='project',project_id=baseline['content']['project_id'],task=None)
                 and metadata['closed_at'] is None and not metadata['targets'] and metadata['export'] is None,'Recovery source metadata owner differs')
-            evidence._recovery_source_history(context,db,reference,_canonical_plain(edge['reference']['identity']))
+            evidence._recovery_source_history(context,db,reference,_canonical_plain(edge['reference']['identity']),validate_stops=validate_stops)
             evidence._recovery_source_shape(content,_canonical_plain(edge['reference']['identity']))
             sources.append((reference,content))
         return baseline,sources

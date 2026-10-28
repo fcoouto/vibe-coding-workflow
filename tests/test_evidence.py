@@ -2272,6 +2272,289 @@ class LinkedVerificationTests(unittest.TestCase):
         return self.api.verify_linked(self.selected.scope,self.selected.request(purpose='completion'),
             observations or self.observations())
 
+    def stop_request(self,f,pointer,**updates):
+        task=self.task(f);context=self.api._evidence_context(f.scope)
+        with self.api._context_database(context) as db:bindings=state._ready_stop_bindings(context,db,task)
+        plan=self.api._read(f.scope,task['evidence']['plan']);candidate=self.api.capture_candidate(f.scope,plan)
+        proof=dict(version=2,kind='stopped-writer-reconciliation',identity=f.identity,expected_revision=task['revision'],
+            expected_pins=task['pins'],observed_turn_id=task['turn_id'],stopped=True,descendants_stopped=True,
+            attempt_ids=[a['id'] for a in task['evidence']['attempts']],observation_ref='fixture:independent-linked-stop',
+            coordinator_ref='fixture:host-checked',candidate_digest=self.api._digest(candidate),
+            verification_digest=task['evidence']['verification']['digest'],**bindings)
+        with self.api._linked_stop_guards(pointer,self.api._canonical_plain(context.authority_set)) as authorities:
+            proof['linked_digest']=self.api._digest(self.api._linked_stop_basis(pointer,authorities))
+        proof.update(updates)
+        raw=json.dumps(proof).encode();path=f.root/('linked-stop-'+hashlib.sha256(raw).hexdigest()+'.json');path.write_bytes(raw);path.chmod(0o400)
+        return f.identity|dict(expected_revision=task['revision'],expected_pins=task['pins'],linked_verification=pointer,
+            stop_proof=dict(path=str(path),sha256=hashlib.sha256(raw).hexdigest()))
+
+    def test_linked_stop_actual_selected_ready_and_peer_verifying_issue_exact_certificates(self):
+        from runtime import changes
+        result=self.verify();pointer=result['verification']
+        originals=[self.task(f) for f in self.members]
+        self.assertEqual([t['state'] for t in originals],['ready','verifying'])
+        for f,original in zip(self.members,originals):
+            stopped=state._retain_ready_stop(f.scope,self.stop_request(f,pointer))['task']
+            for key in ('state','revision','pins','lifecycle'):self.assertEqual(stopped[key],original[key])
+            context=self.api._evidence_context(f.scope);ref=self.reference(f)
+            with self.api._context_database(context) as db:
+                certificate=changes._stopped_certificate(context,db,dict(reference=ref,pins=stopped['pins']))
+                self.assertEqual(certificate['state'],original['state'])
+                changes._check_stopped_certificate(context,db,certificate)
+            with self.assertRaises(StartupError):self.api._observe_closure((context,),ref)
+            if f is self.selected:
+                peer=self.members[1];peer_context=self.api._evidence_context(peer.scope)
+                with self.api._context_database(peer_context) as db,self.assertRaises(StartupError):
+                    changes._stopped_certificate(peer_context,db,dict(reference=self.reference(peer),pins=self.task(peer)['pins']))
+
+    def test_linked_stop_d4_reads_certificates_but_preserves_complete_raw_routes(self):
+        from runtime import changes,onboarding
+        from tests.test_changes import ScopedChangesTests
+        from tests.test_state import canonical_scope
+        pointer=self.verify()['verification']
+        extra=EvidenceTests(methodName='runTest');extra.setUp();self.addCleanup(extra.doCleanups)
+        extra.scope=canonical_scope(extra.scope);state.start_task(extra.scope,extra.identity|dict(mode='editable',decision_ref='user:accepted'))
+        contexts=tuple(self.api._evidence_context(f.scope) for f in [*self.members,extra])
+        refs=tuple(self.reference(f) for f in self.members)
+        d4=ScopedChangesTests(methodName='runTest');d4.setUp();self.addCleanup(d4.doCleanups)
+        request=d4.scoped_request()
+        for repository in request['manifest']['enrollment']['record']['repositories']:
+            for checkout in repository['checkouts']:checkout['clients'][0]['configuration']['runtime']=dict(schema_version=3,state_dir=str(contexts[0].directory))
+        request['approval']['manifest_digest']=onboarding._digest(request['manifest'])
+        self.assertEqual(changes._run_scoped(d4.directory,request,'apply')['exit_code'],0)
+        source=changes._observe_recovery_source(d4.directory,changes._load_journal(d4.directory),contexts,refs)
+        for context in contexts:
+            with self.api._context_database(context,write=True) as db:self.api._register_recovery_source(None,db,source,context=context)
+        for f in self.members:
+            stopped=state._retain_ready_stop(f.scope,self.stop_request(f,pointer))['task']
+            basis=self.api._read(f.scope,stopped['writer_stop']['linked'])
+            self.assertIn(self.reference(extra)['authority'],basis['authorities'])
+        released=changes._register_recovery_release(changes._observe_recovery_release(source.content['authorities'],dict(source.content['identity'])))
+        self.assertTrue(released['complete'],released)
+        inspected=changes.inspect_lifecycle_recovery(source.content['authorities'],refs)
+        self.assertTrue(inspected['complete'],inspected)
+        for ref in refs:self.assertTrue(any(r['kind']=='task' and r['reference']==ref and r['need']=='raw' for r in inspected['requirements']))
+        for context,ref in zip(contexts,refs):
+            with self.assertRaises(StartupError):self.api._observe_closure((context,),ref)
+
+    def test_linked_stop_incomplete_independent_proof_never_stops_any_member(self):
+        pointer=self.verify()['verification'];f=self.members[1]
+        for delta in (dict(descendants_stopped=False),dict(stopped=False),dict(attempt_ids=[]),dict(assignments_digest='f'*64),
+            dict(task_digest='f'*64),dict(linked_digest='f'*64),dict(verification_digest='f'*64),dict(expected_revision=1)):
+            with self.subTest(delta=delta),self.assertRaises(StartupError):state._retain_ready_stop(f.scope,self.stop_request(f,pointer,**delta))
+        for member in self.members:self.assertNotIn('writer_stop',self.task(member))
+
+    def test_linked_stop_exact_replay_keeps_original_ages_and_immutable_envelope(self):
+        pointer=self.verify()['verification'];requests=[]
+        for f in self.members:
+            request=self.stop_request(f,pointer);requests.append(request);state._retain_ready_stop(f.scope,request)
+        for f,request in zip(self.members,requests):
+            original=self.task(f);Path(request['stop_proof']['path']).unlink()
+            with patch.object(self.api,'_artifact',side_effect=AssertionError('Stop replay wrote support')),patch.object(self.api,'_read_host_proof',side_effect=AssertionError('Stop replay reread host authority')):
+                replay=state._retain_ready_stop(f.scope,request)
+            self.assertTrue(replay['replayed']);self.assertEqual(replay['task'],original)
+            with state._database(f.scope,write=True) as db,self.assertRaises(StartupError):
+                changed=json.loads(json.dumps(original));changed['writer_stop'].pop('linked');state._save(db,state._scope_id(f.scope),changed)
+
+    def test_linked_stop_wrong_aggregate_reference_cannot_replace_actual_publication(self):
+        pointer=self.verify()['verification'];context=self.api._evidence_context(self.selected.scope)
+        content=self.api._linked_source(pointer)
+        with self.api._context_database(context) as db:metadata=state._metadata(db,pointer['reference']['name'])
+        owner=self.api._LinkedOwner(self.api._artifact_owner(self.selected.scope,self.task(self.selected)),
+            tuple(self.api._canonical_freeze(edge) for edge in metadata['dependencies'][1:]))
+        clone=dict(authority=pointer['authority'],reference=self.api._artifact(self.selected.scope,content,owner=owner))
+        with self.assertRaisesRegex(StartupError,'selected original publication'):self.stop_request(self.members[1],clone)
+
+    def test_linked_stop_peer_revision_generation_plan_and_source_changes_are_protected(self):
+        for mutation in ('revision','generation','plan','source'):
+            with self.subTest(mutation=mutation):
+                scenario=LinkedVerificationTests(methodName='runTest');scenario.setUp()
+                try:
+                    pointer=scenario.verify()['verification'];f=scenario.selected;peer=scenario.members[1]
+                    request=scenario.stop_request(f,pointer)
+                    if mutation=='source':(peer.repo/'app.py').write_text('changed linked member source')
+                    elif mutation=='plan':
+                        plan=scenario.api._read(peer.scope,scenario.task(peer)['evidence']['plan']);plan['linked']['acceptance'][0]['text']='Divergent approved scope'
+                        scenario.api.plan_evidence(peer.scope,peer.request(plan=plan,change_decision_ref='fixture:changed-linked-contract'))
+                    else:
+                        with state._database(peer.scope,write=True) as db:
+                            if mutation=='generation':db.execute('update checkouts set generation=generation+1')
+                            else:
+                                task=scenario.task(peer);task['revision']+=1;state._save(db,state._scope_id(peer.scope),task)
+                    with self.assertRaises(StartupError):state._retain_ready_stop(f.scope,request)
+                    self.assertNotIn('writer_stop',scenario.task(f))
+                finally:scenario.doCleanups()
+
+    def test_linked_stop_late_foreign_input_rolls_back_original_owner(self):
+        pointer=self.verify()['verification'];f=self.selected;peer=self.members[1];request=self.stop_request(f,pointer)
+        original=self.api._artifact;before=self.task(f)
+        def mutate(scope,value,**kwargs):
+            result=original(scope,value,**kwargs)
+            if value.get('kind')=='linked-complete-stop':(peer.repo/'late-linked-input.py').write_text('late foreign input')
+            return result
+        with patch.object(self.api,'_artifact',side_effect=mutate),self.assertRaises(StartupError):state._retain_ready_stop(f.scope,request)
+        self.assertEqual(self.task(f),before)
+
+    def test_linked_stop_cancelled_peer_preserves_exact_original_predecessor(self):
+        pointer=self.verify()['verification'];peer=self.members[1];task=self.task(peer)
+        proof=dict(version=1,kind='stopped-writer-reconciliation',identity=peer.identity,expected_revision=task['revision'],expected_pins=task['pins'],
+            observed_turn_id=task['turn_id'],stopped=True,descendants_stopped=True,attempt_ids=[],observation_ref='fixture:cancelled-linked-peer',coordinator_ref='fixture:independent')
+        raw=json.dumps(proof).encode();path=peer.root/'linked-cancel.json';path.write_bytes(raw);path.chmod(0o400)
+        cancelled=state.retire_task(peer.scope,peer.request(expected_pins=task['pins'],reason='Cancelled linked peer',reference='fixture:cancel',
+            stop_proof=dict(path=str(path),sha256=hashlib.sha256(raw).hexdigest())))['task']
+        for f in (peer,self.selected):
+            stopped=state._retain_ready_stop(f.scope,self.stop_request(f,pointer))['task']
+            if f is peer:
+                for key in ('state','revision','retirement','pins','lifecycle'):self.assertEqual(stopped[key],cancelled[key])
+                context=self.api._evidence_context(f.scope)
+                from runtime import changes
+                with self.api._context_database(context) as db:
+                    certificate=changes._stopped_certificate(context,db,dict(reference=self.reference(f),pins=stopped['pins']))
+                    self.assertEqual(certificate['state'],'cancelled');changes._check_stopped_certificate(context,db,certificate)
+
+    def test_linked_stop_open_delivery_does_not_claim_delivery_or_closure(self):
+        delivery=dict(provider='fixture',repository='owner/repo',target='main',pull_request='fixture:pull1')
+        self.establish(delivery);result=self.verify(self.observations(delivery=delivery,delivery_status='open'))
+        self.assertFalse(result['delivery_complete'])
+        for f in self.members:
+            stopped=state._retain_ready_stop(f.scope,self.stop_request(f,result['verification']))
+            self.assertNotIn('delivery_complete',stopped);self.assertNotIn('implementation_verified',stopped)
+            linked=self.api._read(f.scope,stopped['task']['writer_stop']['linked'])
+            self.assertFalse(linked['delivery_complete']);self.assertIsNone(stopped['task']['lifecycle']['safe_closed_at'])
+
+    def test_linked_stop_missing_actual_synchronous_barrier_stays_protected(self):
+        from runtime import delegation
+        pointer=self.verify()['verification'];peer=self.members[1]
+        with state._database(peer.scope,write=True) as db:
+            record=next(r for r in delegation._ledger(peer.scope,db) if r['data']['role']=='coordinator')
+            db.execute('delete from assignments where id=?',(record['id'],))
+        with self.assertRaises(StartupError):state._retain_ready_stop(peer.scope,self.stop_request(peer,pointer))
+
+    def test_linked_stop_three_approved_members_cannot_be_truncated(self):
+        from types import SimpleNamespace
+        from tests.test_state import canonical_scope
+        from tests.test_startup import CanonicalAcquisitionTests
+        third=EvidenceTests(methodName='runTest');third.setUp();self.addCleanup(third.doCleanups)
+        third.scope=canonical_scope(third.scope)
+        state.start_task(third.scope,third.identity|dict(mode='editable',decision_ref='user:accepted'))
+        record,path=CanonicalAcquisitionTests.record(SimpleNamespace(repo=third.repo,base=third.root,assertIsNone=self.assertIsNone))
+        identity=self.api._canonical_plain(third.scope.accepted_identity);record['project_id']=identity['project_id']
+        record['repositories'][0]['repository_id']=identity['repository_id'];record['repositories'][0]['checkouts'][0]['checkout_id']=identity['checkout_id']
+        record['repositories'][0]['checkouts'][0]['clients'][0]['configuration'].update(identity['configuration'])
+        path.write_text(json.dumps(record));self.members.append(third);self.establish()
+        pointer=self.verify()['verification'];content=self.api._linked_source(pointer)
+        self.assertEqual(len(content['members']),3)
+        task=state._retain_ready_stop(third.scope,self.stop_request(third,pointer))['task']
+        self.assertEqual(task['state'],'verifying')
+        incomplete=json.loads(json.dumps(content));incomplete['members'].pop()
+        clone=self.retained(self.selected,incomplete)
+        with self.assertRaisesRegex(StartupError,'participant set is incomplete'):self.stop_request(self.selected,clone)
+
+    def test_linked_stop_foreign_semantic_source_is_guarded_and_retains_raw_dependency(self):
+        from tests.test_state import canonical_scope
+        from runtime import delegation
+        extra=EvidenceTests(methodName='runTest');extra.setUp();self.addCleanup(extra.doCleanups)
+        extra.scope=canonical_scope(extra.scope);state.start_task(extra.scope,extra.identity|dict(mode='editable',decision_ref='user:accepted'))
+        observations=self.observations();observe=observations['observe']
+        source=self.retained(extra,dict(version=1,kind='linked-integration-observation',inputs_digest=self.api._digest(self.input_rows()),
+            criteria=dict(together='passed'),observed_at=101,reference='fixture:independent foreign semantic source'))
+        def acquire(facts):
+            acquired=observe(facts);acquired['shared'][0]['evidence']=[source];return acquired
+        observations['observe']=acquire;pointer=self.verify(observations)['verification'];original=self.api._linked_source;guarded=[]
+        def read(reference,**kwargs):
+            if reference==source:
+                with self.assertRaises(StartupError):
+                    with delegation._reservation_write(extra.scope):pass
+                guarded.append(True)
+            return original(reference,**kwargs)
+        with patch.object(self.api,'_linked_source',side_effect=read):
+            result=state._retain_ready_stop(self.selected.scope,self.stop_request(self.selected,pointer))
+        self.assertTrue(guarded)
+        basis=self.api._read(self.selected.scope,result['task']['writer_stop']['linked'])
+        self.assertIn(source['authority'],basis['authorities'])
+        entry=next(s for s in basis['sources'] if s['reference']==source)
+        self.assertTrue(any(e['kind']=='task' and e['reference']==self.reference(extra) for e in entry['metadata']['dependencies']))
+
+    def test_linked_stop_stale_foreign_source_cannot_supply_live_certificate(self):
+        from runtime import changes
+        pointer=self.verify()['verification']
+        for f in self.members:state._retain_ready_stop(f.scope,self.stop_request(f,pointer))
+        f=self.selected;context=self.api._evidence_context(f.scope);task=self.task(f)
+        with self.api._context_database(context) as db:
+            certificate=changes._stopped_certificate(context,db,dict(reference=self.reference(f),pins=task['pins']))
+        (self.members[1].repo/'app.py').write_text('changed foreign source after both independent stops')
+        with self.api._context_database(context) as db,self.assertRaises(StartupError):changes._check_stopped_certificate(context,db,certificate)
+        self.assertEqual(self.task(f),task)
+
+    def test_linked_stop_shared_authority_qualifies_scope_with_identical_local_ids(self):
+        from tests import test_state
+        from runtime import changes
+        shared=tempfile.TemporaryDirectory(prefix='linked-stop-shared-');self.addCleanup(shared.cleanup)
+        canonical=test_state.canonical_scope;count=[0]
+        def scope(legacy,**kwargs):
+            number=count[0];count[0]+=1
+            legacy=replace(legacy,runtime=RuntimeSettings(2,Path(shared.name).resolve()/'state'))
+            return canonical(legacy,repository_id='repository-'+str(number),checkout_id='checkout-'+str(number),**kwargs)
+        scenario=LinkedVerificationTests(methodName='runTest')
+        with patch.object(test_state,'canonical_scope',side_effect=scope):scenario.setUp()
+        self.addCleanup(scenario.doCleanups)
+        self.assertEqual(scenario.reference(scenario.members[0])['authority'],scenario.reference(scenario.members[1])['authority'])
+        pointer=scenario.verify()['verification']
+        for f in scenario.members:
+            before=scenario.task(f);stopped=state._retain_ready_stop(f.scope,scenario.stop_request(f,pointer))['task']
+            for key in ('state','revision','pins','lifecycle'):self.assertEqual(stopped[key],before[key])
+            context=self.api._evidence_context(f.scope);ref=scenario.reference(f)
+            with self.api._context_database(context) as db:
+                certificate=changes._stopped_certificate(context,db,dict(reference=ref,pins=stopped['pins']))
+                changes._check_stopped_certificate(context,db,certificate)
+            candidate=self.api._read(f.scope,stopped['writer_stop']['candidate'])
+            self.assertEqual(self.api._ready_stop_candidate(context,stopped,candidate),stopped['writer_stop']['inputs'])
+            self.assertIn(str(f.repo),stopped['writer_stop']['inputs'])
+
+    def test_linked_stop_late_accepted_umbrella_replacement_rejects_preserved_child_inodes(self):
+        from types import SimpleNamespace
+        from tests.test_state import canonical_scope
+        from tests.test_startup import CanonicalAcquisitionTests
+        scenario=LinkedVerificationTests(methodName='runTest');scenario.api=self.api;scenario.members=[];projects={}
+        for number in range(2):
+            f=EvidenceTests(methodName='runTest');f.setUp();self.addCleanup(f.doCleanups)
+            project=f.root/'umbrella';project.mkdir();primary=project/'primary';f.repo.rename(primary);linked=f.root/'linked'
+            subprocess.run(['git','-C',str(primary),'worktree','add','--detach',str(linked)],check=True,capture_output=True)
+            f.repo=linked;legacy=replace(f.scope,repository_root=linked,git_common_dir=primary/'.git')
+            scope=canonical_scope(legacy,primary_root=primary,git_dir=primary/'.git/worktrees/linked')
+            identity=self.api._canonical_plain(scope.accepted_identity);info=project.stat()
+            identity.update(project_root=str(project),project_binding=dict(device=info.st_dev,inode=info.st_ino))
+            f.scope=replace(scope,project_root=project,authority_path=project/state.PROJECT_FILE,
+                accepted_identity=self.api._canonical_freeze(identity),accepted_scope_digest=self.api._digest(identity))
+            state.start_task(f.scope,f.identity|dict(mode='editable',decision_ref='user:accepted'))
+            record,path=CanonicalAcquisitionTests.record(SimpleNamespace(repo=linked,base=f.root,assertIsNone=self.assertIsNone),project=project,selected=linked)
+            record['project_id']=identity['project_id'];record['repositories'][0]['repository_id']=identity['repository_id']
+            record['repositories'][0]['checkouts'][0]['checkout_id']=identity['checkout_id']
+            record['repositories'][0]['checkouts'][0]['clients'][0]['configuration'].update(identity['configuration'])
+            path.write_text(json.dumps(record));scenario.members.append(f);projects[str(linked)]=project
+        scenario.selected=scenario.members[0];scenario.establish();pointer=scenario.verify()['verification'];f=scenario.selected
+        request=scenario.stop_request(f,pointer);before=scenario.task(f)
+        artifact=self.api._artifact;basis=self.api._linked_stop_basis;files=self.api._stop_input_files
+        phase=dict(armed=False,captures=0,active=0,moved=False)
+        def arm(scope,value,**kwargs):
+            result=artifact(scope,value,**kwargs)
+            if value.get('kind')=='linked-complete-stop':phase['armed']=True
+            return result
+        def capture(*args,**kwargs):
+            if phase['armed']:phase['captures']+=1;phase['active']=phase['captures']
+            try:return basis(*args,**kwargs)
+            finally:phase['active']=0
+        def move(task,candidate):
+            if phase['active']==2 and not phase['moved'] and task['accepted_identity']['repository_root']==str(f.repo):
+                project=projects[str(f.repo)];previous=project.with_name('old-umbrella');project.rename(previous);project.mkdir()
+                for child in list(previous.iterdir()):child.rename(project/child.name)
+                phase['moved']=True
+            return files(task,candidate)
+        with patch.object(self.api,'_artifact',side_effect=arm),patch.object(self.api,'_linked_stop_basis',side_effect=capture), \
+                patch.object(self.api,'_stop_input_files',side_effect=move),self.assertRaises(StartupError):
+            state._retain_ready_stop(f.scope,request)
+        self.assertTrue(phase['moved']);self.assertEqual(scenario.task(f),before)
+
     def test_multi_member_current_proof_sets_only_selected_implementation_ready(self):
         peer_before=self.task(self.members[1])
         result=self.verify()
