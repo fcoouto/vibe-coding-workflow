@@ -146,7 +146,12 @@ def _recovery_source_shape(value, identity):
     if version==2:
         _require(value['previous'] is None,'Compact recovery cut cannot retain a previous raw route')
         from runtime import changes
-        for certificate in value['stopped']: changes._stopped_certificate_shape(certificate)
+        for certificate in value['stopped']:
+            changes._stopped_certificate_shape(certificate)
+            issued={a['reference']['id']:a['reference'] for a in certificate.get('assignments',[])}
+            for reference in value['assignments']:
+                if reference['authority']==certificate['reference']['authority'] and reference['id'] in issued:
+                    changes._stopped_assignment_certificate(certificate,reference)
         for prior in value['supersedes']:
             state._fields(prior,('authority','artifact','identity','journal_sha256'))
             state._artifact_reference(prior['artifact']); state._canonical_hash(prior['journal_sha256'])
@@ -179,6 +184,11 @@ def _recovery_source_history(context,db,reference,identity):
             'Recovery typed metadata dependencies differ from owner source')
         if age is None: age=metadata['created_at']; owner=metadata['owner']
         _require(metadata['created_at']==age and metadata['owner']==owner,'Recovery source history original age or owner changed')
+        if value['version']==2:
+            from runtime import changes
+            for certificate in value['stopped']:
+                if certificate['reference']['authority']==_canonical_plain(context.authority_set[0]):
+                    changes._check_stopped_certificate(context,db,certificate)
         history.append((dict(reference),value))
         reference=value['previous']
         if reference is not None: state._artifact_reference(reference)

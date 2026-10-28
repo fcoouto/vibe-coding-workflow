@@ -1327,6 +1327,13 @@ def reserve_coordinator(scope, request):
 
 
 def _validate_operation_proof(scope, record, task, proof, *, current_candidate_digest=None):
+    return _validate_role_proof(record, task, proof, scope_id=state._scope_id(scope), revision=task['revision'],
+        read=lambda reference: evidence._read(scope, reference),
+        linked_review=lambda attempt: _linked_review(scope, state._scope_id(scope), task, attempt, [record]),
+        current_candidate_digest=current_candidate_digest)
+
+
+def _validate_role_proof(record, task, proof, *, scope_id, revision, read, linked_review, current_candidate_digest=None):
     """Validate exact role bindings only; never authenticate host authority or release ownership."""
     evidence._bounded(proof)
     data, body, owner = record['data'], record['body'], record['owner']
@@ -1355,8 +1362,8 @@ def _validate_operation_proof(scope, record, task, proof, *, current_candidate_d
         task['scope_ref'] == body['request']['scope_ref'], 'Proof task differs from the original reservation')
     _require(type(proof['version']) is int and proof['version'] == 2 and proof['kind'] == kind and
         proof['identity'] == {key: task[key] for key in evidence.IDENTITY[:4]} and
-        proof['expected_pins'] == task['pins'] == body['pins'] and proof['expected_revision'] == task['revision'] and
-        proof['scope_id'] == owner['scope_id'] == state._scope_id(scope) and proof['attempt_id'] == record['id'] and
+        proof['expected_pins'] == task['pins'] == body['pins'] and proof['expected_revision'] == revision and
+        proof['scope_id'] == owner['scope_id'] == scope_id and proof['attempt_id'] == record['id'] and
         proof['dispatch_id'] == owner['dispatch_id'] and proof['assignment_digest'] == data['assignment']['digest'] and
         proof['claims_digest'] == evidence._digest(data['claims']), 'Host proof does not bind the exact original reservation')
     for key in ('observation_ref', 'coordinator_ref'):
@@ -1368,14 +1375,14 @@ def _validate_operation_proof(scope, record, task, proof, *, current_candidate_d
         if data['candidate'] is not None:
             _require(_hex(current_candidate_digest) and proof['current_candidate_digest'] == current_candidate_digest and
                 proof['candidate_digest'] == data['candidate']['digest'], 'Coordinator proof requires actual candidate context')
-        operation = evidence._read(scope, body['operation'])
+        operation = read(body['operation'])
         _require(proof['decision_ref'] == body['decision_ref'] == task['decision_ref'] and
             proof['operation_id'] == operation['id'] and proof['operation_digest'] == body['operation']['digest'] and
             proof['operation_stopped'] is True and proof['operation_descendants_stopped'] is True,
             'Coordinator operation or its descendants remain unverified')
         for key in ('operation_evidence', 'resource_observations'):
             _reference(proof[key])
-            observed = evidence._read(scope, proof[key])
+            observed = read(proof[key])
             _require(all(observed.get(field) == proof[field] for field in ('operation_id', 'operation_digest', 'claims_digest')),
                      'Independent evidence belongs to different operation resources')
     else:
@@ -1389,9 +1396,9 @@ def _validate_operation_proof(scope, record, task, proof, *, current_candidate_d
         else:
             if role == 'review':
                 attempt = next((a for a in task['evidence']['attempts'] if a['id'] == record['id']), None)
-                _require(attempt is not None and _linked_review(scope, state._scope_id(scope), task, attempt, [record]) is not None,
+                _require(attempt is not None and linked_review(attempt) is not None,
                          'Review proof has no exact immutable D5 attempt/plain-prompt binding')
-            observation = evidence._read(scope, data['observation']) if data['observation'] else None
+            observation = read(data['observation']) if data['observation'] else None
             receipt = observation['receipt'] if observation else {}
             _require(isinstance(receipt, dict), 'No actual native identity was observed; missing history cannot prove never-started')
             binding = data['binding']

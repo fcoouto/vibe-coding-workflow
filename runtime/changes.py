@@ -1722,8 +1722,137 @@ class _RecoverySourceObservation:
     release: object = None
 
 
+def _assignment_certificate_shape(value, task):
+    from runtime import delegation, evidence
+    task_state._fields(value,('reference','created_at','request_digest','role','claims','reconciliation'))
+    ref=value['reference']; task_state._fields(ref,('authority','id','owner','assignment'))
+    owner=ref['owner']; task_state._retired_identity('assignment',owner); task_state._artifact_reference(ref['assignment'])
+    d3._require(isinstance(ref['id'],str) and re.fullmatch(r'[0-9a-f]{32}',ref['id']) and
+        ref['authority']==task['reference']['authority'] and all(owner[k]==task['reference'][k] for k in
+        ('scope_id','client','session_id','task_id')),'Stopped assignment original owner differs')
+    task_state._integer(value['created_at'],'original stopped assignment age'); d3._hash(value['request_digest'])
+    delegation._stored_claims(value['claims'],maximum=delegation.MAX_VERIFICATION_CLAIMS)
+    role=value['role']; d3._require(role in {'coordinator','check','worker','review'},'Unknown stopped assignment role')
+    rec=value['reconciliation']; task_state._fields(rec,('reference','source_digest','request_digest','revision','outcome','assessment','proof','bindings'))
+    task_state._artifact_reference(rec['reference']); d3._hash(rec['source_digest']); d3._hash(rec['request_digest'])
+    task_state._integer(rec['revision'],'assignment reconciliation revision',2)
+    d3._require(rec['revision']<=task['retirement']['previous_revision'] and rec['outcome'] in {'completed','failed','cancelled'},
+        'Assignment reconciliation does not precede exact stopped transition')
+    proof=rec['proof']; evidence._bounded(proof)
+    d3._require(proof.get('version')==2 and type(proof['version']) is int and
+        proof.get('identity')==dict(client=owner['client'],session_id=owner['session_id'],task_id=owner['task_id'],scope_ref=task['scope_ref']) and
+        proof.get('scope_id')==owner['scope_id'] and proof.get('attempt_id')==ref['id'] and
+        proof.get('dispatch_id')==owner['dispatch_id'] and proof.get('assignment_digest')==ref['assignment']['digest'] and
+        proof.get('claims_digest')==evidence._digest(value['claims']) and proof.get('expected_pins')==task['pins'] and
+        type(proof.get('expected_revision')) is int and proof['expected_revision']==rec['revision']-1,
+        'Stopped assignment proof original identity differs')
+    bindings=rec['bindings']
+    fields={'coordinator':('operation','operation_evidence','resource_observations','d5_plan','d6_plan','candidate','current_candidate'),
+        'check':('d5_plan','candidate','current_candidate','execution'),
+        'worker':('plan','candidate','current_candidate','observation','native_receipt'),
+        'review':('plan','candidate','current_candidate','observation','native_receipt')}[role]
+    task_state._fields(bindings,fields)
+    for key in fields:
+        if key!='native_receipt' and bindings[key] is not None: task_state._artifact_reference(bindings[key])
+    if role=='check':
+        d3._require(rec['assessment'] is None,'Check certificate invented an assessment')
+    else:
+        assessment=rec['assessment']; task_state._fields(assessment,('outcome','changed_paths','evidence','coordinator_ref'))
+        d3._require(assessment['outcome']==rec['outcome'],'Stopped assessment outcome differs')
+        for key in ('changed_paths','evidence'): delegation._strings(assessment[key],key,maximum=64,limit=4096,nonempty=key=='evidence')
+        for name in assessment['changed_paths']: evidence._relative(name)
+        task_state._text(assessment['coordinator_ref'],'assessment coordinator',4096)
+    if role=='coordinator':
+        d3._require(proof.get('kind')=='coordinator-operation-reconciliation' and proof.get('operation_stopped') is True and
+            proof.get('operation_descendants_stopped') is True and proof.get('operation_digest')==bindings['operation']['digest'] and
+            all(proof.get(k)==bindings[k] for k in ('operation_evidence','resource_observations')),
+            'Stopped coordinator operation bindings differ')
+        for key in ('d5_plan','d6_plan'):
+            if bindings[key] is not None: d3._require(proof.get(key+'_digest')==bindings[key]['digest'],'Stopped coordinator plan differs')
+    else:
+        d3._require(proof.get('kind')==('check-writer-reconciliation' if role=='check' else 'assignment-writer-reconciliation') and
+            proof.get('stopped') is True and proof.get('descendants_stopped') is True,'Stopped assignment descendants differ')
+        if role=='check':
+            d3._require(proof.get('plan_digest')==bindings['d5_plan']['digest'] and
+                proof.get('execution_digest')==(bindings['execution']['digest'] if bindings['execution'] else None),'Stopped check bindings differ')
+        else:
+            receipt=bindings['native_receipt']; task_state._fields(receipt,('native_identity','result_digest','launch_state'))
+            d3._require(proof.get('d6_plan_digest')==bindings['plan']['digest'] and
+                proof.get('observation_digest')==(bindings['observation']['digest'] if bindings['observation'] else None) and
+                all(proof.get(k)==receipt[k] for k in receipt),'Stopped native receipt differs')
+    if bindings['candidate'] is not None:
+        d3._require(proof.get('candidate_digest')==bindings['candidate']['digest'] and bindings['current_candidate'] is not None and
+            proof.get('current_candidate_digest')==bindings['current_candidate']['digest'],'Stopped candidate bindings differ')
+    return value
+
+
+def _assignment_certificate(context,db,task,record):
+    from runtime import evidence,delegation
+    data,body,owner=record['data'],record['body'],record['owner']
+    d3._require(data['status']=='settled' and data.get('lifecycle'),'Recovery assignment lacks dated reconciled stop proof')
+    read=lambda ref:evidence._read(None,ref,context=context,db=db)
+    rec=read(data['reconciliation']); d3._require(type(rec.get('version')) is int and rec['version']==2,'Recovery assignment requires version2 role proof')
+    role=data['role']
+    task_state._fields(rec,('version','proof','source_digest','request_digest','current_candidate',*(() if role=='check' else ('assessment','revision','reservation_snapshot_digest'))))
+    d3._hash(rec['source_digest']);d3._hash(rec['request_digest'])
+    if role!='check': d3._hash(rec['reservation_snapshot_digest'])
+    proof=rec['proof']; attempt=next((a for a in task.get('evidence',{}).get('attempts',[]) if a['id']==record['id']),None)
+    current=rec['current_candidate']; revision=rec.get('revision')
+    if role=='check':
+        d3._require(attempt is not None and delegation._linked_check(None,owner['scope_id'],task,attempt,[record],context=context,db=db) is not None,
+            'Recovery check lacks actual linked attempt')
+        d3._require(attempt.get('reconciliation')==data['reconciliation'] and attempt['status'] not in {'reserved','running','uncertain'},
+            'Recovery check remains unresolved')
+        outcome='completed' if attempt['status']=='passed' else 'cancelled' if attempt['status']=='cancelled' else 'failed'
+        # The check writer persists no revision/assessment; its exact transition increments once.
+        revision=proof['expected_revision']+1; assessment=None
+    else:
+        if role=='review':
+            d3._require(attempt is not None and attempt['status'] not in {'reserved','running','uncertain'} and
+                attempt.get('ownership_reconciliation')==data['reconciliation'],'Recovery review remains unresolved')
+        assessment=rec['assessment']; task_state._fields(assessment,('outcome','changed_paths','result_assessment','partial_change_assessment','evidence','coordinator_ref'))
+        outcome=assessment['outcome']; assessment={k:assessment[k] for k in ('outcome','changed_paths','evidence','coordinator_ref')}
+    task_state._integer(revision,'historical reconciliation revision',2)
+    d3._require(revision<=task['retirement']['previous_revision'] and data['result']==dict(outcome=outcome),
+        'Recovery role outcome/revision differs from stopped owner')
+    delegation._validate_role_proof(record,task,proof,scope_id=owner['scope_id'],revision=revision-1,read=read,
+        linked_review=lambda a:delegation._linked_review(None,owner['scope_id'],task,a,[record],context=context,db=db),
+        current_candidate_digest=current['digest'] if current else None)
+    if current is not None: evidence._candidate_projection(read(current),task)
+    if role=='coordinator':
+        bindings={k:body[k] for k in ('operation','d5_plan','d6_plan')}
+        bindings.update({k:proof[k] for k in ('operation_evidence','resource_observations')})
+    elif role=='check':
+        bindings=dict(d5_plan=body['d5_plan'],execution=data['observation'])
+    else:
+        history=delegation._worker_history(None,data['observation'],context=context)
+        observation=history[0][1] if history else None;receipt=observation['receipt'] if observation else {}
+        if observation is not None:
+            d3._require(isinstance(receipt,dict) and all(receipt.get(k)==v for k,v in data['binding'].items()) and
+                receipt.get('assignment_digest')==data['assignment']['digest'] and receipt.get('candidate_digest')==data['candidate']['digest'] and
+                receipt.get('checkout')==task['accepted_identity']['repository_root'] and
+                any(read(item['incoming']).get('receipt')==receipt for _,item in history),
+                'Recovery native receipt lacks actual original observation/binding')
+            result=observation['result']
+            d3._require((result is None and receipt.get('result_digest') is None) or
+                isinstance(result,str) and hashlib.sha256(result.encode()).hexdigest()==receipt.get('result_digest'),
+                'Recovery native result identity differs')
+        else:
+            d3._require(data['observation'] is None and proof['launch_state']=='not-started' and
+                proof['observation_digest'] is None and proof['result_digest'] is None,'Recovery no-launch proof is incomplete')
+        native={k:data['binding'][k] for k in ('client_surface','native_version','parent_session_id','task_name')}
+        native.update({k:receipt.get(k) for k in ('parent_turn_id','spawn_item_id','worker_id','worker_turn_id','result_item_id')})
+        bindings=dict(plan=body['plan'],observation=data['observation'],native_receipt=dict(native_identity=native,
+            result_digest=receipt.get('result_digest'),launch_state='observed' if observation else 'not-started'))
+    bindings.update(candidate=data['candidate'],current_candidate=current)
+    return dict(reference=dict(authority=_canonical_plain(context.authority_set[0]),id=record['id'],owner=owner,assignment=data['assignment']),
+        created_at=data['lifecycle']['created_at'],request_digest=data['request_digest'],role=role,claims=data['claims'],
+        reconciliation=dict(reference=data['reconciliation'],source_digest=rec['source_digest'],request_digest=rec['request_digest'],
+            revision=revision,outcome=outcome,assessment=assessment,proof=proof,bindings=bindings))
+
+
 def _stopped_certificate_shape(value):
-    task_state._fields(value,('reference','created_at','revision','pins','accepted_identity','scope_ref','turn_id','retirement','proof'))
+    task_state._fields(value,('reference','created_at','revision','pins','accepted_identity','scope_ref','turn_id','retirement','proof'),('assignments',))
     task_state._task_reference(value['reference']); task_state._integer(value['created_at'],'original stopped task age')
     task_state._integer(value['revision'],'stopped task revision',2); task_state._text(value['scope_ref'],'stopped scope')
     d3._require(task_state._validate_pins(value['pins'])==3,'Stopped certificate requires canonical pins')
@@ -1746,6 +1875,10 @@ def _stopped_certificate_shape(value):
         'Stopped certificate attempt set differs')
     for attempt in proof['attempt_ids']: task_state._text(attempt,'stopped attempt ID')
     for key in ('observation_ref','coordinator_ref'): task_state._text(proof[key],key)
+    if 'assignments' in value:
+        d3._require(isinstance(value['assignments'],list) and len(value['assignments'])<=4096,'Stopped assignment certificate bound exceeded')
+        for assignment in value['assignments']: _assignment_certificate_shape(assignment,value)
+        d3._require(len({a['reference']['id'] for a in value['assignments']})==len(value['assignments']),'Duplicate stopped assignments')
     return value
 
 
@@ -1760,7 +1893,19 @@ def _stopped_certificate(context,db,item):
     d3._require(proof.get('attempt_ids')==unresolved,'Recovery stopped attempt ownership differs')
     result=dict(reference=ref,created_at=task['lifecycle']['created_at'],**{k:task[k] for k in
         ('revision','pins','accepted_identity','scope_ref','turn_id','retirement')},proof=proof)
+    from runtime import delegation
+    records=delegation._ledger(None,db,context=context)
+    result['assignments']=[_assignment_certificate(context,db,task,r) for r in records if all(r['owner'][k]==ref[k] for k in ('scope_id','client','session_id','task_id'))]
+    result['assignments'].sort(key=d3._digest)
     return _stopped_certificate_shape(result)
+
+
+def _stopped_assignment_certificate(value,reference):
+    """Resolve an exact issued pointer; retirement markers cannot authenticate that pointer."""
+    _stopped_certificate_shape(value)
+    matches=[a for a in value.get('assignments',[]) if a['reference']==reference]
+    d3._require(len(matches)==1,'Recovery requested assignment differs from retained issued pointer')
+    return matches[0]
 
 
 def _check_stopped_certificate(context,db,value):
@@ -1775,6 +1920,16 @@ def _check_stopped_certificate(context,db,value):
             ('revision','pins','accepted_identity','scope_ref','turn_id','retirement')),'Recovery live stopped owner changed')
         attempts=[a['id'] for a in task.get('evidence',{}).get('attempts',[]) if a['status'] in {'reserved','running','uncertain'}]
         d3._require(attempts==value['proof']['attempt_ids'],'Recovery live stopped attempts changed')
+    for assignment in value.get('assignments',[]):
+        observed=task_state._lifecycle_identity(db,'assignment',assignment['reference'])
+        d3._require(observed['pins_digest']==task_state._digest(value['pins']) and observed['request_digest']==assignment['request_digest'] and
+            observed['created_at']==assignment['created_at'] and observed['identity']==dict(id=assignment['reference']['id'],owner=assignment['reference']['owner']),
+            'Recovery stopped assignment identity support differs')
+        if observed['status']=='live':
+            from runtime import delegation
+            row=db.execute('select id,scope_id,client,session_id,task_id,dispatch_id,data from assignments where id=?',(assignment['reference']['id'],)).fetchone()
+            record=delegation._record(None,row,context=context,db=db)
+            d3._require(_assignment_certificate(context,db,task,record)==assignment,'Recovery live stopped assignment changed')
     return identity
 
 
@@ -1782,7 +1937,14 @@ def _cut_recovery_content(content,certificates,contexts):
     # Preserve independent artifact/assignment raw routes; only the issued proof route is cut.
     from runtime import evidence
     content=deepcopy(content); certificates=sorted(certificates,key=d3._digest)
-    proofs={(d3._digest(c['reference']['authority']),d3._digest(c['retirement']['proof'])) for c in certificates}
+    certified={d3._digest(a['reference']):a for c in certificates for a in c.get('assignments',[])}
+    seeds=[((d3._digest(c['reference']['authority']),d3._digest(c['retirement']['proof'])),c['reference']) for c in certificates]
+    for assignment in certified.values():
+        authority=assignment['reference']['authority']; rec=assignment['reconciliation']
+        refs=[assignment['reference']['assignment'],rec['reference']]
+        refs += [ref for key,ref in rec['bindings'].items() if key!='native_receipt' and ref is not None]
+        owner=dict(authority=authority,**{k:assignment['reference']['owner'][k] for k in ('scope_id','client','session_id','task_id')})
+        seeds.extend(((d3._digest(authority),d3._digest(ref)),owner) for ref in refs)
     raw_tasks=set();metadata_by_key={}
     by_authority={d3._digest(_canonical_plain(c.authority_set[0])):c for c in contexts}
     for artifact in content['artifacts']:
@@ -1790,8 +1952,21 @@ def _cut_recovery_content(content,certificates,contexts):
         with evidence._context_database(by_authority[key[0]]) as db:
             metadata,_=evidence._managed_artifact(None,artifact['artifact'],context=by_authority[key[0]],db=db)
         metadata_by_key[key]=(artifact['authority'],metadata)
-    # Discover retained routes first: a proof reached independently keeps all its raw edges.
-    retained=set();pending=set(metadata_by_key)-proofs
+    # A route retains its original owner; another certified task is still foreign.
+    support=set();foreign=set();seen=set();pending=list(seeds)
+    while pending:
+        key,owner=pending.pop();route=(key,d3._digest(owner))
+        if route in seen or key not in metadata_by_key: continue
+        seen.add(route);authority,metadata=metadata_by_key[key]
+        if authority!=owner['authority'] or metadata['owner'].get('task')!=owner:
+            foreign.add(key);continue
+        support.add(key)
+        for edge in metadata['dependencies']:
+            if edge['kind']!='artifact': continue
+            ref=edge['reference'];other=ref.get('authority',authority)
+            pending.append(((d3._digest(other),d3._digest(ref.get('artifact',ref))),owner))
+    # Discover independent routes before removing any certified raw ownership edge.
+    raw_assignments=set();retained=set();pending=(set(metadata_by_key)-support)|foreign
     while pending:
         key=pending.pop()
         if key in retained: continue
@@ -1799,10 +1974,19 @@ def _cut_recovery_content(content,certificates,contexts):
         retained.add(key);authority,metadata=metadata_by_key[key]
         for edge in metadata['dependencies']:
             if edge['kind']=='task': raw_tasks.add(d3._digest(edge['reference']))
+            elif edge['kind']=='assignment':
+                assignment_key=d3._digest(edge['reference']);raw_assignments.add(assignment_key)
+                if assignment_key in certified:
+                    assignment=certified[assignment_key];rec=assignment['reconciliation']
+                    refs=[assignment['reference']['assignment'],rec['reference']]
+                    refs += [ref for key,ref in rec['bindings'].items() if key!='native_receipt' and ref is not None]
+                    pending.update((d3._digest(assignment['reference']['authority']),d3._digest(ref)) for ref in refs
+                        if (d3._digest(assignment['reference']['authority']),d3._digest(ref)) in metadata_by_key)
             elif edge['kind'] in ('artifact','recovery'):
                 ref=edge['reference'];other=ref.get('authority',authority)
                 required=(d3._digest(other),d3._digest(ref.get('artifact',ref)))
                 if required not in retained: pending.add(required)
+    content['assignments']=[a for a in content['assignments'] if d3._digest(a) not in certified or d3._digest(a) in raw_assignments]
     for assignment in content['assignments']:
         owner=assignment['owner'];raw_tasks.add(d3._digest(dict(authority=assignment['authority'],**{k:owner[k] for k in ('scope_id','client','session_id','task_id')})))
     cut={d3._digest(c['reference']) for c in certificates}-raw_tasks
@@ -1848,6 +2032,8 @@ def _recovery_owner_refs(manifest,context,task_refs):
             named=any(_canonical_plain(r)==ref for r in task_refs)
             if not (named or unresolved or relevant and task.get('retirement')): continue
             tasks.append(dict(reference=ref,revision=task['revision'],pins=task['pins'],turn_id=task['turn_id']))
+            for record in records:
+                if all(record['owner'][k]==ref[k] for k in ('scope_id','client','session_id','task_id')): assignments[record['id']]=record
             if task.get('retirement'):
                 proof=task['retirement']['proof']; task_state._artifact_reference(proof); references.append(proof)
             else:
@@ -2287,6 +2473,8 @@ def _recovery_current_requirements(root,history):
             requirements.append(dict(root=root,owner=owner,kind=kind,reference=ref,need='raw' if kind in ('task','assignment') else 'content'))
         for certificate in content.get('stopped',[]):
             requirements.append(dict(root=root,owner=owner,kind='task',reference=certificate['reference'],need='identity'))
+            for assignment in certificate.get('assignments',[]):
+                requirements.append(dict(root=root,owner=owner,kind='assignment',reference=assignment['reference'],need='identity'))
     d3._require(len(requirements)<=4096,'Recovery current-root requirements exceed bound')
     return requirements
 

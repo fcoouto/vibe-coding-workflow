@@ -1431,10 +1431,41 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
             self.assertEqual(state._metadata(db,second['name'])['created_at'],original)
             self.assertEqual(evidence._read(None,dict(second),context=context,db=db)['previous'],dict(first))
 
-    def recovery_release_fixture(self, *, stopped=True):
+    def recovery_release_fixture(self, *, stopped=True, assignment=False, foreign_support=False):
         from runtime import evidence,state
         request,fixture,context=self.scoped_recovery_request()
         self.assertEqual(self.changes._run_scoped(self.directory,request,'apply')['exit_code'],0)
+        if assignment:
+            from runtime import delegation
+            with evidence._context_database(context) as db:
+                task=state._task(db,state._scope_id(fixture.scope),'codex','session','task')
+            owner={k:task[k] for k in ('client','session_id','task_id','scope_ref')}
+            operation=delegation._reserve_operation(fixture.scope,dict(owner,expected_revision=task['revision'],
+                dispatch_id='release-operation',claims=[dict(kind='path',key=str(self.repo/'AGENTS.md'),mode='write')],
+                operation=dict(id='release-operation',kind='coordinator-work'),reason='Bounded fixture operation',
+                ownership_ref='fixture:owner',stop_conditions=['Stop after operation']),role='coordinator')
+            with evidence._context_database(context) as db:
+                record=delegation._ledger(fixture.scope,db)[0]
+                task=state._task(db,state._scope_id(fixture.scope),'codex','session','task')
+            facts=dict(operation_id='release-operation',operation_digest=record['body']['operation']['digest'],
+                claims_digest=evidence._digest(record['data']['claims']))
+            if foreign_support:
+                foreign=dict(client='codex',session_id='foreign',task_id='foreign',scope_ref='fixture:foreign')
+                state.start_task(fixture.scope,dict(foreign,mode='editable',decision_ref='fixture:foreign-owner'))
+                with state._database(fixture.scope) as db:foreign_task=state._task(db,state._scope_id(fixture.scope),'codex','foreign','foreign')
+                self.release_foreign_ref=evidence._artifact(fixture.scope,dict(required='foreign original body'),owner=evidence._artifact_owner(fixture.scope,foreign_task))
+                facts['foreign_support']=self.release_foreign_ref
+                self.stop_assignment_fixture(fixture.scope,foreign)
+            observed=evidence._artifact(fixture.scope,facts,owner=evidence._artifact_owner(fixture.scope,task))
+            proof=dict(version=2,kind='coordinator-operation-reconciliation',identity=owner,expected_pins=task['pins'],
+                expected_revision=task['revision'],scope_id=record['owner']['scope_id'],attempt_id=record['id'],
+                dispatch_id=record['owner']['dispatch_id'],assignment_digest=record['data']['assignment']['digest'],
+                decision_ref=task['decision_ref'],operation_evidence=observed,resource_observations=observed,
+                operation_stopped=True,operation_descendants_stopped=True,observation_ref='fixture:operation',coordinator_ref='fixture:coordinator',**{k:v for k,v in facts.items() if k!='foreign_support'})
+            raw=json.dumps(proof).encode();path=self.base/'release-host-proof.json';path.write_bytes(raw);path.chmod(0o600)
+            delegation.reconcile_assignment(fixture.scope,dict(owner,expected_revision=task['revision'],attempt_id=operation['attempt_id'],
+                host_proof=dict(path=str(path),sha256=hashlib.sha256(raw).hexdigest()),assessment=dict(outcome='cancelled',changed_paths=[],
+                result_assessment='Stopped fixture',partial_change_assessment='No remaining effects',evidence=['fixture:inspection'],coordinator_ref='fixture:owner')))
         with evidence._context_database(context,write=True) as db:
             task=state._task(db,state._scope_id(fixture.scope),'codex','session','task')
             if stopped:
@@ -1474,6 +1505,272 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
         self.assertFalse(any(r['kind']=='task' and r['need']=='raw' and r['reference']==task_ref for r in inspected['requirements']))
         replay=self.changes._register_recovery_release(self.changes._observe_recovery_release(context.authority_set,identity))
         self.assertEqual(result['replacements'],replay['replacements'])
+
+
+    def test_recovery_release_certifies_actual_reconciled_coordinator(self):
+        from runtime import evidence
+        _,context,task_ref,identity,_=self.recovery_release_fixture(assignment=True)
+        observed=self.changes._observe_recovery_release(context.authority_set,identity)
+        certificate=evidence._canonical_plain(observed.content)['stopped'][0]
+        self.assertEqual(len(certificate['assignments']),1)
+        assignment=certificate['assignments'][0]
+        self.assertEqual(assignment['role'],'coordinator')
+        self.assertEqual(assignment['reconciliation']['outcome'],'cancelled')
+        self.assertEqual(observed.content['assignments'],())
+        self.assertEqual(observed.content['artifacts'],())
+        result=self.changes._register_recovery_release(observed)
+        self.assertTrue(result['complete'],result)
+        inspected=self.changes.inspect_lifecycle_recovery(context.authority_set,(task_ref,))
+        self.assertTrue(inspected['complete'],inspected)
+        self.assertTrue(any(r['kind']=='assignment' and r['need']=='identity' and r['reference']==assignment['reference']
+            for r in inspected['requirements']))
+
+    def stop_assignment_fixture(self,scope,identity):
+        from runtime import evidence,state
+        context=evidence._evidence_context(scope)
+        with evidence._context_database(context,write=True) as db:
+            task=state._task(db,state._scope_id(scope),identity['client'],identity['session_id'],identity['task_id'])
+            unresolved=[a['id'] for a in task.get('evidence',{}).get('attempts',[]) if a['status'] in {'reserved','running','uncertain'}]
+            proof=dict(version=1,kind='stopped-writer-reconciliation',identity=identity,expected_revision=task['revision'],
+                expected_pins=task['pins'],observed_turn_id=task['turn_id'],stopped=True,descendants_stopped=True,
+                attempt_ids=unresolved,observation_ref='fixture:stopped',coordinator_ref='fixture:owner')
+            ref=evidence._artifact(scope,proof,owner=evidence._artifact_owner(scope,task),db=db)
+            task.update(state='cancelled',revision=task['revision']+1,retirement=dict(proof_digest=ref['digest'],proof=ref,
+                observation_ref=proof['observation_ref'],coordinator_ref=proof['coordinator_ref'],previous_revision=task['revision']))
+            state._save(db,state._scope_id(scope),task)
+            reference=dict(authority=evidence._canonical_plain(context.authority_set[0]),scope_id=state._scope_id(scope),
+                **{k:identity[k] for k in ('client','session_id','task_id')})
+            certificate=self.changes._stopped_certificate(context,db,dict(reference=reference,pins=task['pins']))
+        return context,certificate
+
+    def test_assignment_certificate_uses_actual_check_revision_without_assessment(self):
+        from tests.test_evidence import CanonicalEvidenceTests
+        from runtime import evidence,state,delegation
+        fixture=CanonicalEvidenceTests(methodName='runTest');fixture.setUp();self.addCleanup(fixture.doCleanups)
+        f=fixture.fixture;checked=f.checked()
+        self.assertEqual(checked['attempt']['status'],'passed')
+        context,certificate=self.stop_assignment_fixture(f.scope,f.identity)
+        assignment=certificate['assignments'][0];rec=assignment['reconciliation']
+        self.assertEqual(assignment['role'],'check');self.assertIsNone(rec['assessment'])
+        with evidence._context_database(context) as db:
+            original=evidence._read(None,rec['reference'],context=context,db=db)
+            self.assertNotIn('revision',original);self.assertNotIn('assessment',original)
+            self.assertEqual(rec['revision'],original['proof']['expected_revision']+1)
+            self.changes._check_stopped_certificate(context,db,certificate)
+        for mutate in ('outcome','proof','attempt'):
+            with self.subTest(mutate=mutate),evidence._context_database(context,write=True) as db:
+                task=state._task(db,state._scope_id(f.scope),'codex','parent','task')
+                row=db.execute('select id,scope_id,client,session_id,task_id,dispatch_id,data from assignments').fetchone()
+                record=delegation._record(None,row,context=context,db=db)
+                if mutate=='outcome': record['data']['result']['outcome']='cancelled'
+                elif mutate=='proof':
+                    original['proof']['execution_digest']='f'*64
+                    record['data']['reconciliation']=evidence._artifact(f.scope,original,owner=evidence._artifact_owner(f.scope,task),db=db)
+                else: task['evidence']['attempts'][0]['candidate_digest']='f'*64
+                with self.assertRaises(Exception): self.changes._assignment_certificate(context,db,task,record)
+
+    def test_assignment_certificate_uses_actual_native_receipt(self):
+        from tests.test_delegation import CanonicalDelegationTests
+        from runtime import evidence
+        fixture=CanonicalDelegationTests(methodName='runTest');fixture.setUp();self.addCleanup(fixture.doCleanups)
+        f=fixture.fixture;prepared=f.prepare();f.observe_worker(prepared)
+        f.api.reconcile_assignment(f.scope,f.worker_reconciliation_request(prepared,outcome='cancelled'))
+        context,certificate=self.stop_assignment_fixture(f.scope,f.identity)
+        assignment=certificate['assignments'][0];rec=assignment['reconciliation']
+        self.assertEqual(assignment['role'],'worker')
+        self.assertEqual(rec['proof']['native_identity'],rec['bindings']['native_receipt']['native_identity'])
+        self.assertEqual(rec['proof']['result_digest'],rec['bindings']['native_receipt']['result_digest'])
+        with evidence._context_database(context) as db:self.changes._check_stopped_certificate(context,db,certificate)
+        for key in ('result_digest','native_identity','launch_state'):
+            bad=copy.deepcopy(certificate);bad['assignments'][0]['reconciliation']['bindings']['native_receipt'][key]=None
+            with self.subTest(key=key),self.assertRaises(Exception):self.changes._stopped_certificate_shape(bad)
+
+    def test_assignment_certificate_requires_actual_linked_review(self):
+        from tests.test_evidence import CanonicalEvidenceTests
+        from runtime import evidence,state,delegation
+        fixture=CanonicalEvidenceTests(methodName='runTest');fixture.setUp();self.addCleanup(fixture.doCleanups)
+        f=fixture.fixture;f.review()
+        context,certificate=self.stop_assignment_fixture(f.scope,f.identity)
+        assignment=certificate['assignments'][0];self.assertEqual(assignment['role'],'review')
+        with evidence._context_database(context) as db:
+            self.changes._check_stopped_certificate(context,db,certificate)
+            task=state._task(db,state._scope_id(f.scope),'codex','parent','task')
+            record=delegation._ledger(None,db,context=context)[0]
+            task['evidence']['attempts'][0]['assignment_digest']='f'*64
+            with self.assertRaises(Exception):self.changes._assignment_certificate(context,db,task,record)
+
+    def exercise_retired_assignment_recovery(self,request,context,task_ref,identity,old):
+        from runtime import evidence,state
+        observation=self.changes._observe_recovery_release(context.authority_set,identity)
+        original_artifacts=[];old_sources=[]
+        with evidence._context_database(context) as db:
+            for ref,content in evidence._recovery_source_history(context,db,old,identity):
+                old_sources.append(ref);original_artifacts.extend(content['artifacts'])
+        result=self.changes._register_recovery_release(observation);self.assertTrue(result['complete'],result)
+        certificate=evidence._canonical_plain(observation.content)['stopped'][0];assignment=certificate['assignments'][0]
+        if assignment['role'] in {'worker','review'} and assignment['reconciliation']['bindings']['observation'] is None:
+            rec=assignment['reconciliation'];self.assertEqual(rec['proof']['launch_state'],'not-started')
+            receipt=rec['bindings']['native_receipt'];self.assertIsNone(receipt['result_digest'])
+            self.assertTrue(all(receipt['native_identity'][k] is None for k in ('parent_turn_id','spawn_item_id','worker_id','worker_turn_id','result_item_id')))
+        with evidence._context_database(context,write=True) as db:
+            ref=assignment['reference'];marker=dict(version=1,identity=ref['owner'],assignment_id=ref['id'],
+                pins_digest=state._digest(certificate['pins']),request_digest=assignment['request_digest'],created_at=assignment['created_at'],
+                retired_at=assignment['created_at'],outcome='cancelled',evidence_expired=False)
+            db.execute('insert into retired_identities values(?,?,?,?)',('assignment',state._retired_identity('assignment',ref['owner']),json.dumps(marker),ref['id']))
+            db.execute('delete from assignments where id=?',(ref['id'],))
+        self.seed_recovery_task_marker(context,task_ref,certificate)
+        retained={a['artifact']['name'] for a in observation.content['artifacts']}
+        for ref in [*old_sources,*[a['artifact'] for a in original_artifacts if a['artifact']['name'] not in retained]]:
+            (context.directory/'evidence'/ref['name']).unlink(missing_ok=True)
+        self.assertFalse((context.directory/'evidence'/assignment['reference']['assignment']['name']).exists())
+        self.assertFalse((context.directory/'evidence'/assignment['reconciliation']['reference']['name']).exists())
+        with evidence._context_database(context) as db:self.changes._check_stopped_certificate(context,db,certificate)
+        other=copy.deepcopy(assignment['reference']);other['assignment']=dict(name='f'*64+'.json',digest='f'*64)
+        with self.assertRaisesRegex(Exception,'issued pointer'):self.changes._stopped_assignment_certificate(certificate,other)
+        inspected=self.changes.inspect_lifecycle_recovery(context.authority_set,(task_ref,))
+        self.assertTrue(inspected['complete'],inspected)
+        self.assertTrue(any(r['kind']=='assignment' and r['need']=='identity' and r['reference']==assignment['reference'] for r in inspected['requirements']))
+        for operation in ('resume','rollback'):
+            result=self.changes._run_scoped(self.directory,request,operation);self.assertEqual(result['exit_code'],0,result)
+        _,sources=self.changes._recovery_sources(context)
+        self.assertEqual(sources[0][1]['stopped'],[certificate])
+
+    def test_assignment_certificate_markers_preserve_d4_without_raw_bodies(self):
+        self.exercise_retired_assignment_recovery(*self.recovery_release_fixture(assignment=True))
+
+    def recovery_release_role_fixture(self,role):
+        from tests.test_evidence import CanonicalEvidenceTests
+        from tests.test_delegation import CanonicalDelegationTests
+        from runtime import evidence,state,delegation
+        native_worker=role.startswith('worker')
+        fixture=(CanonicalDelegationTests if native_worker else CanonicalEvidenceTests)(methodName='runTest')
+        fixture.setUp();self.addCleanup(fixture.doCleanups);f=fixture.fixture
+        if role=='check':f.checked()
+        elif role=='review':f.review()
+        else:
+            if native_worker:
+                prepared=f.prepare()
+                if role=='worker':f.observe_worker(prepared)
+                delegation.reconcile_assignment(f.scope,f.worker_reconciliation_request(prepared,outcome='cancelled'))
+            else:
+                prepared=evidence.prepare_review(f.scope,f.native_review_request(coverage=['general','security'],criteria=['works'],assignment='Read-only review fixture'))
+                with state._database(f.scope) as db:
+                    record=delegation._ledger(f.scope,db)[0]
+                    task=state._task(db,state._scope_id(f.scope),'codex','parent','task')
+                data=record['data'];native={k:data['binding'][k] for k in ('client_surface','native_version','parent_session_id','task_name')}
+                native.update({k:None for k in ('parent_turn_id','spawn_item_id','worker_id','worker_turn_id','result_item_id')})
+                proof=dict(version=2,kind='assignment-writer-reconciliation',identity=f.identity,expected_pins=task['pins'],
+                    expected_revision=task['revision'],scope_id=record['owner']['scope_id'],attempt_id=record['id'],dispatch_id=record['owner']['dispatch_id'],
+                    assignment_digest=data['assignment']['digest'],candidate_digest=data['candidate']['digest'],
+                    current_candidate_digest=evidence._digest(evidence.capture_candidate(f.scope,evidence._read(f.scope,task['evidence']['plan']))),
+                    d6_plan_digest=data['plan_digest'],claims_digest=evidence._digest(data['claims']),observation_digest=None,result_digest=None,
+                    native_identity=native,launch_state='not-started',stopped=True,descendants_stopped=True,
+                    observation_ref='fixture:independent-no-launch-inspection',coordinator_ref='fixture:owner')
+                raw=json.dumps(proof).encode();path=f.root/'not-started-review.json';path.write_bytes(raw);path.chmod(0o600)
+                delegation.reconcile_assignment(f.scope,f.request(attempt_id=record['id'],host_proof=dict(path=str(path),sha256=hashlib.sha256(raw).hexdigest()),
+                    assessment=dict(outcome='cancelled',changed_paths=[],result_assessment='No launch independently established',
+                        partial_change_assessment='No effects',evidence=['fixture:host-inspection'],coordinator_ref='fixture:owner')))
+        context,certificate=self.stop_assignment_fixture(f.scope,f.identity)
+        request=self.scoped_request()
+        for repository in request['manifest']['enrollment']['record']['repositories']:
+            for checkout in repository['checkouts']:
+                checkout['clients'][0]['configuration']['runtime']=dict(schema_version=3,state_dir=str(context.directory))
+        request['approval']['manifest_digest']=onboarding._digest(request['manifest'])
+        result=self.changes._run_scoped(self.directory,request,'apply');self.assertEqual(result['exit_code'],0,result)
+        source=self.changes._observe_recovery_source(self.directory,self.changes._load_journal(self.directory),(context,),(certificate['reference'],))
+        with evidence._context_database(context,write=True) as db:old=evidence._register_recovery_source(None,db,source,context=context)
+        return request,context,certificate['reference'],dict(source.content['identity']),dict(old)
+
+    def test_assignment_certificate_consumers_after_raw_removal_for_each_role(self):
+        for role in ('check','worker','review','worker-not-started','review-not-started'):
+            with self.subTest(role=role):
+                scenario=ScopedChangesTests(methodName='runTest');scenario.setUp()
+                try:scenario.exercise_retired_assignment_recovery(*scenario.recovery_release_role_fixture(role))
+                finally:scenario.doCleanups()
+
+
+    def test_assignment_certificate_rejects_changed_identity_claims_and_role_proof(self):
+        from runtime import evidence,state
+        _,context,_,identity,_=self.recovery_release_fixture(assignment=True)
+        observed=self.changes._observe_recovery_release(context.authority_set,identity)
+        certificate=evidence._canonical_plain(observed.content)['stopped'][0]
+        for field,value in (('created_at',0),('request_digest','f'*64),('role','check'),('claims',[])):
+            bad=copy.deepcopy(certificate);bad['assignments'][0][field]=value
+            with self.subTest(field=field),evidence._context_database(context) as db,self.assertRaises(Exception):
+                self.changes._check_stopped_certificate(context,db,bad)
+        for field,value in (('operation_descendants_stopped',False),('operation_digest','f'*64),('expected_revision',1),('claims_digest','f'*64)):
+            bad=copy.deepcopy(certificate);bad['assignments'][0]['reconciliation']['proof'][field]=value
+            with self.subTest(field=field),self.assertRaises(Exception):self.changes._stopped_certificate_shape(bad)
+        with evidence._context_database(context,write=True) as db:
+            row=db.execute('select id,data from assignments').fetchone();data=json.loads(row[1])
+            data['reconciliation']=evidence._artifact(self.release_fixture_scope,dict(version=2,stopped=True),
+                owner=evidence._artifact_owner(self.release_fixture_scope,state._task(db,certificate['reference']['scope_id'],'codex','session','task')),db=db)
+            db.execute('update assignments set data=? where id=?',(json.dumps(data),row[0]))
+        with self.assertRaises(Exception):self.changes._observe_recovery_release(context.authority_set,identity)
+
+    def test_assignment_certificate_preserves_independent_content_and_raw_assignment_routes(self):
+        from runtime import evidence,state
+        _,context,task_ref,identity,old=self.recovery_release_fixture(assignment=True)
+        observed=self.changes._observe_recovery_release(context.authority_set,identity)
+        certificate=evidence._canonical_plain(observed.content)['stopped'][0];assignment=certificate['assignments'][0]
+        with evidence._context_database(context,write=True) as db:
+            original=evidence._read(None,old,context=context,db=db)
+            independent=evidence._artifact(self.release_fixture_scope,dict(required=assignment['reconciliation']['reference']),
+                owner=evidence._guidance_artifact_owner(self.release_fixture_scope),db=db)
+            metadata=state._metadata(db,independent['name'])
+            metadata['dependencies'].append(dict(kind='assignment',reference=assignment['reference']))
+            db.execute('update evidence_metadata set data=? where name=?',(json.dumps(metadata),independent['name']))
+        original['artifacts'].append(dict(authority=task_ref['authority'],artifact=independent))
+        cut=self.changes._cut_recovery_content(original,[certificate],(context,))
+        self.assertIn(assignment['reference'],cut['assignments'])
+        self.assertTrue(any(t['reference']==task_ref for t in cut['tasks']))
+        self.assertIn(dict(authority=task_ref['authority'],artifact=assignment['reference']['assignment']),cut['artifacts'])
+        self.assertIn(dict(authority=task_ref['authority'],artifact=assignment['reconciliation']['reference']),cut['artifacts'])
+        self.assertTrue(self.changes._validate_recovery_references(cut,(context,)))
+
+    def test_assignment_certificate_mixed_store_retry_retains_raw_support(self):
+        from runtime import evidence
+        _,first,task_ref,identity,_=self.recovery_release_fixture(assignment=True)
+        _,second=self.recovery_authority();contexts=(first,second)
+        source=self.changes._observe_recovery_source(self.directory,self.changes._load_journal(self.directory),contexts,(task_ref,))
+        for context in contexts:
+            with evidence._context_database(context,write=True) as db:evidence._register_recovery_source(None,db,source,context=context)
+        observation=self.changes._observe_recovery_release(first.authority_set,identity)
+        original=evidence._register_recovery_source;calls=[]
+        def fail_second(*args,**kwargs):
+            calls.append(kwargs['context'].directory)
+            if len(calls)==2:raise OSError('fixture assignment second-store fault')
+            return original(*args,**kwargs)
+        with patch.object(evidence,'_register_recovery_source',side_effect=fail_second):
+            result=self.changes._register_recovery_release(observation)
+        self.assertFalse(result['complete']);self.assertEqual(len(result['replacements']),1)
+        inspected=self.changes.inspect_lifecycle_recovery(first.authority_set,())
+        self.assertTrue(inspected['complete'],inspected)
+        self.assertTrue(any(r['kind']=='assignment' and r['need']=='raw' for r in inspected['requirements']))
+        replay=self.changes._register_recovery_release(self.changes._observe_recovery_release(first.authority_set,identity))
+        self.assertTrue(replay['complete'],replay)
+        inspected=self.changes.inspect_lifecycle_recovery(first.authority_set,())
+        self.assertFalse(any(r['kind']=='assignment' and r['need']=='raw' for r in inspected['requirements']))
+
+    def test_assignment_certificate_preserves_foreign_support_between_certified_owners(self):
+        from runtime import evidence
+        _,context,_,identity,_=self.recovery_release_fixture(assignment=True,foreign_support=True)
+        observed=self.changes._observe_recovery_release(context.authority_set,identity)
+        content=evidence._canonical_plain(observed.content)
+        self.assertEqual(len(content['stopped']),2)
+        self.assertIn(dict(authority=content['authorities'][0],artifact=self.release_foreign_ref),content['artifacts'])
+        self.assertTrue(any(t['reference']['task_id']=='foreign' for t in content['tasks']))
+        self.assertTrue(self.changes._register_recovery_release(observed)['complete'])
+
+    def test_task_only_certificate_never_discharges_assignments(self):
+        from runtime import evidence
+        _,context,_,identity,old=self.recovery_release_fixture(assignment=True)
+        observed=self.changes._observe_recovery_release(context.authority_set,identity)
+        certificate=evidence._canonical_plain(observed.content)['stopped'][0];certificate.pop('assignments')
+        with evidence._context_database(context) as db:original=evidence._read(None,old,context=context,db=db)
+        cut=self.changes._cut_recovery_content(original,[certificate],(context,))
+        self.assertTrue(cut['assignments']);self.assertTrue(cut['tasks']);self.assertTrue(cut['artifacts'])
+        self.changes._stopped_certificate_shape(certificate)
 
     def test_recovery_release_refuses_unstopped_source_owner(self):
         _,context,_,identity,old=self.recovery_release_fixture(stopped=False)
