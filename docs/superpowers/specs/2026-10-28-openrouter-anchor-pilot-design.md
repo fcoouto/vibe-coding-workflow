@@ -1,16 +1,16 @@
 # Local OpenRouter delegation pilot
 
-Status: proposed design for approval. No external inference or workflow activation has occurred.
+Status: approved for implementation on 28 October 2026, including cached discovery, soft triage and native verification. Package implementation and observed client execution are reported separately.
 
 ## Intent and decisions
 
 Use published benchmarks for familiar native models as reference points when selecting external models for bounded subtasks. Let the first real task provide local evidence through native review and objective checks. Do not require a separate qualification suite for each external model.
 
-The user requested an optional pilot in this local checkout before publication. Native discovery and native execution remain the default. The user permits paid candidates and explicitly chose OpenRouter settings as the spending authority: the workflow checks available budget before assigning work and does not introduce a second monetary cap.
+The user requested an optional pilot and subsequently approved ordinary plugin development without a separate local-only rollout. Native discovery and native execution remain the default. The user permits paid candidates and explicitly chose OpenRouter settings as the spending authority: the workflow checks available budget before assigning work and does not introduce a second monetary cap.
 
 The user also requested a discovery mechanism with cached results, following the native discovery structure and refreshing when the cache expires. OpenRouter metadata follows that lifecycle; available spending credit remains a live pre-dispatch check.
 
-The proposed implementation is a coordinator-managed proposal call. An external model receives selected context and returns text or a proposed patch. Native Codex owns tools, filesystem changes, review, validation and integration. This implementation choice is proposed for approval.
+The approved implementation is a coordinator-managed proposal call. An external model receives selected context and returns text or a proposed patch. Native Codex owns tools, filesystem changes, review, validation and integration.
 
 ## Goals, non-goals and constraints
 
@@ -18,7 +18,7 @@ The proposed implementation is a coordinator-managed proposal call. An external 
 - Keep task nature, complexity, consequences and verification cost in the selection decision.
 - Produce a capability plot and an auditable record of each real attempt, including native repair effort.
 - Preserve the coordinator's model, reasoning, subscription and authentication; external calls use only the separately approved OpenRouter connection.
-- Keep the pilot explicitly enabled only for this local workflow copy. Do not publish, create release archives, enable unrelated projects or change native defaults.
+- Package the optional route as part of ordinary plugin development. Enable it only within the user's approved scope; preserve unrelated projects and native defaults. No release archive or global activation is required for implementation.
 - Do not create an autonomous external tool loop, a universal model ranking, inferred task-success probabilities, or claims of measured subscription savings.
 - Do not change the existing local Qwen approval, assessment requirements or eligible scopes. The pilot concerns the separately approved OpenRouter route.
 
@@ -28,7 +28,7 @@ The proposed implementation is a coordinator-managed proposal call. An external 
 2. **Benchmark-guided external proposals with native verification:** matches the user's requested real-task evaluation. Recommended implementation: one external completion, with native ownership of every effect.
 3. **External agents with their own tool loops:** adds tool permissions, sandboxing, lifecycle observation, cancellation and recovery. Defer; these are not required to test candidate selection or proposal usefulness.
 
-The user selected benchmark-guided, native-reviewed real tasks. Proposal-only execution is the narrow implementation recommended here; it is not yet approved as the implementation design.
+The user approved benchmark-guided, native-reviewed real tasks with proposal-only external execution.
 
 ## Benchmark references and selection
 
@@ -89,11 +89,17 @@ Separate outcomes: accepted without repair, accepted after native repair, reject
 
 One success is one observation for that task and configuration. It does not qualify every task family. Later selections may favor repeated useful outcomes and avoid repeated failures, without inventing success probabilities from tiny samples. Do not silently expand the pilot's task or data scope.
 
+Use hard exclusions only for concrete incompatibilities or authorization constraints. Capability preferences remain soft: a single rejection does not ban a model, context/preparation failures are distinguished from capability failures, and transport reliability is separate from correctness. Compare task family, language/framework, difficulty, scope and verification needs with past outcomes, retaining model version, effort and provider. Comparable verified local results can outweigh benchmark ordering; published benchmark values never change. Native repair effort remains visible rather than being credited to the external model. Metadata expiry never erases this history.
+
+The observed MCP triage signals include model/endpoint context and output limits, supported parameters and reasoning controls, benchmark indices, model identity/deprecation, provider uptime/latency/throughput, task-usage shares, pricing and live account credit. Task classifications are sampled popularity, not correctness or a classifier for the current assignment. The advertised tool-success filter measures `tool_calls` finish reasons, not correct tool execution; it is secondary for this proposal-only route.
+
 ## Runtime integration and scope
 
 Keep coordinator-managed external proposal evidence separate from native worker admission. `runtime/delegation.py` currently accepts `codex-native-subagent` and classifies worker/review roles as native. Do not loosen that guard, forge native lifecycle observations, or count an external completion as a native worker or independent reviewer.
 
 During implementation, use the existing coordinator/evidence path where it supports truthful proposal artifacts. Add only the small optional procedure and evidence support needed for this pilot. Do not build a generic provider framework or modify client adapters merely to relabel an HTTP completion. If the current evidence path cannot represent proposals safely, document the narrow extension in the implementation plan before code changes.
+
+Implementation uses a new optional skill and standalone standard-library helper for cached metadata and advisory attempt history. The native coordinator performs the existing MCP calls and ordinary evidence/check actions. The helper stores references to those actions, never native lifecycle rows or proof of completion. It handles neither credentials nor inference and avoids Genesis's core runtime files, allowing parallel implementation in a separate worktree.
 
 Update affected workflow loading instructions and source-to-contract coverage narrowly. Entry points stay within 150 words, and the complete optional procedure loads only when the pilot is enabled. Use skill-creator for instruction authoring. Do not overwrite concurrent edits to `clients/evidence.md` or `docs/policy-sources.md`; reconcile any necessary changes against their current content.
 
