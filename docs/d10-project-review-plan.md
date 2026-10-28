@@ -57,4 +57,4 @@ Acceptance examples: an unenrolled repository and temporary umbrella work withou
 
 ## Related onboarding direction
 
-Applicable lint installation belongs to the [canonical onboarding owner](onboard-my-project-plan.md#project-and-repository-model), while D10 keeps separate installation approval. Adapt the Toolkit's 350-line reference to accepted project counting rules and protections. This records direction only; onboarding implementation/qualification remain with D3/D4 and accepted check definitions with D5.
+Applicable lint installation belongs to the [canonical onboarding owner](onboard-my-project-plan.md#project-and-repository-model), while D10 keeps separate installation approval. Use the canonical [size-rule references](../policies/05-tests-and-builds.md#preserve-quality-and-evidence), adapting to accepted project counting rules and protections. This records direction only; onboarding implementation/qualification remain with D3/D4 and accepted check definitions with D5.

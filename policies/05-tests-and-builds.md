@@ -24,7 +24,7 @@ Apply with the [shared contract rules](00-index.md).
 
 ## Preserve quality and evidence
 
-Apply rules only where their contracts exist, using the adopted gate's self-check and native stack tooling. For compatible TypeScript, evaluate `no-floating-promises` and `no-misused-promises`; measure runtime/memory on the actual runner before adoption. Use 350 lines as a setup reference for size rules, adapting to the accepted project limit and counting semantics. Refactor by responsibility, preserving APIs, validation, error handling, accessibility and tests.
+Apply rules only where their contracts exist, using the adopted gate's self-check and native stack tooling. For compatible TypeScript, evaluate `no-floating-promises` and `no-misused-promises`; measure runtime/memory on the actual runner before adoption. Use Pylint's default file-length limit (1000 lines) and a 350-line ESLint setup reference, adapting to accepted project limits and each tool's counting rules. Refactor by responsibility, preserving APIs, validation, error handling, accessibility and tests.
 
 Preserve existing validation, test coverage and gate severity. Do not clear failures with broad ignores, generic suppressions, increased ceilings or deleted tests. New rules with legacy violations may start at warning severity with measured counts, scope and a reduction plan; violation-free new rules use error severity. Keep an existing zero-warning or error gate intact, measuring adoption separately where necessary. Changes to accepted thresholds require a scoped decision.
 
