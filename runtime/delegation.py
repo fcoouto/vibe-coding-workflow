@@ -1658,6 +1658,7 @@ def retire_settled(db, task_ref, closure):
     """Insert exact certified assignment markers before atomically removing their rows."""
     context=evidence._existing_authority_context(task_ref['authority'],db=db)
     facts=evidence._check_closure_observation(context,db,task_ref,closure)
+    _require('linked' not in facts and 'retained_linked_closure' not in facts,'Linked raw retirement awaits the dependent lifecycle slice')
     records=_closure_assignments(context,db,task_ref,facts['task'],facts['certificate'])
     task=state._task(db,task_ref['scope_id'],task_ref['client'],task_ref['session_id'],task_ref['task_id'])
     lifetime=state._task_lifecycle(task)

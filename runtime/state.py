@@ -549,14 +549,14 @@ def _ready_stop(context,db,task,*,observe=False):
     linked=evidence._read(None,stop['linked'],context=context,db=db) if 'linked' in stop else None
     if linked is not None:
         evidence._linked_stop_shape(linked)
-        if evidence._linked_stop_basis(linked['aggregate'],linked['authorities'])!=linked:raise StateError('Linked complete-stop basis changed')
+        if evidence._linked_stopped_basis(linked['aggregate'],linked['authorities'],writer=(context,db))!=linked:raise StateError('Linked complete-stop basis changed')
     evidence._ready_stop_proof(task,proof,bindings,candidate,verification_ref,linked)
     if (stop['task_revision']!=task['revision'] or stop['generation']!=bindings['generation'] or
         stop['verification']!=verification_ref or
         any(proof[k]!=stop[k] for k in ('observation_ref','coordinator_ref'))):
         raise StateError('Retained ready stop envelope changed')
     evidence._candidate_projection(candidate,task)
-    evidence._check_ready_inputs(stop['inputs'],directory_identity=True)
+    if linked is None or task['lifecycle']['safe_closed_at'] is None:evidence._check_ready_inputs(stop['inputs'],directory_identity=True)
     verification=evidence._read(None,stop['verification'],context=context,db=db)
     if task['state']=='ready' and verification['candidate_digest']!=proof['candidate_digest']:raise StateError('Retained ready verification changed')
     if observe and linked is None:evidence._ready_stop_candidate(context,task,candidate)
@@ -632,7 +632,7 @@ def _close_lifecycle(db, task_ref, observations, compact):
     facts=evidence._check_closure_observation(context,db,task_ref,observations,new_compact=compact)
     task=_task(db,task_ref['scope_id'],task_ref['client'],task_ref['session_id'],task_ref['task_id'])
     _assert_open(task)
-    if task['revision']!=facts['task']['revision'] or task['state']!=facts['task']['state'] or task['state'] not in {'cancelled','ready'}:
+    if task['revision']!=facts['task']['revision'] or task['state']!=facts['task']['state'] or (task['state'] not in {'cancelled','ready'} and not ('linked' in facts and task['state']=='verifying')):
         raise StateError('Closure original stopped owner changed')
     closed_at=_owner_time()
     original_age=max([task['lifecycle']['created_at']]+[item['created_at'] for item in facts['certificate'].get('assignments',[])]+

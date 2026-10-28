@@ -2411,6 +2411,19 @@ class LinkedVerificationTests(unittest.TestCase):
                 with self.api._context_database(context) as db:
                     certificate=changes._stopped_certificate(context,db,dict(reference=self.reference(f),pins=stopped['pins']))
                     self.assertEqual(certificate['state'],'cancelled');changes._check_stopped_certificate(context,db,certificate)
+        contexts=tuple(self.api._evidence_context(f.scope) for f in self.members);refs=tuple(self.reference(f) for f in self.members)
+        authorities=[self.api._canonical_plain(context.authority_set[0]) for context in contexts]
+        prepared=self.api._prepare_linked_closure(self.api._observe_linked_preparation(pointer,authorities));self.assertTrue(prepared['complete'])
+        original=[self.task(f) for f in self.members];raw=self.raw_rows(contexts)
+        for index in (1,0):
+            closed=self.api.close_task(self.members[index].scope,self.linked_closure_request(index),self.api._observe_closure(contexts,refs[index]))['task']
+            self.assertEqual({key:value for key,value in closed.items() if key!='lifecycle'},{key:value for key,value in original[index].items() if key!='lifecycle'})
+            self.assertEqual(closed['lifecycle']['created_at'],original[index]['lifecycle']['created_at']);self.assertIsNotNone(closed['lifecycle']['safe_closed_at'])
+        self.assertEqual(self.task(peer)['retirement'],cancelled['retirement']);self.assertEqual(self.task(peer)['state'],'cancelled')
+        for before,after in zip(raw,self.raw_rows(contexts)):
+            self.assertEqual({key:value for key,value in before.items() if key!='tasks'},{key:value for key,value in after.items() if key!='tasks'})
+        for context,ref in zip(contexts,refs):
+            with self.assertRaises(StartupError):self.api._retire_closed_task(context,ref)
 
     def test_linked_stop_open_delivery_does_not_claim_delivery_or_closure(self):
         delivery=dict(provider='fixture',repository='owner/repo',target='main',pull_request='fixture:pull1')
@@ -2772,8 +2785,18 @@ class LinkedVerificationTests(unittest.TestCase):
             return artifact(scope,value,**kwargs)
         with patch.object(self.api,'_artifact',side_effect=fail),self.assertRaises(StartupError):self.api._prepare_linked_closure(observed)
         f=scenario.selected;context=self.api._evidence_context(f.scope)
-        for stage in ('interrupted','complete'):
+        for stage in ('interrupted','complete','pending-closure'):
             if stage=='complete':self.api._prepare_linked_closure(self.api._observe_linked_preparation(pointer,authorities))
+            if stage=='pending-closure':
+                close=state._close_lifecycle
+                def fail(db,ref,observation,compact):
+                    close(db,ref,observation,compact)
+                    raise RuntimeError('fixture: rollback publication after durable candidate')
+                ref=scenario.reference(f)
+                with patch.object(state,'_close_lifecycle',side_effect=fail),self.assertRaises(RuntimeError):
+                    self.api.close_task(f.scope,scenario.linked_closure_request(0),self.api._observe_closure((context,),ref))
+                self.assertEqual(len(self.linked_closure_candidates(context,ref)),1)
+                self.assertIsNone(scenario.task(f)['lifecycle']['safe_closed_at'])
             identity=dict(client='codex',session_id='ordinary-'+stage,task_id='ordinary-'+stage,scope_ref='user:ordinary')
             task=state.start_task(f.scope,identity|dict(mode='editable',decision_ref='user:accepted'))['task']
             proof=dict(version=1,kind='stopped-writer-reconciliation',identity=identity,expected_revision=task['revision'],expected_pins=task['pins'],
@@ -2800,9 +2823,13 @@ class LinkedVerificationTests(unittest.TestCase):
         path.write_text(json.dumps(record));self.members.append(third);self.establish()
         pointer=self.verify()['verification'];authorities=self.preparation_stops(pointer,skip=2)
         with self.assertRaises(StartupError):self.api._observe_linked_preparation(pointer,authorities[:2])
+        contexts=tuple(self.api._evidence_context(f.scope) for f in self.members[:2])
+        with self.assertRaises(StartupError):self.api._observe_closure(contexts,self.reference(self.selected))
         state._retain_ready_stop(third.scope,self.stop_request(third,pointer))
         observed=self.api._observe_linked_preparation(pointer,authorities[:2])
         self.assertEqual(len(observed.facts['members']),3)
+        with self.assertRaises(StartupError):self.api._observe_closure(contexts,self.reference(self.selected))
+        self.assertTrue(all(self.task(f)['lifecycle']['safe_closed_at'] is None for f in self.members))
         incomplete=self.api._canonical_plain(observed.facts);incomplete['members'].pop()
         with self.assertRaises(StartupError):self.api._prepare_linked_closure(replace(observed,facts=self.api._canonical_freeze(incomplete)))
         self.assertEqual(self.preparation_receipts(tuple(self.api._evidence_context(f.scope) for f in self.members)),[])
@@ -2927,6 +2954,203 @@ class LinkedVerificationTests(unittest.TestCase):
         print('FOREIGN_RAW_TASK_RETAINED ' + str(present), flush=True)
         print('ORIGINAL_SOURCE_REQUIRED_FOREIGN_RAW_TASK ' + str(bool(original)), flush=True)
         self.assertTrue(present, 'D4 erases an explicit foreign raw-task demand merely because its semantic source owner belongs to the prepared component')
+
+    def linked_closure_fixture(self):
+        from runtime import changes
+        pointer,d4,source,contexts,refs=self.preparation_fixture()
+        observed=self.api._observe_linked_preparation(pointer,self.api._canonical_plain(source.content['authorities']))
+        self.assertTrue(self.api._prepare_linked_closure(observed)['complete'])
+        released=changes._register_recovery_release(changes._observe_recovery_release(source.content['authorities'],dict(source.content['identity'])))
+        self.assertTrue(released['complete'],released)
+        return pointer,d4,source,contexts,refs
+
+    def linked_closure_request(self,index):
+        task=self.task(self.members[index])
+        return {key:task[key] for key in ('client','session_id','task_id','scope_ref')}|dict(expected_revision=task['revision'],expected_pins=task['pins'])
+
+    def linked_closure_candidates(self,context,reference):
+        found=[]
+        with self.api._context_database(context) as db:
+            for row in db.execute("select name,digest,owner_key,class,created_at,closed_at,status,bytes,data from evidence_metadata where class='compact'"):
+                metadata=state._metadata_record(row)
+                if metadata['owner'].get('task')!=reference:continue
+                ref=dict(name=row[0],digest=row[1]);body=self.api._read(None,ref,context=context,db=db)
+                if body.get('kind')=='task-closure':found.append(dict(reference=ref,metadata=metadata,content=body))
+        return found
+
+    def test_linked_safe_closure_second_transaction_failure_reuses_registered_candidate(self):
+        _,_,_,contexts,refs=self.linked_closure_fixture()
+        first=self.api.close_task(self.members[0].scope,self.linked_closure_request(0),self.api._observe_closure(contexts,refs[0]))['task']
+        peer=self.task(self.members[1]);before=self.raw_rows(contexts);closed=state._close_lifecycle;failed=[]
+        def fail(db,ref,observation,compact):
+            result=closed(db,ref,observation,compact);failed.append(result)
+            raise RuntimeError('fixture: failure after lifecycle SQL before commit')
+        observed=self.api._observe_closure(contexts,refs[1])
+        with patch.object(state,'_close_lifecycle',side_effect=fail),self.assertRaises(RuntimeError):
+            self.api.close_task(self.members[1].scope,self.linked_closure_request(1),observed)
+        self.assertEqual(len(failed),1);self.assertEqual(self.task(self.members[0]),first);self.assertEqual(self.task(self.members[1]),peer)
+        self.assertEqual(self.raw_rows(contexts),before)
+        candidates=self.linked_closure_candidates(contexts[1],refs[1]);self.assertEqual(len(candidates),1,'A retry needs durable managed ownership, not an unregistered orphan')
+        candidate=candidates[0];self.assertEqual(candidate['metadata']['created_at'],peer['lifecycle']['created_at'])
+        retry=self.api.close_task(self.members[1].scope,self.linked_closure_request(1),self.api._observe_closure(contexts,refs[1]))['task']
+        self.assertEqual(retry['lifecycle']['compact'],candidate['reference']);self.assertIsNotNone(retry['lifecycle']['safe_closed_at'])
+        self.assertEqual(self.linked_closure_candidates(contexts[1],refs[1]),candidates)
+        replay=self.api.close_task(self.members[1].scope,self.linked_closure_request(1),self.api._observe_closure(contexts,refs[1]))['task']
+        self.assertEqual(replay,retry);self.assertEqual(self.task(self.members[0]),first)
+
+    def test_linked_safe_closure_historical_observation_refuses_direct_retirement(self):
+        from runtime import delegation
+        def rows():
+            result=[]
+            for context in contexts:
+                with self.api._context_database(context) as db:result.append(list(db.iterdump()))
+            return result
+        pointer=self.verify()['verification'];authorities=self.preparation_stops(pointer)
+        self.assertTrue(self.api._prepare_linked_closure(self.api._observe_linked_preparation(pointer,authorities))['complete'])
+        contexts=tuple(self.api._evidence_context(f.scope) for f in self.members);refs=tuple(self.reference(f) for f in self.members)
+        first=self.api.close_task(self.members[0].scope,self.linked_closure_request(0),self.api._observe_closure(contexts,refs[0]))['task']
+        for complete in (False,True):
+            if complete:self.api.close_task(self.members[1].scope,self.linked_closure_request(1),self.api._observe_closure(contexts,refs[1]))
+            historical=self.api._observe_closure(contexts,refs[0]);before=self.raw_rows(contexts);all_rows=rows()
+            self.assertIn('retained_linked_closure',historical.facts)
+            for entry in (delegation.retire_settled,state.retire_closed):
+                with self.subTest(all_members_closed=complete,entry=entry.__name__),self.api._context_database(contexts[0],write=True) as db:
+                    with self.assertRaises(state.StateError):entry(db,refs[0],historical)
+                self.assertEqual(self.raw_rows(contexts),before);self.assertEqual(rows(),all_rows)
+            self.assertEqual(self.task(self.members[0]),first)
+
+    def test_linked_safe_closure_recovery_progress_accepts_exact_prior_closure(self):
+        from runtime import changes
+        _,d4,source,contexts,refs=self.linked_closure_fixture();original=[self.task(f) for f in self.members];before=self.raw_rows(contexts)
+        first=self.api.close_task(self.members[0].scope,self.linked_closure_request(0),self.api._observe_closure(contexts,refs[0]))['task']
+        journal=changes._load_journal(d4.directory)
+        request=dict(schema_version=2,manifest=journal['manifest'],approval=journal['approval'])
+        resumed=changes._run_scoped(d4.directory,request,'resume');self.assertEqual(resumed['exit_code'],0,resumed)
+        rolled=changes._run_scoped(d4.directory,request,'rollback');self.assertEqual(rolled['exit_code'],0,rolled)
+        self.assertTrue(changes.inspect_lifecycle_recovery(source.content['authorities'],refs)['complete'])
+        second=self.api.close_task(self.members[1].scope,self.linked_closure_request(1),self.api._observe_closure(contexts,refs[1]))['task']
+        self.assertIsNotNone(second['lifecycle']['safe_closed_at']);self.assertEqual(self.task(self.members[0]),first)
+        replay=self.api.close_task(self.members[0].scope,self.linked_closure_request(0),self.api._observe_closure(contexts,refs[0]))['task']
+        self.assertEqual(replay,first)
+        for f,old in zip(self.members,original):
+            current=self.task(f)
+            self.assertEqual({key:value for key,value in current.items() if key!='lifecycle'},{key:value for key,value in old.items() if key!='lifecycle'})
+            self.assertEqual(current['lifecycle']['created_at'],old['lifecycle']['created_at'])
+            compact=self.api._read(f.scope,current['lifecycle']['compact'])
+            preparation=self.api._read(f.scope,compact['artifacts'][0])
+            for key in ('numerical','reviews','workers','native_guidance','scope_guidance','verifications','sources'):
+                self.assertEqual(compact[key],preparation[key])
+        for old,current in zip(before,self.raw_rows(contexts)):
+            self.assertEqual({key:value for key,value in old.items() if key!='tasks'},{key:value for key,value in current.items() if key!='tasks'})
+        for context,ref in zip(contexts,refs):
+            with self.assertRaises(StartupError):self.api._retire_closed_task(context,ref)
+
+    def linked_closure_late_change(self,kind):
+        _,_,_,contexts,refs=self.linked_closure_fixture()
+        first=self.api.close_task(self.members[0].scope,self.linked_closure_request(0),self.api._observe_closure(contexts,refs[0]))['task']
+        peer=self.task(self.members[1]);before=self.raw_rows(contexts);observed=self.api._observe_closure(contexts,refs[1]);close=state._close_lifecycle;changed=[]
+        def move(db,ref,observation,compact):
+            if kind=='peer':(self.members[0].repo/'app.py').write_text('changed after closure observation\n')
+            else:
+                basis=self.api._read(self.members[0].scope,first['writer_stop']['linked'])
+                source=next(row for row in basis['sources'] if self.api._linked_source(row['reference']).get('kind')=='linked-integration-observation')
+                path=Path(source['metadata']['managed']['path']);replacement=path.with_name(path.name+'.replacement')
+                replacement.write_bytes(path.read_bytes());replacement.chmod(0o400);os.replace(replacement,path)
+            changed.append(True);return close(db,ref,observation,compact)
+        with patch.object(state,'_close_lifecycle',side_effect=move),self.assertRaises(StartupError):
+            self.api.close_task(self.members[1].scope,self.linked_closure_request(1),observed)
+        self.assertEqual(changed,[True]);self.assertEqual(self.raw_rows(contexts),before)
+        self.assertEqual(self.task(self.members[0]),first);self.assertEqual(self.task(self.members[1]),peer)
+        self.assertEqual(len(self.linked_closure_candidates(contexts[1],refs[1])),1)
+        with self.assertRaises(StartupError):self.api._observe_closure(contexts,refs[1])
+        with patch.object(self.api,'_capture',side_effect=AssertionError('Historical replay captured current readiness')):
+            status=state.task_status(self.members[0].scope,'codex','parent')
+            replay=self.api.close_task(self.members[0].scope,self.linked_closure_request(0),self.api._observe_closure(contexts,refs[0]))['task']
+        self.assertEqual(status['task'],first);self.assertTrue(status['historical']['historical']);self.assertFalse(status['historical']['current'])
+        self.assertEqual(replay,first)
+
+    def test_linked_safe_closure_late_peer_change_preserves_committed_history(self):self.linked_closure_late_change('peer')
+
+    def test_linked_safe_closure_late_source_change_preserves_committed_history(self):self.linked_closure_late_change('source')
+
+    def linked_closure_pending_protection(self,kind):
+        _,_,_,contexts,refs=self.linked_closure_fixture();before=[self.task(f) for f in self.members]
+        observed=self.api._observe_closure(contexts,refs[0])
+        with patch.object(state,'_close_lifecycle',side_effect=RuntimeError('fixture: before lifecycle publication')),self.assertRaises(RuntimeError):
+            self.api.close_task(self.members[0].scope,self.linked_closure_request(0),observed)
+        candidate=self.linked_closure_candidates(contexts[0],refs[0])[0];path=Path(candidate['metadata']['managed']['path'])
+        if kind=='stale':
+            f=self.members[0];state.start_task(f.scope,dict(client='codex',session_id='later-owner',task_id='later-task',scope_ref='user:later',mode='editable',decision_ref='user:accepted'))
+        elif kind=='substituted':
+            replacement=path.with_name(path.name+'.replacement');replacement.write_bytes(path.read_bytes());replacement.chmod(0o400);os.replace(replacement,path)
+        else:
+            lookalike=path.with_name('0'*32+'.json');lookalike.write_bytes(path.read_bytes());lookalike.chmod(0o400)
+        with self.assertRaises(StartupError):self.api._observe_closure(contexts,refs[0])
+        self.assertEqual([self.task(f) for f in self.members],before)
+        with self.api._context_database(contexts[0]) as db:
+            self.assertEqual(state._metadata(db,candidate['reference']['name']),candidate['metadata'])
+        self.assertEqual(candidate['metadata']['created_at'],before[0]['lifecycle']['created_at']);self.assertIsNone(candidate['metadata']['closed_at'])
+
+    def test_linked_safe_closure_stale_pending_candidate_stays_protected(self):self.linked_closure_pending_protection('stale')
+
+    def test_linked_safe_closure_substituted_pending_candidate_stays_protected(self):self.linked_closure_pending_protection('substituted')
+
+    def test_linked_safe_closure_unregistered_candidate_lookalike_stays_protected(self):self.linked_closure_pending_protection('lookalike')
+
+    def test_linked_safe_closure_foreign_recovery_raw_root_stays_protected(self):
+        from runtime import changes,onboarding
+        from tests.test_changes import ScopedChangesTests
+        _,_,source,contexts,refs=self.linked_closure_fixture();before=self.raw_rows(contexts)
+        other=ScopedChangesTests(methodName='runTest');other.setUp();self.addCleanup(other.doCleanups);request=other.scoped_request()
+        for repository in request['manifest']['enrollment']['record']['repositories']:
+            for checkout in repository['checkouts']:checkout['clients'][0]['configuration']['runtime']=dict(schema_version=3,state_dir=str(contexts[0].directory))
+        request['approval']['manifest_digest']=onboarding._digest(request['manifest']);self.assertEqual(changes._run_scoped(other.directory,request,'apply')['exit_code'],0)
+        independent=changes._observe_recovery_source(other.directory,changes._load_journal(other.directory),contexts,refs)
+        for context in contexts:
+            with self.api._context_database(context,write=True) as db:self.api._register_recovery_source(None,db,independent,context=context)
+        recovery=changes.inspect_lifecycle_recovery(source.content['authorities'],refs);self.assertTrue(recovery['complete'])
+        self.assertTrue(any(edge['kind']=='task' and edge['reference'] in refs and edge['need']=='raw' for edge in recovery['requirements']))
+        with self.assertRaises(StartupError):self.api._observe_closure(contexts,refs[0])
+        self.assertEqual(self.raw_rows(contexts),before)
+
+    def test_linked_safe_closure_changed_prior_lifecycle_envelope_rejects(self):
+        _,_,_,contexts,refs=self.linked_closure_fixture()
+        first=self.api.close_task(self.members[0].scope,self.linked_closure_request(0),self.api._observe_closure(contexts,refs[0]))['task']
+        corrupt=self.api._canonical_plain(self.api._canonical_freeze(first));corrupt['lifecycle']['closure']['dependency_digest']='0'*64
+        with self.api._context_database(contexts[0],write=True) as db:
+            db.execute('update tasks set data=? where scope_id=? and client=? and session_id=? and task_id=?',
+                (json.dumps(corrupt),*(refs[0][key] for key in ('scope_id','client','session_id','task_id'))))
+        with self.assertRaises(StartupError):self.api._observe_closure(contexts,refs[1])
+        self.assertIsNone(self.task(self.members[1])['lifecycle']['safe_closed_at'])
+        self.assertEqual(state.task_status(self.members[0].scope,'codex','parent')['historical']['status'],'unavailable')
+
+    def test_linked_safe_closure_sequential_members_preserves_raw_history_and_recovery(self):
+        from runtime import changes
+        pointer,_,source,contexts,refs=self.preparation_fixture()
+        observed=self.api._observe_linked_preparation(pointer,self.api._canonical_plain(source.content['authorities']))
+        self.assertTrue(self.api._prepare_linked_closure(observed)['complete'])
+        released=changes._register_recovery_release(changes._observe_recovery_release(source.content['authorities'],dict(source.content['identity'])))
+        self.assertTrue(released['complete'],released)
+        original=[self.task(f) for f in self.members];raw=self.raw_rows(contexts);compacts=[]
+        for index,(f,ref) in enumerate(zip(self.members,refs)):
+            task=original[index]
+            request={key:task[key] for key in ('client','session_id','task_id','scope_ref')}
+            request.update(expected_revision=task['revision'],expected_pins=task['pins'])
+            closure=self.api._observe_closure(contexts,ref)
+            closed=self.api.close_task(f.scope,request,closure)['task'];compacts.append(closed['lifecycle']['compact'])
+            self.assertIsNotNone(closed['lifecycle']['safe_closed_at'])
+            self.assertEqual({k:v for k,v in closed.items() if k!='lifecycle'},{k:v for k,v in task.items() if k!='lifecycle'})
+            self.assertEqual(closed['lifecycle']['created_at'],task['lifecycle']['created_at'])
+            self.assertTrue(changes.inspect_lifecycle_recovery(source.content['authorities'],refs)['complete'])
+            for before,after in zip(raw,self.raw_rows(contexts)):
+                self.assertEqual({k:v for k,v in after.items() if k!='tasks'},{k:v for k,v in before.items() if k!='tasks'})
+        first=self.task(self.members[0]);task=original[0]
+        replay=self.api.close_task(self.members[0].scope,{key:task[key] for key in ('client','session_id','task_id','scope_ref')}|
+            dict(expected_revision=task['revision'],expected_pins=task['pins']),self.api._observe_closure(contexts,refs[0]))['task']
+        self.assertEqual(replay,first)
+        for context,ref in zip(contexts,refs):
+            with self.assertRaises(StartupError):self.api._retire_closed_task(context,ref)
+        self.assertEqual(compacts,[self.task(f)['lifecycle']['compact'] for f in self.members])
 
     def preparation_reader_fixture(self):
         pointer=self.verify()['verification'];authorities=self.preparation_stops(pointer)
