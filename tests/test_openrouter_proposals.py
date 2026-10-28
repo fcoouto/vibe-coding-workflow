@@ -138,6 +138,78 @@ class ProposalTests(unittest.TestCase):
         self.assertEqual(candidate['history'][0]['profile']['scope'], 'one file')
         self.assertEqual(candidate['history_differences'][0], {'task_id': 'task-1', 'fields': ['scope']})
 
+    def test_triage_bounds_repeated_evidence_without_losing_cache_or_history(self):
+        metadata = json.loads(json.dumps(METADATA))
+        metadata['models'][0]['public_notes'] = 'é' * 8192
+        metadata['benchmarks'][0]['optional_evidence'] = [None] * 4000
+        metadata['endpoints'] += [dict(metadata['endpoints'][0], provider=f'p-{index}') for index in range(127)]
+        token = self.call('claim')['refresh_token']
+        self.call('publish', dict(refresh_token=token, metadata=metadata))
+        token = self.call('begin', self.begin_request())['attempt_token']
+        self.call('record', dict(attempt_token=token, disposition='rejected', observations={'cost': None}))
+        # Refresh through the CLI so its real clock also sees fresh discovery.
+        claim = json.loads(self.cli('claim', {'force': True}).stdout)
+        self.assertEqual(self.cli('publish', dict(refresh_token=claim['refresh_token'], metadata=metadata)).returncode, 0)
+        before = self.store.read_bytes()
+        history = self.call('history')
+        request = dict(profile=PROFILE, requirements=dict(context_tokens=100, output_tokens=500, modalities=['text'], parameters=[]))
+        with patch.object(self.api, 'incompatibilities', wraps=self.api.incompatibilities) as checked:
+            result = self.call('triage', request)
+        self.assertEqual(result.get('fallback'), 'response_capacity')
+        self.assertEqual(result['candidates'], [])
+        self.assertEqual(result['incompatible'], [])
+        self.assertLess(checked.call_count, len(metadata['endpoints']))
+        output = self.cli('triage', request)
+        self.assertEqual(output.returncode, 0, output.stderr)
+        self.assertEqual(json.loads(output.stdout), result)
+        self.assertLessEqual(len(output.stdout.encode()), 1024 * 1024)
+        self.assertEqual(self.store.read_bytes(), before)
+        self.assertEqual(self.call('status', {'include_metadata': True})['metadata'], metadata)
+        self.assertEqual(self.call('history'), history)
+        self.assertEqual(self.call('begin', self.begin_request())['fallback'], 'task_already_attempted')
+
+    def test_triage_budget_counts_exact_encoded_envelope_and_newline(self):
+        metadata = json.loads(json.dumps(METADATA))
+        metadata['models'][0]['public_notes'] = 'é\n'
+        metadata['endpoints'].extend((dict(metadata['endpoints'][0], provider='p-2'),
+                                      dict(metadata['endpoints'][0], provider='too-small', max_output_tokens=1)))
+        claim = json.loads(self.cli('claim', {}).stdout)
+        self.assertEqual(self.cli('publish', dict(refresh_token=claim['refresh_token'], metadata=metadata)).returncode, 0)
+        query = dict(profile=PROFILE, requirements=dict(context_tokens=100, output_tokens=500, modalities=['text'], parameters=[]))
+        result = self.call('triage', query)
+        self.assertEqual(len(result['candidates']), 2)
+        self.assertEqual(result['candidates'][0]['model_metadata'], metadata['models'][0])
+        self.assertEqual(result['candidates'][0]['benchmarks'], metadata['benchmarks'])
+        self.assertEqual(result['incompatible'], [dict(model='model/v1', provider='too-small', reasons=['output_tokens'])])
+        expected = json.dumps(result, allow_nan=False, sort_keys=True, separators=(',', ':')) + '\n'
+        output = self.cli('triage', query)
+        self.assertEqual(output.returncode, 0, output.stderr)
+        self.assertEqual(output.stdout, expected)
+        size = len(expected.encode())
+        with patch.object(self.api, 'MAX_RESPONSE', size, create=True):
+            self.assertEqual(self.call('triage', query), result)
+        with patch.object(self.api, 'MAX_RESPONSE', size - 1, create=True):
+            self.assertEqual(self.call('triage', query).get('fallback'), 'response_capacity')
+
+    def test_triage_bounds_history_differences_during_construction(self):
+        self.publish()
+        state = json.loads(self.store.read_bytes())
+        state['attempts'] = [dict(model='model/v1', provider='p', profile=PROFILE, task_id=str(index)) for index in range(100)]
+
+        class CountedProfile(dict):
+            passes = 0
+
+            def __iter__(self):
+                self.passes += 1
+                return super().__iter__()
+
+        task_profile = CountedProfile(PROFILE, **{f'label-{index}': 'different' for index in range(1000)})
+        query = dict(profile=task_profile, requirements=dict(context_tokens=100, output_tokens=500, modalities=['text'], parameters=[]))
+        with patch.object(self.api, 'MAX_RESPONSE', 100 * 1024):
+            result = self.api.triage(state, query, 100)
+        self.assertEqual(result.get('fallback'), 'response_capacity')
+        self.assertLess(task_profile.passes, len(state['attempts']))
+
     def test_concurrent_begin_dispatches_once(self):
         self.publish()
         # Publish through the CLI so its real wall clock sees fresh discovery.

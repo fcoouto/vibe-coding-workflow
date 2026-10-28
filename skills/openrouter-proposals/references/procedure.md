@@ -85,6 +85,8 @@ Publish with `{"refresh_token":"<token>","metadata":{...}}`. If collection fails
 
 ## Triage a bounded task
 
+Keep security-sensitive decisions, broad architectural work and tasks with weak verification native during this first pilot. Relevant benchmarks, focused tests or previous proposal success do not override this task-scope restriction.
+
 Describe the task with short reusable labels for `family`, `language`, `framework`, `difficulty`, `scope` and `verification`. Use meaningful categories such as an isolated bug fix, one language/framework, one-file scope and focused tests; avoid making every task's profile unique. Keep exact task identity separate from these labels.
 
 Call `triage` with the profile and requirements:
@@ -109,6 +111,8 @@ Call `triage` with the profile and requirements:
 ```
 
 These are illustrative requirements, not a universal profile or budget. `context_tokens` is the input estimate, including instructions and task content; the helper separately reserves `output_tokens` within the total context window. Include reasoning in the output reservation where the model counts it there. Use actual client token counts when available; otherwise label estimates. Do not ask for parameters the selected endpoint cannot support. Supply top-level `effort` when triaging an explicit reasoning choice.
+
+The helper caps the complete triage response at 1 MiB, including its CLI newline, using compact ASCII-escaped JSON. If repeated candidate evidence would exceed that budget, it returns `fallback: "response_capacity"` with empty candidate/incompatibility lists. Continue natively; the snapshot and attempt history remain intact. This fallback is not a partial shortlist or permission to retry external selection for the task.
 
 Exclude concrete incompatibilities, such as inadequate context/output capacity or missing required interfaces. Apply the user's provider/data restrictions before choosing a route. Missing benchmark scores lower certainty rather than automatically disqualifying a model.
 

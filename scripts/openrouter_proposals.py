@@ -20,6 +20,7 @@ import time
 
 MAX_INPUT = 1024 * 1024
 MAX_STATE = 8 * 1024 * 1024
+MAX_RESPONSE = 1024 * 1024
 MAX_ATTEMPTS = 1000
 TTL = 86400
 LEASE = 120
@@ -30,13 +31,18 @@ MAX_TIMEOUT_SECONDS = 120
 
 
 def encoded(value, limit):
+    data = bytearray()
     try:
-        data = json.dumps(value, allow_nan=False, sort_keys=True, separators=(',', ':')).encode()
+        for chunk in json.JSONEncoder(allow_nan=False, sort_keys=True, separators=(',', ':')).iterencode(value):
+            chunk = chunk.encode('ascii')
+            if len(data) + len(chunk) > limit:
+                break
+            data.extend(chunk)
+        else:
+            return bytes(data)
     except (TypeError, ValueError, RecursionError) as exc:
         raise ValueError('finite JSON data required') from exc
-    if len(data) > limit:
-        raise ValueError('JSON size limit exceeded')
-    return data
+    raise ValueError('JSON size limit exceeded')
 
 
 def text(value, name):
@@ -150,18 +156,33 @@ def triage(state, request, now):
     requirements = requirements_for(request)
     metadata = state['snapshot']['metadata']
     candidates, incompatible = [], []
+    result = dict(candidates=candidates, incompatible=incompatible, snapshot_digest=state['snapshot']['digest'], advisory=True)
+    remaining = MAX_RESPONSE - len(encoded(result, MAX_RESPONSE)) - 1
     for endpoint in metadata['endpoints']:
         model = next((m for m in metadata['models'] if m['id'] == endpoint['model']), None)
         reasons = incompatibilities(model, endpoint, requirements, request.get('effort'))
-        related = [row for row in state['attempts'] if row['model'] == endpoint['model'] and row['provider'] == endpoint['provider'] and all(row['profile'][key] == request['profile'][key] for key in ('family', 'language'))][-100:]
-        item = dict(model=endpoint['model'], provider=endpoint['provider'], endpoint=endpoint, model_metadata=model,
-                    benchmarks=[b for b in metadata['benchmarks'] if b.get('model') == endpoint['model']],
-                    history=related, history_differences=[dict(task_id=row['task_id'], fields=[key for key in request['profile'] if row['profile'].get(key) != request['profile'][key]]) for row in related])
         if reasons:
-            incompatible.append(dict(model=endpoint['model'], provider=endpoint['provider'], reasons=reasons))
+            target = incompatible
+            item = dict(model=endpoint['model'], provider=endpoint['provider'], reasons=reasons)
         else:
-            candidates.append(item)
-    return dict(candidates=candidates, incompatible=incompatible, snapshot_digest=state['snapshot']['digest'])
+            target = candidates
+            related = [row for row in state['attempts'] if row['model'] == endpoint['model'] and row['provider'] == endpoint['provider'] and all(row['profile'][key] == request['profile'][key] for key in ('family', 'language'))][-100:]
+            item = dict(model=endpoint['model'], provider=endpoint['provider'], endpoint=endpoint, model_metadata=model,
+                        benchmarks=[b for b in metadata['benchmarks'] if b.get('model') == endpoint['model']],
+                        history=related, history_differences=[])
+        try:
+            size = len(encoded(item, remaining - bool(target))) + bool(target)
+            if not reasons:
+                differences = item['history_differences']
+                for row in related:
+                    difference = dict(task_id=row['task_id'], fields=[key for key in request['profile'] if row['profile'].get(key) != request['profile'][key]])
+                    size += len(encoded(difference, remaining - size - bool(differences))) + bool(differences)
+                    differences.append(difference)
+        except ValueError:
+            return dict(fallback='response_capacity', candidates=[], incompatible=[])
+        remaining -= size
+        target.append(item)
+    return result
 
 
 def act(action, state, request, now):
@@ -356,10 +377,11 @@ def main():
         if len(raw) > MAX_INPUT:
             raise ValueError('request size limit exceeded')
         result = run(args.action, args.store, json.loads(raw))
+        output = encoded(result, MAX_RESPONSE - 1 if args.action == 'triage' else MAX_STATE)
     except (ValueError, RecursionError) as exc:
         print(json.dumps(dict(error=str(exc))))
         return 1
-    print(json.dumps(result, allow_nan=False))
+    sys.stdout.buffer.write(output + b'\n')
     return 0
 
 
