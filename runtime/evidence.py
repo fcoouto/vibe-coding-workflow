@@ -549,16 +549,16 @@ def _ready_stop_shape(proof):
         proof['stopped'] is True and proof['descendants_stopped'] is True,'Independent complete ready stop remains missing')
 
 
-def _ready_stop_proof(task,proof,bindings,candidate):
+def _ready_stop_proof(task,proof,bindings,candidate,verification):
     _ready_stop_shape(proof)
     attempts=task.get('evidence',{}).get('attempts',[])
-    _require(task['state']=='ready' and task['pins']['schema_version']==3 and type(proof['version']) is int and proof['version']==2 and
+    _require(task['state'] in {'ready','cancelled'} and task['pins']['schema_version']==3 and type(proof['version']) is int and proof['version']==2 and
         proof['kind']=='stopped-writer-reconciliation' and proof['stopped'] is True and proof['descendants_stopped'] is True and
         proof['identity']=={k:task[k] for k in ('client','session_id','task_id','scope_ref')} and
         proof['expected_revision']==task['revision'] and proof['expected_pins']==task['pins'] and proof['observed_turn_id']==task['turn_id'] and
         proof['attempt_ids']==[a['id'] for a in attempts] and not any(a['status'] in {'reserved','running','uncertain'} for a in attempts) and
         all(proof[k]==v for k,v in bindings.items()) and proof['candidate_digest']==_digest(candidate) and
-        proof['verification_digest']==task['evidence']['verification']['digest'],
+        proof['verification_digest']==verification['digest'],
         'Independent ready stop does not bind the complete current original owner snapshot')
 
 
@@ -570,14 +570,39 @@ def _check_ready_inputs(files,*,directory_identity=False):
         else:_require(current==value,'Ready candidate inputs changed before owner commit')
 
 
+def _stop_verification(context,db,task):
+    """Select actual barrier support; cancellation never asserts passing readiness."""
+    if task['state']=='ready':return task['evidence']['verification']
+    from runtime import changes,delegation
+    _require(task['state']=='cancelled' and task.get('retirement'),'Complete cancelled stop needs original retirement')
+    ref=dict(authority=_canonical_plain(context.authority_set[0]),scope_id=_task_scope_id(task),
+        **{k:task[k] for k in ('client','session_id','task_id')})
+    legacy=dict(reference=ref,created_at=task['lifecycle']['created_at'],**{k:task[k] for k in
+        ('revision','pins','accepted_identity','scope_ref','turn_id','retirement')},proof=_read(None,task['retirement']['proof'],context=context,db=db))
+    changes._stopped_certificate_shape(legacy)
+    attempts=[a['id'] for a in task.get('evidence',{}).get('attempts',[]) if a['status'] in {'reserved','running','uncertain'}]
+    _require(legacy['proof']['attempt_ids']==attempts,'Original cancellation attempt membership changed')
+    barriers=[]
+    for record in delegation._ledger(None,db,context=context):
+        if not all(record['owner'][k]==ref[k] for k in ('scope_id','client','session_id','task_id')):continue
+        if record['data']['role']!='coordinator' or record['data']['status']!='settled':continue
+        rec=_read(None,record['data']['reconciliation'],context=context,db=db)
+        if rec.get('kind')=='synchronous-verification':
+            changes._barrier_facts(context,db,task,record,rec);barriers.append(rec)
+    _require(barriers,'Cancelled complete stop requires an actual original synchronous barrier')
+    return max(barriers,key=lambda rec:rec['revision'])['verification']
+
+
 def _ready_stop_candidate(context,task,candidate):
     """Read-only freshness from original pinned context; never reserve another verifier."""
     with _context_database(context) as db:
         plan=_read(None,task['evidence']['plan'],context=context,db=db)
-        verification=_read(None,task['evidence']['verification'],context=context,db=db)
-    _require(task['state']=='ready' and plan['version']==1 and 'linked_verification' not in task['evidence'] and
-        verification['purpose']=='completion' and not verification['blockers'] and verification['plan_digest']==_digest(plan) and
-        verification['candidate_digest']==_digest(candidate),'Ready verification is missing, linked or stale')
+        verification_ref=_stop_verification(context,db,task)
+        verification=_read(None,verification_ref,context=context,db=db)
+    _require(task['state'] in {'ready','cancelled'} and plan['version']==1 and 'linked_verification' not in task['evidence'] and
+        (task['state']=='cancelled' or verification['purpose']=='completion' and not verification['blockers'] and
+        verification['plan_digest']==_digest(plan) and verification['candidate_digest']==_digest(candidate)),
+        'Ready verification is missing, linked or stale')
     _candidate_projection(candidate,task)
     _require(state.runtime_fingerprint()==task['pins']['runtime_digest'] and policy_digest(state.PACKAGE)==task['pins']['policy_digest'],
         'Installed ready source pins changed')
@@ -585,8 +610,9 @@ def _ready_stop_candidate(context,task,candidate):
     first=_capture(locator,plan,pinned=(task['accepted_identity'],task['pins']))
     second=_capture(locator,plan,pinned=(task['accepted_identity'],task['pins']))
     _require(first==second==candidate,'Ready candidate changed after independent stop')
-    _require(not _blockers(locator,task,plan,candidate,'completion',verification.get('reuse',[]),verification.get('security_impact'),
-        resource_closure=verification['resource_closure'],context=context),'Ready findings/resources remain blocked')
+    if task['state']=='ready':
+        _require(not _blockers(locator,task,plan,candidate,'completion',verification.get('reuse',[]),verification.get('security_impact'),
+            resource_closure=verification['resource_closure'],context=context),'Ready findings/resources remain blocked')
     # Stat snapshots supplement the complete capture at the last short writer.
     root=Path(task['accepted_identity']['repository_root']);git=Path(task['accepted_identity']['git_dir'])
     common=Path(task['accepted_identity']['git_common_dir'])
@@ -629,9 +655,9 @@ def _closure_facts(context, task_ref, db, recovery, *, recovery_files=None):
     _require(task['pins']['schema_version']==3 and task.get('lifecycle') and
         (ready and task.get('writer_stop') or task['state']=='cancelled' and task.get('retirement')),
         'Closure needs a dated independently stopped owner')
-    ready_files=_ready_stop_candidate(context,task,_read(None,task['writer_stop']['candidate'],context=context,db=db)) if ready else {}
+    ready_files=_ready_stop_candidate(context,task,_read(None,task['writer_stop']['candidate'],context=context,db=db)) if task.get('writer_stop') else {}
     certificate=changes._stopped_certificate(context,db,dict(reference=task_ref,pins=task['pins']))
-    _require(ready or not certificate['proof']['attempt_ids'],'Stopped unresolved attempts require assignment certificate integration')
+    _require(task.get('writer_stop') or not certificate['proof']['attempt_ids'],'Stopped unresolved attempts require assignment certificate integration')
     records=delegation._closure_assignments(context,db,task_ref,task,certificate)
     all_records=delegation._ledger(None,db,context=context)
     guidance=delegation._closure_guidance(context,db,all_records)

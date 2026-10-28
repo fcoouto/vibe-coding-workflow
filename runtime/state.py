@@ -545,21 +545,22 @@ def _ready_stop(context,db,task,*,observe=False):
     proof=evidence._read(None,stop['proof'],context=context,db=db)
     bindings=_ready_stop_bindings(context,db,task)
     candidate=evidence._read(None,stop['candidate'],context=context,db=db)
-    evidence._ready_stop_proof(task,proof,bindings,candidate)
+    verification_ref=evidence._stop_verification(context,db,task)
+    evidence._ready_stop_proof(task,proof,bindings,candidate,verification_ref)
     if (stop['task_revision']!=task['revision'] or stop['generation']!=bindings['generation'] or
-        stop['verification']!=task['evidence']['verification'] or
+        stop['verification']!=verification_ref or
         any(proof[k]!=stop[k] for k in ('observation_ref','coordinator_ref'))):
         raise StateError('Retained ready stop envelope changed')
     evidence._candidate_projection(candidate,task)
     evidence._check_ready_inputs(stop['inputs'],directory_identity=True)
     verification=evidence._read(None,stop['verification'],context=context,db=db)
-    if verification['candidate_digest']!=proof['candidate_digest']:raise StateError('Retained ready verification changed')
+    if task['state']=='ready' and verification['candidate_digest']!=proof['candidate_digest']:raise StateError('Retained ready verification changed')
     if observe:evidence._ready_stop_candidate(context,task,candidate)
     return proof
 
 
 def _retain_ready_stop(scope,request):
-    """Private independent host attestation, preserving readiness/revision and original age."""
+    """Private complete host stop, preserving original outcome/revision and age."""
     from runtime import evidence,changes
     if not isinstance(scope,AcceptedScope) or _scope_version(scope)!=3:raise StateError('Ready stop requires actual accepted schema3 scope')
     _fields(request,('client','session_id','task_id','scope_ref','expected_revision','expected_pins','stop_proof'))
@@ -577,9 +578,10 @@ def _retain_ready_stop(scope,request):
                     raise StateError('Ready stop replay payload changed')
                 return dict(ok=True,task=task,replayed=True)
             _assert_open(task)
-            if task['state']!='ready' or 'evidence' not in task or 'verification' not in task['evidence']:
+            if task['state'] not in {'ready','cancelled'} or 'evidence' not in task:
                 raise StateError('Independent ready stop requires actual ordinary ready verification')
             snapshot=_ready_stop_bindings(context,db,task)
+            verification_ref=evidence._stop_verification(context,db,task)
             plan=evidence._read(None,task['evidence']['plan'],context=context,db=db)
         proof=evidence._read_host_proof(scope,request['stop_proof'])
         candidate=evidence.capture_candidate(scope,plan)
@@ -590,11 +592,11 @@ def _retain_ready_stop(scope,request):
             evidence._check_ready_inputs(files)
             owner=evidence._artifact_owner(scope,task)
             # Validate before registering any artifact; the candidate ref digest is its actual canonical content.
-            evidence._ready_stop_proof(task,proof,snapshot,candidate)
+            evidence._ready_stop_proof(task,proof,snapshot,candidate,verification_ref)
             stop=dict(version=1,task_revision=task['revision'],proof_digest=request['stop_proof']['sha256'],
                 proof=evidence._artifact(scope,proof,owner=owner,db=db),observation_ref=proof['observation_ref'],
                 coordinator_ref=proof['coordinator_ref'],generation=snapshot['generation'],
-                candidate=evidence._artifact(scope,candidate,owner=owner,db=db),verification=task['evidence']['verification'],request_digest=_digest(request),inputs=files)
+                candidate=evidence._artifact(scope,candidate,owner=owner,db=db),verification=verification_ref,request_digest=_digest(request),inputs=files)
             task=dict(task,writer_stop=stop);_writer_stop_shape(stop)
             raw=json.dumps(task,separators=(',',':'))
             if len(raw.encode())>4*1024*1024:raise StateError('Ready stop exceeds the original task record bound')

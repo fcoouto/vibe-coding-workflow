@@ -1680,6 +1680,271 @@ class ReadyClosureTests(unittest.TestCase):
                 finally:scenario.doCleanups()
 
 
+class CancelledBarrierClosureTests(unittest.TestCase):
+    """Actual synchronous barriers; independent fixture host authority remains unqualified."""
+    setUp = CanonicalEvidenceTests.setUp
+    ready = ReadyClosureTests.ready
+    stop_request = ReadyClosureTests.stop_request
+
+    def cancelled(self, *, failed=False, stale=False, older_failed=False):
+        api=self.fixture.api
+        if older_failed:
+            self.fixture.checked();self.fixture.verify();self.fixture.review();task=self.fixture.verify()['task']
+            self.assertEqual(task['state'],'ready')
+        elif failed:
+            self.fixture.checked()
+            task=self.fixture.verify()['task']
+            self.assertNotEqual(task['state'],'ready')
+        else:task=self.ready()
+        proof=dict(version=1,kind='stopped-writer-reconciliation',identity=self.fixture.identity,
+            expected_revision=task['revision'],expected_pins=task['pins'],observed_turn_id=task['turn_id'],
+            stopped=True,descendants_stopped=True,attempt_ids=[],observation_ref='fixture:legacy-stop',coordinator_ref='fixture:independent')
+        raw=json.dumps(proof).encode();path=self.fixture.root/'legacy-cancel.json';path.write_bytes(raw);path.chmod(0o400)
+        task=state.retire_task(self.scope,self.fixture.request(expected_pins=task['pins'],reason='Cancelled',reference='fixture:cancel',
+            stop_proof=dict(path=str(path),sha256=hashlib.sha256(raw).hexdigest())))['task']
+        if stale:(self.fixture.repo/'app.py').write_text('changed after historical verification\n')
+        return task
+
+    def stopped(self, **options):
+        api=self.fixture.api;task=self.cancelled(**options)
+        candidate=api.capture_candidate(self.scope,api._load_plan(self.scope,self.fixture.identity))
+        request=self.stop_request(task,candidate_digest=api._digest(candidate))
+        stopped=state._retain_ready_stop(self.scope,request)['task']
+        for key in ('state','revision','retirement','pins','lifecycle'):self.assertEqual(stopped[key],task[key])
+        return stopped,request
+
+    def recovery(self,task):
+        from tests.test_changes import ScopedChangesTests
+        from runtime import changes,onboarding
+        api=self.fixture.api;context=api._evidence_context(self.scope)
+        ref=api._canonical_plain(api._artifact_owner(self.scope,task).task)
+        d4=ScopedChangesTests(methodName='runTest');d4.setUp();self.addCleanup(d4.doCleanups)
+        request=d4.scoped_request()
+        for repository in request['manifest']['enrollment']['record']['repositories']:
+            for checkout in repository['checkouts']:checkout['clients'][0]['configuration']['runtime']=dict(schema_version=3,state_dir=str(context.directory))
+        request['approval']['manifest_digest']=onboarding._digest(request['manifest'])
+        self.assertEqual(changes._run_scoped(d4.directory,request,'apply')['exit_code'],0)
+        source=changes._observe_recovery_source(d4.directory,changes._load_journal(d4.directory),(context,),(ref,))
+        with api._context_database(context,write=True) as db:old=api._register_recovery_source(None,db,source,context=context)
+        with self.assertRaises(StartupError):api._observe_closure((context,),ref)
+        return d4,request,context,ref,source,old
+
+    def test_cancelled_barrier_complete_stop_d4_cut_closure_and_retired_recovery(self):
+        from runtime import changes
+        api=self.fixture.api;task,_=self.stopped()
+        d4,request,context,ref,source,old=self.recovery(task)
+        observed=changes._observe_recovery_release(context.authority_set,dict(source.content['identity']))
+        with api._context_database(context) as db:
+            originals=[r for r,_ in api._recovery_source_history(context,db,dict(old),dict(source.content['identity']))]
+        self.assertTrue(changes._register_recovery_release(observed)['complete'])
+        with api._context_database(context) as db:
+            current=state._task(db,state._scope_id(self.scope),'codex','parent','task')
+            self.assertEqual(current,task)
+        closed=api.close_task(self.scope,self.fixture.request(expected_pins=task['pins']),api._observe_closure((context,),ref))['task']
+        compact=api._read(self.scope,closed['lifecycle']['compact'])
+        self.assertEqual(compact['outcome'],'cancelled');self.assertEqual(closed['retirement'],task['retirement'])
+        self.assertEqual(len(compact['stopped']['assignments']),3)
+        api._retire_closed_task(context,ref)
+        with api._context_database(context) as db:
+            self.assertEqual(db.execute('select count(*) from tasks').fetchone()[0],0)
+            self.assertEqual(db.execute('select count(*) from assignments').fetchone()[0],0)
+            self.assertEqual(db.execute('select count(*) from turns').fetchone()[0],0)
+            self.assertEqual(db.execute('select count(*) from receipts').fetchone()[0],0)
+            marker=state._retired(db,'task',{k:ref[k] for k in ('scope_id','client','session_id','task_id')})
+            self.assertEqual(marker['outcome'],'cancelled');self.assertEqual(marker['created_at'],task['lifecycle']['created_at'])
+            changes._check_stopped_certificate(context,db,compact['stopped'])
+        retained={a['artifact']['name'] for a in observed.content['artifacts']}
+        for item in source.content['artifacts']:
+            if item['artifact']['name'] not in retained:(context.directory/'evidence'/item['artifact']['name']).unlink(missing_ok=True)
+        for item in originals:(context.directory/'evidence'/item['name']).unlink(missing_ok=True)
+        self.assertTrue(changes.inspect_lifecycle_recovery(context.authority_set,(ref,))['complete'])
+        for operation in ('resume','rollback'):
+            result=changes._run_scoped(d4.directory,request,operation);self.assertEqual(result['exit_code'],0,result)
+
+
+    def test_failed_and_stale_barriers_retain_actual_historical_verification(self):
+        for options in (dict(failed=True),dict(stale=True),dict(older_failed=True)):
+            with self.subTest(options=options):
+                scenario=CancelledBarrierClosureTests(methodName='runTest');scenario.setUp()
+                try:
+                    api=scenario.fixture.api;task,_=scenario.stopped(**options);context=api._evidence_context(scenario.scope)
+                    ref=api._canonical_plain(api._artifact_owner(scenario.scope,task).task)
+                    original=api._read(scenario.scope,task['evidence']['verification'])
+                    closed=api.close_task(scenario.scope,scenario.fixture.request(expected_pins=task['pins']),api._observe_closure((context,),ref))['task']
+                    compact=api._read(scenario.scope,closed['lifecycle']['compact'])
+                    self.assertEqual(compact['outcome'],'cancelled');self.assertIn(original,[v['result'] for v in compact['verifications']])
+                    if options.get('failed'):self.assertTrue(original['blockers'])
+                    elif options.get('older_failed'):
+                        self.assertEqual(len(compact['verifications']),2)
+                        self.assertTrue(any(v['result']['blockers'] for v in compact['verifications']))
+                    else:self.assertNotEqual(task['writer_stop']['candidate']['digest'],original['candidate_digest'])
+                    with api._context_database(context) as db:
+                        for item in compact['verifications']:
+                            self.assertEqual(item['created_at'],state._metadata(db,item['source']['name'])['created_at'])
+                    api._retire_closed_task(context,ref)
+                finally:scenario.doCleanups()
+
+    def test_cancelled_complete_stop_requires_exact_full_proof(self):
+        task=self.cancelled();api=self.fixture.api
+        for delta in (dict(version=1),dict(stopped=False),dict(descendants_stopped=False),dict(attempt_ids=[]),
+            dict(attempt_ids=[a['id'] for a in task['evidence']['attempts']]+['foreign']),dict(assignments_digest='f'*64),
+            dict(attempts_digest='f'*64),dict(task_digest='f'*64),dict(candidate_digest='f'*64),dict(verification_digest='f'*64),
+            dict(expected_revision=task['revision']-1),dict(observed_turn_id='foreign-turn')):
+            with self.subTest(delta=delta),self.assertRaises(StartupError):state._retain_ready_stop(self.scope,self.stop_request(task,**delta))
+        context=api._evidence_context(self.scope)
+        with api._context_database(context) as db:self.assertNotIn('writer_stop',state._task(db,state._scope_id(self.scope),'codex','parent','task'))
+
+    def test_cancelled_check_without_synchronous_barrier_cannot_acquire_complete_stop(self):
+        api=self.fixture.api;self.fixture.checked();task=state.task_status(self.scope,'codex','parent')['task']
+        proof=dict(version=1,kind='stopped-writer-reconciliation',identity=self.fixture.identity,
+            expected_revision=task['revision'],expected_pins=task['pins'],observed_turn_id=task['turn_id'],stopped=True,
+            descendants_stopped=True,attempt_ids=[],observation_ref='fixture:no-barrier',coordinator_ref='fixture:independent')
+        raw=json.dumps(proof).encode();path=self.fixture.root/'no-barrier-cancel.json';path.write_bytes(raw);path.chmod(0o400)
+        task=state.retire_task(self.scope,self.fixture.request(expected_pins=task['pins'],reason='Cancelled',reference='fixture:cancel',
+            stop_proof=dict(path=str(path),sha256=hashlib.sha256(raw).hexdigest())))['task']
+        context=api._evidence_context(self.scope)
+        with api._context_database(context) as db:bindings=state._ready_stop_bindings(context,db,task)
+        candidate=api.capture_candidate(self.scope,api._load_plan(self.scope,self.fixture.identity))
+        proof.update(version=2,expected_revision=task['revision'],attempt_ids=[a['id'] for a in task['evidence']['attempts']],
+            candidate_digest=api._digest(candidate),verification_digest='f'*64,**bindings)
+        raw=json.dumps(proof).encode();path=self.fixture.root/'no-barrier-complete.json';path.write_bytes(raw);path.chmod(0o400)
+        with self.assertRaisesRegex(StartupError,'actual original synchronous barrier'):
+            state._retain_ready_stop(self.scope,self.fixture.request(expected_pins=task['pins'],stop_proof=dict(path=str(path),sha256=hashlib.sha256(raw).hexdigest())))
+
+    def test_cancelled_complete_stop_replay_and_generic_writer_preserve_original_age(self):
+        api=self.fixture.api;task,request=self.stopped();context=api._evidence_context(self.scope)
+        Path(request['stop_proof']['path']).unlink()
+        with patch.object(api,'_artifact',side_effect=AssertionError('Replay wrote new support')),patch.object(api,'_read_host_proof',side_effect=AssertionError('Replay read host proof')):
+            replay=state._retain_ready_stop(self.scope,request)
+        self.assertTrue(replay['replayed']);self.assertEqual(replay['task'],task)
+        for action in ('remove','replace'):
+            with api._context_database(context,write=True) as db,self.assertRaises(StartupError):
+                changed=json.loads(json.dumps(task))
+                if action=='remove':changed.pop('writer_stop')
+                else:changed['writer_stop']['request_digest']='f'*64
+                state._save(db,state._scope_id(self.scope),changed)
+
+    def test_changed_cancelled_barrier_source_or_revision_blocks_closure(self):
+        for mutation in ('source','barrier','revision','retirement-proof','generation'):
+            with self.subTest(mutation=mutation):
+                scenario=CancelledBarrierClosureTests(methodName='runTest');scenario.setUp()
+                try:
+                    api=scenario.fixture.api;task,_=scenario.stopped();context=api._evidence_context(scenario.scope)
+                    ref=api._canonical_plain(api._artifact_owner(scenario.scope,task).task)
+                    if mutation=='source':(scenario.fixture.repo/'app.py').write_text('changed after complete stop')
+                    elif mutation=='retirement-proof':
+                        path=context.directory/'evidence'/task['retirement']['proof']['name'];path.chmod(0o600);path.write_bytes(path.read_bytes()+b' ');path.chmod(0o400)
+                    else:
+                        with api._context_database(context,write=True) as db:
+                            if mutation=='barrier':
+                                from runtime import delegation
+                                row=next(r for r in delegation._ledger(None,db,context=context) if r['data']['role']=='coordinator')
+                                data=dict(row['data'],revision=row['data']['revision']-1)
+                                db.execute('update assignments set data=? where id=?',(json.dumps(data),row['id']))
+                            elif mutation=='generation':db.execute('update checkouts set generation=generation+1')
+                            else:
+                                changed=dict(task,revision=task['revision']+1);state._save(db,state._scope_id(scenario.scope),changed)
+                    with self.assertRaises(StartupError):api._observe_closure((context,),ref)
+                finally:scenario.doCleanups()
+
+    def test_cancelled_stop_source_change_during_registration_rolls_back(self):
+        api=self.fixture.api;task=self.cancelled();request=self.stop_request(task);original=api._artifact
+        def mutate(scope,value,**kwargs):
+            result=original(scope,value,**kwargs)
+            if value.get('kind')=='stopped-writer-reconciliation':(self.fixture.repo/'app.py').write_text('changed during stop')
+            return result
+        with patch.object(api,'_artifact',side_effect=mutate),self.assertRaises(StartupError):state._retain_ready_stop(self.scope,request)
+        with state._database(self.scope) as db:self.assertNotIn('writer_stop',state._task(db,state._scope_id(self.scope),'codex','parent','task'))
+
+    def test_cancelled_assignment_task_and_event_retirement_fault_is_atomic(self):
+        api=self.fixture.api;task,_=self.stopped();context=api._evidence_context(self.scope)
+        ref=api._canonical_plain(api._artifact_owner(self.scope,task).task)
+        closed=api.close_task(self.scope,self.fixture.request(expected_pins=task['pins']),api._observe_closure((context,),ref))['task']
+        original=state._retired_record
+        def fail(kind,*args):
+            if kind=='task':raise state.StateError('fixture: cancelled task marker fault')
+            return original(kind,*args)
+        with patch.object(state,'_retired_record',side_effect=fail),self.assertRaises(StartupError):api._retire_closed_task(context,ref)
+        with api._context_database(context) as db:
+            self.assertEqual(state._task(db,state._scope_id(self.scope),'codex','parent','task'),closed)
+            self.assertEqual(db.execute('select count(*) from assignments').fetchone()[0],3)
+            self.assertEqual(db.execute('select count(*) from retired_identities').fetchone()[0],0)
+            self.assertEqual(db.execute('select count(*) from turns').fetchone()[0],1)
+            self.assertEqual(db.execute('select count(*) from receipts').fetchone()[0],2)
+
+    def test_independent_raw_consumer_protects_cancelled_task_after_d4_cut(self):
+        from runtime import changes
+        api=self.fixture.api;task,_=self.stopped();_,_,context,ref,source,_=self.recovery(task)
+        _,_,_,_,other,_=self.recovery(task)
+        observed=changes._observe_recovery_release(context.authority_set,dict(source.content['identity']))
+        self.assertTrue(changes._register_recovery_release(observed)['complete'])
+        inspected=changes.inspect_lifecycle_recovery(context.authority_set,())
+        self.assertTrue(any(r['kind']=='task' and r['reference']==ref and r['need']=='raw' and
+            r['root']['identity']==dict(other.content['identity']) for r in inspected['requirements']))
+        with self.assertRaisesRegex(StartupError,'raw task body'):api._observe_closure((context,),ref)
+
+
+    def test_cancellation_after_ready_complete_stop_keeps_stale_envelope_protected(self):
+        api=self.fixture.api;task=ReadyClosureTests.stopped(self)[0]
+        proof=dict(version=1,kind='stopped-writer-reconciliation',identity=self.fixture.identity,
+            expected_revision=task['revision'],expected_pins=task['pins'],observed_turn_id=task['turn_id'],stopped=True,
+            descendants_stopped=True,attempt_ids=[],observation_ref='fixture:later-cancellation',coordinator_ref='fixture:independent')
+        raw=json.dumps(proof).encode();path=self.fixture.root/'later-cancel.json';path.write_bytes(raw);path.chmod(0o400)
+        cancelled=state.retire_task(self.scope,self.fixture.request(expected_pins=task['pins'],reason='Cancelled',reference='fixture:cancel',
+            stop_proof=dict(path=str(path),sha256=hashlib.sha256(raw).hexdigest())))['task']
+        self.assertEqual(cancelled['writer_stop'],task['writer_stop'])
+        with self.assertRaises(StartupError):state._retain_ready_stop(self.scope,self.stop_request(cancelled))
+        context=api._evidence_context(self.scope);ref=api._canonical_plain(api._artifact_owner(self.scope,cancelled).task)
+        with self.assertRaises(StartupError):api._observe_closure((context,),ref)
+
+    def test_cancelled_source_mutation_during_compact_write_rolls_back_closure(self):
+        api=self.fixture.api;task,_=self.stopped();context=api._evidence_context(self.scope)
+        ref=api._canonical_plain(api._artifact_owner(self.scope,task).task);observed=api._observe_closure((context,),ref)
+        original=api._artifact
+        def mutate(scope,value,**kwargs):
+            result=original(scope,value,**kwargs)
+            if value.get('kind')=='task-closure':(self.fixture.repo/'app.py').write_text('changed during cancelled closure')
+            return result
+        with patch.object(api,'_artifact',side_effect=mutate),self.assertRaises(StartupError):
+            api.close_task(self.scope,self.fixture.request(expected_pins=task['pins']),observed)
+        with api._context_database(context) as db:
+            current=state._task(db,state._scope_id(self.scope),'codex','parent','task')
+            self.assertEqual(current,task)
+
+    def test_cancelled_source_mutation_during_d4_cut_keeps_raw_support(self):
+        from runtime import changes
+        api=self.fixture.api;task,_=self.stopped();_,_,context,ref,source,old=self.recovery(task)
+        observed=changes._observe_recovery_release(context.authority_set,dict(source.content['identity']));original=api._artifact
+        def mutate(scope,value,**kwargs):
+            result=original(scope,value,**kwargs)
+            if value.get('kind')=='d4-recovery-source' and value.get('version')==2:
+                (self.fixture.repo/'app.py').write_text('changed during cancelled source cut')
+            return result
+        with patch.object(api,'_artifact',side_effect=mutate):result=changes._register_recovery_release(observed)
+        self.assertFalse(result['complete'])
+        with api._context_database(context) as db:
+            self.assertEqual(state._task(db,state._scope_id(self.scope),'codex','parent','task'),task)
+            self.assertEqual(db.execute('select count(*) from assignments').fetchone()[0],3)
+            api._read(None,dict(old),context=context,db=db)
+
+
+    def test_cancelled_new_input_during_d4_cut_keeps_raw_support(self):
+        from runtime import changes
+        api=self.fixture.api;task,_=self.stopped();_,_,context,ref,source,old=self.recovery(task)
+        observed=changes._observe_recovery_release(context.authority_set,dict(source.content['identity']));original=api._artifact
+        def mutate(scope,value,**kwargs):
+            result=original(scope,value,**kwargs)
+            if value.get('kind')=='d4-recovery-source' and value.get('version')==2:
+                (self.fixture.repo/'new-candidate-input.py').write_text('new input during cancelled source cut')
+            return result
+        with patch.object(api,'_artifact',side_effect=mutate):result=changes._register_recovery_release(observed)
+        self.assertFalse(result['complete'])
+        with api._context_database(context) as db:
+            self.assertEqual(state._task(db,state._scope_id(self.scope),'codex','parent','task'),task)
+            self.assertEqual(db.execute('select count(*) from assignments').fetchone()[0],3)
+            api._read(None,dict(old),context=context,db=db)
+
+
 class CancelledClosureTests(unittest.TestCase):
     """Disposable owner-proof fixtures; no native stop authority is qualified here."""
     def setUp(self):
