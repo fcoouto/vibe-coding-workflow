@@ -222,7 +222,7 @@ def _retired_record(kind, digest, raw, assignment_id):
                         *(["assignment_id"] if kind == "assignment" else [])))
         if (type(value["version"]) is not int or value["version"] != 1
                 or _retired_identity(kind, value["identity"]) != digest
-                or value["outcome"] not in ("completed", "failed", "cancelled", "unknown", "ready") or kind=="assignment" and value["outcome"]=="ready"
+                or value["outcome"] not in ("completed", "failed", "cancelled", "unknown", "ready", "verifying") or kind=="assignment" and value["outcome"] in {"ready","verifying"}
                 or type(value["evidence_expired"]) is not bool
                 or value["evidence_expired"] and value["outcome"] != "unknown"):
             raise StateError("Retired identity marker is corrupt")
@@ -542,6 +542,15 @@ def _writer_stop_shape(value):
 def _ready_stop(context,db,task,*,observe=False):
     from runtime import evidence
     stop=task.get('writer_stop');_writer_stop_shape(stop)
+    if stop.get('linked') and task['lifecycle']['safe_closed_at'] is not None:
+        linked=evidence._read(None,stop['linked'],context=context,db=db)
+        if evidence._linked_component_closed(linked['aggregate'],writer=(context,db)):
+            retained=evidence._linked_retained_component(linked['aggregate'],linked['authorities'],writer=(context,db))
+            if retained.get('discovered_authorities'):raise StateError('Retained linked stop requires complete source guards')
+            own=next(m for m in retained['members'] if m['reference']['authority']==evidence._canonical_plain(context.authority_set[0]) and
+                m['reference']['scope_id']==evidence._task_scope_id(task) and all(m['reference'][key]==task[key] for key in ('client','session_id','task_id')))
+            if own['task']!=task or own['preparation']['content']['stopped']['writer_stop']!=stop:raise StateError('Historical linked stop owner changed')
+            return own['preparation']['content']['stopped']['proof']
     proof=evidence._read(None,stop['proof'],context=context,db=db)
     bindings=_ready_stop_bindings(context,db,task)
     candidate=evidence._read(None,stop['candidate'],context=context,db=db)
@@ -656,7 +665,7 @@ def retire_closed(db, task_ref, closure):
         for item in facts['certificate'].get('assignments',[])]
     task=_task(db,task_ref['scope_id'],task_ref['client'],task_ref['session_id'],task_ref['task_id'])
     lifetime=_task_lifecycle(task)
-    if lifetime is None or lifetime['safe_closed_at'] is None or evidence._read(None,lifetime['compact'],context=context,db=db)!=evidence._closure_content(facts):
+    if lifetime is None or lifetime['safe_closed_at'] is None or evidence._read(None,lifetime['compact'],context=context,db=db)!=evidence._retirement_content(facts):
         raise StateError('Retirement requires exact current retained closure support')
     identity={k:task_ref[k] for k in ('scope_id','client','session_id','task_id')}
     if db.execute('select 1 from assignments where scope_id=? and client=? and session_id=? and task_id=?',tuple(identity.values())).fetchone():

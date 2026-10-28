@@ -1985,6 +1985,16 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
         request['approval']['manifest_digest']=onboarding._digest(request['manifest'])
         return request,fixture,context
 
+    def test_repeated_scoped_rollback_settles_exact_operation_markers(self):
+        request,_,context=self.scoped_recovery_request()
+        for action in ('apply','rollback','rollback'):
+            result=self.changes._run_scoped(self.directory,request,action)
+            self.assertEqual(result['exit_code'],0,dict(action=action,result=result))
+            recovery=self.changes.inspect_lifecycle_recovery(context.authority_set,())
+            self.assertTrue(recovery['complete'],dict(action=action,blockers=recovery['blockers']))
+            self.assertFalse(any(self.changes._authority_owner(location) for location in
+                self.changes._authority_locations([context.directory])))
+
     def test_recovery_hooks_register_before_effect_and_after_final_journal(self):
         from runtime import evidence,state
         request,fixture,context=self.scoped_recovery_request()

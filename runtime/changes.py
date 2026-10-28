@@ -1756,6 +1756,10 @@ def _barrier_facts(context,db,task,record,rec):
 
 def _barrier_certificate(context,db,task,record,rec):
     task_state._ready_stop(context,db,task)
+    return _barrier_certificate_fields(context,db,task,record,rec)
+
+
+def _barrier_certificate_fields(context,db,task,record,rec):
     outcome=_barrier_facts(context,db,task,record,rec)
     data=record['data']
     return dict(version=2,reference=dict(authority=_canonical_plain(context.authority_set[0]),id=record['id'],owner=record['owner'],assignment=data['assignment']),
@@ -2011,6 +2015,16 @@ def _check_stopped_certificate(context,db,value,*,preparation_reader=None):
     from runtime import evidence
     _stopped_certificate_shape(value)
     ref=value['reference']
+    if value.get('linked') and evidence._linked_component_closed(value['linked']['aggregate'],writer=(context,db)):
+        if preparation_reader is not None and 'preparation' in value:
+            evidence._check_linked_preparation_certificate(context,db,value,preparation_reader=preparation_reader)
+        else:
+            authorities=value.get('preparation',{}).get('authorities',value['linked']['authorities'])
+            support=evidence._linked_retained_component(value['linked']['aggregate'],authorities,writer=(context,db))
+            evidence._check_retained_linked_certificate(support,value)
+        identity=task_state._lifecycle_identity(db,'task',ref)
+        d3._require(identity['status']!='expired','Expired linked identity cannot validate historical support')
+        return identity
     identity=task_state._lifecycle_identity(db,'task',ref)
     d3._require(identity['pins_digest']==task_state._digest(value['pins']) and identity['created_at']==value['created_at']
         and identity['identity']=={k:ref[k] for k in ('scope_id','client','session_id','task_id')},'Recovery stopped identity support differs')
@@ -2124,6 +2138,7 @@ def _recovery_ready_inputs(content,contexts):
                 identity=task_state._lifecycle_identity(db,'task',ref)
                 if identity['status']!='live':continue
                 task=task_state._task(db,ref['scope_id'],ref['client'],ref['session_id'],ref['task_id'])
+                if certificate.get('linked') and task['lifecycle']['safe_closed_at'] is not None and evidence._linked_component_closed(certificate['linked']['aggregate'],writer=(context,db)):continue
                 candidate=evidence._read(None,task['writer_stop']['candidate'],context=context,db=db)
                 files[d3._digest(ref)]=evidence._ready_stop_candidate(context,task,candidate)
     return _canonical_freeze(files)
@@ -2326,7 +2341,8 @@ def _check_recovery_source(source,context,db):
     for certificate in content.get('stopped',[]):
         if certificate['reference']['authority']!=authority:continue
         identity=_check_stopped_certificate(context,db,certificate)
-        if certificate.get('writer_stop') and identity['status']=='live':
+        historical=certificate.get('linked') and evidence._linked_component_closed(certificate['linked']['aggregate'],writer=(context,db))
+        if certificate.get('writer_stop') and identity['status']=='live' and not historical:
             key=d3._digest(certificate['reference'])
             d3._require(source.ready_inputs is not None and key in source.ready_inputs,'Ready source needs its actual bounded input observation')
             evidence._check_ready_inputs(_canonical_plain(source.ready_inputs[key]))
@@ -3196,6 +3212,18 @@ def _run_scoped(plan_dir, request, operation):
                 for location in [canonical_location,*authority_locations]:
                     _atomic(location.parent, location.name + ".json", json.dumps(owner, sort_keys=True).encode())
                 _scoped_register_sources(path,journal,source_contexts)
+            def settle_sources():
+                d3._require(not any(r.get("command") and not r["command"]["stopped"] for r in journal["receipts"].values()),
+                    "Scoped command descendants remain uncertain; preserve recovery markers")
+                with _scoped_source_guards(locations, owner, m) as (final_locations,source_contexts):
+                    writer_locations=_scoped_writer_locations(locations,source_contexts)
+                    _scoped_writers(writer_locations,affected_roots,affected_git,changed_paths=changed_paths)
+                    _scoped_register_sources(path,journal,source_contexts)
+                    for location in [canonical_location,*final_locations]:
+                        if _authority_owner(location) == owner: os.unlink(Path(str(location)+".json"))
+                    descriptor=d3._open_path(lock_root,os.O_RDONLY|os.O_DIRECTORY)
+                    try: os.fsync(descriptor)
+                    finally: os.close(descriptor)
             journal["blocked"] = []
             observation = request.get("observations")
             if observation:
@@ -3212,6 +3240,7 @@ def _run_scoped(plan_dir, request, operation):
                         d3._require(_fingerprint(Path(action["owner"]["root"]),effect["path"]) == effect["before"] and _scoped_target(Path(action["owner"]["root"]),effect["path"])["binding"] == expected, "Previously restored effect changed")
                 last=journal["enrollment"]["postimages"][-1]
                 d3._require(_fingerprint(root,str(PROJECT_FILE)) == last["after"] and (last["after"] is None or _scoped_target(root,str(PROJECT_FILE)) == last["target"]), "Restored authority changed")
+                settle_sources()
                 return dict(state="rolled_back",exit_code=0,blocked=[],activation_status="configured",qualified=False)
             authority_owned = _scoped_owned_authority(journal)
             current_record = d3.read_request(d3._read_file(root / PROJECT_FILE, 128 * 1024)) if (root / PROJECT_FILE).exists() else None
@@ -3260,16 +3289,7 @@ def _run_scoped(plan_dir, request, operation):
                 journal["state"] = "blocked" if journal["blocked"] else "applied"
             _save(path, journal)
             unsettled = any(r.get("command") and not r["command"]["stopped"] for r in journal["receipts"].values())
-            if not unsettled:
-                with _scoped_source_guards(locations, owner, m) as (final_locations,source_contexts):
-                    writer_locations=_scoped_writer_locations(locations,source_contexts)
-                    _scoped_writers(writer_locations,affected_roots,affected_git,changed_paths=changed_paths)
-                    _scoped_register_sources(path,journal,source_contexts)
-                    for location in [canonical_location,*final_locations]:
-                        if _authority_owner(location) == owner: os.unlink(Path(str(location)+".json"))
-                    descriptor=d3._open_path(lock_root,os.O_RDONLY|os.O_DIRECTORY)
-                    try: os.fsync(descriptor)
-                    finally: os.close(descriptor)
+            if not unsettled:settle_sources()
             return dict(transaction_id=journal["transaction_id"],state=journal["state"],exit_code=0 if journal["state"] in ("applied","rolled_back") else 2,
                         blocked=deepcopy(journal["blocked"]),members=deepcopy(journal["enrollment"]["members"]),
                         activation_status="active" if operation != "rollback" and journal["enrollment"]["members"] and all(m["status"]=="active" for m in journal["enrollment"]["members"]) else "configured",

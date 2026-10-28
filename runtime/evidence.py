@@ -866,9 +866,163 @@ def _linked_closure_facts(context,task_ref,pointer,authorities,recovery,files,*,
     return facts[_raw(task_ref)]
 
 
+def _retirement_content(facts):
+    return facts['linked_retirement']['closure']['content'] if 'linked_retirement' in facts else _closure_content(facts)
+
+
+def _linked_retained_requirements(component,contexts,*,writer=None):
+    """Only authenticated preparation-origin routes may replace their own terminal owners."""
+    from runtime import delegation
+    owners={_raw(m['reference']) for m in component['members']}
+    assignments={_raw(a['certificate']['reference']) for m in component['members'] for a in m['assignments']}
+    selected={_raw(_canonical_plain(c.authority_set[0])):c for c in contexts}
+    sources={_raw(s['reference']):s for s in component['sources']}
+    roots={_raw(edge):edge for m in component['members'] for edge in m['preparation']['metadata']['dependencies']}
+    pending=[dict(owner=edge['reference'],**edge,need='content') for edge in roots.values()];seen=set();requirements=[]
+    while pending:
+        edge=pending.pop();key=_raw(edge)
+        if key in seen:continue
+        seen.add(key);_require(len(seen)<=4096,'Retained preparation dependency traversal exceeds bound')
+        requirements.append(edge);kind=edge['kind'];ref=edge['reference']
+        authority=ref.get('authority',edge['owner']['authority']);context=selected.get(_raw(authority))
+        _require(context is not None,'Retained raw dependency authority is outside complete guards')
+        with _preparation_database(context,writer) as db:
+            if kind=='artifact':
+                qualified=dict(authority=authority,artifact=ref.get('artifact',ref));source=sources.get(_raw(qualified))
+                _require(source is not None,'Retained preparation source route is incomplete')
+                metadata,raw=_managed_artifact(None,qualified['artifact'],context=context,db=db);body=json.loads(raw)
+                _require(metadata==source['metadata'] and _closure_file_stat(Path(metadata['managed']['path']))==source['stat'],
+                    'Retained preparation dependency source changed')
+                terminal=_raw(metadata['owner'].get('task')) in owners
+                for dependency in metadata['dependencies']:
+                    child=dependency['reference'];child_kind=dependency['kind'];need='content' if child_kind=='artifact' else 'raw'
+                    if child_kind=='task' and (terminal and _raw(child) in owners or
+                        child==metadata['owner'].get('task') and body.get('kind')!='linked-verification'):need='identity'
+                    if child_kind=='assignment' and terminal and _raw(child) in assignments:need='identity'
+                    pending.append(dict(owner=qualified,**dependency,need=need))
+            elif kind=='task':
+                state._task_reference(ref)
+                if edge['need']=='raw':
+                    _require(_linked_raw_task(db,ref) is not None,'Independent retained source requires its original raw task')
+                elif _raw(ref) not in owners:
+                    _lifecycle_requirements(context,[edge],db=db)
+            elif kind=='assignment':
+                if edge['need']=='identity':_require(_raw(ref) in assignments,'Unknown retained assignment attribution')
+                else:
+                    row=db.execute('select id,scope_id,client,session_id,task_id,dispatch_id,data from assignments where id=?',(ref['id'],)).fetchone()
+                    _require(row is not None,'Independent retained source requires its original raw assignment')
+                    record=delegation._record(None,row,context=context,db=db)
+                    _require(record['owner']==ref['owner'] and record['data']['assignment']==ref['assignment'],
+                        'Independent retained assignment pointer changed')
+            else:raise state.StateError('Independent recovery or unknown retained raw dependency remains protected')
+    return requirements
+
+
+def _linked_retirement_requirements(component,contexts,*,writer=None):
+    from runtime import delegation
+    owners={_raw(m['reference']) for m in component['members']};requirements=_linked_retained_requirements(component,contexts,writer=writer)
+    for context in contexts:
+        authority=_canonical_plain(context.authority_set[0])
+        with _preparation_database(context,writer) as db:
+            rows=db.execute('select scope_id,client,session_id,task_id from tasks limit 4097').fetchall()
+            _require(len(rows)<=4096,'Retirement current task inspection exceeds bound');roots=[]
+            for row in rows:
+                ref=dict(authority=authority,scope_id=row[0],client=row[1],session_id=row[2],task_id=row[3])
+                if _raw(ref) in owners:continue
+                task=state._task(db,*row)
+                roots.extend(dict(owner=ref,**edge,need='content') for edge in _artifact_dependencies(task))
+                linked=task.get('evidence',{}).get('linked_verification')
+                if linked:roots.append(dict(owner=ref,kind='artifact',reference=dict(authority=linked['authority'],artifact=linked['reference']),need='content'))
+            records=delegation._ledger(None,db,context=context)
+            for record in records:
+                owner=dict(authority=authority,**{key:record['owner'][key] for key in ('scope_id','client','session_id','task_id')})
+                if _raw(owner) not in owners:roots.extend(dict(owner=dict(authority=authority,id=record['id']),**edge,need='content') for edge in _artifact_dependencies(record))
+            guidance=delegation._closure_guidance(context,db,records)
+            roots.extend(dict(owner=dict(authority=authority,source='native-guidance'),kind='artifact',reference=ref,need='content') for ref in guidance['references'])
+            requirements.extend(_lifecycle_requirements(context,roots,db=db))
+    return requirements
+
+
+def _linked_retirement_facts(context,task_ref,pointer,authorities,*,writer=None,recovery=None,files=None):
+    from runtime import changes
+    component=_linked_retained_component(pointer,authorities,writer=writer)
+    if component.get('discovered_authorities'):return component
+    contexts=tuple(_reference_context(a) for a in authorities)
+    if recovery is None:
+        # Component ownership is authenticated separately; D4 owns every actual current root.
+        recovery=_canonical_plain(changes._inspect_lifecycle_recovery_guarded(authorities,[]));files=_closure_recovery_files(recovery)
+    _require(recovery['complete'] and not recovery['blockers'] and not recovery['discovered_authorities'] and
+        sorted(recovery['authorities'],key=_raw)==sorted(authorities,key=_raw),'Linked retirement recovery/source coverage is incomplete')
+    _require(_linked_closure_recovery_heads(authorities,writer=writer)==sorted(recovery['roots'],key=_raw),'Retirement recovery source head changed')
+    requirements=[*recovery['requirements'],*_linked_retirement_requirements(component,contexts,writer=writer)]
+    owners={_raw(m['reference']) for m in component['members']}
+    issued={(_raw(a['certificate']['reference']['authority']),a['certificate']['reference']['id']) for m in component['members'] for a in m['assignments']}
+    _require(not any(edge['need']=='raw' and (edge['kind']=='task' and _raw(edge['reference']) in owners or
+        edge['kind']=='assignment' and (_raw(edge['reference']['authority']),edge['reference']['id']) in issued) for edge in requirements),
+        'An independent consumer still requires linked raw history')
+    _require(all(_closure_file_stat(Path(path))==value for path,value in files.items()),'Linked retirement recovery files changed')
+    member=next(m for m in component['members'] if m['reference']==task_ref)
+    if member['task'] is None:return dict(component=component,recovery=recovery,recovery_files=files,requirements=requirements,member=member)
+    with _preparation_database(context,writer) as db:observed=state.inspect_dependencies(db,task_ref)
+    _require(not [value for value in observed['blockers'] if value!='Assignment body requires original task; exact assignment certificate integration is required'],
+        'Linked original event/assignment ownership remains uncertain')
+    physical=[]
+    with _preparation_database(context,writer) as db:
+        for item in observed['metadata']:
+            metadata,_=_managed_artifact(None,item['reference'],context=context,db=db)
+            physical.append(dict(reference=item['reference'],metadata=metadata,stat=_closure_file_stat(Path(metadata['managed']['path']))))
+    _require(sorted(path.name for path in (context.directory/'evidence').iterdir())==sorted(item['reference']['name'] for item in observed['metadata']),
+        'Unaccounted content protects linked retirement')
+    task=member['task'];closure=member['closure'];observed.pop('digest')
+    projection={key:closure['content'][key] for key in ('outcomes','reviews','workers','numerical','verifications','native_guidance','scope_guidance','sources')}
+    return dict(version=1,task_ref=task_ref,task=task,certificate=closure['content']['stopped'],observed=observed,physical=physical,
+        bindings={},ready_files={},guidance=dict(retained=[],files={},folder=None),recovery=recovery,recovery_files=files,
+        requirements=sorted(requirements,key=_raw),artifacts=closure['content']['artifacts'],projection=projection,
+        linked_retirement=dict(aggregate=pointer,authorities=authorities,component=component,closure=closure,closed_at=member['closed_at']))
+
+
+def _stamp_linked_retirement(context,db,task_ref,observation):
+    facts=_check_closure_observation(context,db,task_ref,observation)
+    _require('linked_retirement' in facts,'Closure date stamp requires actual linked retirement acquisition')
+    retained=facts['linked_retirement'];ref=retained['closure']['reference'];metadata=state._metadata(db,ref['name']);closed_at=retained['closed_at']
+    _require(metadata==retained['closure']['metadata'] and metadata['closed_at'] in (None,closed_at), 'Original closure metadata date changed')
+    metadata=dict(metadata,closed_at=closed_at)
+    db.execute('update evidence_metadata set closed_at=?,data=? where name=?',(closed_at,_raw(metadata).decode(),ref['name']))
+    _require(state._metadata(db,ref['name'])==metadata,'Closure date was not retained atomically')
+
+
+def _check_linked_retirement(context,db,task_ref,facts,*,assignments_retired=False,retired=False):
+    """Only the selected local certified removal is an allowed transition."""
+    from runtime import changes
+    expected=facts['linked_retirement'];current=_linked_retained_component(expected['aggregate'],expected['authorities'],writer=(context,db))
+    _require(not current.get('discovered_authorities'),'Retirement source guard set changed')
+    for original,observed in zip(expected['component']['members'],current['members']):
+        if original['reference']!=task_ref:_require(observed==original,'Foreign linked lifecycle/marker support changed')
+        else:
+            before=original['closure']['metadata'];now=observed['closure']['metadata']
+            _require(dict(now,closed_at=before['closed_at'])==before and now['closed_at'] in (before['closed_at'],expected['closed_at']) and
+                observed['preparation']==original['preparation'] and observed['closure']['reference']==original['closure']['reference'] and
+                observed['closure']['content']==original['closure']['content'],'Local linked compact/date correspondence changed')
+            if not retired:_require(observed['task']==original['task'] and observed['task_marker'] is None,'Original linked raw task changed')
+            else:_require(observed['task'] is None and observed['task_marker'] is not None,'Certified linked task did not retire')
+            _require(all((a['marker'] is not None and a['record'] is None) if assignments_retired or retired else a==b
+                for a,b in zip(observed['assignments'],original['assignments'])),'Linked assignment transition is incomplete')
+    _require(current['basis']==expected['component']['basis'] and current['sources']==expected['component']['sources'], 'Linked retained source graph changed')
+    _require(_linked_closure_recovery_heads(expected['authorities'],writer=(context,db))==sorted(facts['recovery']['roots'],key=_raw),'Retirement recovery source head changed')
+    contexts=tuple(_reference_context(a) for a in expected['authorities'])
+    _require(sorted([*facts['recovery']['requirements'],*_linked_retirement_requirements(current,contexts,writer=(context,db))],key=_raw)==facts['requirements'],
+        'Linked independent raw/content requirements changed')
+    for dependency in facts['recovery']['dependencies']:
+        if 'source_artifact' not in dependency or dependency['source_artifact'] is None:continue
+        selected=_reference_context(dependency['authority'])
+        with _preparation_database(selected,(context,db)) as reader:content=_read(None,dependency['source_artifact'],context=selected,db=reader)
+        _require(_digest(changes._validate_recovery_references(content,contexts))==dependency['generation_digest'], 'Retirement recovery raw owner generation changed')
+    _require(all(_closure_file_stat(Path(path))==value for path,value in facts['recovery_files'].items()), 'Retirement journal/source file changed')
+
+
 def _linked_historical_closure(context,db,task_ref):
-    task=state._task(db,task_ref['scope_id'],task_ref['client'],task_ref['session_id'],task_ref['task_id'])
-    _require(task is not None and task.get('writer_stop',{}).get('linked'),'Linked historical owner is unavailable')
+    task=_linked_raw_task(db,task_ref)
+    _require(task is None or task.get('writer_stop',{}).get('linked'),'Linked historical owner is unavailable')
     prepared=_linked_owned_preparation(context,db,task_ref)
     closed=_linked_closed_member(context,db,task_ref,task,prepared)
     return dict(version=1,task_ref=task_ref,task=task,retained_linked_closure=dict(preparation=prepared,closure=closed))
@@ -883,6 +1037,31 @@ def _linked_closure_observation(contexts,task_ref,pointer):
         context=_reference_context(task_ref['authority'])
         facts=_linked_closure_facts(context,task_ref,pointer,complete,recovery,files)
         return _ClosureObservation(_canonical_freeze(facts),context,_CLOSURE_ISSUER)
+
+
+@contextmanager
+def _closure_support_guards(contexts):
+    """Discover retained guidance support structurally; only normal readers authorize it."""
+    from runtime import changes
+    contexts=tuple(contexts);pending={_raw(_canonical_plain(c.authority_set[0])):_canonical_plain(c.authority_set[0]) for c in contexts}
+    for _ in range(4096):
+        expanded=dict(pending)
+        with changes._authority_guards([Path(a['directory']) for a in pending.values()]):
+            for context in contexts:
+                with _context_database(context) as db:
+                    rows=db.execute("select name,digest from evidence_metadata where class='compact' limit 4097").fetchall()
+                    _require(len(rows)<=4096,'Retained closure source discovery exceeds bound')
+                    for name,digest in rows:
+                        owner=state._metadata(db,name)['owner'].get('task')
+                        if owner is None or state._retired(db,'task',{key:owner[key] for key in ('scope_id','client','session_id','task_id')}) is None:continue
+                        value=_read(None,dict(name=name,digest=digest),context=context,db=db)
+                        if value.get('kind') not in {'task-closure','linked-closure-preparation'} or not value.get('stopped',{}).get('linked'):continue
+                        _,authorities,_=_linked_stop_sources(value['stopped']['linked']['aggregate'],list(pending.values()))
+                        expanded.update({_raw(a):a for a in authorities})
+            _require(len(expanded)<=4096,'Retained closure source authority bound exceeded')
+            if set(expanded)==set(pending):yield;return
+        pending=expanded
+    raise state.StateError('Retained closure support authority closure did not converge')
 
 
 def _observe_closure(contexts, task_ref):
@@ -903,7 +1082,7 @@ def _observe_closure(contexts, task_ref):
     _require(len(contexts)==1,'Foreign owner closure needs complete terminal component integration')
     context=contexts[0];authority=_canonical_plain(context.authority_set[0])
     _require(task_ref['authority']==authority,'Closure task authority differs')
-    with changes._authority_guards([context.directory]):
+    with _closure_support_guards((context,)):
         recovery,files=_closure_recovery(context,task_ref)
         with _context_database(context) as db:
             return _ClosureObservation(_canonical_freeze(_closure_facts(context,task_ref,db,recovery,recovery_files=files)),context,_CLOSURE_ISSUER)
@@ -923,6 +1102,8 @@ def _check_closure_observation(context, db, task_ref, observations, *, new_compa
     facts=_issued_closure(context,observations)
     _require(isinstance(facts,dict) and facts.get('task_ref')==task_ref,'Closure snapshot identity is unavailable')
     _check_context(context,db)
+    if 'linked_retirement' in facts:
+        _check_linked_retirement(context,db,task_ref,facts,assignments_retired=assignments_retired,retired=retired)
     if 'retained_linked_closure' in facts:
         _require(new_compact is None and not retired and not assignments_retired,'Historical linked observation cannot publish new lifecycle evidence')
         _require(_linked_historical_closure(context,db,task_ref)==facts,'Retained linked closure envelope changed')
@@ -936,12 +1117,18 @@ def _check_closure_observation(context, db, task_ref, observations, *, new_compa
         return facts
     current=state.inspect_dependencies(db,task_ref)
     compact=(current['task']['lifecycle']['compact'] if current['task'] else None) or new_compact
-    if current['task'] is not None:
+    if current['task'] is not None and 'linked_retirement' not in facts:
         current['task']=dict(current['task'],lifecycle=dict(created_at=current['task']['lifecycle']['created_at'],safe_closed_at=None,closure=None,compact=None))
     current['tasks']=[dict(row,task=current['task']) if row['reference']==task_ref else row for row in current['tasks']]
-    current['metadata']=[item for item in current['metadata'] if item['reference']!=compact]
+    if 'linked_retirement' not in facts:current['metadata']=[item for item in current['metadata'] if item['reference']!=compact]
     current.pop('digest')
     expected=deepcopy(facts['observed'])
+    if 'linked_retirement' in facts:
+        closure=facts['linked_retirement']['closure'];original=closure['metadata']
+        for item in current['metadata']:
+            if item['reference']==closure['reference']:
+                _require(item['metadata']['closed_at'] in (original['closed_at'],facts['linked_retirement']['closed_at']),'Closure date changed')
+                item['metadata']=dict(item['metadata'],closed_at=original['closed_at'])
     if assignments_retired or retired:
         certificates=facts['certificate'].get('assignments',[])
         ids={item['reference']['id'] for item in certificates}
@@ -977,6 +1164,10 @@ def _check_closure_observation(context, db, task_ref, observations, *, new_compa
     _check_ready_inputs(facts['ready_files'])
     guidance=facts['guidance']
     for support in guidance['retained']:
+        if 'linked_component' in support:
+            component=support['linked_component']
+            _require(_linked_retained_component(component['aggregate'],component['authorities'],writer=(context,db))==component,
+                'Retained linked guidance provenance changed before closure commit')
         _require(state._retired(db,'task',{key:support['identity'][key] for key in ('scope_id','client','session_id','task_id')})==support['marker']
             and all(state._retired_assignment(db,identity)==marker for identity,marker in support['assignments']),
             'Retained guidance owner markers changed before closure commit')
@@ -988,10 +1179,10 @@ def _check_closure_observation(context, db, task_ref, observations, *, new_compa
             and hashlib.sha256(delegation._read_bytes(Path(path))).hexdigest()==original['digest'],
             'Guidance cache source changed before closure commit')
     names=sorted(path.name for path in (context.directory/'evidence').iterdir())
-    expected=sorted([item['reference']['name'] for item in current['metadata']]+([] if compact is None else [compact['name']]))
+    expected=sorted([item['reference']['name'] for item in current['metadata']]+([] if compact is None or 'linked_retirement' in facts else [compact['name']]))
     _require(names==expected,'Unaccounted content appeared before closure commit')
     if compact is not None:
-        _require(_read(None,compact,context=context,db=db)==_closure_content(facts),'Compact support differs from original owner facts')
+        _require(_read(None,compact,context=context,db=db)==_retirement_content(facts),'Compact support differs from original owner facts')
     return facts
 
 
@@ -1020,7 +1211,7 @@ def close_task(scope, request, observations):
             _require(task['revision']==request['expected_revision'] and task['pins']==request['expected_pins'] and task['scope_ref']==request['scope_ref'],
                 'Closure replay request differs from exact original owner')
             return dict(ok=True,task=task)
-    guards=_linked_stop_guards(linked['aggregate'],linked['authorities']) if linked else changes._authority_guards([context.directory])
+    guards=_linked_stop_guards(linked['aggregate'],linked['authorities']) if linked else _closure_support_guards((context,))
     with guards:
         if linked:
             refs=[row['task'] for row in _linked_source(linked['aggregate'])['members']]
@@ -1076,14 +1267,44 @@ def close_task(scope, request, observations):
 
 def _retire_closed_task(context, task_ref):
     from runtime import changes,delegation
-    with changes._authority_guards([context.directory]):
+    with _context_database(context) as reader:
+        task=_linked_raw_task(reader,task_ref)
+        if task is not None:linked=task.get('writer_stop',{}).get('linked')
+        else:
+            rows=reader.execute("select name,digest from evidence_metadata where class='compact' limit 4097").fetchall()
+            _require(len(rows)<=4096,'Retired linked owner lookup exceeds bound')
+            linked=None
+            for name,digest in rows:
+                metadata=state._metadata(reader,name)
+                if metadata['owner'].get('task')==task_ref:
+                    body=_read(None,dict(name=name,digest=digest),context=context,db=reader)
+                    if body.get('kind')=='linked-closure-preparation':linked=body['stopped']['writer_stop']['linked'];break
+        if linked:pointer=_read(None,linked,context=context,db=reader)['aggregate']
+    if linked:
+        pending=[task_ref['authority']]
+        for _ in range(4096):
+            with _linked_stop_guards(pointer,pending) as complete:
+                facts=_linked_retirement_facts(context,task_ref,pointer,complete)
+                if facts.get('discovered_authorities'):
+                    pending=sorted({_raw(a):a for a in [*complete,*facts['discovered_authorities']]}.values(),key=_raw);continue
+                if 'member' in facts:
+                    marker=facts['member']['task_marker']
+                    return dict(retired=True,identity=marker['identity'],outcome=marker['outcome'])
+                issued=_ClosureObservation(_canonical_freeze(facts),context,_CLOSURE_ISSUER)
+                with _context_database(context,write=True) as db:
+                    _check_closure_observation(context,db,task_ref,issued)
+                    _stamp_linked_retirement(context,db,task_ref,issued)
+                    delegation.retire_settled(db,task_ref,issued)
+                    return state.retire_closed(db,task_ref,issued)
+        raise state.StateError('Linked retirement source authority closure did not converge')
+    with _closure_support_guards((context,)):
         recovery,files=_closure_recovery(context,task_ref)
         with _context_database(context) as reader:
             facts=_closure_facts(context,task_ref,reader,recovery,recovery_files=files)
         issued=_ClosureObservation(_canonical_freeze(facts),context,_CLOSURE_ISSUER)
         with _context_database(context,write=True) as db:
             _check_closure_observation(context,db,task_ref,issued)
-            task=state._task(db,task_ref['scope_id'],task_ref['client'],task_ref['session_id'],task_ref['task_id'])
+            task=_linked_raw_task(db,task_ref)
             _require(task['lifecycle']['safe_closed_at'] is not None,'Task has no retained safe closure')
             compact=_read(None,task['lifecycle']['compact'],context=context,db=db)
             _require(compact==_closure_content(facts),'Closure support or current dependencies changed')
@@ -1102,7 +1323,7 @@ def _registered_owner(scope, context, owner, db):
     if isinstance(owner,_ClosureOwner):
         ref=_canonical_plain(owner.reference)
         facts=_check_closure_observation(context,db,ref,owner.facts)
-        _require('retained_linked_closure' not in facts,'Historical replay cannot register new closure artifacts')
+        _require('retained_linked_closure' not in facts and 'linked_retirement' not in facts,'Historical replay/retirement cannot register new closure artifacts')
         _require(_canonical_plain(owner.content)==_closure_content(facts)
             and owner.created_at==facts['task']['lifecycle']['created_at']
             and [_canonical_plain(d) for d in owner.dependencies]==[dict(kind='artifact',reference=r) for r in facts['artifacts']],
@@ -2790,12 +3011,12 @@ def _linked_closure_candidate(context,db,reference,task,preparation):
         ref=dict(name=row[0],digest=row[1]);body=_read(None,ref,context=context,db=db)
         if body.get('kind')!='task-closure':continue
         projection=('outcomes','reviews','workers','numerical','verifications','native_guidance','scope_guidance','sources')
-        _require(metadata['owner']==preparation['metadata']['owner'] and metadata['created_at']==prepared['created_at']==task['lifecycle']['created_at'] and
-            metadata['status']=='live' and metadata['closed_at'] is None and not metadata['targets'] and metadata['export'] is None and
+        _require(metadata['owner']==preparation['metadata']['owner'] and metadata['created_at']==prepared['created_at'] and
+            metadata['status']=='live' and (metadata['closed_at'] is None or task is None or metadata['closed_at']==task['lifecycle']['safe_closed_at']) and not metadata['targets'] and metadata['export'] is None and
             body.get('version')==1 and body['identity']==reference and
             all(body[key]==prepared[key] for key in ('identity','pins','accepted_identity','created_at','revision','outcome','stopped',*projection)) and
-            body['outcome']==task['state'] and body['revision']==task['revision'] and body['pins']==task['pins'] and
-            body['accepted_identity']==task['accepted_identity'] and body['artifacts']==[preparation['reference']] and
+            (task is None or body['outcome']==task['state'] and body['revision']==task['revision'] and body['pins']==task['pins'] and
+                body['accepted_identity']==task['accepted_identity'] and body['created_at']==task['lifecycle']['created_at']) and body['artifacts']==[preparation['reference']] and
             metadata['dependencies']==[dict(kind='task',reference=reference),dict(kind='artifact',reference=preparation['reference'])],
             'Linked closure candidate differs from exact original managed preparation')
         found.append(dict(reference=ref,metadata=metadata,content=body))
@@ -2805,6 +3026,17 @@ def _linked_closure_candidate(context,db,reference,task,preparation):
 
 def _linked_closed_member(context,db,reference,task,preparation):
     """Authenticate a committed successor; it creates no current passing assertion."""
+    if task is None:
+        candidate=_linked_closure_candidate(context,db,reference,None,preparation)
+        _require(candidate is not None,'Retired linked member lacks actual managed closure')
+        marker=state._retired(db,'task',{key:reference[key] for key in ('scope_id','client','session_id','task_id')});body=candidate['content']
+        _require(marker is not None and not marker['evidence_expired'] and marker['pins_digest']==_digest(body['pins']) and
+            marker['outcome']==body['outcome'] and marker['created_at']==body['created_at'] and marker['request_digest'] is None and
+            candidate['metadata']['closed_at'] is not None and marker['retired_at']>=candidate['metadata']['closed_at'],
+            'Retired linked task marker differs from exact closure outcome/pins/age/time')
+        return candidate
+    _require(state._retired(db,'task',{key:reference[key] for key in ('scope_id','client','session_id','task_id')}) is None,
+        'Live linked member conflicts with its retirement marker')
     lifetime=state._task_lifecycle(task)
     _require(lifetime is not None and lifetime['safe_closed_at'] is not None,'Linked member has no retained safe closure')
     candidate=_linked_closure_candidate(context,db,reference,task,preparation)
@@ -2818,8 +3050,168 @@ def _linked_closed_member(context,db,reference,task,preparation):
     return candidate
 
 
+def _linked_raw_task(db,reference):
+    """Read only a present row; the normal task lookup deliberately rejects retired admission."""
+    key=tuple(reference[field] for field in ('scope_id','client','session_id','task_id'))
+    if db.execute('select 1 from tasks where scope_id=? and client=? and session_id=? and task_id=?',key).fetchone() is None:return None
+    return state._task(db,*key)
+
+
+def _linked_component_closed(pointer,*,writer=None):
+    content=_linked_source(pointer);_linked_stop_content(content)
+    for row in content['members']:
+        ref=row['task'];context=_reference_context(ref['authority'])
+        with _preparation_database(context,writer) as db:
+            task=_linked_raw_task(db,ref)
+            if task is not None and task['lifecycle']['safe_closed_at'] is None:return False
+    return True
+
+
+def _linked_retained_references(value,authority):
+    """Find actual qualified references in issued compact content, without adopting paths."""
+    found={}
+    def visit(item,current):
+        if isinstance(item,dict):
+            if set(item)=={'name','digest'}:
+                state._artifact_reference(item);ref=dict(authority=current,artifact=item);found[_raw(ref)]=ref;return
+            other=item.get('authority')
+            if other is None:
+                owner=item.get('task',item.get('reference'))
+                if isinstance(owner,dict):other=owner.get('authority')
+            if isinstance(other,dict) and set(other)=={'directory','database','directory_binding','database_binding'}:current=other
+            for child in item.values():visit(child,current)
+        elif isinstance(item,(list,tuple)):
+            for child in item:visit(child,current)
+    visit(value,authority)
+    return list(found.values())
+
+
+def _linked_retained_assignments(context,db,reference,task,prepared,closed_at,task_marker):
+    from runtime import changes,delegation
+    certificate=prepared['content']['stopped'];changes._stopped_certificate_shape(certificate)
+    actual=db.execute('select id from assignments where scope_id=? and client=? and session_id=? and task_id=? limit 4097',
+        tuple(reference[key] for key in ('scope_id','client','session_id','task_id'))).fetchall()
+    _require(len(actual)<=4096,'Linked retained assignment membership exceeds bound');issued=certificate.get('assignments',[]);states=[]
+    _require({row[0] for row in actual}<={item['reference']['id'] for item in issued},'Uncertified linked assignment remains protected')
+    for item in issued:
+        ref=item['reference'];marker=state._retired_assignment(db,ref['id']);owner_marker=state._retired(db,'assignment',ref['owner'])
+        row=db.execute('select id,scope_id,client,session_id,task_id,dispatch_id,data from assignments where id=?',(ref['id'],)).fetchone()
+        metadata,raw=_managed_artifact(None,ref['assignment'],context=context,db=db);body=json.loads(raw)
+        _require(metadata['owner'].get('task')==reference and body['owner']==ref['owner'] and body['pins']==prepared['content']['pins'] and
+            body['accepted_identity']==prepared['content']['accepted_identity'] and body['lifecycle']['created_at']==item['created_at'] and
+            _digest(body['request'])==item['request_digest'] and body['role']==item['role'] and body['claims']==item['claims'],
+            'Retained assignment concrete pointer differs from original issued certificate')
+        if row is not None:
+            _require(task is not None and marker is None and owner_marker is None,'Live linked assignment conflicts with marker/task absence')
+            record=delegation._record(None,row,context=context,db=db)
+            reconciliation=_read(None,record['data']['reconciliation'],context=context,db=db)
+            observed=changes._barrier_certificate_fields(context,db,task,record,reconciliation) if reconciliation.get('kind')=='synchronous-verification' else changes._assignment_certificate(context,db,task,record)
+            _require(observed==item,'Live linked assignment differs from exact original stop certificate')
+            states.append(dict(certificate=item,record=record,marker=None))
+        else:
+            _require(marker is not None and marker==owner_marker and not marker['evidence_expired'] and
+                marker['identity']==ref['owner'] and marker['assignment_id']==ref['id'] and marker['pins_digest']==_digest(prepared['content']['pins']) and
+                marker['request_digest']==item['request_digest'] and marker['created_at']==item['created_at'] and
+                marker['outcome']==item['reconciliation']['outcome'] and marker['retired_at']>=closed_at and
+                (task_marker is None or marker['retired_at']<=task_marker['retired_at']),
+                'Linked assignment marker differs from certified ID/owner/request/outcome/age/time')
+            states.append(dict(certificate=item,record=None,marker=marker))
+    return states
+
+
+def _linked_retained_component(pointer,authorities,*,writer=None):
+    """Actual compact/marker successors only; never reconstruct removed task bodies."""
+    from runtime import changes
+    content=_linked_source(pointer);_linked_stop_content(content);known={_raw(a):a for a in authorities};members=[];basis=None;digest=None;pending=[];discovered={};checked=set()
+    for row in content['members']:
+        ref=row['task']
+        if _raw(ref['authority']) not in known:discovered[_raw(ref['authority'])]=ref['authority'];continue
+        context=_reference_context(ref['authority'])
+        with _preparation_database(context,writer) as db:
+            if _raw(ref['authority']) not in checked:
+                checked.add(_raw(ref['authority']));names=[row[0] for row in db.execute('select name from evidence_metadata limit 4097')]
+                _require(len(names)<=4096 and sorted(path.name for path in (context.directory/'evidence').iterdir())==sorted(names),
+                    'Unaccounted content protects retained linked support')
+            prepared=_linked_owned_preparation(context,db,ref);body=prepared['content'];stopped=body['stopped'];changes._stopped_certificate_shape(stopped)
+            retained=stopped['linked'];_linked_stop_shape(retained)
+            if basis is None:basis=retained;digest=body['component_digest']
+            _require(retained==basis and basis['aggregate']==pointer and basis['content']==content and body['component_digest']==digest and
+                body['component']['basis_digest']==_digest(basis) and body['component']['aggregate']==pointer and body['component']['delivery_complete'] is True and
+                body['component']['acceptance']==content['projection']['acceptance'] and body['component']['deliveries']==basis['deliveries'] and
+                body['component']['members']==[dict(reference=m['task'],state=m['state'],revision=m['revision'],pins=m['pins'],created_at=m['created_at']) for m in basis['members']],
+                'Retained linked preparation complete membership/basis/acceptance/delivery changed')
+            original=next(m for m in basis['members'] if m['task']==ref)
+            _require(body['identity']==ref and body['outcome']==original['state'] and body['revision']==original['revision'] and
+                body['pins']==original['pins'] and body['created_at']==original['created_at'] and stopped['reference']==ref and
+                stopped['state']==body['outcome'] and stopped['revision']==body['revision'] and stopped['pins']==body['pins'] and
+                stopped['accepted_identity']==body['accepted_identity'],'Retained linked original scalar facts changed')
+            stop=stopped['writer_stop'];proof=_read(None,stop['proof'],context=context,db=db);candidate=_read(None,stop['candidate'],context=context,db=db)
+            _ready_stop_shape(proof)
+            _require(proof==stopped['proof'] and proof['linked_digest']==_digest(basis) and stop['proof']['digest']==_digest(proof) and
+                _digest(candidate)==proof['candidate_digest'] and stop['candidate']['digest']==proof['candidate_digest'] and
+                stop['verification']['digest']==proof['verification_digest'] and stop['task_revision']==body['revision'] and
+                stop['generation']==original['bindings']['generation'] and all(proof[key]==original['bindings'][key] for key in
+                    ('task_digest','attempts_digest','assignments_digest','generation')),
+                'Retained linked independent complete stop changed')
+            task=_linked_raw_task(db,ref)
+            closure=_linked_closed_member(context,db,ref,task,prepared)
+            closed_at=closure['metadata']['closed_at'] if task is None else task['lifecycle']['safe_closed_at']
+            task_marker=state._retired(db,'task',{key:ref[key] for key in ('scope_id','client','session_id','task_id')})
+            _require(closed_at>=max([body['created_at']]+[a['created_at'] for a in stopped.get('assignments',[])]+
+                [value['created_at'] for value in body['numerical']+body['verifications']]),'Linked original closure clock predates support')
+            assignments=_linked_retained_assignments(context,db,ref,task,prepared,closed_at,task_marker)
+            barriers=[a['certificate'] for a in assignments if a['certificate'].get('version')==2 and
+                a['certificate']['reconciliation']['body']['verification']==original['verification']]
+            _require(barriers,'Retained linked local synchronous verification is unavailable')
+            assignment=_read(None,barriers[0]['reference']['assignment'],context=context,db=db)
+            plan=_read(None,assignment['d5_plan'],context=context,db=db)
+            _require(_linked_projection(ref,plan)==content['projection'] and _digest(plan)==candidate['definitions_digest'],
+                'Retained linked approved local contract differs')
+            members.append(dict(reference=ref,task=task,task_marker=task_marker,preparation=prepared,closure=closure,closed_at=closed_at,
+                assignments=assignments,plan=plan,candidate=candidate))
+            pending.extend(_linked_retained_references(body,ref['authority']));pending.extend(_linked_retained_references(prepared['metadata']['dependencies'],ref['authority']))
+    if discovered:return dict(discovered_authorities=sorted(discovered.values(),key=_raw))
+    _,expanded,observed=_linked_stop_sources(pointer,authorities)
+    if expanded!=sorted(authorities,key=_raw):return dict(discovered_authorities=[a for a in expanded if _raw(a) not in known])
+    _require([dict(reference=reference,metadata=metadata,stat=_closure_file_stat(Path(metadata['managed']['path']))) for _,(reference,metadata) in sorted(observed.items())]==basis['sources'],
+        'Retained linked original source facts changed')
+    snapshots=[dict(reference=m['reference'],plan=m['plan'],candidate=m['candidate']) for m in members]
+    blockers,delivered,_,deliveries=_linked_outcomes(content['projection'],content['inputs_digest'],content['observations'],snapshots,content['selected'],observed=observed)
+    _require(not blockers and delivered and deliveries==basis['deliveries'],'Retained linked shared/exact delivery source support changed')
+    sources={}
+    while pending:
+        ref=pending.pop();key=_raw(ref)
+        if key in sources:continue
+        _require(len(sources)<4096,'Retained linked source graph exceeds bound')
+        if _raw(ref['authority']) not in known:discovered[_raw(ref['authority'])]=ref['authority'];continue
+        context=_reference_context(ref['authority'])
+        with _preparation_database(context,writer) as db:metadata,raw=_managed_artifact(None,ref['artifact'],context=context,db=db)
+        sources[key]=dict(reference=ref,metadata=metadata,stat=_closure_file_stat(Path(metadata['managed']['path'])))
+        for edge in metadata['dependencies']:
+            target=edge['reference'];other=target.get('authority',ref['authority'])
+            if _raw(other) not in known:discovered[_raw(other)]=other
+            if edge['kind']=='artifact':pending.append(dict(authority=other,artifact=target.get('artifact',target)))
+            elif edge['kind'] in {'assignment','recovery'}:pending.append(dict(authority=other,artifact=target['assignment'] if edge['kind']=='assignment' else target['artifact']))
+            else:_require(edge['kind']=='task','Unknown retained source dependency remains protected')
+    if discovered:return dict(discovered_authorities=sorted(discovered.values(),key=_raw))
+    sources=[sources[key] for key in sorted(sources)]
+    expected=_preparation_dependencies(dict(members=[dict(reference=m['reference'],certificate=m['preparation']['content']['stopped']) for m in members],sources=sources))
+    _require(all(m['preparation']['metadata']['dependencies']==expected for m in members),'Retained preparation typed source dependencies changed')
+    return dict(aggregate=pointer,basis=basis,component_digest=digest,members=members,sources=sources,authorities=sorted(authorities,key=_raw))
+
+
 def _linked_stopped_basis(pointer,authorities,*,writer=None,fresh=False):
     """Open basis remains unchanged; only exact issued closures admit a historical successor."""
+    if _linked_component_closed(pointer,writer=writer):
+        retained=_linked_retained_component(pointer,authorities,writer=writer)
+        _require(not retained.get('discovered_authorities'),'Retained linked source authority coverage is incomplete')
+        if fresh:
+            _require(all(m['task'] is not None for m in retained['members']),'Retired linked owners cannot obtain fresh verification')
+            for member,original in zip(retained['members'],retained['basis']['members']):
+                snapshot=_linked_snapshot(member['reference'],stopped=True)
+                _require(_digest(snapshot['candidate'])==original['candidate_digest'] and not snapshot['blockers'],'Closed linked current candidate changed')
+                _check_ready_inputs(original['inputs'])
+        return retained['basis']
     content=_linked_source(pointer);_linked_stop_content(content);rows=[]
     for member in content['members']:
         ref=member['task'];context=_reference_context(ref['authority'])
@@ -3148,12 +3540,14 @@ def _linked_prepared_replacements(certificates,contexts,*,writer=None):
                         if metadata['owner'].get('task')==ref and _read(None,dict(name=item[0],digest=item[1]),context=ctx,db=db).get('kind')=='linked-closure-preparation':present=True
             if not present:
                 groups[key]=(None,None);result.append(certificate);continue
-            facts=_linked_preparation_facts(pointer,authorities,writer=writer)
+            historical=_linked_component_closed(pointer,writer=writer)
+            facts=_linked_retained_component(pointer,authorities,writer=writer) if historical else _linked_preparation_facts(pointer,authorities,writer=writer)
             _require(not facts.get('discovered_authorities'),'Prepared replacement authority coverage is incomplete')
             required={_raw(m['reference']) for m in facts['members']}
             actual={_raw(c['reference']) for c in certificates if c.get('linked',{}).get('aggregate')==pointer}
             _require(actual==required,'D4 prepared component omits an approved member')
-            receipts={_raw(m['reference']):_preparation_receipt(facts,m['reference'],writer=writer) for m in facts['members']}
+            receipts={_raw(m['reference']):(dict(authority=m['reference']['authority'],artifact=m['preparation']['reference']) if historical else
+                _preparation_receipt(facts,m['reference'],writer=writer)) for m in facts['members']}
             groups[key]=(facts,receipts if all(receipts.values()) else None)
             if all(receipts.values()):
                 extra.extend(receipts.values());extra.extend(s['reference'] for s in facts['sources'])
@@ -3162,9 +3556,26 @@ def _linked_prepared_replacements(certificates,contexts,*,writer=None):
                         routes[_raw(source['reference'])]=required
         facts,receipts=groups[key]
         if receipts is not None:
-            certificate=dict(certificate,preparation=dict(reference=receipts[_raw(certificate['reference'])]['artifact'],component_digest=_digest(facts),authorities=authorities))
+            certificate=dict(certificate,preparation=dict(reference=receipts[_raw(certificate['reference'])]['artifact'],component_digest=facts['component_digest'] if 'component_digest' in facts else _digest(facts),authorities=authorities))
         result.append(certificate)
     return result,extra,routes
+
+
+def _check_retained_linked_certificate(component,certificate):
+    _require(not component.get('discovered_authorities'),'Retained linked source guards are incomplete')
+    member=next((m for m in component['members'] if m['reference']==certificate['reference']),None)
+    _require(member is not None and {key:value for key,value in certificate.items() if key!='preparation'}==member['preparation']['content']['stopped'],
+        'Retained linked certificate differs from actual prepared/closed original owner')
+    if 'preparation' in certificate:
+        prepared=certificate['preparation'];required={_raw(a) for a in component['basis']['authorities']}
+        required.update(_raw(m['reference']['authority']) for m in component['members'])
+        for source in component['sources']:
+            required.add(_raw(source['reference']['authority']))
+            required.update(_raw(edge['reference'].get('authority',source['reference']['authority'])) for edge in source['metadata']['dependencies'])
+        _require(prepared['reference']==member['preparation']['reference'] and prepared['component_digest']==component['component_digest'] and
+            required<={_raw(a) for a in prepared['authorities']}<={_raw(a) for a in component['authorities']},
+            'Retained preparation owner pointer/component/source set changed')
+    return member
 
 
 _PREPARATION_READER = ContextVar('linked_preparation_inspection_reader', default=None)
@@ -3188,6 +3599,13 @@ class _PreparationReader:
             _raw(_canonical_plain(context.authority_set[0])) in self.authorities,
             'Preparation reader physical authority set differs')
         key=_raw(dict(aggregate=pointer,authorities=[self.authorities[a] for a in sorted(self.authorities)]))
+        if key not in self.entries and _linked_component_closed(pointer,writer=(context,db)):
+            support=_linked_retained_component(pointer,list(self.authorities.values()),writer=(context,db))
+            _require(not support.get('discovered_authorities'),'Retained preparation authority coverage is incomplete')
+            self.entries[key]=('retained',_canonical_freeze(support))
+        if key in self.entries and self.entries[key][0]=='retained':
+            _check_retained_linked_certificate(_canonical_plain(self.entries[key][1]),certificate)
+            return
         if key not in self.entries:
             facts=_linked_preparation_facts(pointer,list(self.authorities.values()),writer=(context,db))
             _require(not facts.get('discovered_authorities'),'D4 prepared component authority set is incomplete')
@@ -3209,6 +3627,11 @@ class _PreparationReader:
     def finish(self):
         self._check_owner()
         for captured,retained in self.entries.values():
+            if captured=='retained':
+                support=_canonical_plain(retained)
+                _require(_linked_retained_component(support['aggregate'],list(self.authorities.values()))==support,
+                    'Retained linked marker/source support changed during inspection')
+                continue
             facts=_canonical_plain(captured);receipts=_canonical_plain(retained)
             _check_preparation_inputs(facts)
             _require(all(_preparation_receipt(facts,m['reference'])==receipts[_raw(m['reference']).decode()] for m in facts['members']),
@@ -3232,6 +3655,9 @@ def _check_linked_preparation_certificate(context,db,certificate,*,preparation_r
         preparation_reader.check(context,db,certificate)
         return
     basis=certificate['linked'];authorities=certificate['preparation']['authorities']
+    if _linked_component_closed(basis['aggregate'],writer=(context,db)):
+        _check_retained_linked_certificate(_linked_retained_component(basis['aggregate'],authorities,writer=(context,db)),certificate)
+        return
     facts=_linked_preparation_facts(basis['aggregate'],authorities,writer=(context,db))
     _require(not facts.get('discovered_authorities') and _digest(facts)==certificate['preparation']['component_digest'],
         'D4 prepared component facts changed')

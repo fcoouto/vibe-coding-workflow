@@ -293,8 +293,19 @@ def _closure_guidance(context,db,records):
         _require(owner['authority']==evidence._canonical_plain(context.authority_set[0]),'Foreign retained guidance owner remains protected')
         marker=state._retired(db,'task',{key:owner[key] for key in ('scope_id','client','session_id','task_id')})
         if marker is None:continue
+        compact=evidence._read(None,dict(name=row[0],digest=row[1]),context=context,db=db);linked=None
+        if compact.get('kind')=='linked-closure-preparation':
+            support=evidence._linked_retained_component(compact['component']['aggregate'],compact['stopped']['linked']['authorities'],writer=(context,db))
+            _require(not support.get('discovered_authorities'),'Retained guidance source guards are incomplete')
+            member=next(m for m in support['members'] if m['reference']==owner)
+            _require(member['preparation']['reference']==dict(name=row[0],digest=row[1]),'Retained guidance preparation is not its actual owner')
+            continue
         owner_key=evidence._raw(owner);_require(owner_key not in owners,'Retained guidance owner has ambiguous compact receipts');owners.add(owner_key)
-        compact=evidence._read(None,dict(name=row[0],digest=row[1]),context=context,db=db)
+        if compact.get('stopped',{}).get('linked'):
+            support=evidence._linked_retained_component(compact['stopped']['linked']['aggregate'],compact['stopped']['linked']['authorities'],writer=(context,db))
+            _require(not support.get('discovered_authorities'),'Retained guidance component source guards are incomplete')
+            linked=next(m for m in support['members'] if m['reference']==owner)
+            _require(linked['closure']['reference']==dict(name=row[0],digest=row[1]),'Retained guidance closure is not its actual owner')
         _require(compact.get('kind')=='task-closure' and compact['identity']==owner and not marker['evidence_expired']
             and marker['pins_digest']==state._digest(compact['pins']) and marker['created_at']==compact['created_at']==metadata['created_at'],
             'Retained scope-guidance receipt differs from original task identity/age')
@@ -314,15 +325,22 @@ def _closure_guidance(context,db,records):
                 _require(source_metadata is not None,'Retained native guidance source metadata is unavailable')
                 projected=dict(reference=original,created_at=source_metadata['created_at'],owner=source_metadata['owner'],
                     bytes=source_metadata['bytes'],unit='bytes')
-                _require(original in compact['artifacts'] and projected in compact['sources'],
+                if linked is not None:
+                    projected['reference']=dict(authority=owner['authority'],artifact=original)
+                    present=any(source['reference']==projected['reference'] for source in support['sources'])
+                else:present=original in compact['artifacts']
+                _require(present and projected in compact['sources'],
                     'Retained native guidance source differs from original managed provenance/age')
             actual=assignment(body,ref,certificate['created_at'],certificate['request_digest'])
             _require(actual in compact.get('native_guidance',[]),'Retained native guidance projection differs from actual original assignment')
         for original in compact.get('scope_guidance',[]):
             actual=source(original['reference'])
-            _require(actual==original and original['reference'] in compact['artifacts'],
+            present=any(source['reference']==dict(authority=owner['authority'],artifact=original['reference']) for source in support['sources']) if linked is not None else original['reference'] in compact['artifacts']
+            _require(actual==original and present,
                 'Retained scope guidance differs from original source projection')
-        retained.append(dict(reference=dict(name=row[0],digest=row[1]),identity=owner,marker=marker,assignments=markers))
+        receipt=dict(reference=dict(name=row[0],digest=row[1]),identity=owner,marker=marker,assignments=markers)
+        if linked is not None:receipt['linked_component']=support
+        retained.append(receipt)
     if folder.exists():
         state._private(folder,True);entries=list(folder.iterdir());_require(len(entries)<=4096,'Guidance cache source bound exceeded')
         surfaces.update(path.name[:-5] for path in entries if path.name.endswith('.json') and not path.name.endswith('.control.json'))
@@ -1658,12 +1676,12 @@ def retire_settled(db, task_ref, closure):
     """Insert exact certified assignment markers before atomically removing their rows."""
     context=evidence._existing_authority_context(task_ref['authority'],db=db)
     facts=evidence._check_closure_observation(context,db,task_ref,closure)
-    _require('linked' not in facts and 'retained_linked_closure' not in facts,'Linked raw retirement awaits the dependent lifecycle slice')
+    _require('linked' not in facts and 'retained_linked_closure' not in facts,'Linked removal needs its complete retirement observation')
     records=_closure_assignments(context,db,task_ref,facts['task'],facts['certificate'])
     task=state._task(db,task_ref['scope_id'],task_ref['client'],task_ref['session_id'],task_ref['task_id'])
     lifetime=state._task_lifecycle(task)
     _require(lifetime is not None and lifetime['safe_closed_at'] is not None
-        and evidence._read(None,lifetime['compact'],context=context,db=db)==evidence._closure_content(facts),
+        and evidence._read(None,lifetime['compact'],context=context,db=db)==evidence._retirement_content(facts),
         'Assignment retirement requires exact retained safe closure')
     retired_at=state._owner_time()
     _require(retired_at>=lifetime['safe_closed_at'],'Assignment retirement clock regressed')
