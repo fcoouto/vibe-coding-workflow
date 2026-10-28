@@ -1229,6 +1229,243 @@ class RecoveryContextTests(unittest.TestCase):
         self.assertTrue(calls)
 
 
+class CancelledClosureTests(unittest.TestCase):
+    """Disposable owner-proof fixtures; no native stop authority is qualified here."""
+    def setUp(self):
+        from tests.test_state import StateTests,canonical_scope
+        self.f=StateTests(methodName='runTest');self.f.setUp();self.addCleanup(self.f.doCleanups)
+        self.f.scope=canonical_scope(self.f.scope);self.scope=self.f.scope
+        from runtime import evidence
+        self.api=evidence
+        with patch.object(state,'_owner_time',return_value=100):self.f.start()
+        self.f.update(state='active')
+        self.f.event(kind='UserPromptSubmit',tool_call_id=None)
+        self.f.event()
+        task=self.f.status()['task']
+        identity={k:task[k] for k in ('client','session_id','task_id','scope_ref')}
+        proof=dict(version=1,kind='stopped-writer-reconciliation',identity=identity,expected_revision=task['revision'],
+            expected_pins=task['pins'],observed_turn_id=task['turn_id'],stopped=True,descendants_stopped=True,
+            attempt_ids=[],observation_ref='fixture:independent-stop',coordinator_ref='fixture:checked')
+        raw=json.dumps(proof).encode();path=self.f.base/'stop.json';path.write_bytes(raw);path.chmod(0o400)
+        self.task=state.retire_task(self.scope,identity|dict(expected_revision=task['revision'],expected_pins=task['pins'],
+            reason='Stopped',reference='fixture:cancel',stop_proof=dict(path=str(path),sha256=hashlib.sha256(raw).hexdigest())))['task']
+        self.context=self.api._evidence_context(self.scope)
+        self.ref=self.api._canonical_plain(self.api._artifact_owner(self.scope,self.task).task)
+        self.request=identity|dict(expected_revision=self.task['revision'],expected_pins=self.task['pins'])
+
+    def close(self):
+        observed=self.api._observe_closure((self.context,),self.ref)
+        return self.api.close_task(self.scope,self.request,observed)
+
+    def test_cancelled_dated_owner_closes_without_changing_revision_or_age(self):
+        with patch.object(state,'_owner_time',return_value=200):result=self.close()
+        task=result['task'];self.assertEqual(task['revision'],self.task['revision'])
+        self.assertEqual(task['retirement'],self.task['retirement'])
+        self.assertEqual(task['lifecycle']['created_at'],100)
+        self.assertEqual(task['lifecycle']['safe_closed_at'],200)
+        compact=self.api._read(self.scope,task['lifecycle']['compact'])
+        self.assertEqual(compact['outcome'],'cancelled');self.assertEqual(compact['numerical'],[])
+        self.assertEqual(compact['usage'],'unknown')
+        with patch.object(state,'_owner_time',return_value=300):self.assertEqual(self.close()['task'],task)
+
+    def test_atomic_retirement_preserves_exact_replay_markers(self):
+        with patch.object(state,'_owner_time',return_value=200):self.close()
+        with patch.object(state,'_owner_time',return_value=250):self.api._retire_closed_task(self.context,self.ref)
+        with self.api._context_database(self.context) as db:
+            self.assertEqual(db.execute('select count(*) from tasks').fetchone()[0],0)
+            marker=state._retired(db,'task',{k:self.ref[k] for k in ('scope_id','client','session_id','task_id')})
+            self.assertEqual(marker['created_at'],100);self.assertEqual(marker['outcome'],'cancelled')
+        with self.assertRaises(state.StateError):self.f.start()
+
+    def test_unproved_cancelled_flag_and_caller_snapshot_cannot_close(self):
+        with self.assertRaises(state.StateError):self.api.close_task(self.scope,self.request,dict(closed=True,stopped=True))
+        with state._database(self.scope,write=True) as db:
+            task=state._task(db,self.ref['scope_id'],'codex','session');task.pop('retirement')
+            db.execute('update tasks set data=?',(json.dumps(task),))
+        with self.assertRaises(state.StateError):self.close()
+
+
+    def test_closed_identity_refuses_side_effects_but_history_and_new_identity_remain(self):
+        task=self.close()['task']
+        self.assertEqual(state.task_status(self.scope,'codex','session')['task'],task)
+        review=dict(applicability='inapplicable',reason='Trivial unexecuted accepted check',independent=False)
+        plan=dict(version=1,decision_ref='user:accepted',criteria=[dict(id='works',checks=['unit'],behavior=False)],
+            checks=[dict(id='unit',argv=[sys.executable,'-c','pass'],cwd='.',timeout=3,env={'PATH':os.defpath},
+                effects=dict(kind='read-only',inspection_ref='fixture:inspected',network=False,production=False,publish=False,migrations=False),
+                baseline=dict(status='passed',reference='fixture:baseline'),dependencies=[])],
+            reviews=dict(general=review,security=review),security_impact=dict(status='assessed',reason='Local fixture',reference='fixture:checked'),
+            base='HEAD',comparison='endpoint',nontrivial=False,instructions=[],exclusions=[],review_limit=1)
+        self.api._plan(plan)
+        with patch.object(self.api,'capture_candidate',side_effect=AssertionError('capture after closure')), \
+             patch.object(self.api,'_artifact',side_effect=AssertionError('artifact after closure')):
+            request={k:self.request[k] for k in self.api.IDENTITY}
+            with self.assertRaisesRegex(state.StateError,'Safely closed'):self.api.plan_evidence(self.scope,request|dict(plan=plan))
+            with self.assertRaises(state.StateError):self.f.start()
+        before=self.api._canonical_plain(task)
+        self.assertEqual(self.f.event().action,'deny')
+        with state._database(self.scope) as db:
+            self.assertEqual(state._task(db,self.ref['scope_id'],'codex','session'),before)
+        new=self.f.start(task_id='new-task',replaces=dict(task_id='task',expected_revision=task['revision']))
+        self.assertEqual(new['task']['task_id'],'new-task')
+        with state._database(self.scope) as db:
+            self.assertEqual(state._task(db,self.ref['scope_id'],'codex','session','task'),before)
+
+    def test_terminal_admission_stops_native_discovery_commands_and_git_plan_probe(self):
+        from runtime import delegation
+        self.close();request={k:self.request[k] for k in self.api.IDENTITY}
+        native=request|dict(dispatch_id='new',job_id='job',selection={},control_observation={},
+            discovery_expectation={},guidance={},resource_units=1,brief={})
+        with patch.object(delegation,'_discovery',side_effect=AssertionError('native discovery')), \
+             patch.object(delegation,'_git_directory',side_effect=AssertionError('Git probe')), \
+             patch.object(self.api,'_execute',side_effect=AssertionError('command execution')):
+            with self.assertRaisesRegex(state.StateError,'Safely closed'):delegation._prepare_native(self.scope,native,role='worker')
+            with self.assertRaisesRegex(state.StateError,'Safely closed'):delegation.plan_delegation(self.scope,request|dict(plan={}))
+            with self.assertRaisesRegex(state.StateError,'Safely closed'):self.api.run_check(self.scope,request|dict(check_id='unit'))
+            with self.assertRaisesRegex(state.StateError,'Safely closed'):self.api.verify_completion(self.scope,request|dict(purpose='completion'))
+
+    def test_closed_session_external_completion_invalidates_other_task_checkout(self):
+        task=self.close()['task']
+        state.start_task(self.scope,self.f.request|dict(session_id='other',task_id='other-task'))
+        before=state.task_status(self.scope,'codex','other')['generation']
+        result=self.f.event(kind='PostToolUse',tool_call_id='external-new-call')
+        self.assertEqual(result.action,'context')
+        self.assertEqual(state.task_status(self.scope,'codex','other')['generation'],before+1)
+        with state._database(self.scope) as db:
+            self.assertEqual(state._task(db,self.ref['scope_id'],'codex','session'),task)
+            self.assertIsNone(db.execute("select 1 from receipts where tool_call_id='external-new-call'").fetchone())
+
+    def test_marker_failure_rolls_back_all_rows_and_markers(self):
+        self.close();original=state._retired_record
+        def fail(kind,*args):
+            if kind=='turn':raise state.StateError('fixture:before second marker')
+            return original(kind,*args)
+        with patch.object(state,'_retired_record',side_effect=fail):
+            with self.assertRaises(state.StateError):self.api._retire_closed_task(self.context,self.ref)
+        with self.api._context_database(self.context) as db:
+            self.assertEqual(db.execute('select count(*) from tasks').fetchone()[0],1)
+            self.assertEqual(db.execute('select count(*) from retired_identities').fetchone()[0],0)
+            self.assertEqual(db.execute('select count(*) from turns').fetchone()[0],1)
+
+    def test_substituted_same_byte_stop_content_blocks_retirement(self):
+        task=self.close()['task']
+        path=self.context.directory/'evidence'/task['retirement']['proof']['name']
+        replacement=path.with_name('replacement.json');replacement.write_bytes(path.read_bytes());replacement.chmod(0o400)
+        os.replace(replacement,path)
+        with self.assertRaises(state.StateError):self.api._retire_closed_task(self.context,self.ref)
+    def test_actual_d4_source_cut_composes_atomic_retirement_and_rollback(self):
+        from tests.test_changes import ScopedChangesTests
+        f=ScopedChangesTests(methodName='runTest');f.setUp();self.addCleanup(f.doCleanups)
+        request,context,ref,identity,old=f.recovery_release_fixture()
+        with self.assertRaises(state.StateError):self.api._observe_closure((context,),ref)
+        released=f.changes._register_recovery_release(f.changes._observe_recovery_release(context.authority_set,identity))
+        self.assertTrue(released['complete'])
+        observed=self.api._observe_closure((context,),ref)
+        with self.api._context_database(context) as db:
+            task=state._task(db,ref['scope_id'],ref['client'],ref['session_id'],ref['task_id'])
+        selected={k:task[k] for k in ('client','session_id','task_id','scope_ref')}
+        self.api.close_task(f.release_fixture_scope,selected|dict(expected_revision=task['revision'],expected_pins=task['pins']),observed)
+        self.api._retire_closed_task(context,ref)
+        self.assertTrue(f.changes.inspect_lifecycle_recovery(context.authority_set,(ref,))['complete'])
+        resumed=f.changes._run_scoped(f.directory,request,'resume');self.assertEqual(resumed['exit_code'],0,resumed)
+        rolled=f.changes._run_scoped(f.directory,request,'rollback');self.assertEqual(rolled['exit_code'],0,rolled)
+        self.assertTrue(f.changes.inspect_lifecycle_recovery(context.authority_set,(ref,))['complete'])
+
+    def test_retired_artifact_attribution_requires_retained_owned_compact(self):
+        task=self.close()['task'];self.api._retire_closed_task(self.context,self.ref)
+        compact=task['lifecycle']['compact']
+        with self.api._context_database(self.context,write=True) as db:
+            db.execute('delete from evidence_metadata where name=?',(compact['name'],))
+        (self.context.directory/'evidence'/compact['name']).unlink()
+        root=dict(owner=dict(authority=self.ref['authority'],artifact=task['retirement']['proof']),
+            kind='artifact',reference=task['retirement']['proof'],need='content')
+        with self.api._context_database(self.context) as db:
+            with self.assertRaises(state.StateError):self.api._lifecycle_requirements(self.context,[root],db=db)
+
+    def test_lower_writers_reject_unissued_mapping_even_with_current_rows(self):
+        observed=self.api._canonical_plain(self.api._observe_closure((self.context,),self.ref).facts)
+        forged=json.loads(json.dumps(observed));forged['certificate']['proof']['stopped']=False
+        content=self.api._closure_content(forged)
+        owner=self.api._ClosureOwner(self.api._canonical_freeze(self.ref),self.api._canonical_freeze(forged),
+            self.api._canonical_freeze(content),tuple(self.api._canonical_freeze(dict(kind='artifact',reference=r)) for r in forged['artifacts']),100)
+        with self.api._context_database(self.context,write=True) as db:
+            with self.assertRaises(state.StateError):self.api._artifact(None,content,context=self.context,owner=owner,db=db)
+        with self.api._context_database(self.context,write=True) as db:
+            with self.assertRaises(state.StateError):state._close_lifecycle(db,self.ref,forged,None)
+
+    def test_source_change_during_marker_insertion_rolls_back_retirement(self):
+        task=self.close()['task'];original=state._retired_record;changed=[]
+        path=self.context.directory/'evidence'/task['retirement']['proof']['name']
+        def mutate(kind,*args):
+            result=original(kind,*args)
+            if kind=='receipt' and not changed:
+                path.chmod(0o600);path.write_bytes(path.read_bytes()+b' ');path.chmod(0o400);changed.append(True)
+            return result
+        with patch.object(state,'_retired_record',side_effect=mutate):
+            with self.assertRaises(state.StateError):self.api._retire_closed_task(self.context,self.ref)
+        self.assertTrue(changed)
+        with self.api._context_database(self.context) as db:
+            self.assertEqual(db.execute('select count(*) from tasks').fetchone()[0],1)
+            self.assertEqual(db.execute('select count(*) from retired_identities').fetchone()[0],0)
+
+    def test_unknown_scope_owned_guidance_dependency_is_protected(self):
+        self.api._artifact(self.scope,dict(kind='d4-recovery-source',text='caller label cannot turn guidance into owner-issued recovery'),
+            owner=self.api._guidance_artifact_owner(self.scope))
+        with self.assertRaisesRegex(state.StateError,'Scope-owned consumer'):self.close()
+
+    def test_unknown_unaccounted_artifact_blocks_new_closure(self):
+        path=self.context.directory/'evidence'/'orphan.json';path.write_text('{}');path.chmod(0o400)
+        with self.assertRaises(state.StateError):self.close()
+        with state._database(self.scope) as db:
+            self.assertIsNone(state._task(db,self.ref['scope_id'],'codex','session')['lifecycle']['safe_closed_at'])
+
+    def test_late_generation_change_reprotects_closed_support(self):
+        self.close();self.f.event(kind='PostToolUse',tool_call_id='late-external')
+        with self.assertRaises(state.StateError):self.api._retire_closed_task(self.context,self.ref)
+        with state._database(self.scope) as db:self.assertEqual(db.execute('select count(*) from tasks').fetchone()[0],1)
+
+    def test_independent_live_consumer_raw_edge_blocks_closure(self):
+        other=state.start_task(self.scope,self.f.request|dict(session_id='other',task_id='other'))['task']
+        ref=self.api._artifact(self.scope,dict(kind='fixture:actual-live-consumer'),owner=self.api._artifact_owner(self.scope,other))
+        with state._database(self.scope,write=True) as db:
+            metadata=state._metadata(db,ref['name']);metadata['dependencies'].append(dict(kind='task',reference=self.ref))
+            db.execute('update evidence_metadata set data=? where name=?',(json.dumps(metadata),ref['name']))
+            other['evidence']=dict(version=1,plan=ref,candidate=ref,attempts=[])
+            state._save(db,self.ref['scope_id'],other)
+        with self.assertRaises(state.StateError):self.close()
+
+    def test_generation_change_during_compact_registration_rejects_and_rolls_back(self):
+        original=self.api._artifact_registered
+        def mutate(scope,value,*args):
+            ref=original(scope,value,*args)
+            if value.get('kind')=='task-closure':args[-1].execute('update checkouts set generation=generation+1')
+            return ref
+        before=self.f.status()['generation']
+        with patch.object(self.api,'_artifact_registered',side_effect=mutate):
+            with self.assertRaises(state.StateError):self.close()
+        with state._database(self.scope) as db:
+            self.assertIsNone(state._task(db,self.ref['scope_id'],'codex','session')['lifecycle']['safe_closed_at'])
+            self.assertEqual(db.execute('select generation from checkouts').fetchone()[0],before)
+
+    def test_regressed_owner_clock_cannot_create_closure_age(self):
+        with patch.object(state,'_owner_time',return_value=99):
+            with self.assertRaises(state.StateError):self.close()
+        with state._database(self.scope) as db:
+            self.assertIsNone(state._task(db,self.ref['scope_id'],'codex','session')['lifecycle']['safe_closed_at'])
+
+    def test_compact_registration_failure_leaves_no_closed_row_or_marker(self):
+        original=self.api._artifact_registered
+        def fail(scope,value,*args):
+            ref=original(scope,value,*args)
+            if value.get('kind')=='task-closure':raise state.StateError('fixture:after artifact registration')
+            return ref
+        with patch.object(self.api,'_artifact_registered',side_effect=fail):
+            with self.assertRaises(state.StateError):self.close()
+        with state._database(self.scope) as db:
+            self.assertIsNone(state._task(db,self.ref['scope_id'],'codex','session')['lifecycle']['safe_closed_at'])
+            self.assertEqual(db.execute('select count(*) from retired_identities').fetchone()[0],0)
+        with self.assertRaises(state.StateError):self.close()
+
+
 class LinkedVerificationTests(unittest.TestCase):
     """Synthetic trusted coordinator sources; actual disposable check receipts, no native qualification."""
     def setUp(self):

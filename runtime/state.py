@@ -456,6 +456,124 @@ def _lifecycle_identity(db, kind, reference):
         created_at=lifecycle["created_at"]))
 
 
+def inspect_dependencies(db, task_ref):
+    """Observe bounded existing rows; this is not closure or deletion permission."""
+    from runtime import evidence
+    _task_reference(task_ref)
+    context=evidence._existing_authority_context(task_ref['authority'],db=db)
+    selected_identity=_lifecycle_identity(db,'task',task_ref)
+    authority=_canonical_plain(context.authority_set[0])
+    def bounded(sql):
+        rows=db.execute(sql+' limit 4097').fetchall()
+        if len(rows)>4096:raise StateError('Lifecycle current history exceeds its observation bound')
+        return rows
+    tasks=[];requirements=[];blockers=[]
+    for scope_id,client,session,task_id in bounded('select scope_id,client,session_id,task_id from tasks order by scope_id,client,session_id,task_id'):
+        reference=dict(authority=authority,scope_id=scope_id,client=client,session_id=session,task_id=task_id)
+        task=_task(db,scope_id,client,session,task_id)
+        tasks.append(dict(reference=reference,task=task))
+        if reference!=task_ref:requirements.append(dict(owner=reference,kind='task',reference=reference,need='raw'))
+    selected=next((row['task'] for row in tasks if row['reference']==task_ref),None)
+    if selected is None and selected_identity['status']=='live':raise StateError('Lifecycle task body is unavailable')
+    assignments=bounded('select id,scope_id,client,session_id,task_id,dispatch_id,data from assignments order by id')
+    for row in assignments:
+        requirements.append(dict(owner=dict(authority=authority,id=row[0]),kind='assignment',
+            reference=dict(authority=authority,id=row[0],owner=dict(zip(('scope_id','client','session_id','task_id','dispatch_id'),row[1:6]))),need='raw'))
+        if tuple(row[1:5])==tuple(task_ref[k] for k in ('scope_id','client','session_id','task_id')):
+            blockers.append('Assignment body requires original task; exact assignment certificate integration is required')
+    turns=bounded('select scope_id,client,session_id,turn_id,task_id,continuation_consumed from turns order by scope_id,client,session_id,turn_id')
+    receipts=bounded('select scope_id,client,session_id,turn_id,tool_call_id,kind,fingerprint,conflicted from receipts order by scope_id,client,session_id,turn_id,tool_call_id,kind')
+    owner=tuple(task_ref[k] for k in ('scope_id','client','session_id'))
+    known_tasks={tuple(row['reference'][k] for k in ('scope_id','client','session_id','task_id')) for row in tasks}
+    for row in turns:
+        if tuple(row[:3])==owner and tuple(row[:3])+(row[4],) not in known_tasks:
+            blockers.append('Turn task ownership is ambiguous')
+    for row in receipts:
+        if tuple(row[:3])==owner and row[7]:blockers.append('Conflicted receipt ownership remains protected')
+        if tuple(row[:3])==owner and not any(tuple(t[:4])==tuple(row[:4]) and t[4] is not None for t in turns):
+            blockers.append('Receipt task ownership is ambiguous')
+    metadata=[]
+    for row in bounded('select name,digest,owner_key,class,created_at,closed_at,status,bytes,data from evidence_metadata order by name'):
+        metadata.append(dict(reference=dict(name=row[0],digest=row[1]),metadata=_metadata_record(row)))
+    checkouts=bounded('select scope_id,project_id,repository_root,git_common_dir,generation,physical_identity from checkouts order by scope_id')
+    if not any(row[0]==task_ref['scope_id'] for row in checkouts):raise StateError('Lifecycle checkout is unavailable')
+    bindings=bounded('select scope_id,client,session_id,task_id from bindings order by scope_id,client,session_id')
+    result=dict(task=selected,tasks=tasks,assignments=assignments,turns=turns,receipts=receipts,metadata=metadata,
+        checkouts=checkouts,bindings=bindings,requirements=requirements,blockers=sorted(set(blockers)))
+    result=_canonical_plain(_canonical_freeze(result))
+    result['digest']=_digest(result)
+    return result
+
+
+def _assert_open(task):
+    if task is not None and task.get('lifecycle',{}).get('safe_closed_at') is not None:
+        raise StateError('Safely closed task cannot admit mutations or new evidence')
+
+
+def _close_lifecycle(db, task_ref, observations, compact):
+    """Owner-only same-revision write; general _save never permits lifecycle changes."""
+    from runtime import evidence
+    context=evidence._existing_authority_context(task_ref['authority'],db=db)
+    facts=evidence._check_closure_observation(context,db,task_ref,observations,new_compact=compact)
+    task=_task(db,task_ref['scope_id'],task_ref['client'],task_ref['session_id'],task_ref['task_id'])
+    _assert_open(task)
+    if task['revision']!=facts['task']['revision'] or task['state']!='cancelled':
+        raise StateError('Closure original cancelled owner changed')
+    closed_at=_owner_time()
+    if closed_at<task['lifecycle']['created_at']:raise StateError('Closure clock regressed before original owner age')
+    task['lifecycle']=dict(created_at=task['lifecycle']['created_at'],safe_closed_at=closed_at,compact=compact,
+        closure=dict(version=1,task_revision=task['revision'],dependency_digest=_digest(facts),observed_at=closed_at,evidence=facts['artifacts']))
+    _task_lifecycle(task)
+    db.execute('update tasks set data=? where scope_id=? and client=? and session_id=? and task_id=?',
+        (json.dumps(task,separators=(',',':')),task_ref['scope_id'],task_ref['client'],task_ref['session_id'],task_ref['task_id']))
+    evidence._check_closure_observation(context,db,task_ref,observations,new_compact=compact)
+    return task
+
+
+def retire_closed(db, task_ref, closure):
+    """Atomically mark exact identities before removing rows; never delete evidence files."""
+    from runtime import evidence
+    context=evidence._existing_authority_context(task_ref['authority'],db=db)
+    facts=evidence._check_closure_observation(context,db,task_ref,closure)
+    task=_task(db,task_ref['scope_id'],task_ref['client'],task_ref['session_id'],task_ref['task_id'])
+    lifetime=_task_lifecycle(task)
+    if lifetime is None or lifetime['safe_closed_at'] is None or evidence._read(None,lifetime['compact'],context=context,db=db)!=evidence._closure_content(facts):
+        raise StateError('Retirement requires exact current retained closure support')
+    identity={k:task_ref[k] for k in ('scope_id','client','session_id','task_id')}
+    if db.execute('select 1 from assignments where scope_id=? and client=? and session_id=? and task_id=?',tuple(identity.values())).fetchone():
+        raise StateError('Surviving assignment still requires its original task')
+    observed=inspect_dependencies(db,task_ref)
+    if observed['blockers']:raise StateError('; '.join(observed['blockers']))
+    retired_at=_owner_time()
+    if retired_at<lifetime['safe_closed_at']:raise StateError('Retirement clock regressed before safe closure')
+    pins_digest=_digest(task['pins']);age=lifetime['created_at'];markers=[]
+    def marker(kind,key,request_digest=None):
+        if _retired(db,kind,key):raise StateError('Live identity conflicts with its retired marker')
+        data=dict(version=1,identity=key,pins_digest=pins_digest,request_digest=request_digest,
+            created_at=age,retired_at=retired_at,outcome='cancelled',evidence_expired=False)
+        digest=_retired_identity(kind,key);raw=json.dumps(data,separators=(',',':'))
+        _retired_record(kind,digest,raw,None)
+        db.execute('insert into retired_identities values(?,?,?,NULL)',(kind,digest,raw))
+        markers.append((kind,key,data))
+    turns=[row for row in observed['turns'] if tuple(row[:3])==tuple(identity.values())[:3] and row[4]==identity['task_id']]
+    receipts=[row for row in observed['receipts'] if any(tuple(row[:4])==tuple(turn[:4]) for turn in turns)]
+    if any(row[7] for row in receipts):raise StateError('Conflicted event receipt ownership remains protected')
+    marker('task',identity)
+    for row in turns:
+        key=dict(zip(('scope_id','client','session_id','turn_id'),row[:4]));marker('turn',key)
+    for row in receipts:
+        key=dict(zip(('scope_id','client','session_id','turn_id','tool_call_id','kind'),row[:6]));marker('receipt',key,_digest(row[6]))
+    for row in receipts:db.execute('delete from receipts where scope_id=? and client=? and session_id=? and turn_id=? and tool_call_id=? and kind=?',row[:6])
+    for row in turns:db.execute('delete from turns where scope_id=? and client=? and session_id=? and turn_id=?',row[:4])
+    db.execute('delete from bindings where scope_id=? and client=? and session_id=? and task_id=?',tuple(identity.values()))
+    db.execute('delete from tasks where scope_id=? and client=? and session_id=? and task_id=?',tuple(identity.values()))
+    evidence._check_closure_observation(context,db,task_ref,closure,new_compact=lifetime['compact'],retired=True)
+    for kind,key,data in markers:
+        if _retired(db,kind,key)!=data:raise StateError('Retirement marker changed before commit')
+    evidence._check_context(context,db)
+    return dict(retired=True,identity=identity,outcome='cancelled')
+
+
 def _scope_version(scope):
     if isinstance(scope, AcceptedScope):
         if (not all(isinstance(getattr(scope, key), MappingProxyType) and _frozen_snapshot(getattr(scope, key))
@@ -905,6 +1023,7 @@ def _save(db, scope_id, task):
             (scope_id, task["client"], task["session_id"], task["task_id"])).fetchone()
         if previous:
             old = json_object(previous[0], limit=4 * 1024 * 1024)
+            _assert_open(old)
             if old["accepted_identity"] != task["accepted_identity"] or old["pins"] != task["pins"]:
                 raise StateError("Stored task identity and pins are immutable")
             if old.get("lifecycle") != task.get("lifecycle") or ("lifecycle" in old) != ("lifecycle" in task):
@@ -1013,6 +1132,7 @@ def start_task(scope, request):
         _checkout_row(db, scope, initialize=True)
         current = _task(db, scope_id, request["client"], request["session_id"])
         if current and current["task_id"] == request["task_id"]:
+            _assert_open(current)
             _compatible(scope, current)
             if any(current[field] != request[field] for field in ("scope_ref", "mode", "decision_ref")):
                 raise StateError("Task mode, scope and decision reference are immutable")
@@ -1025,11 +1145,13 @@ def start_task(scope, request):
             _compatible(scope, current)
             if replacement != dict(task_id=current["task_id"], expected_revision=current["revision"]):
                 raise StateError("Replacing a bound task requires its identity and current revision")
-            current["revision"] += 1
+            if current.get("lifecycle",{}).get("safe_closed_at") is None:
+                current["revision"] += 1
             for condition in current["conditions"]:
                 if "continuation" in condition:
                     condition["continuation"]["revoked"] = True
-            _save(db, scope_id, current)
+            if current.get("lifecycle",{}).get("safe_closed_at") is None:
+                _save(db, scope_id, current)
         elif replacement is not None:
             raise StateError("No bound task matches the requested replacement")
         task = {field: request[field] for field in ("client", "session_id", "task_id", "scope_ref", "mode", "decision_ref")}
@@ -1148,21 +1270,34 @@ def process_event(scope, event):
             if db is None:
                 raise StateError("Task state has not been initialized")
             scope_id = _scope_id(scope)
+            retired_event=False
             event_identity = dict(scope_id=scope_id, client=event.client, session_id=event.session_id, turn_id=event.turn_id)
             if event.turn_id is not None:
                 if _retired(db, "turn", event_identity):
-                    raise StateError("Retired event cannot be rebound")
+                    retired_event=True
+                    if event.kind!="PostToolUse":raise StateError("Retired event cannot be rebound")
                 if event.tool_call_id is not None:
                     receipt_identity = event_identity | dict(tool_call_id=event.tool_call_id, kind=event.kind)
                     if _retired(db, "receipt", receipt_identity):
-                        raise StateError("Retired receipt cannot be replayed as new work")
+                        retired_event=True
+                        if event.kind!="PostToolUse":raise StateError("Retired receipt cannot be replayed as new work")
             _checkout_row(db, scope)
             task = _task(db, scope_id, event.client, event.session_id)
             _compatible(scope, task)
+            closed=task is not None and task.get("lifecycle",{}).get("safe_closed_at") is not None
+            if closed and event.kind!="PostToolUse":_assert_open(task)
             identity = (scope_id, event.client, event.session_id, event.turn_id)
             row = db.execute("select task_id,continuation_consumed from turns where scope_id=? and client=? and session_id=? and turn_id=?", identity).fetchone() if event.turn_id else None
             receipt_identity = (*identity, event.tool_call_id, event.kind)
             receipt = db.execute("select fingerprint,conflicted from receipts where scope_id=? and client=? and session_id=? and turn_id=? and tool_call_id=? and kind=?", receipt_identity).fetchone() if event.turn_id and event.tool_call_id else None
+            if closed or retired_event:
+                # External completions still invalidate the physical checkout, without resuming a terminal owner.
+                result,changes=evaluate(event,dict(task=None,turn=None,receipt={"fingerprint":receipt[0],"conflicted":receipt[1]} if receipt else None))
+                if changes['generation_delta']:
+                    db.execute('update checkouts set generation=generation+? where scope_id=?',(changes['generation_delta'],scope_id))
+                if changes.get('poison_receipt'):
+                    db.execute('update receipts set conflicted=1 where scope_id=? and client=? and session_id=? and turn_id=? and tool_call_id=? and kind=?',receipt_identity)
+                return HookResult(event.kind,'context','Terminal task remains closed; external completion freshness was observed')
             result, changes = evaluate(event, dict(task=task, turn={"task_id": row[0], "continuation_consumed": row[1]} if row else None,
                                                    receipt={"fingerprint": receipt[0], "conflicted": receipt[1]} if receipt else None))
             if changes["generation_delta"]:

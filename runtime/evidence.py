@@ -76,6 +76,7 @@ def _task(db, scope, request, revision=True):
     task = state._task(db, state._scope_id(scope), request['client'], request['session_id'])
     _require(task is not None and all(task[k] == request[k] for k in IDENTITY[:4]), 'Evidence task binding changed')
     state._compatible(scope, task)
+    state._assert_open(task)
     _require(not revision or task['revision'] == request['expected_revision'], 'Task revision conflict')
     _require(task['state'] != 'cancelled', 'Cancelled tasks cannot collect or verify evidence')
     return task
@@ -335,7 +336,300 @@ def _guidance_artifact_owner(scope):
     return _ArtifactOwner(scope.project_id, None, _canonical_freeze(state._pins(scope)), 'guidance')
 
 
+_CLOSURE_ISSUER=object()
+
+
+@dataclass(frozen=True)
+class _ClosureObservation:
+    """Acquisition provenance, not authentication of native/operator stop authority."""
+    facts: object
+    context: EvidenceAuthorityContext
+    issuer: object
+
+
+def _issued_closure(context, observations):
+    _require(isinstance(observations,_ClosureObservation) and observations.issuer is _CLOSURE_ISSUER
+        and all(getattr(observations.context,key)==getattr(context,key) for key in
+            ('directory','database','directory_binding','database_binding','authority_set'))
+        and state._frozen_snapshot(observations.facts),
+        'Closure needs an immutable observation issued by actual owner acquisition')
+    return _canonical_plain(observations.facts)
+
+
+@dataclass(frozen=True)
+class _ClosureOwner:
+    reference: object
+    facts: object
+    content: object
+    dependencies: tuple
+    created_at: int
+
+
+def _closure_task_artifacts(task):
+    refs=[]
+    if 'retirement' in task:refs.append(task['retirement']['proof'])
+    evidence=task.get('evidence',{})
+    for field in ('plan','candidate','verification'):
+        if field in evidence:refs.append(evidence[field])
+    _require(not evidence.get('attempts') and not evidence.get('history') and 'linked_verification' not in evidence,
+        'Collected assignment or linked proof requires its complete owner certificate integration')
+    _require('delegation' not in task,'Delegation closure requires original assignment certificate integration')
+    return refs
+
+
+def _lifecycle_requirements(context, roots, *, db):
+    """Follow typed managed-content consumers; exact inserted owner edges are attribution."""
+    authority=_canonical_plain(context.authority_set[0]);pending=list(roots);seen=set();requirements=[]
+    while pending:
+        edge=pending.pop(0);key=_raw(edge)
+        if key in seen:continue
+        seen.add(key);_require(len(seen)<=4096,'Lifecycle dependency traversal exceeds bound')
+        kind=edge['kind'];reference=edge['reference'];need=edge['need']
+        requirements.append(edge)
+        if kind=='task':
+            state._task_reference(reference)
+            _require(reference['authority']==authority,'Foreign task consumer remains protected')
+            identity=state._lifecycle_identity(db,'task',reference)
+            if identity['status']!='live':
+                from runtime import changes
+                rows=db.execute("select name,digest,owner_key,class,created_at,closed_at,status,bytes,data from evidence_metadata where class='compact' and status='live' limit 4097").fetchall()
+                _require(len(rows)<=4096,'Retained attribution support exceeds its bound')
+                support=[]
+                for row in rows:
+                    metadata=state._metadata_record(row)
+                    if metadata['owner'].get('task')!=reference:continue
+                    value=_read(None,dict(name=row[0],digest=row[1]),context=context,db=db)
+                    if value.get('kind')!='task-closure':continue
+                    _require(value['identity']==reference and state._digest(value['pins'])==identity['pins_digest']
+                        and value['created_at']==metadata['created_at']==identity['created_at'],
+                        'Retained compact attribution differs from original marker identity/age')
+                    changes._check_stopped_certificate(context,db,value['stopped'])
+                    support.append(value)
+                _require(len(support)==1,'Retired attribution requires exact retained owned compact support')
+        elif kind=='artifact':
+            selected=reference.get('authority',authority)
+            _require(selected==authority,'Foreign content consumer remains protected')
+            ref=reference.get('artifact',reference)
+            metadata,raw=_managed_artifact(None,ref,context=context,db=db)
+            value=json.loads(raw)
+            for dependency in metadata['dependencies']:
+                child=dict(dependency);child_need='content' if child['kind']=='artifact' else 'raw'
+                if child['kind']=='task' and child['reference']==metadata['owner'].get('task') and value.get('kind')!='linked-verification':
+                    child_need='identity'
+                _require(child['kind'] in {'task','artifact'},'Unknown owner dependency requires its original raw support')
+                pending.append(dict(owner=dict(authority=authority,artifact=ref),**child,need=child_need))
+        else:
+            raise state.StateError('Assignment, delivery or recovery body needs owner-specific closure support')
+    return sorted(requirements,key=_raw)
+
+
+def _closure_file_stat(path):
+    info=path.lstat()
+    _require(stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode),'Closure source is not a physical file/directory')
+    return [info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_nlink,info.st_size,info.st_mtime_ns,info.st_ctime_ns]
+
+
+def _closure_recovery_files(recovery):
+    """Freshness only: D4 owns interpretation of these exact approved source trees."""
+    files={};pending=sorted({Path(row['plan_dir']) for row in recovery['dependencies'] if 'plan_dir' in row})
+    while pending:
+        path=pending.pop();_require(len(files)<4096,'Closure recovery file observation exceeds bound')
+        files[str(path)]=_closure_file_stat(path)
+        if path.is_dir():pending.extend(sorted(path.iterdir()))
+    return files
+
+
+def _closure_recovery(context,task_ref):
+    from runtime import changes
+    authorities=[_canonical_plain(context.authority_set[0])]
+    result=_canonical_plain(changes._inspect_lifecycle_recovery_guarded(authorities,[task_ref]))
+    before=_closure_recovery_files(result)
+    latest=_canonical_plain(changes._inspect_lifecycle_recovery_guarded(authorities,[task_ref]))
+    _require(latest==result and _closure_recovery_files(latest)==before,'Recovery source moved during closure observation')
+    return result,before
+
+
+def _closure_facts(context, task_ref, db, recovery, *, recovery_files=None):
+    from runtime import changes,delegation
+    _check_context(context,db)
+    state._fields(recovery,('complete','dependencies','blockers','roots','requirements','authorities','discovered_authorities'))
+    authority=_canonical_plain(context.authority_set[0])
+    _require(recovery['complete'] is True and not recovery['blockers'] and not recovery['discovered_authorities']
+        and recovery['authorities']==[authority],'Recovery current source coverage is incomplete or foreign')
+    observed=state.inspect_dependencies(db,task_ref);task=observed['task']
+    _require(not observed['blockers'],'; '.join(observed['blockers']))
+    _require(task['pins']['schema_version']==3 and task['state']=='cancelled' and task.get('retirement')
+        and task.get('lifecycle'),'Closure needs a dated actually cancelled stopped owner')
+    certificate=changes._stopped_certificate(context,db,dict(reference=task_ref,pins=task['pins']))
+    _require(not certificate['proof']['attempt_ids'],'Stopped unresolved attempts require assignment certificate integration')
+    delegation._ledger(None,db,context=context)
+    own_refs=_closure_task_artifacts(task)
+    for ref in own_refs:
+        body=_read(None,ref,context=context,db=db)
+        _require(body.get('version')!=2 or 'linked' not in body,'Linked closure requires exact stopped participant/delivery composition')
+    roots=[]
+    for row in observed['tasks']:
+        if row['reference']==task_ref:continue
+        for ref in _artifact_dependencies(row['task']):
+            roots.append(dict(owner=row['reference'],**ref,need='content'))
+        linked=row['task'].get('evidence',{}).get('linked_verification')
+        if linked:
+            roots.append(dict(owner=row['reference'],kind='artifact',reference=dict(authority=linked['authority'],artifact=linked['reference']),need='content'))
+    # D4 already classified its current roots, including independent old proof routes.
+    requirements=list(recovery['requirements'])+_lifecycle_requirements(context,roots,db=db)
+    _require(not any(edge['kind']=='task' and edge['reference']==task_ref and edge['need']=='raw' for edge in requirements),
+        'An independent current consumer still requires the raw task body')
+    # Every existing managed file is accounted and physically bound; unregistered orphans protect.
+    physical=[];compact=task['lifecycle']['compact']
+    for item in observed['metadata']:
+        ref=item['reference'];path=Path(item['metadata']['managed']['path']);before=_closure_file_stat(path)
+        metadata,raw=_managed_artifact(None,ref,context=context,db=db)
+        _require(_closure_file_stat(path)==before,'Managed source moved during closure read')
+        owner=metadata['owner'];body=json.loads(raw)
+        _require(owner.get('kind')=='project' and owner.get('project_id')==task['accepted_identity']['project_id'],
+            'Unknown or foreign evidence owner remains protected')
+        if owner['task'] is None:
+            _require(metadata['class']=='compact' and body.get('kind') in {'authority-source-baseline','d4-recovery-source'},
+                'Scope-owned consumer dependencies require existing guidance/review owner integration')
+        physical.append(dict(reference=ref,metadata=metadata,stat=before))
+    folder=context.directory/'evidence'
+    names=sorted(p.name for p in folder.iterdir()) if folder.exists() else []
+    _require(len(names)<=4096 and names==sorted(item['reference']['name'] for item in observed['metadata']),
+        'Unaccounted evidence content remains protected')
+    # Normalize only the owner-written closure envelope and its one retained compact artifact.
+    task=dict(task,lifecycle=dict(created_at=task['lifecycle']['created_at'],safe_closed_at=None,closure=None,compact=None))
+    normalized=dict(observed,task=task)
+    normalized['tasks']=[dict(row,task=task) if row['reference']==task_ref else row for row in observed['tasks']]
+    normalized['metadata']=[item for item in observed['metadata'] if item['reference']!=compact]
+    normalized.pop('digest')
+    physical=[item for item in physical if item['reference']!=compact]
+    original=task['accepted_identity']
+    bindings={original['project_root']:original['project_binding']}
+    bindings.update({original[k]:original['bindings'][label] for k,label in (('repository_root','root'),('primary_root','primary_root'),('git_dir','git_dir'),('git_common_dir','git_common_dir'))})
+    _require(all(_binding(Path(path))==binding for path,binding in bindings.items()),'Historical checkout physical identity changed')
+    return dict(version=1,task_ref=task_ref,task=task,certificate=certificate,bindings=bindings,recovery_files=recovery_files or {},
+        observed=normalized,physical=physical,requirements=sorted(requirements,key=_raw),recovery=recovery,
+        artifacts=sorted(own_refs,key=_raw))
+
+
+def _observe_closure(contexts, task_ref):
+    """Internal owner observation. Types/flags authenticate nothing; writers rederive facts."""
+    from runtime import changes
+    contexts=tuple(contexts);_require(len(contexts)==1,'Foreign owner closure needs complete terminal component integration')
+    context=contexts[0];authority=_canonical_plain(context.authority_set[0])
+    _require(task_ref['authority']==authority,'Closure task authority differs')
+    with changes._authority_guards([context.directory]):
+        recovery,files=_closure_recovery(context,task_ref)
+        with _context_database(context) as db:
+            return _ClosureObservation(_canonical_freeze(_closure_facts(context,task_ref,db,recovery,recovery_files=files)),context,_CLOSURE_ISSUER)
+
+
+def _closure_content(facts):
+    task=facts['task']
+    return dict(version=1,kind='task-closure',identity=facts['task_ref'],pins=task['pins'],accepted_identity=task['accepted_identity'],
+        created_at=task['lifecycle']['created_at'],revision=task['revision'],outcome='cancelled',coverage='stopped-owner-only',
+        stopped=facts['certificate'],artifacts=facts['artifacts'],numerical=[],usage='unknown',
+        dependency_digest=_digest(facts),limitations=['Cancellation is not implementation success or delivery evidence',
+            'No command executions or native usage are asserted by this zero-assignment closure'])
+
+
+def _check_closure_observation(context, db, task_ref, observations, *, new_compact=None, retired=False):
+    """Final local recheck only; complete source interpretation precedes the writer."""
+    facts=_issued_closure(context,observations)
+    _require(isinstance(facts,dict) and facts.get('task_ref')==task_ref,'Closure snapshot identity is unavailable')
+    _check_context(context,db)
+    current=state.inspect_dependencies(db,task_ref)
+    compact=(current['task']['lifecycle']['compact'] if current['task'] else None) or new_compact
+    if current['task'] is not None:
+        current['task']=dict(current['task'],lifecycle=dict(created_at=current['task']['lifecycle']['created_at'],safe_closed_at=None,closure=None,compact=None))
+    current['tasks']=[dict(row,task=current['task']) if row['reference']==task_ref else row for row in current['tasks']]
+    current['metadata']=[item for item in current['metadata'] if item['reference']!=compact]
+    current.pop('digest')
+    expected=deepcopy(facts['observed'])
+    if retired:
+        _require(current['task'] is None,'Retired owner unexpectedly remains live')
+        identity=tuple(task_ref[k] for k in ('scope_id','client','session_id','task_id'))
+        removed_turns={tuple(row[:4]) for row in expected['turns'] if tuple(row[:3])==identity[:3] and row[4]==identity[3]}
+        expected['task']=None
+        expected['tasks']=[row for row in expected['tasks'] if row['reference']!=task_ref]
+        expected['bindings']=[row for row in expected['bindings'] if tuple(row)!=identity]
+        expected['turns']=[row for row in expected['turns'] if tuple(row[:4]) not in removed_turns]
+        expected['receipts']=[row for row in expected['receipts'] if tuple(row[:4]) not in removed_turns]
+    _require(current==expected,'Closure rows, source heads, generation or metadata changed')
+    _require(all(_binding(Path(path))==binding for path,binding in facts['bindings'].items()),'Closure checkout binding changed')
+    for item in facts['physical']:
+        _require(_closure_file_stat(Path(item['metadata']['managed']['path']))==item['stat'],'Closure source bytes or physical identity changed')
+        for path,binding in item['metadata']['managed']['parents'].items():
+            _require(_binding(Path(path))==binding,'Closure content parent changed')
+    _require(all(_closure_file_stat(Path(path))==value for path,value in facts['recovery_files'].items()),'Recovery source changed before closure commit')
+    names=sorted(path.name for path in (context.directory/'evidence').iterdir())
+    expected=sorted([item['reference']['name'] for item in current['metadata']]+([] if compact is None else [compact['name']]))
+    _require(names==expected,'Unaccounted content appeared before closure commit')
+    if compact is not None:
+        _require(_read(None,compact,context=context,db=db)==_closure_content(facts),'Compact support differs from original owner facts')
+    return facts
+
+
+def close_task(scope, request, observations):
+    """Internal coordinator wrapper only; public JSON/CLI cannot supply closure authority."""
+    _require(isinstance(scope,AcceptedScope),'Closure requires current accepted scope wrapper')
+    state._fields(request,('client','session_id','task_id','scope_ref','expected_revision','expected_pins'))
+    state._identity(request);state._integer(request['expected_revision'],'expected_revision',1)
+    state._validate_pins(request['expected_pins'])
+    context=_evidence_context(scope)
+    task_ref=dict(authority=_canonical_plain(context.authority_set[0]),scope_id=state._scope_id(scope),
+        **{k:request[k] for k in ('client','session_id','task_id')})
+    from runtime import changes
+    with changes._authority_guards([context.directory]):
+        recovery,files=_closure_recovery(context,task_ref)
+        with _context_database(context) as reader:
+            actual=_closure_facts(context,task_ref,reader,recovery,recovery_files=files)
+        _require(actual==_issued_closure(context,observations),'Closure owner observation is stale or caller supplied')
+        issued=_ClosureObservation(_canonical_freeze(actual),context,_CLOSURE_ISSUER)
+        with _context_database(context,write=True) as db:
+            facts=_check_closure_observation(context,db,task_ref,issued);task=facts['task']
+            _require(task['revision']==request['expected_revision'] and task['pins']==request['expected_pins']
+                and task['scope_ref']==request['scope_ref'],'Closure request differs from exact original owner')
+            actual=state._task(db,task_ref['scope_id'],request['client'],request['session_id'],request['task_id'])
+            if actual['lifecycle']['safe_closed_at'] is not None:
+                _require(_read(None,actual['lifecycle']['compact'],context=context,db=db)==_closure_content(facts),
+                    'Retained closure compact support changed')
+                return dict(ok=True,task=actual)
+            content=_closure_content(facts)
+            dependencies=tuple(_canonical_freeze(dict(kind='artifact',reference=ref)) for ref in facts['artifacts'])
+            owner=_ClosureOwner(_canonical_freeze(task_ref),issued,_canonical_freeze(content),dependencies,task['lifecycle']['created_at'])
+            compact=_artifact(None,content,context=context,owner=owner,db=db)
+            _check_closure_observation(context,db,task_ref,issued,new_compact=compact)
+            task=state._close_lifecycle(db,task_ref,issued,compact)
+            return dict(ok=True,task=task)
+
+
+def _retire_closed_task(context, task_ref):
+    from runtime import changes,delegation
+    with changes._authority_guards([context.directory]):
+        recovery,files=_closure_recovery(context,task_ref)
+        with _context_database(context) as reader:
+            facts=_closure_facts(context,task_ref,reader,recovery,recovery_files=files)
+        issued=_ClosureObservation(_canonical_freeze(facts),context,_CLOSURE_ISSUER)
+        with _context_database(context,write=True) as db:
+            _check_closure_observation(context,db,task_ref,issued)
+            task=state._task(db,task_ref['scope_id'],task_ref['client'],task_ref['session_id'],task_ref['task_id'])
+            _require(task['lifecycle']['safe_closed_at'] is not None,'Task has no retained safe closure')
+            compact=_read(None,task['lifecycle']['compact'],context=context,db=db)
+            _require(compact==_closure_content(facts),'Closure support or current dependencies changed')
+            delegation.retire_settled(db,task_ref,issued)
+            return state.retire_closed(db,task_ref,issued)
+
+
 def _registered_owner(scope, context, owner, db):
+    if isinstance(owner,_ClosureOwner):
+        ref=_canonical_plain(owner.reference)
+        facts=_check_closure_observation(context,db,ref,owner.facts)
+        _require(_canonical_plain(owner.content)==_closure_content(facts)
+            and owner.created_at==facts['task']['lifecycle']['created_at']
+            and [_canonical_plain(d) for d in owner.dependencies]==[dict(kind='artifact',reference=r) for r in facts['artifacts']],
+            'Closure registration differs from existing owner-derived facts')
+        return dict(kind='project',project_id=facts['task']['accepted_identity']['project_id'],task=ref),ref
     if isinstance(owner, _LinkedOwner):
         return _registered_owner(scope, context, owner.task_owner, db)
     if isinstance(owner, _RecoveryOwner):
@@ -360,6 +654,7 @@ def _registered_owner(scope, context, owner, db):
         and reference['scope_id'] == state._scope_id(scope), 'Artifact owner authority changed')
     task = state._task(db, reference['scope_id'], reference['client'], reference['session_id'], reference['task_id'])
     _require(task is not None and task['pins'] == _canonical_plain(owner.pins), 'Artifact original task owner is unavailable')
+    state._assert_open(task)
     _require(state._physical_identity(task['accepted_identity']) == state._physical_identity(_canonical_plain(scope.accepted_identity)),
         'Artifact original task physical owner changed')
     return dict(kind='project', project_id=owner.project_id, task=reference), reference
@@ -432,13 +727,13 @@ def _artifact_registered(scope, value, context, owner, db):
         os.close(directory_fd)
     digest = hashlib.sha256(raw).hexdigest()
     recovery = isinstance(owner, _RecoveryOwner)
-    if recovery: _require(value == _canonical_plain(owner.content), 'Recovery artifact differs from owner-derived content')
-    dependencies = [_canonical_plain(d) for d in owner.dependencies] if recovery or isinstance(owner, _LinkedOwner) else _artifact_dependencies(value)
+    if recovery or isinstance(owner,_ClosureOwner): _require(value == _canonical_plain(owner.content), 'Artifact differs from owner-derived content')
+    dependencies = [_canonical_plain(d) for d in owner.dependencies] if recovery or isinstance(owner, (_LinkedOwner,_ClosureOwner)) else _artifact_dependencies(value)
     if task_ref is not None:
         dependencies.insert(0, dict(kind='task', reference=task_ref))
     baseline = isinstance(owner, _BaselineOwner)
-    created = owner.creation.created_at if baseline else owner.created_at if recovery else state._owner_time()
-    content_class = 'compact' if baseline or recovery else 'detail'
+    created = owner.creation.created_at if baseline else owner.created_at if recovery or isinstance(owner,_ClosureOwner) else state._owner_time()
+    content_class = 'compact' if baseline or recovery or isinstance(owner,_ClosureOwner) else 'detail'
     if baseline:
         expected = dict(version=1, kind='authority-source-baseline', source_contract=2,
             authority=_canonical_plain(owner.creation.authority), project_id=owner.project_id,
@@ -998,6 +1293,7 @@ def _reserve_check(scope, request):
     from runtime import delegation
     with state._database(scope) as db:
         _require(db is not None, 'Task state has not been initialized')
+        state._assert_open(state._task(db,state._scope_id(scope),request['client'],request['session_id'],request['task_id']))
         replay = delegation._replay(scope, delegation._ledger(scope, db), request)
         if replay:
             _require(replay['data']['role'] == 'check', 'Dispatch identity belongs to another role')
@@ -1057,6 +1353,8 @@ def run_check(scope, request):
     result = _finish(scope, request, attempt, reserved['task']['revision'])
     revision = result['task']['revision']
     execution_owner = deepcopy(result['attempt'])
+    with state._database(scope) as db:
+        _task(db,scope,request,revision=False)
     attempt.update(_execute(scope, check, candidate['tools'][check['id']]))
     output_ref = _artifact(scope, attempt.pop('private_output'), owner=_artifact_owner(scope, result["task"]))
     try:

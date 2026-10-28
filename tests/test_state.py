@@ -1317,5 +1317,34 @@ class AuthorityBootstrapTests(unittest.TestCase):
 
 
 
+class LifecycleDependencyTests(unittest.TestCase):
+    def setUp(self):
+        from runtime import evidence
+        self.f=StateTests(methodName='runTest');self.f.setUp();self.addCleanup(self.f.doCleanups)
+        self.f.scope=canonical_scope(self.f.scope);self.api=self.f.api()
+        with patch.object(self.api,'_owner_time',return_value=100):self.f.start()
+        with self.api._database(self.f.scope) as db:
+            task=self.api._task(db,self.api._scope_id(self.f.scope),'codex','session')
+            self.ref=evidence._canonical_plain(evidence._artifact_owner(self.f.scope,task).task)
+
+    def test_dependency_observation_is_bounded_exact_and_read_only(self):
+        with self.api._database(self.f.scope) as db:
+            before=db.total_changes
+            result=self.api.inspect_dependencies(db,self.ref)
+            self.assertEqual(result['task']['lifecycle']['created_at'],100)
+            self.assertEqual(result['task']['task_id'],'task')
+            self.assertEqual(result['assignments'],[])
+            self.assertEqual(result['blockers'],[])
+            self.assertEqual(result,self.api.inspect_dependencies(db,self.ref))
+            self.assertEqual(db.total_changes,before)
+
+    def test_ambiguous_receipt_ownership_is_protected(self):
+        with self.api._database(self.f.scope,write=True) as db:
+            db.execute("insert into receipts values(?,?,?,?,?,?,?,0)",(self.ref['scope_id'],'codex','session','orphan-turn','call','PreToolUse','hash'))
+        with self.api._database(self.f.scope) as db:
+            result=self.api.inspect_dependencies(db,self.ref)
+            self.assertTrue(any('ownership' in b for b in result['blockers']))
+
+
 if __name__ == "__main__":
     unittest.main()

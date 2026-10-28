@@ -680,6 +680,8 @@ def plan_delegation(scope, request):
     """Pin one immutable task plan; an assertion records but cannot grant native authority."""
     evidence._request(request, ('plan',))
     request = json_object(evidence._raw(request))
+    with state._database(scope) as db:
+        evidence._task(db,scope,request)
     state._fields(request['plan'], PLAN_FIELDS)
     plan = _delegation_plan(scope, dict(request['plan'], git_directory=_git_directory(scope)))
     _require(plan['route']['parent_session_id'] == request['session_id'], 'Prepared native parent differs from task owner')
@@ -1272,6 +1274,7 @@ def _reserve_operation(scope, request, *, role, _verification=False):
     with state._database(scope) as db:
         _require(db is not None, 'Runtime task state is missing')
         _retired_dispatch(scope, db, request)
+        state._assert_open(state._task(db,state._scope_id(scope),request['client'],request['session_id'],request['task_id']))
         records = _ledger(scope, db)
         replay = _replay(scope, records, request)
         if replay:
@@ -1295,6 +1298,7 @@ def _reserve_operation(scope, request, *, role, _verification=False):
         request['operation']['id'] if role == 'check' else job_id, byte_limit=byte_limit)
     with _reservation_write(scope) as db:
         _retired_dispatch(scope, db, request)
+        state._assert_open(state._task(db,state._scope_id(scope),request['client'],request['session_id'],request['task_id']))
         records = _ledger(scope, db)
         replay = _replay(scope, records, request)
         if replay:
@@ -1417,6 +1421,7 @@ def _prepare_native(scope, request, *, role):
     with state._database(scope) as db:
         _require(db is not None, 'Runtime task state is missing')
         _retired_dispatch(scope, db, request)
+        state._assert_open(state._task(db,state._scope_id(scope),request['client'],request['session_id'],request['task_id']))
         records = _ledger(scope, db)
         replay = _replay(scope, records, request)
         if replay:
@@ -1438,6 +1443,8 @@ def _prepare_native(scope, request, *, role):
         _admission(scope, db, task, plan, job, claims, records, request)
     _require(_git_directory(scope) == plan['git_directory'], 'Prepared worktree Git metadata changed')
     git_routing = _git_routing(scope, plan['git_directory'])
+    with state._database(scope) as db:
+        evidence._task(db,scope,request)
     observed, guidance = _discovery(scope, plan, request)
     candidate = evidence.capture_candidate(scope, proof_plan)
     _require(candidate['actual_policy_digest'] == task['pins']['policy_digest'], 'Actual policy changed from accepted task pins')
@@ -1482,6 +1489,7 @@ def _prepare_native(scope, request, *, role):
         data['lifecycle'] = body['lifecycle']
     with _reservation_write(scope) as db:
         _retired_dispatch(scope, db, request)
+        state._assert_open(state._task(db,state._scope_id(scope),request['client'],request['session_id'],request['task_id']))
         records = _ledger(scope, db)
         replay = _replay(scope, records, request)
         if replay:
@@ -1524,11 +1532,22 @@ def _assignment(scope, db, request, *, roles=('worker',)):
     return record
 
 
+def retire_settled(db, task_ref, closure):
+    """No assignment may disappear until its actual owner certificate is integrated."""
+    context=evidence._existing_authority_context(task_ref['authority'],db=db)
+    evidence._check_closure_observation(context,db,task_ref,closure)
+    rows=db.execute('select id from assignments where scope_id=? and client=? and session_id=? and task_id=?',
+        tuple(task_ref[k] for k in ('scope_id','client','session_id','task_id'))).fetchall()
+    _require(not rows,'Assignment retirement requires retained exact stopped/reconciliation certificate integration')
+    return 0
+
+
 def _assignment_task(scope, db, request, *, revision=True):
     task = state._task(db, state._scope_id(scope), request['client'], request['session_id'], request['task_id'])
     _require(task is not None and all(task[key] == request[key] for key in evidence.IDENTITY[:4]),
              'Assignment task identity changed')
     state._compatible(scope, task)
+    state._assert_open(task)
     _require(not revision or task['revision'] == request['expected_revision'], 'Assignment task revision conflict')
     return task
 
