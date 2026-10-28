@@ -19,6 +19,14 @@ Select repositories first, then one or more areas or **Full Scan**. Use native m
 
 Full Scan covers all applicable areas only in the selected repositories, at a stated bounded depth with exclusions and gaps. Workflow health and context/token efficiency diagnostics remain separate, including under Full Scan; project review does not start them.
 
+## Planned focused source-structure assessment
+
+The user-approved [oversized-file and agent-context flow](onboard-my-project-plan.md#oversized-files-and-agent-context) adds a focused assessment under Code quality, using the existing skill. Its scope, analysis-only approval, subsequent refactoring approval and distinction from D11 measured diagnostics are defined there. This extension is not implemented or behaviorally qualified by the current D10a/b evidence.
+
+The D10 owner updates the selected review procedure and relevant entry-point exclusion wording so structural context-burden estimates are permitted without activating workflow/usage diagnostics. Keep repositories-before-areas selection, evidence freshness, safe deduplicated checks, temporary unenrolled scope, separate installation authority and the existing retention boundary. Load detailed instructions only for an explicitly approved focused assessment; a Full Scan can report ordinary structural observations without automatically expanding into this analysis. Actual refactoring remains a separately approved normal-development follow-up, not a mutation mode of the review.
+
+Extend D10c acceptance with fresh and stale onboarding shortlists, a grouped partial umbrella inventory, explicit unknowns and sample-only priorities, and an ordinary Full Scan that never starts the focused assessment automatically. Verify that analysis approval permits no source changes, accepting the report grants no implementation authority, and only specifically approved refactoring proceeds through normal checks. Preserve chat-only detailed reporting while managed retention is unavailable, and distinguish likely structural impact from measured savings. Update the source map and affected loading paths during implementation; no new skill or review engine is required.
+
 ## Inspect safely and reuse evidence
 
 Read project rules and inspect command definitions/effects before running existing safe local lint, tests and builds by default. Do not trigger GitHub Actions, recurring/startup/periodic scans or automatic adjustments. Unsafe, unavailable or out-of-scope commands leave explicit gaps while independent inspection continues.
