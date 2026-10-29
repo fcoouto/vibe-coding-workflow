@@ -27,6 +27,7 @@ def control_main():
         storage_actions = storage.add_subparsers(dest="action", required=True)
         storage_actions.add_parser("status", add_help=False)
         storage_actions.add_parser("prepare", add_help=False)
+        storage_actions.add_parser("project-owner", add_help=False)
         storage_actions.add_parser("owner", add_help=False).add_argument("--cwd", required=True)
         task = commands.add_parser("task", add_help=False)
         actions = task.add_subparsers(dest="action", required=True)
@@ -86,6 +87,12 @@ def control_main():
                 report = review_storage.prepare_storage(Path(request["private_data_dir"]))
             elif args.action == "owner":
                 report = review_storage.resolve_owner(Path(args.cwd))
+            elif args.action == "project-owner":
+                from runtime.onboarding import MAX_REQUEST, read_request
+                request = read_request(sys.stdin.buffer.read(MAX_REQUEST + 1))
+                if set(request) != {"project_scope"}:
+                    raise StartupError("Expected exactly project_scope")
+                report = review_storage.resolve_project_owner(request["project_scope"])
             else:
                 report = review_storage.storage_status()
             print(json.dumps(report))

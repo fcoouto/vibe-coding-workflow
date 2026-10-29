@@ -20,6 +20,7 @@ from runtime.startup import (PROJECT_FILE, checkout, json_object, read_git, _can
 MAX_CONFIG = 64 * 1024
 MAX_RECORDS = 4096
 _ACTIVE_PRODUCER = ContextVar('temporary_storage_producer', default=None)
+_PRODUCER_BUDGET = ContextVar('temporary_storage_observation_budget', default=None)
 _ERRORS = (OSError, state.StartupError, sqlite3.Error, ValueError, TypeError, KeyError,
            RecursionError, subprocess.SubprocessError)
 
@@ -31,6 +32,26 @@ def _machine_config_path():
 def _require(value, reason='Temporary review storage remains protected'):
     if not value:
         raise state.StateError(reason)
+
+
+class _HistoryConflict(state.StateError):
+    def __init__(self, owners):
+        super().__init__('Related temporary accounting requires explicit reconciliation')
+        self.owners = owners
+
+
+def _budget(deadline=None):
+    now = time.monotonic()
+    _require(deadline is None or type(deadline) in (int, float) and math.isfinite(deadline))
+    result = dict(paths=0, bytes=0, deadline=min(deadline, now + 4) if deadline is not None else now + 4)
+    _check_observation_deadline(result)
+    return result
+
+
+def _history_protected(owners=None):
+    history = dict(complete=owners is not None, owners=[] if owners is None else [
+        {key: owner[key] for key in ('owner', 'reference', 'created_at')} for owner in owners])
+    return dict(_protected(), temporary_history=history)
 
 
 def _path(value):
@@ -203,6 +224,63 @@ def _provenance(config, context, db):
     return reference
 
 
+def _literal_membership(value):
+    from runtime import onboarding as d3
+    state._fields(value, ('include', 'exclude', 'future_join', 'authorization'))
+    for name in ('include', 'exclude'):
+        for boundary in d3._strings(value[name], empty=name == 'exclude'):
+            if boundary != '.':
+                d3._relative(boundary)
+    _require(type(value['future_join']) is bool)
+    d3._text(value['authorization'])
+    return dict(include=sorted(value['include']), exclude=sorted(value['exclude']),
+                future_join=value['future_join'], authorization=value['authorization'])
+
+
+def _target_shape(target):
+    state._fields(target, ('path', 'binding', 'parents', 'git'))
+    root = state._canonical_path(target['path'])
+    state._canonical_binding(target['binding'])
+    state._metadata_parents(root, target['parents'])
+    _require(len(root.parents) <= 128 and set(target['parents']) == {str(p) for p in root.parents})
+    if target['git'] is not None:
+        git = target['git']
+        state._fields(git, ('root', 'primary_root', 'git_dir', 'git_common_dir', 'binding'))
+        state._fields(git['binding'], ('root', 'primary_root', 'git_dir', 'git_common_dir'))
+        _require(git['root'] == git['primary_root'] == str(root)
+                 and git['git_dir'] == git['git_common_dir'] == str(root / '.git')
+                 and target['binding'] == git['binding']['root'] == git['binding']['primary_root']
+                 and git['binding']['git_dir'] == git['binding']['git_common_dir'])
+        for binding in git['binding'].values():
+            state._canonical_binding(binding)
+    return root
+
+
+def _owner_targets(content):
+    """One strict content shape is shared by the real producer and immutable reader."""
+    _require(type(content['version']) is int and content['version'] == 1)
+    if content['kind'] == 'temporary-target-owner':
+        state._fields(content, ('version', 'kind', 'owner', 'created_at', 'target', 'provenance'))
+        _target_shape(content['target'])
+        _require(content['target']['git'] is not None)
+        return [content['target']]
+    _require(content['kind'] == 'temporary-project-owner')
+    state._fields(content, ('version', 'kind', 'owner', 'created_at', 'root', 'membership', 'members', 'provenance'))
+    root = _target_shape(content['root'])
+    _require(content['root']['git'] is None and _literal_membership(content['membership']) == content['membership']
+             and isinstance(content['members'], list) and 0 < len(content['members']) < MAX_RECORDS)
+    paths, commons = [], []
+    for target in content['members']:
+        member = _target_shape(target)
+        _require(target['git'] is not None and member != root and member.is_relative_to(root)
+                 and any(member.is_relative_to(root / name) for name in content['membership']['include'])
+                 and not any(member.is_relative_to(root / name) for name in content['membership']['exclude']))
+        paths.append(str(member))
+        commons.append(tuple(sorted(target['git']['binding']['git_common_dir'].items())))
+    _require(paths == sorted(set(paths)) and len(set(commons)) == len(commons))
+    return [content['root'], *content['members']]
+
+
 def _check_producer(context, db, owner):
     """Only the active real producer can register its exact observed compact facts."""
     _require(_ACTIVE_PRODUCER.get() is owner and owner.db is db and owner.context == context
@@ -221,20 +299,36 @@ def _check_producer(context, db, owner):
         for table in state.CANONICAL_TABLE_SQL:
             _require(db.execute('select 1 from ' + table + ' limit 1').fetchone() is None)
     else:
-        _require(len(targets) == 1 and _observe_target(Path(targets[0]['path'])) == targets[0]
-                 and content == dict(version=1, kind='temporary-target-owner', owner=metadata_owner,
-                    created_at=owner.created_at, target=targets[0], provenance=content['provenance']))
+        _require(_owner_targets(content) == targets and content['created_at'] == owner.created_at)
+        budget = _PRODUCER_BUDGET.get() or _budget()
+        machine = _path(_machine_config_path())
+        descriptor = os.open(machine.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            config = _configuration(machine, descriptor)
+            _require(config is not None and _ready_context(config, _parents(machine), deadline=budget['deadline']) == context)
+            _require(content['provenance'] == _provenance(config, context, db))
+            _storage_outside(context, machine, targets)
+        finally:
+            os.close(descriptor)
+        if content['kind'] == 'temporary-project-owner':
+            observed = _observe_temporary_project(content['root']['path'],
+                [target['path'] for target in content['members']], content['membership'], budget)
+            _require(observed == {key: content[key] for key in ('root', 'membership', 'members')})
+        else:
+            _require(_observe_target(Path(targets[0]['path']), budget=budget) == targets[0])
     return metadata_owner
 
 
-def _register(context, db, content, targets, *, creation=None):
+def _register(context, db, content, targets, *, creation=None, budget=None):
     _require(len(evidence._raw(content)) <= MAX_CONFIG)
     owner = evidence._TemporaryOwner(context, db, _canonical_freeze(content), _canonical_freeze(targets),
                                      content['created_at'], creation)
     token = _ACTIVE_PRODUCER.set(owner)
+    observation_token = _PRODUCER_BUDGET.set(budget)
     try:
         return evidence._artifact(None, content, context=context, owner=owner, db=db)
     finally:
+        _PRODUCER_BUDGET.reset(observation_token)
         _ACTIVE_PRODUCER.reset(token)
 
 
@@ -332,8 +426,10 @@ def prepare_storage(private_data_dir):
             os.close(creation.descriptor)
 
 
-def _observe_target(target):
+def _observe_target(target, *, budget=None):
     from runtime.onboarding import _checkout_observation
+    budget = budget if budget is not None else _budget()
+    _check_observation_deadline(budget)
     _require(isinstance(target, (str, Path)) and len(str(target)) <= 4096)
     try:
         selected = Path(target).resolve(strict=True)
@@ -342,7 +438,7 @@ def _observe_target(target):
     if selected.is_file():
         selected = selected.parent
     _require(selected.is_dir())
-    identity = checkout(selected, limit=64 * 1024, deadline=time.monotonic() + 5)
+    identity = checkout(selected, limit=64 * 1024, deadline=budget['deadline'])
     _require(identity is not None)
     root, common = identity
     _require(root / '.git' == common and (root / '.git').is_dir() and not (root / '.git').is_symlink())
@@ -352,10 +448,46 @@ def _observe_target(target):
             _require(not os.path.lexists(ancestor / '.git'))
     worktrees = common / 'worktrees'
     _require(not os.path.lexists(worktrees) or worktrees.is_dir() and next(worktrees.iterdir(), None) is None)
-    observed, error = _checkout_observation(str(root), dict(paths=0, bytes=0, deadline=time.monotonic() + 5))
+    observed, error = _checkout_observation(str(root), budget)
     _require(error is None and observed['primary_root'] == str(root) and observed['git_dir'] == str(common))
     git = {key: observed[key] for key in ('root', 'primary_root', 'git_dir', 'git_common_dir', 'binding')}
     return dict(path=str(root), binding=evidence._binding(root), parents=_parents(root), git=git)
+
+
+def _observe_temporary_project(root, members, membership, budget):
+    from runtime import onboarding as d3
+    _check_observation_deadline(budget)
+    root = _path(root)
+    d3._no_links(root)
+    _require(root.is_dir())
+    membership = _literal_membership(membership)
+    for name in (*membership['include'], *membership['exclude']):
+        boundary = root / name
+        d3._no_links(boundary)
+        _require(boundary.resolve().is_relative_to(root))
+    for ancestor in (root, *root.parents):
+        _require(not os.path.lexists(ancestor / PROJECT_FILE.parent))
+    code, _ = read_git(root, '-c', 'safe.bareRepository=all', 'rev-parse', '--absolute-git-dir',
+                       limit=4096, discovery=True, deadline=budget['deadline'])
+    _require(code != 0)
+    target = dict(path=str(root), binding=evidence._binding(root), parents=_parents(root), git=None)
+    budget['paths'] += len(target['parents']) + 1
+    _require(budget['paths'] <= d3.MAX_PATHS)
+    selected = []
+    for member in sorted(members):
+        _check_observation_deadline(budget)
+        member = _path(member)
+        _require(member != root and member.is_relative_to(root)
+                 and any(member.is_relative_to(root / name) for name in membership['include'])
+                 and not any(member.is_relative_to(root / name) for name in membership['exclude']))
+        observed = _observe_target(member, budget=budget)
+        _require(observed['path'] == str(member))
+        selected.append(observed)
+    result = dict(root=target, members=selected, membership=membership)
+    _owner_targets(dict(version=1, kind='temporary-project-owner', owner={}, created_at=0,
+                        provenance={}, **result))
+    _check_observation_deadline(budget)
+    return result
 
 
 def _owners(config, context, db, *, budget=None):
@@ -383,31 +515,64 @@ def _owners(config, context, db, *, budget=None):
         total += metadata['bytes']
         _require(metadata['bytes'] <= MAX_CONFIG and total <= evidence.MAX_ARTIFACT)
         content = evidence._read(None, reference, context=context, db=db)
-        state._fields(content, ('version', 'kind', 'owner', 'created_at', 'target', 'provenance'))
-        _require(type(content['version']) is int and content['version'] == 1
-                 and content['kind'] == 'temporary-target-owner' and content['provenance'] == config['provenance']
+        targets = _owner_targets(content)
+        _require(content['provenance'] == config['provenance']
                  and metadata['owner']['kind'] == 'temporary' and metadata['owner'] == content['owner']
                  and metadata['created_at'] == content['created_at'] == content['owner']['created_at']
-                 and metadata['class'] == 'compact' and metadata['targets'] == [content['target']]
+                 and metadata['class'] == 'compact' and metadata['targets'] == targets
                  and not metadata['dependencies'] and metadata['closed_at'] is None and metadata['export'] is None)
+        if budget is not None:
+            from runtime.onboarding import MAX_TOTAL
+            budget['bytes'] += metadata['bytes']
+            _require(budget['bytes'] <= MAX_TOTAL)
+        details = dict(target=targets[0], targets=targets, kind=content['kind'])
+        if content['kind'] == 'temporary-project-owner':
+            details.update(membership=content['membership'], members=content['members'])
         owners.append(dict(owner=content['owner'], reference=reference, created_at=content['created_at'],
-                           target=content['target'], bytes=metadata['bytes']))
-    return owners
+                           bytes=metadata['bytes'], **details))
+    return sorted(owners, key=lambda owner: (owner['created_at'], owner['target']['path']))
 
 
-def _existing_owner(owners, target):
-    result = None
-    root = Path(target['path'])
+def _related(left, right):
+    root, other = Path(left['path']), Path(right['path'])
+    return (root.is_relative_to(other) or other.is_relative_to(root) or left['binding'] == right['binding']
+            or left['git'] is not None and right['git'] is not None
+            and left['git']['binding']['git_common_dir'] == right['git']['binding']['git_common_dir'])
+
+
+def _related_owners(owners, targets, budget=None):
+    related = []
     for owner in owners:
-        original = owner['target']
-        old_root = Path(original['path'])
-        related = (root.is_relative_to(old_root) or old_root.is_relative_to(root)
-                   or original['binding'] == target['binding']
-                   or original['git']['binding']['git_common_dir'] == target['git']['binding']['git_common_dir'])
-        if related:
-            _require(original == target and result is None)
-            result = owner
-    return result
+        if budget is not None:
+            _check_observation_deadline(budget)
+        if any(_related(original, target) for original in owner['targets'] for target in targets):
+            related.append(owner)
+    return related
+
+
+def _reobserve_project_owner(owner, budget):
+    expected = dict(root=owner['target'], members=owner['members'], membership=owner['membership'])
+    _require(_observe_temporary_project(owner['target']['path'],
+        [target['path'] for target in owner['members']], owner['membership'], budget) == expected)
+
+
+def _existing_owner(owners, target, *, budget=None):
+    related = _related_owners(owners, [target], budget)
+    if not related:
+        return None
+    if len(related) != 1:
+        raise _HistoryConflict(related)
+    owner = related[0]
+    if owner['kind'] == 'temporary-project-owner':
+        if target not in owner['members']:
+            raise _HistoryConflict(related)
+        try:
+            _reobserve_project_owner(owner, budget if budget is not None else _budget())
+        except (*_ERRORS, RuntimeError):
+            raise _HistoryConflict(related) from None
+    elif owner['target'] != target:
+        raise _HistoryConflict(related)
+    return owner
 
 
 def _resolved(owner):
@@ -492,28 +657,101 @@ def _enrolled_baseline(context, project_id, budget):
     return baseline
 
 
-def _enrolled_history(config, context, db, observed, budget):
+def _record_targets(data):
+    """Keep sibling history visible even when only one checkout was selected."""
+    targets = [dict(path=data['project_root'], binding=data['project_binding'], git=None)]
+    for repository in data['repositories']:
+        for selected in repository['checkouts']:
+            git = {key: repository[key] for key in ('primary_root', 'git_common_dir')}
+            git.update({key: selected[key] for key in ('root', 'git_dir')})
+            git['binding'] = repository['binding'] | selected['binding']
+            targets.append(dict(path=selected['root'], binding=selected['binding']['root'], git=git))
+    return targets
+
+
+def _enrolled_history(config, context, db, observed, budget, *, data=None):
     owners = _owners(config, context, db, budget=budget)
-    root = Path(observed['root'])
-    primary = Path(observed['primary_root'])
-    for owner in owners:
-        _check_observation_deadline(budget)
-        original = owner['target']
-        old_root = Path(original['path'])
-        _require(not (root.is_relative_to(old_root) or old_root.is_relative_to(root)
-            or primary.is_relative_to(old_root) or old_root.is_relative_to(primary)
-            or original['binding'] in (observed['binding']['root'], observed['binding']['primary_root'])
-            or original['git']['binding']['git_common_dir'] == observed['binding']['git_common_dir']))
+    targets = [dict(path=observed['root'], binding=observed['binding']['root'], git=observed)]
+    if data is not None:
+        targets.extend(_record_targets(data))
+    related = _related_owners(owners, targets, budget)
+    if related:
+        raise _HistoryConflict(related)
     return owners
+
+
+def _storage_outside(context, path, targets):
+    roots = {target['path'] for target in targets}
+    roots.update(target['git'][key] for target in targets if target['git'] is not None
+                 for key in ('root', 'primary_root', 'git_dir', 'git_common_dir'))
+    _require(not any(context.directory.is_relative_to(Path(root))
+        or Path(root).is_relative_to(context.directory) or path.is_relative_to(Path(root)) for root in roots))
+
+
+def _configuration_snapshot(path, descriptor):
+    config = _configuration(path, descriptor)
+    return config, evidence._binding(path) if config is not None else None
+
+
+def _enrolled_result(selected, acquisitions, budget, *, scope=None):
+    selections = [_enrolled_selection(acquired, budget) for acquired in acquisitions]
+    data, observed, authority, context = selections[0]
+    _require(all((entry[0], entry[2], entry[3]) == (data, authority, context) for entry in selections))
+    if scope is not None:
+        membership = dict(data['membership'], authorization=data['membership']['authorization']['reference'])
+        _require(scope['kind'] == data['kind'] and scope['project_root'] == data['project_root']
+                 and _literal_membership(scope['membership']) == _literal_membership(membership)
+                 and scope['authority']['path'] == str(acquisitions[0].authority_path)
+                 and scope['authority']['sha256'] == acquisitions[0].authority_target['fingerprint']['sha256'])
+        for member, entry, acquired in zip(selected, selections, acquisitions):
+            _require(entry[1]['root'] == str(member)
+                and acquired.authority_path == acquisitions[0].authority_path
+                and acquired.authority_target == acquisitions[0].authority_target)
+            _require(any(repository['primary_root'] == entry[1]['primary_root']
+                and any(checkout['root'] == str(member) for checkout in repository['checkouts'])
+                for repository in data['repositories']))
+        _require(scope['kind'] != 'standalone' or observed['primary_root'] == scope['project_root'])
+        common_bindings = [tuple(sorted(entry[1]['binding']['git_common_dir'].items())) for entry in selections]
+        _require(len(set(common_bindings)) == len(common_bindings))
+    baseline = _enrolled_baseline(context, data['project_id'], budget)
+    with _machine_guard(deadline=budget['deadline']) as (path, descriptor, parents):
+        snapshot = _configuration_snapshot(path, descriptor)
+        config = snapshot[0]
+        history = dict(complete=False, reason='machine_configuration_absent')
+        temporary_context = owners = None
+        if config is not None:
+            temporary_context = _ready_context(config, parents, deadline=budget['deadline'])
+            _storage_outside(temporary_context, path, _record_targets(data))
+            with evidence._context_database(temporary_context) as db:
+                owners = _enrolled_history(config, temporary_context, db, observed, budget, data=data)
+            history = dict(complete=True, reason='authenticated_no_related_history')
+            if scope is not None:
+                history['owners'] = []
+        for member, acquired in zip(selected, acquisitions):
+            _require(_acquire_canonical_membership(member, authority_path=None, budget=budget) == acquired)
+        # Reopen after the first transaction ends so committed baseline changes are visible.
+        _require(_enrolled_baseline(context, data['project_id'], budget) == baseline)
+        _require(_configuration_snapshot(path, descriptor) == snapshot
+            and (config is not None or not os.path.lexists(path)))
+        if config is not None:
+            _require(_ready_context(config, parents, deadline=budget['deadline']) == temporary_context)
+            with evidence._context_database(temporary_context) as db:
+                _require(_enrolled_history(config, temporary_context, db, observed, budget, data=data) == owners)
+        _check_observation_deadline(budget)
+        checkouts = [{key: entry[1][key] for key in
+            ('root', 'primary_root', 'git_dir', 'git_common_dir', 'binding')} for entry in selections]
+        result = dict(ok=True, status='resolved', owner=dict(kind='project', project_id=data['project_id'], task=None),
+            reference=_canonical_plain(baseline['reference']), created_at=baseline['content']['created_at'],
+            authority=authority, checkout=checkouts[0], age_basis='authority_provenance', temporary_history=history)
+        if scope is not None:
+            result['checkouts'] = checkouts
+    return result
 
 
 def acquire_enrolled_accounting(target, *, deadline=None):
     """Resolve existing Project accounting facts without activation, setup or writes."""
     try:
-        now = time.monotonic()
-        _require(deadline is None or type(deadline) in (int, float) and math.isfinite(deadline))
-        budget = dict(paths=0, bytes=0, deadline=min(deadline, now + 4) if deadline is not None else now + 4)
-        _check_observation_deadline(budget)
+        budget = _budget(deadline)
         _require(isinstance(target, (str, Path)) and len(str(target)) <= 4096)
         selected = Path(target).resolve(strict=True)
         if selected.is_file():
@@ -522,38 +760,132 @@ def acquire_enrolled_accounting(target, *, deadline=None):
         acquired = _acquire_canonical_membership(selected, authority_path=None, budget=budget)
         if acquired.status == 'outside':
             return dict(ok=False, status='outside', reason=acquired.reason)
-        data, observed, authority, context = _enrolled_selection(acquired, budget)
-        baseline = _enrolled_baseline(context, data['project_id'], budget)
-        with _machine_guard(deadline=budget['deadline']) as (path, descriptor, parents):
-            config = _configuration(path, descriptor)
-            history = dict(complete=False, reason='machine_configuration_absent')
-            temporary_context = owners = None
-            if config is not None:
-                temporary_context = _ready_context(config, parents, deadline=budget['deadline'])
-                roots = [Path(observed['root']), Path(observed['primary_root'])]
-                _require(not any(temporary_context.directory.is_relative_to(root)
-                    or root.is_relative_to(temporary_context.directory) or path.is_relative_to(root) for root in roots))
-                with evidence._context_database(temporary_context) as db:
-                    owners = _enrolled_history(config, temporary_context, db, observed, budget)
-                history = dict(complete=True, reason='authenticated_no_related_history')
-            _require(_acquire_canonical_membership(selected, authority_path=None, budget=budget) == acquired)
-            # Reopen after the first transaction ends so committed baseline changes are visible.
-            _require(_enrolled_baseline(context, data['project_id'], budget) == baseline)
-            _require(_configuration(path, descriptor) == config
-                and (config is not None or not os.path.lexists(path)))
-            if config is not None:
-                _require(_ready_context(config, parents, deadline=budget['deadline']) == temporary_context)
-                with evidence._context_database(temporary_context) as db:
-                    _require(_enrolled_history(config, temporary_context, db, observed, budget) == owners)
-            _check_observation_deadline(budget)
-            result = dict(ok=True, status='resolved', owner=dict(kind='project', project_id=data['project_id'], task=None),
-                reference=_canonical_plain(baseline['reference']), created_at=baseline['content']['created_at'],
-                authority=authority, checkout={key: observed[key] for key in
-                    ('root', 'primary_root', 'git_dir', 'git_common_dir', 'binding')},
-                age_basis='authority_provenance', temporary_history=history)
-        return result
+        return _enrolled_result([selected], [acquired], budget)
     except (*_ERRORS, RuntimeError):
         return _protected()
+
+
+def _existing_project_owner(owners, facts, budget):
+    related = _related_owners(owners, [facts['root'], *facts['members']], budget)
+    if not related:
+        return None
+    if len(related) == 1:
+        owner = related[0]
+        if (owner['kind'] == 'temporary-project-owner' and owner['target'] == facts['root']
+                and owner['membership'] == facts['membership']
+                and all(member in owner['members'] for member in facts['members'])):
+            try:
+                _reobserve_project_owner(owner, budget)
+            except (*_ERRORS, RuntimeError):
+                raise _HistoryConflict(related) from None
+            return owner
+    raise _HistoryConflict(related)
+
+
+def _temporary_project_result(scope, budget, *, scope_guard):
+    facts = _observe_temporary_project(scope['project_root'], scope['member_checkouts'], scope['membership'], budget)
+    _require(scope['authority']['sha256'] == 'absent')
+    targets = [facts['root'], *facts['members']]
+    with _machine_guard(deadline=budget['deadline']) as (path, descriptor, parents):
+        snapshot = _configuration_snapshot(path, descriptor)
+        config = snapshot[0]
+        if config is None:
+            return _pending()
+        context = _ready_context(config, parents, deadline=budget['deadline'])
+        _storage_outside(context, path, targets)
+        with evidence._context_database(context) as db:
+            owners = _owners(config, context, db, budget=budget)
+            existing = _existing_project_owner(owners, facts, budget)
+        if existing is not None:
+            _require(_configuration_snapshot(path, descriptor) == snapshot
+                     and _ready_context(config, parents, deadline=budget['deadline']) == context)
+            with evidence._context_database(context) as db:
+                _require(_owners(config, context, db, budget=budget) == owners)
+            _check_observation_deadline(budget)
+            return _resolved(existing)
+
+        def before_commit(db):
+            scope_guard()
+            _require(_configuration_snapshot(path, descriptor) == snapshot
+                     and _ready_context(config, parents, deadline=budget['deadline']) == context)
+            _require(_observe_temporary_project(scope['project_root'], scope['member_checkouts'],
+                scope['membership'], budget) == facts)
+            _require(_owners(config, context, db, budget=budget) == published)
+            _check_observation_deadline(budget)
+
+        with evidence._context_database(context, write=True, durable=True, before_commit=before_commit) as db:
+            owners = _owners(config, context, db, budget=budget)
+            existing = _existing_project_owner(owners, facts, budget)
+            if existing is None:
+                _require(len(owners) < MAX_RECORDS - 1)
+                created_at = state._owner_time()
+                owner = dict(kind='temporary', id=uuid.uuid4().hex, created_at=created_at)
+                content = dict(version=1, kind='temporary-project-owner', owner=owner,
+                               created_at=created_at, provenance=config['provenance'], **facts)
+                _require(sum(row['bytes'] for row in owners) + len(evidence._raw(content)) <= evidence.MAX_ARTIFACT)
+                scope_guard()
+                reference = _register(context, db, content, targets, budget=budget)
+                existing = dict(owner=owner, reference=reference, created_at=created_at)
+            published = _owners(config, context, db, budget=budget)
+        return _resolved(existing)
+
+
+def _scope_root_target(scope, budget):
+    from runtime import onboarding as d3
+    _check_observation_deadline(budget)
+    root = Path(scope['project_root'])
+    d3._no_links(root)
+    for name in (*scope['membership']['include'], *scope['membership']['exclude']):
+        boundary = root / name
+        d3._no_links(boundary)
+        _require(boundary.resolve().is_relative_to(root))
+    if scope['kind'] == 'umbrella':
+        code, _ = read_git(root, '-c', 'safe.bareRepository=all', 'rev-parse', '--absolute-git-dir',
+                           limit=4096, discovery=True, deadline=budget['deadline'])
+        _require(code != 0)
+    target = dict(path=str(root), binding=evidence._binding(root), parents=_parents(root), git=None)
+    budget['paths'] += len(target['parents']) + len(scope['membership']['include']) + len(scope['membership']['exclude']) + 1
+    _require(budget['paths'] <= d3.MAX_PATHS)
+    return target
+
+
+def resolve_project_owner(project_scope, *, deadline=None):
+    """Acquire one declared Project's accounting; do not prepare storage or enroll it."""
+    from runtime import onboarding as d3
+    try:
+        budget = _budget(deadline)
+        d3._bounded(project_scope)
+        scope = d3._project_scope(project_scope)
+        root = Path(scope['project_root'])
+        root_target = _scope_root_target(scope, budget)
+
+        def scope_guard():
+            _require(_scope_root_target(scope, budget) == root_target)
+
+        members = [_path(member) for member in scope['member_checkouts']]
+        acquired = [_acquire_canonical_membership(member, authority_path=None, budget=budget) for member in members]
+        _check_observation_deadline(budget)
+        if any(item.status != 'outside' for item in acquired):
+            _require(all(item.status == 'observed' for item in acquired))
+            result = _enrolled_result(members, acquired, budget, scope=scope)
+        elif scope['kind'] == 'standalone':
+            observed = _observe_target(members[0], budget=budget)
+            _require(observed['path'] == str(members[0]) and observed['git']['primary_root'] == str(root)
+                     and scope['authority']['sha256'] == 'absent'
+                     and any(root.is_relative_to(root / name) for name in scope['membership']['include'])
+                     and not any(root.is_relative_to(root / name) for name in scope['membership']['exclude']))
+            result = _temporary_target_result(members[0], budget=budget, scope_guard=scope_guard)
+        else:
+            result = _temporary_project_result(scope, budget, scope_guard=scope_guard)
+        scope_guard()
+        _check_observation_deadline(budget)
+        if result.get('status') == 'protected' and 'temporary_history' not in result:
+            return _history_protected()
+        return result
+    except _HistoryConflict as error:
+        return _history_protected(error.owners)
+    except (*_ERRORS, RuntimeError):
+        return _history_protected()
 
 
 def resolve_owner(target):
@@ -561,31 +893,42 @@ def resolve_owner(target):
     enrolled = acquire_enrolled_accounting(target)
     if enrolled['status'] != 'outside':
         return enrolled
+    return _temporary_target_result(target)
+
+
+def _temporary_target_result(target, *, budget=None, scope_guard=None):
     try:
-        with _machine_guard() as (path, descriptor, parents):
-            config = _configuration(path, descriptor)
+        observe = lambda: _observe_target(target, **({'budget': budget} if budget is not None else {}))
+        guard = {'deadline': budget['deadline']} if budget is not None else {}
+        with _machine_guard(**guard) as (path, descriptor, parents):
+            snapshot = _configuration_snapshot(path, descriptor)
+            config = snapshot[0]
             if config is None:
                 return _pending()
-            context = _ready_context(config, parents)
-            observed = _observe_target(target)
+            context = _ready_context(config, parents, **guard)
+            observed = observe()
             root = Path(observed['path'])
             _require(not context.directory.is_relative_to(root) and not root.is_relative_to(context.directory)
                      and not path.is_relative_to(root))
             with evidence._context_database(context) as db:
-                existing = _existing_owner(_owners(config, context, db), observed)
+                owners = _owners(config, context, db, budget=budget)
+                existing = _existing_owner(owners, observed, budget=budget)
                 if existing is not None:
-                    _require(_observe_target(target) == observed and _configuration(path, descriptor) == config)
+                    _require(observe() == observed and _configuration_snapshot(path, descriptor) == snapshot)
                     return _resolved(existing)
 
             def before_commit(db):
-                _require(_configuration(path, descriptor) == config and _observe_target(target) == observed)
-                _ready_context(config, parents)
-                _provenance(config, context, db)
+                if scope_guard is not None:
+                    scope_guard()
+                _require(_configuration_snapshot(path, descriptor) == snapshot and observe() == observed)
+                _require(_ready_context(config, parents, **guard) == context)
+                _require(_owners(config, context, db, budget=budget) == published)
 
             with evidence._context_database(context, write=True, durable=True, before_commit=before_commit) as db:
-                owners = _owners(config, context, db)
-                existing = _existing_owner(owners, observed)
+                owners = _owners(config, context, db, budget=budget)
+                existing = _existing_owner(owners, observed, budget=budget)
                 if existing is not None:
+                    published = owners
                     return _resolved(existing)
                 _require(len(owners) < MAX_RECORDS - 1)
                 created_at = state._owner_time()
@@ -593,8 +936,15 @@ def resolve_owner(target):
                 content = dict(version=1, kind='temporary-target-owner', owner=owner, created_at=created_at,
                                target=observed, provenance=config['provenance'])
                 _require(sum(row['bytes'] for row in owners) + len(evidence._raw(content)) <= evidence.MAX_ARTIFACT)
-                reference = _register(context, db, content, [observed])
+                if scope_guard is not None:
+                    scope_guard()
+                reference = _register(context, db, content, [observed], **({'budget': budget} if budget else {}))
                 result = dict(owner=owner, reference=reference, created_at=created_at)
+                published = _owners(config, context, db, budget=budget)
             return _resolved(result)
+    except _HistoryConflict:
+        if budget is not None:
+            raise
+        return _protected()
     except _ERRORS:
         return _protected()
