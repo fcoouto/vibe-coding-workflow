@@ -40,7 +40,7 @@ class ProposalTests(unittest.TestCase):
     def begin_request(self, task='task-1'):
         return dict(task_id=task, profile=PROFILE, model='model/v1', provider='p', effort=None,
                     snapshot_digest=self.call('status')['snapshot_digest'], approval_ref='approval/1', base_ref='git:abc',
-                    credit={'observed_at': 100, 'remaining': 1}, output_tokens=500, timeout_seconds=60,
+                    output_tokens=500, timeout_seconds=60,
                     requirements=dict(context_tokens=100, output_tokens=500, modalities=['text'], parameters=[]))
 
     def test_cache_reuse_expiry_and_failed_refresh_preserve_original_snapshot(self):
@@ -92,29 +92,36 @@ class ProposalTests(unittest.TestCase):
         self.assertIsNone(history[0]['outcome']['observations']['cost'])
         self.assertNotIn('credit', history[0])
 
-    def test_credit_and_attempt_bounds(self):
+    def test_begin_without_credit_preserves_server_owned_spending(self):
         self.publish()
-        for credit in ({'observed_at': 100, 'remaining': 0}, {'observed_at': 1, 'remaining': 1}, {'observed_at': 101, 'remaining': 1}, {'observed_at': 100, 'remaining': 1, 'key_remaining': 0}, {'observed_at': 100, 'remaining': 1, 'key_expires_at': 99}):
-            request = self.begin_request()
-            request['credit'] = credit
-            self.assertNotIn('attempt_token', self.call('begin', request))
+        self.assertIn('attempt_token', self.call('begin', self.begin_request()))
+        row = self.call('history')['records'][0]
+        self.assertNotIn('credit', row)
+        self.assertNotIn('credit_checked_at', row)
+
+    def test_legacy_credit_observations_neither_gate_nor_persist(self):
+        self.publish()
+        for index, credit in enumerate((None, {'observed_at': 0, 'remaining': 0},
+                {'observed_at': 999, 'remaining': 1, 'key_remaining': 0},
+                {'observed_at': 100, 'remaining': 1, 'key_expires_at': 99})):
+            with self.subTest(credit=credit):
+                request = dict(self.begin_request(f'legacy-{index}'), credit=credit)
+                result = self.call('begin', request)
+                self.assertIn('attempt_token', result)
+                self.call('record', dict(attempt_token=result['attempt_token'], disposition='transport_failure'))
+        for row in self.call('history')['records']:
+            self.assertNotIn('credit', row)
+            self.assertNotIn('credit_checked_at', row)
+
+    def test_attempt_execution_bounds_remain_enforced(self):
+        self.publish()
         request = self.begin_request()
         request['timeout_seconds'] = 0
         with self.assertRaises(ValueError):
             self.call('begin', request)
-        request = self.begin_request()
-        request['credit']['key_remaining'] = None
-        self.assertIn('attempt_token', self.call('begin', request))
-
-    def test_free_route_accepts_zero_credit_only_when_both_prices_are_known_zero(self):
-        self.publish()
-        token = self.call('claim', {'force': True})['refresh_token']
-        metadata = json.loads(json.dumps(METADATA))
-        metadata['endpoints'][0]['pricing'] = {'prompt': '0', 'completion': '0'}
-        self.call('publish', dict(refresh_token=token, metadata=metadata))
-        request = self.begin_request()
-        request['credit']['remaining'] = 0
-        self.assertIn('attempt_token', self.call('begin', request))
+        request = dict(self.begin_request(), output_tokens=8193)
+        with self.assertRaises(ValueError):
+            self.call('begin', request)
 
     def test_outcomes_require_native_reports_and_history_matches_exact_profile(self):
         self.publish()
@@ -216,8 +223,6 @@ class ProposalTests(unittest.TestCase):
         claim = json.loads(self.cli('claim', {'force': True}).stdout)
         self.assertEqual(self.cli('publish', dict(refresh_token=claim['refresh_token'], metadata=METADATA)).returncode, 0)
         request = self.begin_request()
-        import time
-        request['credit']['observed_at'] = time.time()
         command = [sys.executable, '-I', '-B', str(SCRIPT), 'begin', '--store', str(self.store)]
         children = [subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(8)]
         for child in children:
@@ -231,15 +236,14 @@ class ProposalTests(unittest.TestCase):
             outputs.append(json.loads(output))
         self.assertEqual(sum('attempt_token' in item for item in outputs), 1)
 
-    def test_tiny_nonzero_price_is_not_free(self):
+    def test_paid_pricing_does_not_create_a_local_credit_gate(self):
         self.publish()
         token = self.call('claim', {'force': True})['refresh_token']
         metadata = json.loads(json.dumps(METADATA))
         metadata['endpoints'][0]['pricing'] = {'prompt': '1e-9999', 'completion': '0'}
         self.call('publish', dict(refresh_token=token, metadata=metadata))
         request = self.begin_request()
-        request['credit']['remaining'] = 0
-        self.assertNotIn('attempt_token', self.call('begin', request))
+        self.assertIn('attempt_token', self.call('begin', request))
 
     def test_status_exposes_cached_metadata_only_when_requested(self):
         self.publish()

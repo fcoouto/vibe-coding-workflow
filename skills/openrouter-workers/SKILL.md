@@ -7,11 +7,12 @@ description: Run an explicitly approved background OpenRouter worker through Ope
 
 Preserve the coordinator's model, provider, authentication and plugins. Follow the
 [pilot procedure](references/procedure.md) before dispatch. Reuse cached model
-discovery and obtain fresh credit evidence. The supervisor is a real native agent;
+discovery; OpenRouter enforces spending limits. The supervisor is a real native agent;
 its model column remains native. OpenRouter work runs through pinned OpenCode over
 explicitly copied files with read-only tools. Observe actual events, verify results
-independently, and record measured usage with attribution limits. Reuse the existing
+independently, and record measured usage with attribution limits. Reuse
 installed Habblaud transport only when explicitly configured. Never fabricate native
-logs, expose credentials, silently retry paid work, or equate display completion with
-acceptance. Unavailable authentication, permissions, worker evidence or independent
+logs, expose credentials, add an outer retry loop, or equate display completion with
+acceptance. OpenCode owns request retries. Confirm local stop before native takeover.
+Unavailable authentication, permissions, worker evidence or independent
 verification leaves the corresponding pilot outcome incomplete.

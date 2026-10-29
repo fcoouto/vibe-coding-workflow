@@ -5,7 +5,6 @@ Tokens prevent accidental replay in this store; coordinator-supplied references
 are reports, not authenticated native verification or spending authorization.
 """
 import argparse
-from decimal import Decimal, InvalidOperation
 import fcntl
 import hashlib
 import json
@@ -25,7 +24,6 @@ MAX_ATTEMPTS = 1000
 TTL = 86400
 LEASE = 120
 BACKOFF = 3600
-CREDIT_MAX_AGE = 60
 MAX_OUTPUT_TOKENS = 8192
 MAX_TIMEOUT_SECONDS = 120
 
@@ -256,16 +254,6 @@ def act(action, state, request, now):
         requirements = requirements_for(request)
         if requirements['output_tokens'] != request['output_tokens']:
             raise ValueError('requirements output_tokens must equal dispatch output_tokens')
-        credit = request.get('credit')
-        if not isinstance(credit, dict):
-            return dict(fallback='credit_unavailable')
-        observed = number(credit.get('observed_at'), 'credit observed_at')
-        remaining = number(credit.get('remaining'), 'remaining credit')
-        key_remaining, key_expiry = credit.get('key_remaining'), credit.get('key_expires_at')
-        if key_remaining is not None:
-            number(key_remaining, 'key_remaining')
-        if key_expiry is not None:
-            number(key_expiry, 'key_expires_at')
         endpoint = next((ep for ep in state['snapshot']['metadata']['endpoints'] if ep['model'] == request['model'] and ep['provider'] == request['provider']), None)
         if endpoint is None:
             return dict(fallback='unknown_route')
@@ -274,17 +262,10 @@ def act(action, state, request, now):
         reasons = incompatibilities(model, endpoint, requirements, request.get('effort'))
         if reasons:
             return dict(fallback='incompatible_route', reasons=reasons)
-        pricing = endpoint.get('pricing') or {}
-        try:
-            free = 'prompt' in pricing and 'completion' in pricing and all(not isinstance(value, bool) and Decimal(str(value)) == 0 for value in pricing.values())
-        except (TypeError, ValueError, AttributeError, InvalidOperation):
-            free = False
-        if not 0 <= now - observed <= CREDIT_MAX_AGE or not free and remaining <= 0 or key_remaining == 0 or key_expiry is not None and key_expiry <= now:
-            return dict(fallback='credit_unavailable')
         token = secrets.token_urlsafe(24)
         row = {key: request.get(key) for key in ('task_id', 'profile', 'model', 'provider', 'effort', 'snapshot_digest', 'approval_ref', 'base_ref', 'output_tokens', 'timeout_seconds', 'requirements')}
         row['discovery_evidence'] = dict(model=model, endpoint=endpoint, benchmarks=[b for b in metadata['benchmarks'] if b.get('model') == request['model']])
-        row.update(attempt_token=token, begun_at=now, snapshot_fetched_at=current['fetched_at'], credit_checked_at=observed)
+        row.update(attempt_token=token, begun_at=now, snapshot_fetched_at=current['fetched_at'])
         state['attempts'].append(row)
         return dict(attempt_token=token, advisory=True)
     if action == 'record':

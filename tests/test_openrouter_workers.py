@@ -8,6 +8,7 @@ import os
 import signal
 import sys
 import time
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'scripts/openrouter_workers.py'
 
@@ -33,7 +34,7 @@ class WorkerTests(unittest.TestCase):
                           coordinator_chat_id=str(uuid.uuid4()), model='vendor/model',
                           model_display_name='Model', provider='provider', objective='Read input.txt and count lines.',
                           source_root=str(self.source), files=['input.txt'], timeout_seconds=5,
-                          steps=3, credit={'observed_at':100, 'remaining':1}, approval_ref='user-approved', effort='low')
+                          steps=3, approval_ref='user-approved', effort='low')
 
     def test_snapshot_excludes_unselected_inputs_and_rejects_replay(self):
         (self.source / 'secret.txt').write_text('not selected')
@@ -46,14 +47,28 @@ class WorkerTests(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             self.api.prepare(self.root / 'runs', self.brief, now=100)
 
-    def test_unsafe_inputs_and_stale_credit_fail_before_run_creation(self):
+    def test_unsafe_inputs_fail_before_run_creation(self):
         (self.source / 'link').symlink_to(self.source / 'input.txt')
         for files in [['../escape'], ['link'], ['/absolute'], ['.env']]:
             with self.subTest(files=files), self.assertRaises(ValueError):
                 self.api.prepare(self.root / 'runs', dict(self.brief, files=files), now=100)
-        with self.assertRaises(ValueError):
-            self.api.prepare(self.root / 'runs', self.brief, now=200)
         self.assertFalse((self.root / 'runs/pilot-1').exists())
+
+    def test_prepare_without_credit_keeps_execution_and_replay_bounds(self):
+        try:
+            run = self.api.prepare(self.root / 'runs', self.brief)
+        except ValueError as error:
+            self.fail(f'Credit lookup must not be required: {error}')
+        self.assertEqual(json.loads((run / 'result.json').read_text())['state'], 'prepared')
+        with self.assertRaises(FileExistsError):
+            self.api.prepare(self.root / 'runs', self.brief)
+
+    def test_legacy_credit_is_ignored_and_not_saved(self):
+        try:
+            run = self.api.prepare(self.root / 'runs', dict(self.brief, credit={'remaining': 0}), now=999)
+        except ValueError as error:
+            self.fail(f'Legacy credit must not gate dispatch: {error}')
+        self.assertNotIn('credit', json.loads((run / 'brief.json').read_text()))
 
     def test_permission_patterns_cannot_be_injected_through_filenames(self):
         for name in ['*', 'file?', '[a]', './input.txt', 'folder//file.txt']:
@@ -72,9 +87,16 @@ class WorkerTests(unittest.TestCase):
             self.assertNotEqual(permissions.get(tool), 'allow')
         self.assertFalse(config['provider']['openrouter']['models']['vendor/model']['options']['provider']['allow_fallbacks'])
 
+    def test_worker_reuses_qualified_catalog_without_a_background_refresh(self):
+        exe = self.fixture("import os\nassert os.environ.get('OPENCODE_DISABLE_MODELS_FETCH') == 'true'\n"
+                           "print(json.dumps({'type':'text','part':{'text':'Fixture answer'}}))\n"
+                           "print(json.dumps({'type':'step_finish','part':{'reason':'stop','cost':0,'tokens':{}}}))\n")
+        run = self.api.prepare(self.root / 'runs', self.brief)
+        self.assertEqual(self.api.execute(run, exe, self.root / 'auth')['state'], 'awaiting_verification')
+
     def test_missing_visibility_adapter_does_not_prevent_worker_execution(self):
         import subprocess
-        brief = dict(self.brief, credit={'observed_at':time.time(), 'remaining':1})
+        brief = dict(self.brief)
         exe = self.fixture("print(json.dumps({'type':'error','error':{'message':'provider unavailable'}}))\n")
         result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--root', str(self.root/'runs'),
                                  '--opencode', str(exe), '--auth-data', str(self.root/'auth'),
@@ -115,6 +137,189 @@ for event in [
         result = self.api.execute(run, exe, self.root / 'auth')
         self.assertEqual(result['state'], 'failed')
         self.assertNotIn('SECRET', (run / 'progress.jsonl').read_text())
+
+    def test_structured_terminal_failures_retain_only_recognized_facts(self):
+        self.assertTrue(callable(getattr(self.api, 'terminal_failure', None)), 'terminal failure evidence is required')
+        for status, source, category in [(402, None, 'budget'),
+                (402, 'openrouter_in_flight_budget', 'budget'),
+                (403, 'openrouter_workspace_budget', 'budget'), (403, None, 'permission'),
+                (401, None, 'authentication'), (429, None, 'rate_limit'),
+                (503, None, 'service'), (400, None, 'invalid_request')]:
+            with self.subTest(status=status, source=source):
+                error = {'name': 'APIError', 'data': {'statusCode': status,
+                    'message': 'SECRET', 'isRetryable': True,
+                    'responseHeaders': {'Authorization': 'SECRET', 'retry-after-ms': '1500'},
+                    'responseBody': json.dumps({'error': {'message': 'SECRET',
+                        'metadata': {'limit_source': source}}})}}
+                result = self.api.terminal_failure(error)
+                expected = {'category': category, 'status_code': status, 'retry_after_seconds': 1.5}
+                if source: expected['limit_source'] = source
+                self.assertEqual(result, expected)
+                self.assertNotIn('SECRET', json.dumps(result))
+
+    def test_malformed_terminal_evidence_never_invents_budget_or_retry_count(self):
+        self.assertTrue(callable(getattr(self.api, 'terminal_failure', None)), 'terminal failure evidence is required')
+        for error in [None, [], 'SECRET', {'message': 'SECRET'},
+                {'name': 'SECRET', 'data': ['SECRET']},
+                {'data': {'statusCode': True, 'responseBody': 'SECRET'}},
+                {'data': {'statusCode': '402', 'responseHeaders': {'retry-after': 'NaN'}}},
+                {'data': {'responseBody': '[' * 2000}},
+                {'data': {'responseBody': 'SECRET' * 10000}}]:
+            with self.subTest(error_type=type(error).__name__):
+                self.assertEqual(self.api.terminal_failure(error), {'category': 'unknown'})
+        self.assertEqual(self.api.terminal_failure({'name': 'ContextOverflowError',
+                         'data': {'message': 'SECRET'}}), {'category': 'context'})
+        result = self.api.terminal_failure({'data': {'statusCode': 403,
+            'responseBody': json.dumps({'error': {'metadata': {'limit_source': 'SECRET'}}})}})
+        self.assertEqual(result, {'category': 'permission', 'status_code': 403})
+
+    def test_retry_hint_dates_and_invalid_values_are_advisory_only(self):
+        self.assertTrue(callable(getattr(self.api, 'terminal_failure', None)), 'terminal failure evidence is required')
+        from email.utils import formatdate
+        for headers, expected in [({'Retry-After': '2'}, 2),
+                ({'retry-after': formatdate(130, usegmt=True)}, 30),
+                ({'retry-after': '-1'}, None), ({'retry-after-ms': 'inf'}, None),
+                ({'retry-after': True}, None), ({'retry-after': []}, None)]:
+            with self.subTest(headers=headers), patch.object(self.api.time, 'time', return_value=100):
+                result = self.api.terminal_failure({'data': {'statusCode': 503, 'responseHeaders': headers}})
+                self.assertEqual(result.get('retry_after_seconds'), expected)
+
+    def test_terminal_failure_launches_once_and_allows_native_takeover_after_stop(self):
+        launches = self.root / 'launches.txt'
+        error = {'name': 'APIError', 'data': {'statusCode': 503,
+                 'message': 'SECRET', 'responseBody': 'SECRET'}}
+        exe = self.fixture("with open(%r, 'a') as stream: stream.write('launch\\n')\n" % str(launches) +
+                           "print(json.dumps({'type':'error','error':%r}), flush=True)\n" % error)
+        run = self.api.prepare(self.root / 'runs', self.brief)
+        result = self.api.execute(run, exe, self.root / 'auth')
+        self.assertEqual(launches.read_text().splitlines(), ['launch'])
+        self.assertEqual(result.get('failure'), {'category': 'service', 'status_code': 503})
+        self.assertIs(result.get('local_execution_stopped'), True)
+        self.assertIs(result.get('native_fallback_ready'), True)
+        self.assertEqual(result['state'], 'failed')
+        self.assertFalse(result['upstream_cancellation_confirmed'])
+        self.assertFalse(result['accounting_complete'])
+        self.assertIsNone(result['reported_cost_usd'])
+        self.assertNotIn('SECRET', (run / 'result.json').read_text())
+        self.assertNotIn('SECRET', (run / 'progress.jsonl').read_text())
+
+    def test_partial_usage_survives_terminal_error_without_becoming_a_complete_bill(self):
+        exe = self.fixture("""for event in [
+ {'type':'text','part':{'text':'Partial finding'}},
+ {'type':'step_finish','part':{'reason':'tool-calls','cost':0.02,'tokens':{'input':20}}},
+ {'type':'error','error':{'name':'APIError','data':{'statusCode':402}}}
+]: print(json.dumps(event), flush=True)
+""")
+        run = self.api.prepare(self.root / 'runs', self.brief)
+        result = self.api.execute(run, exe, self.root / 'auth')
+        self.assertEqual(result.get('failure'), {'category': 'budget', 'status_code': 402})
+        self.assertEqual(result['known_cost_subtotal_usd'], 0.02)
+        self.assertEqual(result['reported_tokens']['input'], 20)
+        self.assertIsNone(result['reported_cost_usd'])
+        self.assertFalse(result['accounting_complete'])
+        self.assertIs(result.get('native_fallback_ready'), True)
+        with self.assertRaises(ValueError): self.api.verify(run, 'accepted', ['Partial output is not completion'])
+
+    def test_deadline_stays_global_across_events_and_does_not_relaunch(self):
+        launches = self.root / 'launches.txt'
+        exe = self.fixture("with open(%r, 'a') as stream: stream.write('launch\\n')\n" % str(launches) +
+                           "for _ in range(100):\n print(json.dumps({'type':'step_start','part':{}}), flush=True)\n time.sleep(.1)\n")
+        run = self.api.prepare(self.root / 'runs', dict(self.brief, timeout_seconds=1))
+        started = time.monotonic()
+        result = self.api.execute(run, exe, self.root / 'auth')
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual(launches.read_text().splitlines(), ['launch'])
+        self.assertEqual(result.get('failure'), {'category': 'deadline'})
+        self.assertEqual(result['state'], 'unresolved')
+        self.assertIs(result.get('local_execution_stopped'), True)
+        self.assertIs(result.get('native_fallback_ready'), True)
+
+    def test_unconfirmed_process_group_stop_withholds_native_takeover(self):
+        exe = self.fixture("print(json.dumps({'type':'error','error':{}}), flush=True)\n")
+        run = self.api.prepare(self.root / 'runs', self.brief)
+        with patch.object(self.api.os, 'killpg', side_effect=PermissionError('fixture refusal')):
+            try:
+                result = self.api.execute(run, exe, self.root / 'auth')
+            except OSError as error:
+                self.fail(f'Failed cleanup must remain explicit recovery evidence: {error}')
+        self.assertEqual(result['state'], 'unresolved')
+        self.assertIs(result.get('local_execution_stopped'), False)
+        self.assertIs(result.get('native_fallback_ready'), False)
+
+    def test_stalled_stdin_cannot_bypass_the_worker_deadline(self):
+        exe = self.fixture('time.sleep(3)\n')
+        run = self.api.prepare(self.root / 'runs', dict(self.brief, objective='😀' * 15000,
+                                                       timeout_seconds=1))
+        started = time.monotonic()
+        result = self.api.execute(run, exe, self.root / 'auth')
+        self.assertLess(time.monotonic() - started, 2.5)
+        self.assertEqual(result.get('failure'), {'category': 'deadline'})
+        self.assertIs(result.get('native_fallback_ready'), True)
+
+    def test_deeply_nested_event_remains_recoverable_without_replay(self):
+        exe = self.fixture("sys.stdout.write('[' * 2000 + '0' + ']' * 2000 + '\\n')\n")
+        run = self.api.prepare(self.root / 'runs', self.brief)
+        decode = self.api.json.loads
+        def older_decoder(value, *args, **kwargs):
+            # Older supported Python decoders raise RecursionError for nested JSON.
+            if isinstance(value, bytes) and value.startswith(b'['): raise RecursionError()
+            return decode(value, *args, **kwargs)
+        with patch.object(self.api.json, 'loads', side_effect=older_decoder):
+            try:
+                result = self.api.execute(run, exe, self.root / 'auth')
+            except RecursionError:
+                self.fail('Malformed nested output must remain an unresolved recoverable result')
+        self.assertEqual(result['state'], 'unresolved')
+        self.assertEqual(result.get('failure'), {'category': 'runtime_or_output'})
+        self.assertIs(result.get('native_fallback_ready'), True)
+
+    def test_cli_interruption_retires_the_worker_before_native_takeover(self):
+        import subprocess
+        pidfile = self.root / 'worker.pid'
+        exe = self.fixture("import os\n"
+                           "print(json.dumps({'type':'step_finish','part':{'reason':'tool-calls','cost':0.02,'tokens':{'input':20}}}), flush=True)\n"
+                           "with open(%r, 'w') as stream: stream.write(str(os.getpid()))\ntime.sleep(20)\n" % str(pidfile))
+        process = subprocess.Popen([sys.executable, str(SCRIPT), 'run', '--root', str(self.root / 'runs'),
+                                    '--opencode', str(exe), '--auth-data', str(self.root / 'auth')],
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            process.stdin.write(json.dumps(self.brief))
+            process.stdin.close()
+            process.stdin = None
+            until = time.monotonic() + 5
+            while not pidfile.exists() and time.monotonic() < until: time.sleep(.01)
+            self.assertTrue(pidfile.exists(), 'fixture worker must start before interruption')
+            result_path = self.root / 'runs/pilot-1/result.json'
+            while time.monotonic() < until:
+                if result_path.exists() and json.loads(result_path.read_text()).get('known_cost_subtotal_usd') == 0.02:
+                    break
+                time.sleep(.01)
+            self.assertEqual(json.loads(result_path.read_text()).get('known_cost_subtotal_usd'), 0.02)
+            process.send_signal(signal.SIGTERM)
+            output, error = process.communicate(timeout=5)
+            self.assertEqual(process.returncode, 0, error)
+            result = json.loads(output.splitlines()[-1])
+            self.assertEqual(result['state'], 'unresolved')
+            self.assertEqual(result.get('failure'), {'category': 'interrupted'})
+            self.assertIs(result.get('local_execution_stopped'), True)
+            self.assertIs(result.get('native_fallback_ready'), True)
+            self.assertEqual(result['known_cost_subtotal_usd'], 0.02)
+            self.assertEqual(result['reported_tokens']['input'], 20)
+            self.assertIsNone(result['reported_cost_usd'])
+            self.assertFalse(result['accounting_complete'])
+            with self.assertRaises(ProcessLookupError): os.kill(int(pidfile.read_text()), 0)
+        finally:
+            if process.poll() is None: process.kill(); process.wait()
+
+    def test_native_rejection_allows_takeover_without_an_external_replay(self):
+        exe = self.fixture("print(json.dumps({'type':'text','part':{'text':'Wrong answer'}}))\n"
+                           "print(json.dumps({'type':'step_finish','part':{'reason':'stop','cost':0,'tokens':{}}}))\n")
+        run = self.api.prepare(self.root / 'runs', self.brief)
+        result = self.api.execute(run, exe, self.root / 'auth')
+        self.assertEqual(result['state'], 'awaiting_verification')
+        self.assertIs(result.get('native_fallback_ready'), False)
+        rejected = self.api.verify(run, 'rejected', ['Native inspection found the answer incorrect'])
+        self.assertIs(rejected.get('native_fallback_ready'), True)
 
     def test_timeout_and_missing_finish_remain_unresolved(self):
         for body in ['time.sleep(5)\n', "print(json.dumps({'type':'text','part':{'text':'unfinished'}}))\n"]:

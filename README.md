@@ -10,7 +10,7 @@ For task controls, read [task runtime](clients/runtime.md); for accepted checks,
 
 Optional [OpenRouter proposals](skills/openrouter-proposals/SKILL.md) use an explicitly approved MCP connection for bounded work. Discovery is cached; native agents select candidates using benchmarks and comparable task history, then verify each proposal. OpenRouter manages spending limits. The helper never handles credentials or executes model output. Package checks and observed live-client execution are reported separately.
 
-The separate [OpenRouter worker pilot](skills/openrouter-workers/SKILL.md) runs background OpenCode agents under genuine native Codex supervisors. The first slice permits read-only tools over explicitly copied files, with native verification, observed progress and the existing optional Habblaud role/model display. It requires its own OpenCode installation and OpenRouter login; it does not change the coordinator's provider or enable external repository writes.
+The separate [OpenRouter worker pilot](skills/openrouter-workers/SKILL.md) runs background OpenCode agents under genuine native Codex supervisors. The first slice permits read-only tools over explicitly copied files, with native verification, observed progress and the existing optional Habblaud role/model display. It requires its own OpenCode installation and OpenRouter login; it does not change the coordinator's provider or enable external repository writes. OpenCode owns transient request retries; the workflow adds no outer retry loop and permits native takeover after confirmed local stop. Credit checks are optional; OpenRouter enforces spending limits.
 
 ## Prepare your Workspace
 

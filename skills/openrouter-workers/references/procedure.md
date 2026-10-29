@@ -20,10 +20,14 @@ separate. Its successful tests do not qualify tool use or autonomous editing.
    Authenticate OpenRouter through OpenCode's own login with the same private
    `XDG_DATA_HOME` passed as `--auth-data`. Never extract or repurpose MCP credentials.
    Do not paste keys in chat, briefs or arguments. Keep auth and state owner-only.
-4. Obtain fresh `get-credits` evidence through the authorized OpenRouter MCP. Store
-   observed time and remaining account credit in the brief. OpenRouter manages
-   spending limits; this is not a reservation or proof of the separate key's limit.
-   Use one supervisor/run at a time during this pilot. No automatic paid retries.
+4. OpenRouter enforces spending limits. No credit preflight is required; optional
+   balance inspection cannot establish the separate OpenCode key's allowance.
+   Warm cached discovery does not require a fresh MCP call. Use one supervisor/run
+   at a time during this pilot and follow retry ownership below.
+
+The runner disables OpenCode's background catalog fetch. The workflow's discovery
+cache remains the selection source; the pinned client uses its bundled catalog and
+explicit model configuration.
 
 ## Run
 
@@ -39,15 +43,14 @@ python3 -I -B <plugin-root>/scripts/openrouter_workers.py run
 
 The brief contains exactly `task_id`, `role`, `specialty`, `coordinator_chat_id`,
 `model`, `model_display_name`, `provider`, `effort`, `objective`, `source_root`,
-`files`, `timeout_seconds`, `steps`, `credit`, and `approval_ref`. Use the actual
+`files`, `timeout_seconds`, `steps`, and `approval_ref`. Use the actual
 root coordinator chat UUID for the Habblaud parent; retain the genuine native
 supervisor UUID separately in evidence. This keeps both workers visible in consumers
 whose sidebar does not render nested children. Do not invent a native identity. Model is an
 OpenRouter author/slug; provider is the selected endpoint routing slug. File names
 are nonhidden relative paths under the canonical source root, without symlinks.
 Explicitly inspect the selected files for secrets before approving transmission.
-Credit is `{ "observed_at": <Unix seconds>, "remaining": <USD> }` from a lookup
-within 60 seconds. Choose 1–8 steps and 1–300 seconds. The runner currently caps
+Legacy optional `credit` is ignored and discarded. Choose 1–8 steps and 1–300 seconds. The runner currently caps
 requested output at 2048 tokens per model response. These controls do not set money
 limits, and API requests already in flight may still be billed after cancellation.
 
@@ -63,6 +66,38 @@ qualified. A run ID cannot be reused, even after failure. State must stay outsid
 repositories and plugin installations. Do not rerun under another ID to conceal an
 unresolved attempt. Background execution uses the host's normal process facility;
 the supervisor remains responsible for collecting its final result.
+
+## Retry ownership and native recovery
+
+OpenCode owns transient request retries within the original worker deadline.
+Pinned 1.19.5 permits up to five retries per failing processor stream, not per
+whole worker. The deadline covers all retries and waits and may expire first.
+Never add an outer retry loop, restart the worker, switch providers/models, or
+invent another run ID after exhaustion. Keep the qualified pinned route.
+
+`result.json` retains `failure`: null or a bounded summary with controlled
+`category` and optional observed `status_code`, recognized `limit_source`, and
+`retry_after_seconds`. These are terminal observations, not an upstream retry
+count or permission to retry. Raw provider messages, headers and bodies are not
+retained in this summary. Generic 402 does not prove zero balance; known budget
+403 remains distinct from permission 403. Capacity and service failures are
+availability observations, not evidence of model-quality failure.
+
+On terminal failure, give one concise warning and use native execution only after
+the supervisor confirms owned local execution stopped. `local_execution_stopped`
+reports process-group absence; `native_fallback_ready` indicates a failed,
+unresolved or natively rejected result with that observation. These local reports
+do not authenticate approval or replace the supervisor's trusted host evidence.
+If stop cannot be confirmed, retain unresolved ownership and reconcile it first.
+Unknown upstream cancellation or billing does not prevent independent native work
+once local quiescence is confirmed. Preserve partial results and known accounting;
+independently establish any finding reused during takeover.
+
+The current JSON CLI does not forward OpenCode's internal retry status. Report
+only observed events or presence; never claim an exact retry number, countdown,
+or five exhausted retries from silence or a generic terminal error. OpenCode can
+internally retry some quota-like errors through its broad classifier; the wrapper
+usually learns their cause only at termination. Do not duplicate that classifier.
 
 ## Visibility
 
@@ -109,7 +144,8 @@ Preserve unknown accounting and
 requested-versus-observed model/provider/effort differences. Reject unsupported
 event streams. On timeout, interruption or uncertain execution, report `unresolved`,
 confirm the owned local process stopped, and never assume upstream cancellation.
-Native fallback stays with the coordinator until uncertain execution is settled.
+Apply the local-stop and native-recovery rules above; unsettled billing remains
+unknown rather than becoming an automatic worker replay or a zero-cost claim.
 
 Package tests, fixture processes, actual OpenCode tool execution, Habblaud rendering
 and genuine native dispatch are separate evidence classes. Do not publish or enable
