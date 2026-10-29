@@ -9,9 +9,9 @@ import stat
 
 from runtime import changes, onboarding
 
-MAX_FILE = 1024 * 1024
-MAX_TOTAL = 8 * 1024 * 1024
-MAX_PATHS = 4096
+MAX_FILE = 512 * 1024
+MAX_TOTAL = 32 * 1024 * 1024
+MAX_PATHS = 2000
 MAX_MANIFEST = 2 * 1024 * 1024
 MARKER = '.council-snapshot.json'
 GAPS = ['Only explicitly approved files are included; omitted content is not reviewed.',

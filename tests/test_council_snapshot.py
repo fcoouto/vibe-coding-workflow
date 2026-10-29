@@ -147,6 +147,35 @@ class SnapshotTests(CouncilCase):
             self.api.capture(self.repo, self.destination, approved)
         self.assertFalse(self.destination.exists())
 
+    def test_file_size_ceiling_accepts_512_kib_and_rejects_next_byte(self):
+        self.write('source.txt', b'a' * (512 * 1024))
+        manifest = self.api.capture(self.repo, self.destination, self.approved(['source.txt']))
+        self.assertEqual((self.destination / 'source.txt').stat().st_size, 524288)
+        self.api.verify(self.destination, manifest)
+        self.write('source.txt', b'a' * (512 * 1024 + 1))
+        with self.assertRaises(ValueError):
+            self.api.capture(self.repo, self.root / 'overflow', self.approved(['source.txt']))
+
+    def test_path_count_ceiling_accepts_2000_and_rejects_next_path(self):
+        # Excluded paths still consume the review ceiling without requiring 2001 source files.
+        empty = dict(sha256=hashlib.sha256(b'').hexdigest(), size=0)
+        approved = {f'.env.{index}': dict(empty) for index in range(2000)}
+        manifest = self.api.capture(self.repo, self.destination, approved)
+        self.assertEqual(manifest['coverage']['excluded'], 2000)
+        approved['.env.overflow'] = empty
+        with self.assertRaises(ValueError):
+            self.api.capture(self.repo, self.root / 'overflow', approved)
+
+    def test_total_size_ceiling_accepts_32_mib_and_rejects_next_byte(self):
+        names = [f'part-{index}.txt' for index in range(64)]
+        for name in names:
+            self.write(name, b'a' * (512 * 1024))
+        manifest = self.api.capture(self.repo, self.destination, self.approved(names))
+        self.assertEqual(sum(item['size'] for item in manifest['files'].values()), 33554432)
+        self.write('overflow.txt', b'x')
+        with self.assertRaises(ValueError):
+            self.api.capture(self.repo, self.root / 'overflow', self.approved([*names, 'overflow.txt']))
+
     def test_destination_must_be_absent_private_and_outside_checkout(self):
         self.write('source.txt')
         approved = self.approved(['source.txt'])
