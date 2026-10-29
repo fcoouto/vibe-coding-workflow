@@ -2,7 +2,7 @@
 
 Implementation plan · 26 October 2026 · Package controls implemented; native lifecycle qualification remains pending.
 
-**Goal:** select native subagents, reserve their work before dispatch, and verify results before integration. D6 is the canonical owner of duplicate-dispatch, resource-conflict and uncertain-interruption controls. Native Codex is the first adapter target; qualify CLI and Desktop separately. Superset integration and the separate Enable/Disable Superset skill are **implementation suspended**; their [future design](superset-feature-map.md) is retained. Initial onboarding stays unchanged.
+**Goal:** select native subagents, reserve their work before dispatch, and verify results before integration. D6 is the canonical owner of duplicate-dispatch, resource-conflict and uncertain-interruption controls. Native Codex is the first adapter target; qualify CLI and Desktop separately. Initial onboarding stays unchanged.
 
 The coordinator always retains the user's chosen model and reasoning. For each delegated task, it selects worker model/effort using current official platform guidance and available controls. Implementation assignments below name roles, not fixed models.
 
@@ -106,7 +106,7 @@ Rollback preserves prior enrollment/configuration as recovery material; it does 
 
 ## 5. Guidance, independent review and qualification
 
-**Owner: guidance worker.** Add selectively loaded `clients/delegation.md`; link it from `clients/runtime.md` only when preparing, observing or recovering delegated work. Update validator coverage, affected guidance and the [source map](policy-sources.md). No new skill is needed. Keep runtime loading free of onboarding procedures, Toolkit sources and suspended Superset guidance.
+**Owner: guidance worker.** Add selectively loaded `clients/delegation.md`; link it from `clients/runtime.md` only when preparing, observing or recovering delegated work. Update validator coverage, affected guidance and the [source map](policy-sources.md). No new skill is needed. Keep runtime loading free of onboarding procedures and Toolkit sources.
 
 Exercise instruction paths for direct execution, a bounded worker, parallel disjoint work, conflicting/unknown ownership, independent review, unsupported controls, interruption and exhausted budgets. Check every applicable contract requirement and confirm unrelated material stays unloaded. Runtime code owns deterministic checks; instructions own judgment and verified authority, without claiming stronger enforcement.
 
@@ -125,9 +125,9 @@ All task fixtures use isolated Git configuration and no production services or f
 
 For each wave: wait for writers, freeze each task's exact diff/snapshot, verify checks, then obtain independent read-only task review before starting the next wave. Review concurrency, provenance and security where affected; authors cannot provide their own independent verdict. Resolve blocking findings and recheck affected proof before releasing dependencies. Preserve requested review-round limits, serialize any authorized commits with current HEAD per task, and write one coordinator progress entry. Final integration review checks the combined result without replacing wave reviews or repeating unaffected coverage. If qualification exposes a defect, return it to the owning task and review the affected change before rerunning qualification.
 
-Run focused adapter/delegation/state/evidence/onboarding tests, the complete unit suite, `python3 -B scripts/validate.py` and `git diff --check`. Record a disposable native coordinator/worker/reviewer lifecycle with Superset absent, including cached guidance, supported worker model/effort selection, reservation before launch, verified integration and recovery. Qualify CLI and Desktop separately, verify unchanged coordinator settings and record exposed worker settings. Package checks and simulated races do not establish native behavior.
+Run focused adapter/delegation/state/evidence/onboarding tests, the complete unit suite, `python3 -B scripts/validate.py` and `git diff --check`. Record a disposable native coordinator/worker/reviewer lifecycle, including cached guidance, supported worker model/effort selection, reservation before launch, verified integration and recovery. Qualify CLI and Desktop separately, verify unchanged coordinator settings and record exposed worker settings. Package checks and simulated races do not establish native behavior.
 
-**Completion:** the qualified native path selects authorized workers, excludes conflicting managed assignments, retains uncertain ownership and accepts only independently checked results. Unsupported enforcement remains explicit. Superset and its control skill stay suspended; Claude lifecycle qualification and D7 repository enforcement remain separate deliverables.
+**Completion:** the qualified native path selects authorized workers, excludes conflicting managed assignments, retains uncertain ownership and accepts only independently checked results. Unsupported enforcement remains explicit. Claude lifecycle qualification and D7 repository enforcement remain separate deliverables.
 
 **Parallel delivery:** [D7's ownership plan](d7-repository-gate-plan.md#4-parallel-delivery-with-d6) permits independent verifier work after agreeing evidence fields. D6 retains its shared runtime/state/CLI and guidance files until reviewed handoff; pause all package writers for shared checks. Select implementation and independent review workers through the [delegation contract](../policies/03-agent-delegation.md#select-capability-and-dispatch), using applicable cached platform guidance, task risk and available controls. No model or reasoning tier is mandatory for every review. Preserve coordinator settings and existing sessions.
 

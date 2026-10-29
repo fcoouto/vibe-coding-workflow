@@ -1,6 +1,6 @@
-# Claude startup and Superset host validation
+# Claude startup validation
 
-25 October 2026. Scope: reuse the validated startup layer for another native client and establish Superset's actual integration boundary. Onboarding, enforcement, model routing and connector implementation remain later work.
+25 October 2026. Scope: reuse the validated startup layer for another native client. Onboarding, enforcement, model routing and connector implementation remain later work.
 
 ## Candidate and automated proof
 
@@ -10,7 +10,7 @@ Policy digest: `e955274b00b5dbf75f266677e99da138f0c3da835e8c23ed7fc1e34c03be429d
 
 - Package validation passed.
 - 54 tests passed. Both native adapters run the shared acceptance cases, including checkout/worktree isolation, wrong-client enrollment, malformed records, settings preservation and hostile Python/Git environments.
-- Superset environment hints cannot activate an unrelated checkout or replace native client enrollment.
+- Host environment hints cannot activate an unrelated checkout or replace native client enrollment.
 - Package checks reject duplicate Claude default hooks, divergent manifest versions and paths escaping the package.
 - `git diff --check` passed.
 - Independent code/security review found no actionable issues in the adapters, shared parser, routing, manifests, validator or host guidance; the reviewer independently ran all 54 tests and package checks.
@@ -29,20 +29,8 @@ Claude used `--init-only --plugin-dir <copy> --setting-sources user`, which runs
 
 Adding license-holder author metadata resolved the initial strict-validation warning. Strict validation and one enrolled Claude startup were rerun against that final manifest. Other cases remain applicable because runtime, registration and enrollment behavior were unchanged. The validator's marketplace-install advice remains advisory; local `--plugin-dir` loading was qualified, not published marketplace distribution.
 
-## Superset inspection
-
-Installed Superset and its bundled CLI are version 1.40.0. The CLI rejects `plugins` as an unknown command. This release hosts native agents and has no independently qualified workflow startup protocol, so no placeholder `superset.py` was added.
-
-Installed source in `app.asar` shows:
-
-- `dist/main/templates/codex-wrapper-exec.template.sh`: adds project trust for a workspace config and adds `--dangerously-bypass-hook-trust` when absent.
-- `dist/main/chunks/host-service-utils-CkZE9Cf4.js`: default agent launch commands contain permission bypasses.
-- `dist/main/host-service.js`: supplies `SUPERSET_*` workspace/terminal environment hints.
-
-The plugin does not copy these launch flags or treat the environment hints as authorization. Real Superset execution remains unqualified until the selected launch path, final arguments, permissions and hook behavior are reconciled and observed. Source inspection cannot establish actual launch behavior.
-
 ## Limits
 
-Claude Desktop is not installed here. Desktop Code, Cowork, Superset launches, desktop UI behavior and model policy compliance remain untested. Native startup success does not qualify those surfaces or later enforcement features.
+Claude Desktop is not installed here. Desktop Code, Cowork, desktop UI behavior and model policy compliance remain untested. Native startup success does not qualify those surfaces or later enforcement features.
 
-Sources: [Claude hooks](https://code.claude.com/docs/en/hooks), [Claude plugin manifest](https://code.claude.com/docs/en/plugins-reference), [Superset agent integration](https://docs.superset.sh/add-agent-support), [Superset environment controls](https://docs.superset.sh/cli/env-vars).
+Sources: [Claude hooks](https://code.claude.com/docs/en/hooks), [Claude plugin manifest](https://code.claude.com/docs/en/plugins-reference).

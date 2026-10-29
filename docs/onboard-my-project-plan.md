@@ -12,9 +12,9 @@ Contract approval does not establish client execution or project adoption. D1 st
 
 D1 startup implementation is recorded in [Codex validation](codex-validation.md). D2 controls and bounded native observations are in [D2 validation](d2-validation.md); the bundled controlled Stop-held Interrupt case passed, while ordinary read-first correlation, desktop UI and model policy compliance remain unqualified.
 
-The [concrete D2 plan](d2-runtime-plan.md) scopes native state, guards, invalidation, Stop handling and diagnostics. Superset remains optional; no backend integration or onboarding choice is added in D2.
+The [concrete D2 plan](d2-runtime-plan.md) scopes native state, guards, invalidation, Stop handling and diagnostics.
 
-The [D3 plan and validation record](d3-onboarding-plan.md) describe the implemented private inspect/plan workflow and its limits; D4 applies an approved plan. Native operation remains the default, with no Superset question during initial onboarding. Superset integration and the separate [Enable/Disable Superset skill](superset-feature-map.md#planned-project-control-skill) are **implementation suspended**. Their future design retains explicit disable restoring native routing for new tasks.
+The [D3 plan and validation record](d3-onboarding-plan.md) describe the implemented private inspect/plan workflow and its limits; D4 applies an approved plan. Native operation remains the default; optional integrations remain separate from initial onboarding.
 
 The [approved D4 plan](d4-onboarding-plan.md) covers recoverable apply/resume/rollback and verified Toolkit adoption. Its [validation record](d4-validation.md) separates implementation checks, disposable adoption and actual native startup observations; none alone establishes complete project readiness.
 
@@ -24,7 +24,7 @@ The planned [D10: Review my Project](d10-project-review-plan.md) adds requested 
 
 The approved [D11: Workflow diagnostics](d11-workflow-diagnostics-plan.md) is the **last deliverable**: an on-request offline HTML projection of existing evidence, with honest coverage and measured gains. The [project/repository model](#project-and-repository-model) and [retention policy](#evidence-retention) below are approved planning extensions, not implemented enrollment or cleanup behavior.
 
-The user authorized the same startup layer for the next clients. Claude Code now reuses the shared startup protocol; Superset is documented as a host for native adapters. See [Claude and Superset validation](claude-and-superset-validation.md). This advances startup support only; D8's full lifecycle qualification still follows the required runtime/onboarding slices.
+The user authorized the same startup layer for the next clients. Claude Code now reuses the shared startup protocol. See [Claude validation](claude-validation.md). This advances startup support only; D8's full lifecycle qualification still follows the required runtime/onboarding slices.
 
 ## 1. Authority and scope
 
@@ -130,13 +130,11 @@ Use the host's question UI when available and ordinary conversation otherwise. H
 
 Keep shared workflow contracts in `policies/`, entry skills in `skills/`, and design, plans and source mapping in `docs/`.
 
-The [Superset feature map](superset-feature-map.md) preserves future host integration decisions and dated capability findings. Superset implementation is suspended; consult it when that work resumes, not for native D6 execution.
-
 ### Client scope and adapter organization
 
-Support targets are Codex, Superset, Claude Code and Claude Desktop's Code and Cowork surfaces. Claude Chat is out of scope. Keep client implementations under `runtime/adapters/`; add modules or subdirectories only when implementing that client. Share policy and procedures, loading only the adapter instructions needed for the current task.
+Support targets are Codex, Claude Code and Claude Desktop's Code and Cowork surfaces. Claude Chat is out of scope. Keep client implementations under `runtime/adapters/`; add modules or subdirectories only when implementing that client. Share policy and procedures, loading only the adapter instructions needed for the current task.
 
-Codex and Claude Code share the compatible `SessionStart` JSON subset in `runtime/adapters/session_start.py`, with a thin module per native client. Superset launches those agents rather than supplying another startup protocol; preserve that distinction and qualify its launch/permission behavior separately.
+Codex and Claude Code share the compatible `SessionStart` JSON subset in `runtime/adapters/session_start.py`, with a thin module per native client.
 
 Organize client interface specifications under `clients/`, using `index.md` and descriptive client names such as `codex.md`. No numeric prefixes are needed.
 
@@ -302,7 +300,7 @@ Each deliverable receives its own reviewable change and evidence. Unit/fixture v
 | **D3** | Guided onboarding plan | `onboard-my-project` skill/procedure, inspect/plan CLI, private versioned plan and exact proposal schema | Three stages distinguished; full catalog covered; mandatory policies separated from conditional actions; no mode waives a policy; equivalents require evidence; merge feasibility established |
 | **D4** | Reversible Project Onboarding and toolkit adoption | Transaction module, approved component execution, mode-aware configuration/docs, inactive backups, `apply`, `resume`, `rollback` | Missing mandatory policy/mechanism qualification prevents readiness; future task evidence remains separate; required conflicts resolve or block; recovery preserves unrelated content |
 | **D5** | Checks, general review and security review evidence | Accepted check/review policies, applicability decisions, check runner and completion verifier | Security review runs after implementation with no planning-time review gate; every merge receives general and applicable security coverage; missing/stale required evidence or blocking findings prevent readiness |
-| **D6** | Native worker routing and concurrent ownership | User-selected coordinator settings, cached worker guidance, bounded dispatch, atomic reservations and stop reconciliation; [canonical worker-control plan](d6-native-delegation-plan.md) | Duplicate requests and ambiguous launch outcomes cannot produce a second managed writer; fifteen conflicting claims have one winner; bounded retries preserve partial work and uncertain ownership until verified stop/descendant reconciliation; coordinator settings stay unchanged; Superset absent |
+| **D6** | Native worker routing and concurrent ownership | User-selected coordinator settings, cached worker guidance, bounded dispatch, atomic reservations and stop reconciliation; [canonical worker-control plan](d6-native-delegation-plan.md) | Duplicate requests and ambiguous launch outcomes cannot produce a second managed writer; fifteen conflicting claims have one winner; bounded retries preserve partial work and uncertain ownership until verified stop/descendant reconciliation; coordinator settings stay unchanged |
 | **D7** | Real repository merge assurance | Trusted final verifier, repository-enforced gate, disposable rejection/acceptance proof and separately authorized live rules; [canonical gate plan](d7-repository-gate-plan.md) | Actual supported merge paths reject missing/stale/failed evidence and accept a legitimate current candidate; bypasses and queues are qualified where applicable; local readiness cannot establish enforcement |
 | **D8** | Claude Code adapter | Native manifest/config adapter and shared contract fixtures | The same scenarios pass in an actual Claude session; no duplicate handlers or policy fork; settings evidence remains truthful |
 | **D9** | Behavioral qualification, native usage reporting and PHIOON pilot | Reusable native harness cases, reconciled task-consumption report, then one Python and one Next.js repository and a bounded cross-repository task; [D9 sequence](#d9-qualification-usage-and-pilot) | Evaluator rejects deliberately broken workflow behavior and accepts its correction; native coordinator/worker usage reconciles through verified acceptance without omissions or double counting; ordinary requests activate the qualified workflow |
@@ -315,7 +313,7 @@ D10 is a separate future deliverable, not a dependency blocking active D6/D7 or 
 
 **D11 is delivered last, after the preceding deliverables' accepted slices.** Its scoped projection, HTML and qualification work reuse their evidence owners and the canonical membership/retention follow-up above. Unknown or unqualified client capabilities must render honestly; delivery does not require universal success across every client. D11 does not reopen D6 worker controls, D7 enforcement or the approved task-based worker-selection policy.
 
-Superset integration and its Enable/Disable skill remain **implementation suspended**, outside D6. Resume them only when requested, preserving the [future control contract](superset-feature-map.md#planned-project-control-skill). Scope Claude Desktop surfaces separately after capability discovery; do not infer their qualification from D8. Qualify the implemented D1 startup slice before extending the runtime.
+Scope Claude Desktop surfaces separately after capability discovery; do not infer their qualification from D8. Qualify the implemented D1 startup slice before extending the runtime.
 
 Keep the larger items reviewable:
 

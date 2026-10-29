@@ -1,6 +1,6 @@
 # Task checks and review evidence
 
-Load this contract for a Codex task that needs accepted checks, general or security review, a completion decision, or local merge evidence. Follow the full [Tests and Builds](../policies/05-tests-and-builds.md), [Code Review](../policies/06-code-review.md), and [Security Review](../policies/04-security-review.md) contracts; this file gives the local controls, not replacements for those policies. This is task runtime guidance: do not load Toolkit sources, setup/onboarding procedures, or Superset guidance. Load [native delegation](delegation.md) only for native review preparation, lifecycle observation or recovery. Direct checks need no D6 native plan, discovery, model choice or guidance.
+Load this contract for a Codex task that needs accepted checks, general or security review, a completion decision, or local merge evidence. Follow the full [Tests and Builds](../policies/05-tests-and-builds.md), [Code Review](../policies/06-code-review.md), and [Security Review](../policies/04-security-review.md) contracts; this file gives the local controls, not replacements for those policies. This is task runtime guidance: do not load Toolkit sources or setup/onboarding procedures. Load [native delegation](delegation.md) only for native review preparation, lifecycle observation or recovery. Direct checks need no D6 native plan, discovery, model choice or guidance.
 
 ## Plan and capture
 
