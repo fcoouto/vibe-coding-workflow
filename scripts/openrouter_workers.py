@@ -254,24 +254,35 @@ def _execute(run, brief, executable, auth_data, publish):
         settings.require(isinstance(stamp, dict) and set(stamp) == {'scope_id', 'revision'}
                          and isinstance(stamp['scope_id'], str) and settings.integer(stamp['revision']),
                          'openrouter_preparation_unmanaged')
+        deadline = time.monotonic() + brief['timeout_seconds']
         with settings.admission(brief['source_root'], 'workers', root=run.parent, opencode=executable,
                                 auth_data=auth_data, revision=stamp['revision'], scope_id=stamp['scope_id']):
+            if time.monotonic() >= deadline: raise TimeoutError()
             proc = subprocess.Popen([str(executable), 'run', '--pure', '--format', 'json', '--agent', 'pilot',
                                      '--model', 'openrouter/' + brief['model'], '--title', brief['task_id']],
                                     cwd=workspace, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                     stderr=subprocess.DEVNULL, start_new_session=True)
         emit('Starting')
-        proc.stdin.write(brief['objective'].encode('utf-8'))
-        proc.stdin.close()
-        deadline = time.monotonic() + brief['timeout_seconds']
+        pending = memoryview(brief['objective'].encode('utf-8'))
+        os.set_blocking(proc.stdin.fileno(), False)
         with selectors.DefaultSelector() as selector:
             selector.register(proc.stdout, selectors.EVENT_READ)
+            selector.register(proc.stdin, selectors.EVENT_WRITE)
             while selector.get_map():
                 if time.monotonic() >= deadline: raise TimeoutError()
                 if time.monotonic() - last_presence >= 20:
                     emit('Working; awaiting next observed event')
                     last_presence = time.monotonic()
-                for key, _ in selector.select(0.2):
+                for key, _ in selector.select(min(0.2, max(0, deadline - time.monotonic()))):
+                    if time.monotonic() >= deadline: raise TimeoutError()
+                    if key.fileobj is proc.stdin:
+                        try: written = os.write(key.fd, pending[:4096])
+                        except BlockingIOError: continue
+                        pending = pending[written:]
+                        if not pending:
+                            selector.unregister(proc.stdin)
+                            proc.stdin.close()
+                        continue
                     chunk = os.read(key.fileobj.fileno(), 65536)
                     if not chunk:
                         selector.unregister(key.fileobj)
@@ -341,6 +352,7 @@ def _execute(run, brief, executable, auth_data, publish):
         if proc:
             # Retire all owned descendants, including a server left after CLI exit.
             result['local_execution_stopped'] = stop_process(proc)
+            if proc.stdin: proc.stdin.close()
             if proc.stdout: proc.stdout.close()
         else:
             result['local_execution_stopped'] = True

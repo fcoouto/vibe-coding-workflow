@@ -324,14 +324,96 @@ for event in [
         self.assertIs(result.get('native_fallback_ready'), False)
 
     def test_stalled_stdin_cannot_bypass_the_worker_deadline(self):
-        exe = self.fixture('time.sleep(3)\n')
+        exe = self.fixture('time.sleep(4)\n')
         run = self.api.prepare(self.runs, dict(self.brief, objective='😀' * 15000,
                                                        timeout_seconds=1))
         started = time.monotonic()
-        result = self.api.execute(run, exe, self.root / 'auth')
+        result, processes = self.execute_with_backpressure(run, exe)
         self.assertLess(time.monotonic() - started, 2.5)
         self.assertEqual(result.get('failure'), {'category': 'deadline'})
+        self.assertEqual(len(processes), 1)
+        self.assertIsNotNone(processes[0].poll())
+        self.assertIs(result.get('local_execution_stopped'), True)
         self.assertIs(result.get('native_fallback_ready'), True)
+
+    def execute_with_backpressure(self, run, executable):
+        launch = self.api.subprocess.Popen
+        processes = []
+        def start(command, **kwargs):
+            process = launch(command, **kwargs)
+            if command[0] == str(executable):
+                processes.append(process)
+                descriptor = process.stdin.fileno()
+                os.set_blocking(descriptor, False)
+                try:
+                    # Fill the real pipe so the test does not depend on host capacity.
+                    for _ in range(1024): os.write(descriptor, b'!' * 4096)
+                    self.fail('fixture pipe did not reach backpressure')
+                except BlockingIOError: pass
+                finally: os.set_blocking(descriptor, True)
+            return process
+        with patch.object(self.api.subprocess, 'Popen', side_effect=start):
+            result = self.api.execute(run, executable, self.root / 'auth')
+        return result, processes
+
+    def test_output_before_input_is_drained_without_losing_utf8_objective(self):
+        import hashlib
+        objective = '😀' * 16000
+        expected = hashlib.sha256(objective.encode()).hexdigest()
+        exe = self.fixture("import hashlib\n"
+            "print(json.dumps({'type':'text','part':{'text':'x' * (1024 * 1024)}}), flush=True)\n"
+            "payload = sys.stdin.buffer.read().lstrip(b'!')\n"
+            "print(json.dumps({'type':'text','part':{'text':hashlib.sha256(payload).hexdigest()}}))\n"
+            "print(json.dumps({'type':'step_finish','part':{'reason':'stop','cost':0,'tokens':{}}}))\n")
+        run = self.api.prepare(self.runs, dict(self.brief, objective=objective, timeout_seconds=2))
+        started = time.monotonic()
+        result, processes = self.execute_with_backpressure(run, exe)
+        self.assertLess(time.monotonic() - started, 4)
+        self.assertEqual(len(processes), 1)
+        self.assertEqual(result['state'], 'awaiting_verification')
+        self.assertEqual(result['response'].splitlines()[-1], expected)
+        self.assertIs(result['local_execution_stopped'], True)
+        self.assertIs(result['native_fallback_ready'], False)
+
+    def test_launch_time_uses_the_original_deadline(self):
+        exe = self.fixture("sys.stdin.read()\n"
+            "print(json.dumps({'type':'text','part':{'text':'answer'}}))\n"
+            "print(json.dumps({'type':'step_finish','part':{'reason':'stop','cost':0,'tokens':{}}}))\n")
+        run = self.api.prepare(self.runs, dict(self.brief, timeout_seconds=1))
+        launch = self.api.subprocess.Popen
+        processes = []
+        def delayed(command, **kwargs):
+            process = launch(command, **kwargs)
+            if command[0] == str(exe): processes.append(process); time.sleep(1.2)
+            return process
+        with patch.object(self.api.subprocess, 'Popen', side_effect=delayed):
+            result = self.api.execute(run, exe, self.root / 'auth')
+        self.assertEqual(result['failure'], {'category': 'deadline'})
+        self.assertEqual(len(processes), 1)
+        self.assertIsNotNone(processes[0].poll())
+        self.assertIs(result['local_execution_stopped'], True)
+        self.assertIs(result['native_fallback_ready'], True)
+
+    def test_expired_admission_does_not_launch_a_worker(self):
+        from contextlib import contextmanager
+        run = self.api.prepare(self.runs, dict(self.brief, timeout_seconds=1))
+        admission, launch = self.api.settings.admission, self.api.subprocess.Popen
+        processes = []
+        @contextmanager
+        def slow(*args, **kwargs):
+            with admission(*args, **kwargs) as report:
+                time.sleep(1.2)
+                yield report
+        def observed(command, **kwargs):
+            process = launch(command, **kwargs)
+            if command[0] == str(self.root / 'worker'): processes.append(process)
+            return process
+        with patch.object(self.api.settings, 'admission', slow), patch.object(self.api.subprocess, 'Popen', observed):
+            result = self.api.execute(run, self.root / 'worker', self.root / 'auth')
+        self.assertEqual(processes, [])
+        self.assertEqual(result['failure'], {'category': 'deadline'})
+        self.assertIs(result['local_execution_stopped'], True)
+        self.assertIs(result['native_fallback_ready'], True)
 
     def test_deeply_nested_event_remains_recoverable_without_replay(self):
         exe = self.fixture("sys.stdout.write('[' * 2000 + '0' + ']' * 2000 + '\\n')\n")
