@@ -4,7 +4,7 @@ Planning only · 26 October 2026 · Approved design; **last deliverable**. No da
 
 **Goal:** show how the selected onboarded Projects' workflow is configured, operating and supported by evidence, including measured benefits and costs. Produce a local, self-contained **offline HTML report on request**, using existing authoritative records. The requested experience is **“Clear, Straight to the point and a very good looking dashboard”**.
 
-**Basis:** the [canonical implementation sequence](onboard-my-project-plan.md#5-small-deliverables), user-approved [Project/Repository model](onboard-my-project-plan.md#project-and-repository-model) and [evidence-retention policy](onboard-my-project-plan.md#evidence-retention). These two shared sections own membership and retention; D11 consumes them without a parallel registry or policy. Follow the [instruction authoring standard](../AGENTS.md#instruction-authoring). Preserve the chosen coordinator settings, current task-based worker selection, permissions and customizations. Superset integration remains suspended.
+**Basis:** the [canonical implementation sequence](onboard-my-project-plan.md#5-small-deliverables), user-approved [Project/Repository model](onboard-my-project-plan.md#project-and-repository-model) and [evidence-retention policy](onboard-my-project-plan.md#evidence-retention). These two shared sections own membership and retention; D11 consumes them without a parallel registry or policy. Follow the [instruction authoring standard](../AGENTS.md#instruction-authoring). Preserve the chosen coordinator settings, current task-based worker selection, permissions and customizations.
 
 ## Read existing evidence
 

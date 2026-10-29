@@ -8,7 +8,7 @@
 
 **Source inspection:** the coordinator resolved Toolkit `main` on 25 October 2026 to `790a895304e0c08b70a5b215c9d334f1c86b816c`, matching the reviewed basis; a future new run must resolve again.
 
-**Basis:** [approved scope](../policies/01-project-scope.md), [onboarding contract](../policies/10-project-onboarding.md), [D3 deliverable](onboard-my-project-plan.md#5-small-deliverables), [source coverage](policy-sources.md) and [backend decision](superset-feature-map.md#delegation-backend). Follow OpenAI's installed `skill-creator` standard: concise entry, explicit loading triggers, complete applicable procedure, no duplicated rules. Python 3.11+ and standard library only.
+**Basis:** [approved scope](../policies/01-project-scope.md), [onboarding contract](../policies/10-project-onboarding.md), [D3 deliverable](onboard-my-project-plan.md#5-small-deliverables) and [source coverage](policy-sources.md). Follow OpenAI's installed `skill-creator` standard: concise entry, explicit loading triggers, complete applicable procedure, no duplicated rules. Python 3.11+ and standard library only.
 
 ## Boundaries and reuse
 
@@ -16,7 +16,7 @@
 - D4 owns approved application, private backups, operation journaling, resume/rollback and enrollment qualification. D5–D7 retain evidence verification, native delegation and repository enforcement. Describe missing mechanisms and dependencies rather than claim they exist.
 - Reuse `runtime/startup.py`'s `checkout()`, strict JSON parsing and policy digest. Its `resolve_project()` requires accepted enrollment: it cannot establish a new onboarding target. Keep planning identity separate from `ProjectScope`; do not weaken startup validation to admit a proposal.
 - Extend `scripts/workflow.py`; add one `runtime/onboarding.py`. No installer catalog, generic adapter framework, database, daemon or new CLI package.
-- Native operation is the default. Initial onboarding asks no Superset question and does not discover it opportunistically. The retained future design allows a separate `manage-superset` skill to select a backend per already-onboarded project after the integration qualifies; implementation is suspended. Disable restores native for new tasks even when Superset is unreachable; existing tasks retain their backend and ownership until finished or explicitly reconciled. No automatic fallback while Superset remains selected.
+- Native operation is the default. Optional integrations remain separate from initial project onboarding.
 
 ## Entry and loading
 
