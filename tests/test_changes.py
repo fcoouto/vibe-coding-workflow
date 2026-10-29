@@ -2517,24 +2517,96 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
         # Complete before this authority was linked: no marker or reverse source edge exists.
         request=self.scoped_request()
         self.assertEqual(self.changes._run_scoped(self.directory,request,'apply')['exit_code'],0)
+        journal=self.changes._load_journal(self.directory)
+        self.assertEqual(journal['state'],'applied')
+        journal_raw=(self.directory/'transaction.json').read_bytes()
+        effects={a['id']:self.changes._fingerprint(Path(a['owner']['root']),a['effects'][0]['path'])
+            for a in request['manifest']['actions']}
+        for action in request['manifest']['actions']:
+            self.assertEqual(effects[action['id']],action['effects'][0]['after'])
         fixture,context=self.recovery_authority()
+        locations=self.changes._authority_locations([context.directory])
+        self.assertTrue(all(self.changes._authority_owner(location) is None for location in locations))
         with evidence._context_database(context,write=True) as db:
             baseline=state._source_baseline(None,db,context=context)
+            self.assertEqual(baseline['dependencies'],())
             name=baseline['reference']['name']; metadata=state._metadata(db,name)
-            path=Path(metadata['managed']['path']); content=evidence._canonical_plain(baseline['content']); content['source_contract']=1
+            path=Path(metadata['managed']['path']); content=evidence._canonical_plain(baseline['content'])
+            original_content=dict(content); original_metadata=copy.deepcopy(metadata)
+            # Synthetic persisted legacy input, not captured output or current v1 issuance.
+            content['source_contract']=1
             raw=evidence._raw(content); path.chmod(0o600); path.write_bytes(raw); path.chmod(0o400)
-            digest=hashlib.sha256(raw).hexdigest(); metadata['managed']['sha256']=digest
+            digest=hashlib.sha256(raw).hexdigest(); metadata['version']=1; metadata['managed']['sha256']=digest
             db.execute('update evidence_metadata set digest=?,data=? where name=?',(digest,evidence._raw(metadata).decode(),name))
+            baseline_before=evidence._canonical_plain(state._source_baseline(None,db,context=context))
+            metadata_before=state._metadata(db,name)
+        self.assertEqual(content,dict(original_content,source_contract=1))
+        self.assertEqual(metadata_before,dict(original_metadata,version=1,
+            managed=dict(original_metadata['managed'],sha256=digest)))
         before=path.read_bytes()
+        def snapshot():
+            with evidence._context_database(context) as db:
+                return ({table:db.execute('select * from '+table).fetchall() for table in state.CANONICAL_TABLE_SQL},
+                    {p.name:(p.read_bytes(),p.stat().st_mode,p.stat().st_ino) for p in path.parent.iterdir()})
+        expected_blockers=(evidence._canonical_freeze(dict(reason='unknown_creation_time_d4_coverage',
+            authority=evidence._canonical_plain(context.authority_set[0]))),)
+        inspection_before=snapshot()
         recovery=self.changes.inspect_lifecycle_recovery(context.authority_set,())
+        self.assertEqual(snapshot(),inspection_before)
         self.assertFalse(recovery['complete'],recovery)
+        self.assertEqual(recovery['blockers'],expected_blockers)
         self.assertEqual(recovery['dependencies'],())
-        journal=self.changes._load_journal(self.directory)
-        source=self.changes._observe_recovery_source(self.directory,journal,(context,),())
+
+        # Retain a reconstructed v1 edge bound to the same real, fully completed journal.
+        identity=dict(plan_dir=str(self.directory),transaction_id=journal['transaction_id'],manifest_digest=journal['manifest_digest'])
+        created_at=content['created_at']+1
+        legacy=dict(version=1,kind='d4-recovery-source',identity=identity,
+            journal=dict(sha256=hashlib.sha256(journal_raw).hexdigest(),observed_at=created_at,state='applied'),
+            authorities=[evidence._canonical_plain(context.authority_set[0])],tasks=[],assignments=[],artifacts=[],previous=None)
+        source_raw=evidence._raw(legacy); source_path=path.parent/('d'*32+'.json')
+        descriptor=os.open(source_path,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o400)
+        with os.fdopen(descriptor,'wb') as stream:stream.write(source_raw)
+        info=source_path.lstat(); reference=dict(name=source_path.name,digest=hashlib.sha256(source_raw).hexdigest())
+        source_metadata=dict(copy.deepcopy(metadata_before),created_at=created_at,bytes=len(source_raw),dependencies=[],
+            managed=dict(metadata_before['managed'],path=str(source_path),binding=dict(device=info.st_dev,inode=info.st_ino),
+                sha256=reference['digest'],bytes=len(source_raw),mode=0o400))
+        edge=dict(kind='recovery',reference=dict(identity=identity,artifact=reference))
         with evidence._context_database(context,write=True) as db:
-            evidence._register_recovery_source(None,db,source,context=context)
-        self.assertFalse(self.changes.inspect_lifecycle_recovery(context.authority_set,())['complete'])
+            row=(reference['name'],reference['digest'],'project:'+content['project_id'],'compact',created_at,
+                None,'live',len(source_raw),evidence._raw(source_metadata).decode())
+            state._metadata_record(row)
+            db.execute('insert into evidence_metadata values(?,?,?,?,?,?,?,?,?)',row)
+            metadata=dict(metadata_before,dependencies=[edge])
+            db.execute('update evidence_metadata set data=? where name=?',(evidence._raw(metadata).decode(),name))
+            self.assertEqual(evidence._recovery_source_history(context,db,reference,identity),[(reference,legacy)])
+            self.assertEqual(evidence._managed_artifact(None,reference,context=context,db=db),(source_metadata,source_raw))
+        inspection_before=snapshot()
+        recovery=self.changes.inspect_lifecycle_recovery(context.authority_set,())
+        self.assertEqual(snapshot(),inspection_before)
+        self.assertFalse(recovery['complete'],recovery)
+        self.assertEqual(recovery['blockers'],expected_blockers)
+        self.assertEqual(len(recovery['dependencies']),1)
+        dependency=recovery['dependencies'][0]
+        self.assertEqual(evidence._canonical_plain(dependency['source_artifact']),reference)
+        self.assertEqual(evidence._canonical_plain(dependency['journal']),legacy['journal'])
+        self.assertEqual({key:dependency[key] for key in identity},identity)
+        with evidence._context_database(context) as db:
+            self.assertEqual(evidence._canonical_plain(state._source_baseline(None,db,context=context)),
+                dict(baseline_before,dependencies=[edge]))
+            self.assertEqual(state._metadata(db,name),dict(metadata_before,dependencies=[edge]))
         self.assertEqual(path.read_bytes(),before)
+
+        # Actual current admission still rejects publication outside its owner lifetime, without writes.
+        admission_before=snapshot()
+        source=self.changes._observe_recovery_source(self.directory,journal,(context,),())
+        with evidence._context_database(context,write=True) as db, \
+                self.assertRaisesRegex(self.changes.StartupError,'Recovery publication requires its actual active owner lifetime'):
+            evidence._register_recovery_source(None,db,source,context=context)
+        self.assertEqual(snapshot(),admission_before)
+        self.assertEqual((self.directory/'transaction.json').read_bytes(),journal_raw)
+        for action in request['manifest']['actions']:
+            self.assertEqual(self.changes._fingerprint(Path(action['owner']['root']),action['effects'][0]['path']),effects[action['id']])
+        self.assertTrue(all(self.changes._authority_owner(location) is None for location in locations))
 
     def test_recovery_two_store_admission_failure_preserves_markers_and_preimages(self):
         from runtime import evidence,state
