@@ -34,7 +34,7 @@ Use [review-my-project](skills/review-my-project/SKILL.md) to review selected re
 
 ## Observability
 
-Use the separate [Manage Observability Integration](skills/manage-observability/SKILL.md) skill to prepare optional integration setup, status, scope or enable/disable requests for a selected Project. Its name is provider-neutral; Langfuse is the first planned option. The skill currently provides guidance and identifies prerequisites; persistent settings, connection management and live collection are not implemented.
+Use the separate [Manage Observability Integration](skills/manage-observability/SKILL.md) skill for optional integration setup, status, scope or enable/disable requests. Its name is provider-neutral; Langfuse is the first connection option. Existing accepted Codex POSIX checkouts support private connection settings, current-project verification and an explicit fixed metrics-only synthetic probe. Desired opt-in starts no native collector; Project-wide activation, workflow measurements and dashboard qualification remain pending. Credentials come from secure environment injection; OS secure-storage setup is not implemented.
 
 Project onboarding does not configure or activate workflow observability. After onboarding completes, it may suggest this separate skill as an optional follow-up.
 
