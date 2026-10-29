@@ -7,13 +7,23 @@ separate. Its successful tests do not qualify tool use or autonomous editing.
 
 ## Prepare
 
+Read `scripts/openrouter.py status --cwd <selected-checkout>` with `{}` on stdin.
+Require saved enablement, selected route `workers` and ready local configuration.
+Use exactly its `worker_root`, `opencode` and `auth_data` references. Requested
+control changes belong to `../../manage-openrouter/SKILL.md`; ordinary delegation
+does not load that procedure or activate a route. An account connection, copied
+cache or an `approval_ref` alone does not replace saved checkout consent.
+
 1. Follow the project's native worker selection and declaration contract. Reserve
    the private run directory and give a genuine native supervisor the assignment,
    exact runner/runtime paths, role, specialty, copied inputs, checks and stop rule.
    Keep its native model identity truthful. Use `Task (via Model Display Name)` in
    progress details; the native card represents the supervisor, not OpenRouter.
-2. Reuse discovery/triage from `../../openrouter-proposals/references/procedure.md`;
-   refresh only under its cache rules. Require endpoint tool support and compatible
+2. Load only the discovery/cache and triage sections of
+   `../../openrouter-proposals/references/procedure.md`. Use the status response's
+   `proposal_store` as the shared metadata cache even when `proposals` is disabled;
+   workers require only their own route. Refresh only under those cache rules.
+   Require endpoint tool support and compatible
    effort. Benchmarks guide selection; independently qualify actual agent behavior.
    Do not call the proposal route's `begin`/`record` for a multi-step agent run.
 3. Use a separately installed, pinned OpenCode 1.19.5. The runner never installs it.
@@ -36,9 +46,9 @@ one JSON brief on stdin:
 
 ```text
 python3 -I -B <plugin-root>/scripts/openrouter_workers.py run
-  --root <private-canonical-runs-directory>
-  --opencode <absolute-pinned-executable>
-  --auth-data <private-opencode-data-directory>
+  --root <saved-worker-root>
+  --opencode <saved-pinned-executable>
+  --auth-data <saved-opencode-data-directory>
 ```
 
 The brief contains exactly `task_id`, `role`, `specialty`, `coordinator_chat_id`,
@@ -57,6 +67,13 @@ limits, and API requests already in flight may still be billed after cancellatio
 The runner copies at most 16 files, each at most 128 KiB, into its private workspace
 and initializes an empty private Git repository there. OpenCode's read permissions
 match worktree-relative filenames; without Git it may resolve the worktree to `/`.
+Preparation saves the consent scope and revision but does not admit external
+execution. Immediately before process creation, the runner rechecks enablement,
+selected route, scope, revision and configured runtime paths under the shared
+short guard. Disable after preparation blocks launch; re-enable does not revive
+stale preparation. Already-launched workers keep their original deadline and may
+finish and receive native verification after disable. Historical status and
+verification never require re-enabling. Disable does not revoke the account key.
 Canonical filenames cannot contain wildcard characters. Git is a runtime prerequisite;
 initialization uses no global configuration or templates and creates no commit.
 It denies shell, edits, network tools, external directories and nested agents through

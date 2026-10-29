@@ -12,6 +12,8 @@ Optional [OpenRouter proposals](skills/openrouter-proposals/SKILL.md) use an exp
 
 The separate [OpenRouter worker pilot](skills/openrouter-workers/SKILL.md) runs background OpenCode agents under genuine native Codex supervisors. The first slice permits read-only tools over explicitly copied files, with native verification, observed progress and the existing optional Habblaud role/model display. It requires its own OpenCode installation and OpenRouter login; it does not change the coordinator's provider or enable external repository writes. OpenCode owns transient request retries; the workflow adds no outer retry loop and permits native takeover after confirmed local stop. Credit checks are optional; OpenRouter enforces spending limits.
 
+Use [Manage OpenRouter Integration](skills/manage-openrouter/SKILL.md) for saved setup, status and enable/disable controls. It starts disabled and currently supports an already enrolled Codex POSIX checkout with accepted private runtime state. Both helpers enforce the selected routes and configured paths. Disable blocks new admissions; launched work can finish and receive native verification. Saved enablement does not verify a connection, client execution or model fitness, and disabling does not revoke direct account access.
+
 ## Prepare your Workspace
 
 Open this checkout in a coding agent with terminal access to the destination machine:
@@ -36,6 +38,6 @@ Use [review-my-project](skills/review-my-project/SKILL.md) to review selected re
 
 Use the separate [Manage Observability Integration](skills/manage-observability/SKILL.md) skill for optional integration setup, credentials, status, scope or enable/disable requests. Its name is provider-neutral; Langfuse is the first connection option. Existing accepted Codex POSIX checkouts support private connection settings, explicit OS storage or environment credentials, current-project verification and an authorized fixed metrics-only synthetic probe. Recommend a dedicated Langfuse project per logical Vibe Project; explicitly confirm sharing before another distinct Project links to a known actively used destination. Same-Project repositories/worktrees normally share one destination. Current checkout controls do not automate canonical cross-Project discovery. Saving/replacing or removing shared credentials follows the provider's [shared impact rule](skills/manage-observability/references/langfuse.md#shared-credential-impact). Desired opt-in starts no native collector; Project-wide activation, workflow measurements, real OS/account qualification and Windows runtime support remain separate.
 
-Project onboarding does not configure or activate workflow observability. After onboarding completes, it may suggest this separate skill as an optional follow-up.
+Project onboarding does not configure or activate observability or OpenRouter delegation. After successful qualified onboarding, it may offer either separate management skill as an optional follow-up.
 
 [Development guide](AGENTS.md)

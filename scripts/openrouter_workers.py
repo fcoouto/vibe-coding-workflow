@@ -16,6 +16,10 @@ import sys
 import time
 import uuid
 
+PACKAGE = Path(__file__).resolve().parents[1]
+if str(PACKAGE) not in sys.path: sys.path.insert(0, str(PACKAGE))
+from runtime import openrouter_settings as settings
+
 ROLES = {'Scout', 'Builder', 'Tester', 'Reviewer', 'Scribe', 'Investigator'}
 LIMIT = 4 * 1024 * 1024
 
@@ -51,6 +55,8 @@ def prepare(root, brief, now=None):
     if not source.is_absolute() or source.resolve() != source or not source.is_dir(): raise ValueError('invalid_source')
     files = brief['files']
     if not isinstance(files, list) or not 1 <= len(files) <= 16: raise ValueError('invalid_files')
+    with settings.admission(source, 'workers', root=root) as report:
+        brief = dict(brief, management=dict(scope_id=report['scope_id'], revision=report['revision']))
     inputs = {}
     for name in files:
         if not isinstance(name, str): raise ValueError('invalid_input')
@@ -244,10 +250,16 @@ def _execute(run, brief, executable, auth_data, publish):
     total = 0
     buffer = b''
     try:
-        proc = subprocess.Popen([str(executable), 'run', '--pure', '--format', 'json', '--agent', 'pilot',
-                                 '--model', 'openrouter/' + brief['model'], '--title', brief['task_id']],
-                                cwd=workspace, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL, start_new_session=True)
+        stamp = brief.get('management')
+        settings.require(isinstance(stamp, dict) and set(stamp) == {'scope_id', 'revision'}
+                         and isinstance(stamp['scope_id'], str) and settings.integer(stamp['revision']),
+                         'openrouter_preparation_unmanaged')
+        with settings.admission(brief['source_root'], 'workers', root=run.parent, opencode=executable,
+                                auth_data=auth_data, revision=stamp['revision'], scope_id=stamp['scope_id']):
+            proc = subprocess.Popen([str(executable), 'run', '--pure', '--format', 'json', '--agent', 'pilot',
+                                     '--model', 'openrouter/' + brief['model'], '--title', brief['task_id']],
+                                    cwd=workspace, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                    stderr=subprocess.DEVNULL, start_new_session=True)
         emit('Starting')
         proc.stdin.write(brief['objective'].encode('utf-8'))
         proc.stdin.close()
@@ -313,6 +325,9 @@ def _execute(run, brief, executable, auth_data, publish):
                            'awaiting_verification' if terminal and result['response'].strip() and not buffer.strip() else 'unresolved')
         if result['state'] != 'awaiting_verification' and result['failure'] is None:
             result['failure'] = {'category': 'runtime' if proc.returncode else 'incomplete_output'}
+    except settings.SettingsError as exc:
+        result['state'] = 'failed'
+        result['failure'] = {'category': 'integration', 'reason': str(exc)}
     except (TimeoutError, subprocess.TimeoutExpired):
         result['state'] = 'unresolved'
         if result['failure'] is None: result['failure'] = {'category': 'deadline'}

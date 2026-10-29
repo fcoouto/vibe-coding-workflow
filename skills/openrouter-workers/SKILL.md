@@ -1,14 +1,15 @@
 ---
 name: openrouter-workers
-description: Run an explicitly approved background OpenRouter worker through OpenCode with a genuine native Codex supervisor and optional Habblaud visibility. Use for the read-only agent pilot, not ordinary native delegation or proposal-only calls.
+description: Use when running an approved read-only OpenRouter worker through OpenCode with native supervision and optional Habblaud visibility; not native delegation or proposal-only calls.
 ---
 
 # OpenRouter Workers
 
 Preserve the coordinator's model, provider, authentication and plugins. Follow the
-[pilot procedure](references/procedure.md) before dispatch. Reuse cached model
-discovery; OpenRouter enforces spending limits. The supervisor is a real native agent;
-its model column remains native. OpenRouter work runs through pinned OpenCode over
+[pilot procedure](references/procedure.md) before dispatch. Require saved checkout
+enablement; use [Manage OpenRouter Integration](../manage-openrouter/SKILL.md) for requested control changes.
+Reuse cached discovery; OpenRouter enforces spending limits. The genuine native
+supervisor retains its native model column. OpenRouter work runs through pinned OpenCode over
 explicitly copied files with read-only tools. Observe actual events, verify results
 independently, and record measured usage with attribution limits. Reuse
 installed Habblaud transport only when explicitly configured. Never fabricate native

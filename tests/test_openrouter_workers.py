@@ -9,6 +9,8 @@ import signal
 import sys
 import time
 from unittest.mock import patch
+from runtime import openrouter_settings as settings
+from tests.openrouter_fixtures import enroll, configure
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'scripts/openrouter_workers.py'
 
@@ -29,6 +31,13 @@ class WorkerTests(unittest.TestCase):
         self.root = Path(self.tmp.name).resolve()
         self.source = self.root / 'source'
         self.source.mkdir()
+        enroll(self.source, self.root / 'private')
+        (self.root / 'auth').mkdir(mode=0o700)
+        executable = self.root / 'worker'
+        executable.write_text('#!/bin/sh\nexit 0\n')
+        executable.chmod(0o700)
+        self.settings = configure(self.source, executable=executable, auth=self.root / 'auth', routes=('workers',))
+        self.runs = Path(self.settings['worker_root'])
         (self.source / 'input.txt').write_text('three lines\nof evidence\nfor review\n')
         self.brief = dict(task_id='pilot-1', role='Scout', specialty='File analysis',
                           coordinator_chat_id=str(uuid.uuid4()), model='vendor/model',
@@ -36,36 +45,104 @@ class WorkerTests(unittest.TestCase):
                           source_root=str(self.source), files=['input.txt'], timeout_seconds=5,
                           steps=3, approval_ref='user-approved', effort='low')
 
+    def test_disable_blocks_preparation_and_launch_without_replay(self):
+        run = self.api.prepare(self.runs, self.brief)
+        settings.disable(self.source, {'expected_revision': self.settings['revision']})
+        with self.assertRaisesRegex(settings.SettingsError, 'openrouter_disabled'):
+            self.api.prepare(self.runs, dict(self.brief, task_id='blocked'))
+        result = self.api.execute(run, self.root / 'worker', self.root / 'auth')
+        self.assertEqual(result['failure'], {'category': 'integration', 'reason': 'openrouter_disabled'})
+        self.assertIs(result['native_fallback_ready'], True)
+        self.assertIs(result['local_execution_stopped'], True)
+        with self.assertRaisesRegex(ValueError, 'already_started'):
+            self.api.execute(run, self.root / 'worker', self.root / 'auth')
+
+    def test_reenable_does_not_admit_old_preparation(self):
+        run = self.api.prepare(self.runs, self.brief)
+        report = settings.disable(self.source, {'expected_revision': self.settings['revision']})
+        settings.enable(self.source, {'expected_revision': report['revision']})
+        result = self.api.execute(run, self.root / 'worker', self.root / 'auth')
+        self.assertEqual(result['failure']['reason'], 'openrouter_preparation_stale')
+
+    def test_worker_rejects_alternate_runtime_and_unmanaged_preparation(self):
+        for index, change in enumerate(('executable', 'auth', 'stamp')):
+            with self.subTest(change=change):
+                run = self.api.prepare(self.runs, dict(self.brief, task_id=f'mismatch-{index}'))
+                executable, auth = self.root / 'worker', self.root / 'auth'
+                if change == 'executable': executable = self.root / 'other-worker'
+                elif change == 'auth': auth = self.root / 'other-auth'
+                else:
+                    brief = json.loads((run / 'brief.json').read_text())
+                    del brief['management']
+                    (run / 'brief.json').write_text(json.dumps(brief))
+                result = self.api.execute(run, executable, auth)
+                self.assertEqual(result['failure']['reason'], 'openrouter_preparation_unmanaged'
+                                 if change == 'stamp' else 'openrouter_configuration_mismatch')
+                self.assertIs(result['native_fallback_ready'], True)
+        with self.assertRaisesRegex(settings.SettingsError, 'openrouter_configuration_mismatch'):
+            self.api.prepare(self.root / 'other-runs', self.brief)
+
+    def test_launched_worker_finishes_and_verifies_after_disable(self):
+        import subprocess
+        started, release = self.root / 'started', self.root / 'release'
+        exe = self.fixture(f'''from pathlib import Path
+Path({str(started)!r}).touch()
+while not Path({str(release)!r}).exists(): time.sleep(.01)
+print(json.dumps({{'type':'text','part':{{'text':'There are three lines.'}}}}))
+print(json.dumps({{'type':'step_finish','part':{{'reason':'stop','cost':0,'tokens':{{}}}}}}))
+''')
+        child = subprocess.Popen([sys.executable, '-I', '-B', str(SCRIPT), 'run', '--root', str(self.runs),
+            '--opencode', str(exe), '--auth-data', str(self.root / 'auth')], stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            child.stdin.write(json.dumps(self.brief)); child.stdin.close(); child.stdin = None
+            deadline = time.monotonic() + 10
+            while not started.exists() and child.poll() is None and time.monotonic() < deadline: time.sleep(.01)
+            self.assertTrue(started.exists(), 'worker must launch before disable')
+            report = settings.disable(self.source, {'expected_revision': self.settings['revision']})
+            self.assertFalse(report['enabled'])
+            self.assertIsNone(child.poll(), 'disable must not wait for or stop admitted work')
+            release.touch()
+            output, error = child.communicate(timeout=10)
+            self.assertEqual(child.returncode, 0, error)
+            result = json.loads(output.splitlines()[-1])
+            self.assertEqual(result['state'], 'awaiting_verification')
+            self.assertEqual(self.api.verify(self.runs / 'pilot-1', 'accepted', ['Native line count equals three'])['state'], 'accepted')
+            self.assertFalse(settings.status(self.source)['enabled'])
+        finally:
+            if child.poll() is None: child.kill(); child.wait()
+            for stream in (child.stdout, child.stderr): stream.close()
+
     def test_snapshot_excludes_unselected_inputs_and_rejects_replay(self):
         (self.source / 'secret.txt').write_text('not selected')
-        run = self.api.prepare(self.root / 'runs', self.brief, now=100)
+        run = self.api.prepare(self.runs, self.brief, now=100)
         self.assertEqual((run / 'workspace/input.txt').read_text(), 'three lines\nof evidence\nfor review\n')
         self.assertFalse((run / 'workspace/secret.txt').exists())
         import subprocess
         actual_root = subprocess.check_output(['git', '-C', str(run/'workspace'), 'rev-parse', '--show-toplevel'], text=True).strip()
         self.assertEqual(actual_root, str(run/'workspace'))
         with self.assertRaises(FileExistsError):
-            self.api.prepare(self.root / 'runs', self.brief, now=100)
+            self.api.prepare(self.runs, self.brief, now=100)
 
     def test_unsafe_inputs_fail_before_run_creation(self):
         (self.source / 'link').symlink_to(self.source / 'input.txt')
         for files in [['../escape'], ['link'], ['/absolute'], ['.env']]:
             with self.subTest(files=files), self.assertRaises(ValueError):
-                self.api.prepare(self.root / 'runs', dict(self.brief, files=files), now=100)
-        self.assertFalse((self.root / 'runs/pilot-1').exists())
+                self.api.prepare(self.runs, dict(self.brief, files=files), now=100)
+        self.assertFalse((self.runs / 'pilot-1').exists())
 
     def test_prepare_without_credit_keeps_execution_and_replay_bounds(self):
         try:
-            run = self.api.prepare(self.root / 'runs', self.brief)
+            run = self.api.prepare(self.runs, self.brief)
         except ValueError as error:
             self.fail(f'Credit lookup must not be required: {error}')
         self.assertEqual(json.loads((run / 'result.json').read_text())['state'], 'prepared')
         with self.assertRaises(FileExistsError):
-            self.api.prepare(self.root / 'runs', self.brief)
+            self.api.prepare(self.runs, self.brief)
 
     def test_legacy_credit_is_ignored_and_not_saved(self):
         try:
-            run = self.api.prepare(self.root / 'runs', dict(self.brief, credit={'remaining': 0}), now=999)
+            run = self.api.prepare(self.runs, dict(self.brief, credit={'remaining': 0}), now=999)
         except ValueError as error:
             self.fail(f'Legacy credit must not gate dispatch: {error}')
         self.assertNotIn('credit', json.loads((run / 'brief.json').read_text()))
@@ -74,7 +151,7 @@ class WorkerTests(unittest.TestCase):
         for name in ['*', 'file?', '[a]', './input.txt', 'folder//file.txt']:
             if '/' not in name: (self.source/name).write_text('fixture')
             with self.subTest(name=name), self.assertRaises(ValueError):
-                self.api.prepare(self.root/'runs', dict(self.brief, files=[name]), now=100)
+                self.api.prepare(self.runs, dict(self.brief, files=[name]), now=100)
 
     def test_permissions_deny_shell_writes_network_and_other_agents(self):
         config = self.api.configuration(self.brief)
@@ -91,20 +168,20 @@ class WorkerTests(unittest.TestCase):
         exe = self.fixture("import os\nassert os.environ.get('OPENCODE_DISABLE_MODELS_FETCH') == 'true'\n"
                            "print(json.dumps({'type':'text','part':{'text':'Fixture answer'}}))\n"
                            "print(json.dumps({'type':'step_finish','part':{'reason':'stop','cost':0,'tokens':{}}}))\n")
-        run = self.api.prepare(self.root / 'runs', self.brief)
+        run = self.api.prepare(self.runs, self.brief)
         self.assertEqual(self.api.execute(run, exe, self.root / 'auth')['state'], 'awaiting_verification')
 
     def test_missing_visibility_adapter_does_not_prevent_worker_execution(self):
         import subprocess
         brief = dict(self.brief)
         exe = self.fixture("print(json.dumps({'type':'error','error':{'message':'provider unavailable'}}))\n")
-        result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--root', str(self.root/'runs'),
+        result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--root', str(self.runs),
                                  '--opencode', str(exe), '--auth-data', str(self.root/'auth'),
                                  '--visibility-plugin', str(self.root/'missing')], input=json.dumps(brief),
                                 text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads((self.root/'runs/pilot-1/result.json').read_text())['state'], 'failed')
-        self.assertFalse(json.loads((self.root/'runs/pilot-1/visibility.json').read_text())['delivered'])
+        self.assertEqual(json.loads((self.runs/'pilot-1/result.json').read_text())['state'], 'failed')
+        self.assertFalse(json.loads((self.runs/'pilot-1/visibility.json').read_text())['delivered'])
 
     def fixture(self, body):
         p = self.root / 'worker'
@@ -121,7 +198,7 @@ for event in [
  {'type':'step_finish','sessionID':'ses_1','part':{'reason':'stop','cost':0.001,'tokens':{'input':10,'output':5,'reasoning':2,'cache':{'read':0,'write':0}}}}
 ]: print(json.dumps(event), flush=True)
 ''')
-        run = self.api.prepare(self.root / 'runs', self.brief, now=100)
+        run = self.api.prepare(self.runs, self.brief, now=100)
         result = self.api.execute(run, exe, self.root / 'auth', publish=lambda phase: None)
         self.assertEqual(result['state'], 'awaiting_verification')
         self.assertEqual(result['tools'], ['read'])
@@ -133,7 +210,7 @@ for event in [
 
     def test_error_even_with_zero_exit_never_becomes_success(self):
         exe = self.fixture("print(json.dumps({'type':'error','error':{'message':'SECRET'}}))\n")
-        run = self.api.prepare(self.root / 'runs', self.brief, now=100)
+        run = self.api.prepare(self.runs, self.brief, now=100)
         result = self.api.execute(run, exe, self.root / 'auth')
         self.assertEqual(result['state'], 'failed')
         self.assertNotIn('SECRET', (run / 'progress.jsonl').read_text())
@@ -190,7 +267,7 @@ for event in [
                  'message': 'SECRET', 'responseBody': 'SECRET'}}
         exe = self.fixture("with open(%r, 'a') as stream: stream.write('launch\\n')\n" % str(launches) +
                            "print(json.dumps({'type':'error','error':%r}), flush=True)\n" % error)
-        run = self.api.prepare(self.root / 'runs', self.brief)
+        run = self.api.prepare(self.runs, self.brief)
         result = self.api.execute(run, exe, self.root / 'auth')
         self.assertEqual(launches.read_text().splitlines(), ['launch'])
         self.assertEqual(result.get('failure'), {'category': 'service', 'status_code': 503})
@@ -210,7 +287,7 @@ for event in [
  {'type':'error','error':{'name':'APIError','data':{'statusCode':402}}}
 ]: print(json.dumps(event), flush=True)
 """)
-        run = self.api.prepare(self.root / 'runs', self.brief)
+        run = self.api.prepare(self.runs, self.brief)
         result = self.api.execute(run, exe, self.root / 'auth')
         self.assertEqual(result.get('failure'), {'category': 'budget', 'status_code': 402})
         self.assertEqual(result['known_cost_subtotal_usd'], 0.02)
@@ -224,7 +301,7 @@ for event in [
         launches = self.root / 'launches.txt'
         exe = self.fixture("with open(%r, 'a') as stream: stream.write('launch\\n')\n" % str(launches) +
                            "for _ in range(100):\n print(json.dumps({'type':'step_start','part':{}}), flush=True)\n time.sleep(.1)\n")
-        run = self.api.prepare(self.root / 'runs', dict(self.brief, timeout_seconds=1))
+        run = self.api.prepare(self.runs, dict(self.brief, timeout_seconds=1))
         started = time.monotonic()
         result = self.api.execute(run, exe, self.root / 'auth')
         self.assertLess(time.monotonic() - started, 5)
@@ -236,7 +313,7 @@ for event in [
 
     def test_unconfirmed_process_group_stop_withholds_native_takeover(self):
         exe = self.fixture("print(json.dumps({'type':'error','error':{}}), flush=True)\n")
-        run = self.api.prepare(self.root / 'runs', self.brief)
+        run = self.api.prepare(self.runs, self.brief)
         with patch.object(self.api.os, 'killpg', side_effect=PermissionError('fixture refusal')):
             try:
                 result = self.api.execute(run, exe, self.root / 'auth')
@@ -248,7 +325,7 @@ for event in [
 
     def test_stalled_stdin_cannot_bypass_the_worker_deadline(self):
         exe = self.fixture('time.sleep(3)\n')
-        run = self.api.prepare(self.root / 'runs', dict(self.brief, objective='😀' * 15000,
+        run = self.api.prepare(self.runs, dict(self.brief, objective='😀' * 15000,
                                                        timeout_seconds=1))
         started = time.monotonic()
         result = self.api.execute(run, exe, self.root / 'auth')
@@ -258,7 +335,7 @@ for event in [
 
     def test_deeply_nested_event_remains_recoverable_without_replay(self):
         exe = self.fixture("sys.stdout.write('[' * 2000 + '0' + ']' * 2000 + '\\n')\n")
-        run = self.api.prepare(self.root / 'runs', self.brief)
+        run = self.api.prepare(self.runs, self.brief)
         decode = self.api.json.loads
         def older_decoder(value, *args, **kwargs):
             # Older supported Python decoders raise RecursionError for nested JSON.
@@ -279,7 +356,7 @@ for event in [
         exe = self.fixture("import os\n"
                            "print(json.dumps({'type':'step_finish','part':{'reason':'tool-calls','cost':0.02,'tokens':{'input':20}}}), flush=True)\n"
                            "with open(%r, 'w') as stream: stream.write(str(os.getpid()))\ntime.sleep(20)\n" % str(pidfile))
-        process = subprocess.Popen([sys.executable, str(SCRIPT), 'run', '--root', str(self.root / 'runs'),
+        process = subprocess.Popen([sys.executable, str(SCRIPT), 'run', '--root', str(self.runs),
                                     '--opencode', str(exe), '--auth-data', str(self.root / 'auth')],
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
@@ -289,7 +366,7 @@ for event in [
             until = time.monotonic() + 5
             while not pidfile.exists() and time.monotonic() < until: time.sleep(.01)
             self.assertTrue(pidfile.exists(), 'fixture worker must start before interruption')
-            result_path = self.root / 'runs/pilot-1/result.json'
+            result_path = self.runs / 'pilot-1/result.json'
             while time.monotonic() < until:
                 if result_path.exists() and json.loads(result_path.read_text()).get('known_cost_subtotal_usd') == 0.02:
                     break
@@ -314,7 +391,7 @@ for event in [
     def test_native_rejection_allows_takeover_without_an_external_replay(self):
         exe = self.fixture("print(json.dumps({'type':'text','part':{'text':'Wrong answer'}}))\n"
                            "print(json.dumps({'type':'step_finish','part':{'reason':'stop','cost':0,'tokens':{}}}))\n")
-        run = self.api.prepare(self.root / 'runs', self.brief)
+        run = self.api.prepare(self.runs, self.brief)
         result = self.api.execute(run, exe, self.root / 'auth')
         self.assertEqual(result['state'], 'awaiting_verification')
         self.assertIs(result.get('native_fallback_ready'), False)
@@ -322,17 +399,16 @@ for event in [
         self.assertIs(rejected.get('native_fallback_ready'), True)
 
     def test_timeout_and_missing_finish_remain_unresolved(self):
-        for body in ['time.sleep(5)\n', "print(json.dumps({'type':'text','part':{'text':'unfinished'}}))\n"]:
-            with tempfile.TemporaryDirectory() as d:
-                brief = dict(self.brief, timeout_seconds=1)
-                run = self.api.prepare(Path(d).resolve(), brief, now=100)
-                result = self.api.execute(run, self.fixture(body), self.root / 'auth')
-                self.assertEqual(result['state'], 'unresolved')
-                with self.assertRaises(ValueError): self.api.verify(run, 'accepted', ['self-reported success'])
+        for index, body in enumerate(['time.sleep(5)\n', "print(json.dumps({'type':'text','part':{'text':'unfinished'}}))\n"]):
+            brief = dict(self.brief, task_id=f'timeout-{index}', timeout_seconds=1)
+            run = self.api.prepare(self.runs, brief, now=100)
+            result = self.api.execute(run, self.fixture(body), self.root / 'auth')
+            self.assertEqual(result['state'], 'unresolved')
+            with self.assertRaises(ValueError): self.api.verify(run, 'accepted', ['self-reported success'])
 
     def test_malformed_part_is_persisted_as_unresolved(self):
         exe = self.fixture("print(json.dumps({'type':'step_finish','part':[]}))\n")
-        run = self.api.prepare(self.root / 'runs', self.brief, now=100)
+        run = self.api.prepare(self.runs, self.brief, now=100)
         self.assertEqual(self.api.execute(run, exe, self.root / 'auth')['state'], 'unresolved')
         self.assertEqual(json.loads((run / 'result.json').read_text())['state'], 'unresolved')
 
@@ -341,7 +417,7 @@ for event in [
  print(json.dumps({'type':'step_finish','part':part}))
 print(json.dumps({'type':'text','part':{'text':'answer'}}))
 """)
-        run = self.api.prepare(self.root / 'runs', self.brief, now=100)
+        run = self.api.prepare(self.runs, self.brief, now=100)
         result = self.api.execute(run, exe, self.root / 'auth')
         self.assertIsNone(result['reported_cost_usd'])
         self.assertEqual(result['known_cost_subtotal_usd'], 0.1)
@@ -359,7 +435,7 @@ else:
  with open(%r,'w') as f: f.write(str(pid))
  time.sleep(.1)
 """ % str(pidfile))
-        run = self.api.prepare(self.root / 'runs', self.brief, now=100)
+        run = self.api.prepare(self.runs, self.brief, now=100)
         self.api.execute(run, exe, self.root / 'auth')
         pid = int(pidfile.read_text())
         try:

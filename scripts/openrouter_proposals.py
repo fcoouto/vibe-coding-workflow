@@ -17,6 +17,10 @@ import sys
 import tempfile
 import time
 
+PACKAGE = Path(__file__).resolve().parents[1]
+if str(PACKAGE) not in sys.path: sys.path.insert(0, str(PACKAGE))
+from runtime import openrouter_settings as settings
+
 MAX_INPUT = 1024 * 1024
 MAX_STATE = 8 * 1024 * 1024
 MAX_RESPONSE = 1024 * 1024
@@ -288,7 +292,18 @@ def act(action, state, request, now):
     raise ValueError('unknown action')
 
 
-def run(action: str, store: Path, request: dict, *, now: float | None = None) -> dict:
+def run(action: str, store: Path, request: dict, *, now: float | None = None, cwd=None) -> dict:
+    if action == 'begin':
+        try:
+            with settings.admission(cwd, 'proposals', store=store) as report:
+                return _run(action, store, request, now=now,
+                            management=dict(scope_id=report['scope_id'], revision=report['revision']))
+        except settings.SettingsError as exc:
+            return dict(fallback=str(exc), advisory=True)
+    return _run(action, store, request, now=now)
+
+
+def _run(action: str, store: Path, request: dict, *, now: float | None = None, management=None) -> dict:
     """Serialize one short local operation; callers perform all external actions."""
     if not isinstance(request, dict):
         raise ValueError('request must be an object')
@@ -323,6 +338,8 @@ def run(action: str, store: Path, request: dict, *, now: float | None = None) ->
                     raise ValueError('incompatible state; preserve it and use native execution')
             before = encoded(state, MAX_STATE)
             result = act(action, state, request, now)
+            if action == 'begin' and 'attempt_token' in result:
+                state['attempts'][-1]['management'] = management
             try:
                 after = encoded(state, MAX_STATE)
             except ValueError:
@@ -352,12 +369,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action')
     parser.add_argument('--store', required=True, type=Path)
+    parser.add_argument('--cwd', type=Path)
     args = parser.parse_args()
     try:
         raw = sys.stdin.buffer.read(MAX_INPUT + 1)
         if len(raw) > MAX_INPUT:
             raise ValueError('request size limit exceeded')
-        result = run(args.action, args.store, json.loads(raw))
+        result = run(args.action, args.store, json.loads(raw), cwd=args.cwd)
         output = encoded(result, MAX_RESPONSE - 1 if args.action == 'triage' else MAX_STATE)
     except (ValueError, RecursionError) as exc:
         print(json.dumps(dict(error=str(exc))))

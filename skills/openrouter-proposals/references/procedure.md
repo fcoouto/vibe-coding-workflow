@@ -4,6 +4,15 @@ Use this only for the approved OpenRouter proposal route. The native coordinator
 
 ## Start with the available route
 
+For new proposal calls, read saved checkout consent with `scripts/openrouter.py status --cwd <selected-checkout>`
+using `{}` on stdin. Require `enabled:true`, selected route `proposals` and ready
+local configuration before new work. Use its exact `proposal_store`; an arbitrary
+cache directory or `approval_ref` cannot replace saved enablement. For requested
+control changes, use `../../manage-openrouter/SKILL.md`. Do not enable during a task.
+Offline cache/history/status inspection does not require a live connection check.
+Workers reuse only discovery and triage below under their own enabled `workers`
+route; they do not require the `proposals` route or its call/settlement procedure.
+
 Confirm that the current client exposes the existing authenticated OpenRouter MCP tools. Use `list-models`, `get-model`, `list-model-endpoints`, `list-benchmarks` and optionally `list-task-classifications` or `get-endpoint-uptime-history` for discovery; `send-message` for the proposal; and `get-generation` for reported execution facts. Use `get-credits` only when balance inspection is requested or relevant to diagnosis. Tool names may have a client prefix. Inspect the exposed schema rather than inventing arguments.
 
 Reuse the user's explicit approval within its scope. An installed connection does not approve sending unrelated project content. Preserve the native coordinator's settings and account authentication. Do not install a proxy, extract credentials, change OpenRouter limits or enable automatic routing. If the necessary tools or controls are unavailable, continue natively and report that limitation.
@@ -15,10 +24,10 @@ The external model receives only a bounded task packet and returns text. It has 
 Run the packaged helper with Python 3.11+:
 
 ```text
-python3 -I -B <plugin-root>/scripts/openrouter_proposals.py <action> --store <absolute-private-directory>/openrouter.json
+python3 -I -B <plugin-root>/scripts/openrouter_proposals.py <action> --store <saved-proposal-store> --cwd <selected-checkout>
 ```
 
-Supply one JSON object on stdin; read the JSON result and exit status. `<plugin-root>` is this installed package, not the task's working directory. Use one stable state file per approved Project in an existing owner-only directory (mode 0700), under its existing state directory when available, outside repositories and plugin installations. Create that private directory with native tools when needed. Do not store state in this skill directory. Use the same file across participating sessions; separate stores do not coordinate calls.
+Supply one JSON object on stdin; read the JSON result and exit status. `<plugin-root>` is this installed package, not the task's working directory. Management derives one private store from the selected checkout's accepted runtime state. Use the same returned path across sessions; do not create another store or move historical data automatically. Existing advisory stores remain inspectable, but only the configured path admits new calls.
 
 The helper contains only bounded advisory metadata and compact task records. It does not contact OpenRouter, read authentication, apply patches or establish native verification. Its filesystem checks prevent common accidental unsafe writes; same-user local files are not an independent trust boundary. Never put prompts, model responses, source code, credentials or tool-output instructions into the store.
 
@@ -128,7 +137,7 @@ Normal completion responses report request usage and cost, not a remaining accou
 
 Call `begin` with the stable task ID, full profile, selected `model`, canonical provider slug, supported `effort` or null, current `snapshot_digest`, `approval_ref`, `base_ref`, the actual `requirements`, `output_tokens` and `timeout_seconds`. Use the same requirements shape as `triage`; its `output_tokens` must equal the call's top-level value. Admission rechecks the pinned route's capabilities before consuming the attempt. Legacy credit observations are ignored and not stored in new records. Output limits remain at most 8192 tokens and timeouts at most 120 seconds. These are bounded pilot-call controls, not OpenRouter spending settings.
 
-Only a newly returned attempt token permits this coordinator to make the proposal call. A duplicate task ID never permits a second call. If the helper reports a pending local attempt, stale discovery, invalid controls or storage capacity, use the native path. Do not create a different task ID or store directory to evade the original attempt limit.
+Only a newly returned attempt token permits this coordinator to make the proposal call. `begin` requires `--cwd` and rechecks saved enablement, selected route and configured store under a short guard through durable admission. Each admitted attempt records the scope and settings revision. Disable blocks new admissions; an issued token may finish its one call and be recorded afterward. A duplicate task ID never permits a second call. If the helper reports disabled/busy consent, a pending local attempt, stale discovery, invalid controls or storage capacity, use the native path. Do not create a different task ID or store directory to evade the original attempt limit.
 
 Send one `send-message` with the exact chosen model, `provider.only` containing the canonical provider slug, `provider.allow_fallbacks:false`, supported `reasoning_effort` when applicable, `max_tokens` and `timeout_ms`. Pass the bounded objective, required context, relevant constraints, acceptance checks and requested proposal format. Do not enable web-search/routing variants, paid tools or an inference retry loop. This executor does not inherit OpenCode's worker retry policy. The token ceiling includes reasoning where the tool specifies it.
 
@@ -178,4 +187,4 @@ Record an interrupted attempt truthfully before later work. An unresolved record
 
 History and each attempt's relevant model/endpoint/benchmark evidence survive cache refresh. Keep failures, repair costs and configuration differences visible when selecting future candidates. Use `history` with `{}` for the latest records, or optional `model`, `provider`, `effort`, exact `profile` and `limit` (1–100) filters. Use cached benchmark data for a capability table or plot when helpful. Distinguish published scores, local observations and unknowns. Never claim subscription savings without actual avoided spending and comparable task evidence.
 
-Completion means the native task's acceptance requirements are satisfied and the external attempt has a truthful recorded disposition. Package tests, instruction walkthroughs and actual observed MCP/client execution are separate evidence classes. Disabling this optional route restores native-only selection and leaves OpenRouter account settings unchanged.
+Completion means the native task's acceptance requirements are satisfied and the external attempt has a truthful recorded disposition. Package tests, instruction walkthroughs and actual observed MCP/client execution are separate evidence classes. Saved disable restores native-only selection for new managed admissions and leaves OpenRouter account settings and direct MCP access unchanged.

@@ -8,6 +8,8 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from runtime import openrouter_settings as settings
+from tests.openrouter_fixtures import enroll, configure
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'scripts/openrouter_proposals.py'
 PROFILE = dict(family='coding', language='Python', framework=None, difficulty='small', scope='one file', verification='unit tests')
@@ -28,10 +30,66 @@ class ProposalTests(unittest.TestCase):
         self.assertIsNotNone(self.api, 'standalone proposal helper must exist')
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.store = Path(self.tmp.name) / 'state.json'
+        root = Path(self.tmp.name).resolve()
+        self.repo = root / 'repo'
+        enroll(self.repo, root / 'private')
+        self.settings = configure(self.repo, routes=('proposals',))
+        self.store = Path(self.settings['proposal_store'])
 
     def call(self, action, request=None, now=100):
-        return self.api.run(action, self.store, request or {}, now=now)
+        return self.api.run(action, self.store, request or {}, now=now, cwd=self.repo)
+
+    def test_begin_requires_saved_checkout_enablement_and_selected_store(self):
+        self.publish()
+        request = self.begin_request()
+        missing = self.api.run('begin', self.store, request, now=100)
+        self.assertEqual(missing.get('fallback'), 'openrouter_scope_required')
+        wrong = self.api.run('begin', self.store.parent / 'other.json', request, now=100, cwd=self.repo)
+        self.assertEqual(wrong.get('fallback'), 'openrouter_configuration_mismatch')
+        settings.disable(self.repo, {'expected_revision': self.settings['revision']})
+        self.assertEqual(self.call('begin', request).get('fallback'), 'openrouter_disabled')
+        self.assertEqual(json.loads(self.store.read_text())['attempts'], [])
+
+    def test_admitted_proposal_can_settle_after_disable(self):
+        self.publish()
+        result = self.call('begin', self.begin_request())
+        self.assertEqual(self.call('history')['records'][0]['management'],
+                         dict(scope_id=self.settings['scope_id'], revision=self.settings['revision']))
+        settings.disable(self.repo, {'expected_revision': self.settings['revision']})
+        recorded = self.call('record', dict(attempt_token=result['attempt_token'], disposition='rejected'))
+        self.assertTrue(recorded['recorded'])
+        self.assertEqual(self.call('begin', self.begin_request('another'))['fallback'], 'openrouter_disabled')
+
+    def test_disable_cannot_pass_an_admission_held_by_another_process(self):
+        program = '''import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from runtime import openrouter_settings as settings
+with settings.admission(Path(sys.argv[2]), 'proposals', store=Path(sys.argv[3])):
+    print('admitted', flush=True)
+    sys.stdin.readline()
+'''
+        child = subprocess.Popen([sys.executable, '-I', '-B', '-c', program,
+            str(SCRIPT.parents[1]), str(self.repo), str(self.store)], stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            import selectors
+            with selectors.DefaultSelector() as selector:
+                selector.register(child.stdout, selectors.EVENT_READ)
+                self.assertTrue(selector.select(10), 'admission process must signal readiness')
+            self.assertEqual(child.stdout.readline().strip(), 'admitted')
+            command = [sys.executable, '-I', '-B', str(SCRIPT.with_name('openrouter.py')),
+                       'disable', '--cwd', str(self.repo)]
+            blocked = subprocess.run(command, input=json.dumps({'expected_revision': self.settings['revision']}),
+                                     text=True, capture_output=True, timeout=10)
+            self.assertNotEqual(blocked.returncode, 0)
+            self.assertFalse(json.loads(blocked.stdout)['ok'])
+            _, error = child.communicate('\n', timeout=10)
+            self.assertEqual(child.returncode, 0, error)
+            self.assertFalse(settings.disable(self.repo, {'expected_revision': self.settings['revision']})['enabled'])
+        finally:
+            if child.poll() is None: child.kill(); child.wait()
+            for stream in (child.stdin, child.stdout, child.stderr): stream.close()
 
     def publish(self):
         token = self.call('claim')['refresh_token']
@@ -223,7 +281,7 @@ class ProposalTests(unittest.TestCase):
         claim = json.loads(self.cli('claim', {'force': True}).stdout)
         self.assertEqual(self.cli('publish', dict(refresh_token=claim['refresh_token'], metadata=METADATA)).returncode, 0)
         request = self.begin_request()
-        command = [sys.executable, '-I', '-B', str(SCRIPT), 'begin', '--store', str(self.store)]
+        command = [sys.executable, '-I', '-B', str(SCRIPT), 'begin', '--store', str(self.store), '--cwd', str(self.repo)]
         children = [subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(8)]
         for child in children:
             child.stdin.write(json.dumps(request))
@@ -383,7 +441,7 @@ class ProposalTests(unittest.TestCase):
                 self.call('status', {'invalid': value})
 
     def cli(self, action, request):
-        return subprocess.run([sys.executable, '-I', '-B', str(SCRIPT), action, '--store', str(self.store)], input=json.dumps(request), text=True, capture_output=True)
+        return subprocess.run([sys.executable, '-I', '-B', str(SCRIPT), action, '--store', str(self.store), '--cwd', str(self.repo)], input=json.dumps(request), text=True, capture_output=True)
 
     def test_cli_json_errors_and_real_process_contention(self):
         bad = self.cli('unknown', {})
