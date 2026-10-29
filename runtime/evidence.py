@@ -511,7 +511,7 @@ def _closure_assignment_projection(context,db,task,records):
             if 'collected' in attempt:
                 collected=read(attempt['collected']);_report(collected['report'],attempt)
                 if record['data']['result']['outcome']=='completed':
-                    _require(_review_quality_matches(None,attempt,record,collected,context=context),
+                    _require(_review_quality_matches(None,attempt,record,collected,context=context,db=db),
                         'Completed historical review lacks its exact bound native report')
                 review.update(source=attempt['collected'],report=collected['report'],receipt=collected['receipt'])
             assessments=[]
@@ -535,7 +535,7 @@ def _closure_assignment_projection(context,db,task,records):
         outcomes.append(outcome)
     for record in records:
         if record['data']['role'] not in {'worker','review'}:continue
-        history=delegation._worker_history(None,record['data']['observation'],context=context)
+        history=delegation._worker_history(None,record['data']['observation'],context=context,db=db)
         if record['data']['role']=='worker':
             for _,value in history:
                 if value['report'] is not None:
@@ -4127,16 +4127,16 @@ def _report(value, attempt):
     return value
 
 
-def _review_quality_matches(scope, attempt, record, collected=None, *, context=None):
+def _review_quality_matches(scope, attempt, record, collected=None, *, context=None, db=None):
     """Positive quality belongs to the exact latest native result, not just its assignment."""
     from runtime import delegation
     if record is None or collected is None and 'collected' not in attempt:
         return False
-    history = delegation._worker_history(scope, record['data']['observation'], context=context)
+    history = delegation._worker_history(scope, record['data']['observation'], context=context, db=db)
     latest = history[0][1] if history else None
     if latest is None or latest['status'] != 'observed' or latest['error'] is not None or latest['conflict'] is not None:
         return False
-    collected = _read(None if context is not None else scope, attempt['collected'], context=context) if collected is None else collected
+    collected = _read(None if context is not None else scope, attempt['collected'], context=context, db=db) if collected is None else collected
     try:
         actual, receipt = latest['receipt'], collected['receipt']
         if actual is None or actual['turn_status'] != 'completed' or not isinstance(latest['result'], str):

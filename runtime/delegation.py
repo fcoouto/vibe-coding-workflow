@@ -1735,16 +1735,16 @@ def _assignment_task(scope, db, request, *, revision=True):
     return task
 
 
-def _worker_history(scope, reference, *, context=None):
+def _worker_history(scope, reference, *, context=None, db=None):
     history, seen = [], set()
     while reference is not None:
         _reference(reference)
         _require(reference['digest'] not in seen and len(history) < MAX_OBSERVATIONS, 'Worker observation history bound reached')
         seen.add(reference['digest'])
-        value = evidence._read(None if context is not None else scope, reference, context=context)
+        value = evidence._read(None if context is not None else scope, reference, context=context, db=db)
         state._fields(value, ('version', 'receipt', 'result', 'report', 'error', 'previous', 'conflict', 'revision', 'status', 'request', 'incoming'))
         _reference(value['incoming'])
-        evidence._read(None if context is not None else scope, value['incoming'], context=context)
+        evidence._read(None if context is not None else scope, value['incoming'], context=context, db=db)
         _require(type(value['version']) is int and value['version'] == 1 and value['status'] in {'observed', 'uncertain'},
                  'Worker observation history is incompatible')
         state._integer(value['revision'], 'observation revision', 1)
