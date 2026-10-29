@@ -56,9 +56,9 @@ Independent review must cover the exact source caller and real response compatib
 
 ## Remaining qualification
 
-Reuse canonical D9 enable/disable, privacy and [shared retention](onboard-my-project-plan.md#evidence-retention) through their existing owners. Required local execution evidence remains independent of optional observability. This helper does not prove opt-in, authenticity, freshness, current completion, export eligibility or destination lifetime compliance.
+Reuse canonical D9 enable/disable, privacy and [shared retention](onboard-my-project-plan.md#evidence-retention) through their existing owners, with D9's [metrics-only remote retention exception](onboard-my-project-plan.md#metrics-only-remote-retention) for eligible exports. Required local execution evidence remains independent of optional observability. This helper does not prove opt-in, authenticity, freshness, current completion, export eligibility or applicable destination-policy compliance; its local identifiers are not an export-safe payload.
 
-D9b acceptance still requires the native-only coordinator/worker/reviewer task, authoritative source reconciliation and preceding D7b proof. Exports require destination permissions, privacy and deletion/lifetime qualification. D11 remains last and requires supported target-version dashboards and observed scope/filter behavior. Preparation and unit fixtures pass none of those gates. No integration account, service connection, dashboard or collector is activated by this slice.
+D9b acceptance still requires the native-only coordinator/worker/reviewer task, authoritative source reconciliation and preceding D7b proof. Exports require destination permissions, a qualified metrics-only payload and disclosure of destination retention/access behavior; eligible metrics do not require remote deletion qualification or plugin deletion logic. Local evidence retention remains unchanged. D11 remains last and requires supported target-version dashboards and observed scope/filter behavior. Preparation and unit fixtures pass none of those gates. No integration account, service connection, dashboard or collector is activated by this slice.
 
 ## Validation recorded on 28 October 2026
 
