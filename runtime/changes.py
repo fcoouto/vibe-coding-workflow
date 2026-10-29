@@ -2873,6 +2873,8 @@ def _check_d4_publication(source,context,db):
     if lifetime['kind']=='operation':
         _check_d4_grant(lifetime['grant'])
         approved=_canonical_plain(lifetime['grant'].facts)
+        d3._require(approved['registration_projections']==lifetime['registration_projections'],
+            'Recovery registration projection differs from actual approved acquisition')
         d3._require(approved['source']==_canonical_plain(source.content) and approved['generations']==_canonical_plain(source.generations)
             and approved['created_at']==source.created_at,'D4 source content differs from actual approved acquisition')
         d3._require(_d4_permission_facts(lifetime['journal'],source)==lifetime['permissions'],
@@ -2907,7 +2909,7 @@ def _d4_publication_batch(path,journal,contexts,request,host,owner,markers):
     if not isinstance(host,_D4HostCapability):raise Pending('Actual trusted D4 host authority is unavailable; bookkeeping remains pending')
     source=_observe_recovery_source(path,journal,contexts,())
     permissions=_d4_permission_facts(journal,source)
-    baselines=[]
+    baselines=[];projections={}
     for context in contexts:
         with evidence._context_database(context) as db:
             baseline=task_state._source_baseline(None,db,context=context)
@@ -2916,14 +2918,21 @@ def _d4_publication_batch(path,journal,contexts,request,host,owner,markers):
             d3._require(project==journal['manifest']['enrollment']['record']['project_id'] or any(
                 subject['project_id']==project for subject in permissions['subjects']),'D4 Project owner lacks exact current subject coverage')
             baselines.append(dict(authority=_canonical_plain(context.authority_set[0]),baseline=_canonical_plain(baseline)))
+            content=_canonical_plain(source.content)
+            heads=[edge['reference']['artifact'] for edge in baseline['dependencies'] if _canonical_plain(edge['reference']['identity'])==content['identity']]
+            d3._require(len(heads)<=1,'Recovery original baseline head is ambiguous')
+            inputs=evidence._recovery_use_inputs(context,db,_canonical_plain(heads[0]) if heads else None,content['identity'],content=content)
+            projections[str(context.database)]=evidence._recovery_registration_projection(content,source.created_at,inputs)
     facts=dict(operation='protective-recovery-bookkeeping',request=request,plan=journal['plan'],identity=_canonical_plain(source.content)['identity'],
         journal=_canonical_plain(source.content)['journal'],permissions=permissions,baselines=baselines,
-        source=_canonical_plain(source.content),generations=_canonical_plain(source.generations),created_at=source.created_at)
+        source=_canonical_plain(source.content),generations=_canonical_plain(source.generations),created_at=source.created_at,
+        registration_projections=projections)
     with _acquire_d4_grant(host,facts) as grant:
         for location in markers:_atomic(location.parent,location.name+'.json',json.dumps(owner,sort_keys=True).encode())
         lifetime=dict(active=True,kind='operation',source=source,grant=grant,permissions=permissions,journal=deepcopy(journal),
             guards=tuple(getattr(_authority_context,'held',())),markers=tuple(markers),owner=owner,registrations={},
-            baselines={str(context.database):item['baseline'] for context,item in zip(contexts,baselines)})
+            baselines={str(context.database):item['baseline'] for context,item in zip(contexts,baselines)},
+            registration_projections=_canonical_plain(grant.facts)['registration_projections'])
         previous=getattr(_authority_context,'publication',None);_authority_context.publication=lifetime
         try:yield lifetime
         finally:lifetime['active']=False;_authority_context.publication=previous
@@ -3076,10 +3085,15 @@ def _register_recovery_release(observation):
             d3._require(sorted([_canonical_plain(c.authority_set[0]) for c in contexts],key=d3._digest)==sorted([_canonical_plain(c.authority_set[0]) for c in observation.contexts],key=d3._digest),
                 'Recovery release complete authority set changed')
             lifetime=dict(active=True,kind='release',source=observation,journal=deepcopy(journal),
-                guards=tuple(getattr(_authority_context,'held',())),registrations={},baselines={})
+                guards=tuple(getattr(_authority_context,'held',())),registrations={},baselines={},registration_projections={})
             for context in contexts:
                 with evidence._context_database(context) as db:
                     lifetime['baselines'][str(context.database)]=_canonical_plain(task_state._source_baseline(None,db,context=context))
+                    baseline=lifetime['baselines'][str(context.database)]
+                    heads=[edge['reference']['artifact'] for edge in baseline['dependencies'] if edge['reference']['identity']==content['identity']]
+                    d3._require(len(heads)==1,'Recovery release source head unavailable')
+                    inputs=evidence._recovery_use_inputs(context,db,heads[0],content['identity'],content=content)
+                    lifetime['registration_projections'][str(context.database)]=evidence._recovery_registration_projection(content,observation.created_at,inputs)
             previous=getattr(_authority_context,'publication',None);_authority_context.publication=lifetime
             try:
                 for context in contexts:
