@@ -294,7 +294,7 @@ def _metadata_record(row):
     value = json_object(row[8])
     _fields(value, ("version", "owner", "created_at", "class", "bytes", "status", "closed_at",
                     "dependencies", "targets", "export", "managed"))
-    if type(value["version"]) is not int or value["version"] != 1:
+    if type(value["version"]) is not int or value["version"] not in (1, 2):
         raise StateError("Unsupported evidence metadata")
     owner = value["owner"]
     if not isinstance(owner, dict):

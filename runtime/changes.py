@@ -266,6 +266,20 @@ def _worktree_lock(git_dir):
 _authority_context = threading.local()
 
 
+def _held_authority_guards(directories):
+    """Observe this thread's still-held locks, never a caller's asserted lock set."""
+    held={}
+    for observation in getattr(_authority_context,'held',()):
+        if observation['active']:
+            held.update(observation['bindings'])
+    for directory in directories:
+        directory=Path(directory)
+        if directory not in held or not directory.exists():return False
+        info=directory.lstat()
+        if held[directory]!=(info.st_dev,info.st_ino):return False
+    return True
+
+
 def _authority_locations(directories):
     keys = set()
     for directory in directories:
@@ -303,6 +317,7 @@ def _authority_owner(location):
 @contextmanager
 def _authority_guards(directories, owner=None, *, observe=False):
     """Shared approved-authority exclusion; never locks or writes the old database."""
+    directories=tuple(sorted(set(map(Path,directories))))
     locations = _authority_locations(directories)
     with ExitStack() as locks:
         for location in locations:
@@ -316,7 +331,14 @@ def _authority_guards(directories, owner=None, *, observe=False):
             held = _authority_owner(location)
             if held is not None and held != owner and not observe:
                 raise Pending("Shared state authority has an active or uncertain D4 operation; resume its bound journal")
-        yield locations
+        observation=dict(active=True,bindings={directory:(directory.lstat().st_dev,directory.lstat().st_ino)
+            for directory in directories if directory.exists()})
+        previous=getattr(_authority_context,'held',())
+        _authority_context.held=(*previous,observation)
+        try:yield locations
+        finally:
+            observation['active']=False
+            _authority_context.held=previous
 
 
 @contextmanager
@@ -1667,6 +1689,8 @@ def _scoped_task_relevant(checkout_row,roots,task=None,changed_paths=()):
 def _scoped_writers(locations, affected_roots, git_roots=(), *, changed_paths=()):
     from runtime import delegation, evidence
     claims = [dict(kind="path", key=str(root), mode="write") for root in affected_roots] + [dict(kind="git", key=str(root), mode="write") for root in git_roots]
+    # D4's validated finite Project scope has its own bound, separate from assignment claim budgets.
+    claims = delegation._claims(claims, maximum=len(claims)) if claims else []
     for directory, (locator, version) in locations.items():
         if version == 1:
             if _legacy_writers(replace(locator, runtime=replace(locator.runtime, schema_version=1))):
@@ -1712,6 +1736,64 @@ def _scoped_writers(locations, affected_roots, git_roots=(), *, changed_paths=()
 
 
 _RECOVERY_ISSUER = object()
+_RECOVERY_RELEASE_ISSUER = object()
+_D4_HOST_BOOTSTRAP_ISSUER = object()
+_D4_HOST_ISSUER = object()
+
+
+@dataclass(frozen=True)
+class _D4HostCapability:
+    owner: object
+    issuer: object
+    state: object
+
+
+@dataclass(frozen=True)
+class _D4HostGrant:
+    capability: object
+    acquisition: object
+    facts: object
+    issuer: object
+
+
+@contextmanager
+def _bootstrap_d4_host(owner, *, issuer):
+    """Trusted integration only: the caller independently verifies user/session authority."""
+    d3._require(issuer is _D4_HOST_BOOTSTRAP_ISSUER and callable(getattr(owner,'acquire_d4_bookkeeping',None)),
+        'D4 host bootstrap requires its independently trusted integration owner')
+    state=dict(active=True,capability=None)
+    capability=_D4HostCapability(owner,_D4_HOST_ISSUER,state);state['capability']=capability
+    try:yield capability
+    finally:state['active']=False
+
+
+def _check_d4_grant(grant):
+    d3._require(isinstance(grant,_D4HostGrant),'Actual D4 host grant is required')
+    capability=grant.capability;acquisition=grant.acquisition
+    d3._require(isinstance(capability,_D4HostCapability) and capability.issuer is _D4_HOST_ISSUER
+        and capability.state['active'] and capability.state['capability'] is capability
+        and grant.issuer is _D4_HOST_ISSUER and acquisition['active'] and acquisition['grant'] is grant
+        and acquisition['capability'] is capability and acquisition['facts'] is grant.facts,
+        'D4 host grant is foreign, reconstructed or expired')
+
+
+@contextmanager
+def _acquire_d4_grant(host,facts):
+    if not isinstance(host,_D4HostCapability) or host.issuer is not _D4_HOST_ISSUER or not host.state['active'] or host.state['capability'] is not host:
+        raise Pending('Actual trusted D4 host authority is unavailable; bookkeeping remains pending')
+    frozen=_canonical_freeze(facts)
+    acquisition=dict(active=True,capability=host,facts=frozen,grant=None)
+    def issue(approved):
+        d3._require(acquisition['active'] and acquisition['grant'] is None and _canonical_plain(approved)==facts,
+            'D4 host approval differs from exact acquired subjects/sources/transitions')
+        grant=_D4HostGrant(host,acquisition,frozen,_D4_HOST_ISSUER);acquisition['grant']=grant
+        return grant
+    try:
+        grant=host.owner.acquire_d4_bookkeeping(frozen,issue)
+        _check_d4_grant(grant)
+        d3._require(grant.acquisition is acquisition,'D4 host returned a copied or stale acquisition')
+        yield grant
+    finally:acquisition['active']=False
 
 
 @dataclass(frozen=True)
@@ -1723,6 +1805,7 @@ class _RecoverySourceObservation:
     issuer: object
     release: object = None
     ready_inputs: object = None
+    provenance: object = None
 
 
 def _stop_revision(task):
@@ -2015,16 +2098,17 @@ def _stopped_assignment_certificate(value,reference):
     return matches[0]
 
 
-def _check_stopped_certificate(context,db,value,*,preparation_reader=None):
+def _check_stopped_certificate(context,db,value,*,preparation_reader=None,writer=None):
     from runtime import evidence
     _stopped_certificate_shape(value)
     ref=value['reference']
-    if value.get('linked') and evidence._linked_component_closed(evidence._linked_basis_root(value['linked']),writer=(context,db)):
+    linked_writer=writer if writer is not None else (context,db)
+    if value.get('linked') and evidence._linked_component_closed(evidence._linked_basis_root(value['linked']),writer=linked_writer):
         if preparation_reader is not None and 'preparation' in value:
-            evidence._check_linked_preparation_certificate(context,db,value,preparation_reader=preparation_reader)
+            evidence._check_linked_preparation_certificate(context,db,value,preparation_reader=preparation_reader,writer=writer)
         else:
             authorities=value.get('preparation',{}).get('authorities',value['linked']['authorities'])
-            support=evidence._linked_retained_component(evidence._linked_basis_root(value['linked']),authorities,writer=(context,db))
+            support=evidence._linked_retained_component(evidence._linked_basis_root(value['linked']),authorities,writer=linked_writer)
             evidence._check_retained_linked_certificate(support,value)
         identity=task_state._lifecycle_identity(db,'task',ref)
         d3._require(identity['status']!='expired','Expired linked identity cannot validate historical support')
@@ -2050,7 +2134,7 @@ def _check_stopped_certificate(context,db,value,*,preparation_reader=None):
             row=db.execute('select id,scope_id,client,session_id,task_id,dispatch_id,data from assignments where id=?',(assignment['reference']['id'],)).fetchone()
             record=delegation._record(None,row,context=context,db=db)
             d3._require(_assignment_certificate(context,db,task,record)==assignment,'Recovery live stopped assignment changed')
-    if 'preparation' in value:evidence._check_linked_preparation_certificate(context,db,value,preparation_reader=preparation_reader)
+    if 'preparation' in value:evidence._check_linked_preparation_certificate(context,db,value,preparation_reader=preparation_reader,writer=writer)
     return identity
 
 
@@ -2327,7 +2411,7 @@ def _observe_recovery_source(path, journal, contexts, task_refs):
         ready_inputs=_recovery_ready_inputs(content,contexts))
 
 
-def _check_recovery_source(source,context,db):
+def _check_recovery_source(source,context,db,*,writer=None):
     from runtime import evidence
     d3._require(isinstance(source,_RecoverySourceObservation) and source.issuer is _RECOVERY_ISSUER,'D4 owner-observed recovery source is required')
     authority=_canonical_plain(context.authority_set[0]); content=_canonical_plain(source.content)
@@ -2344,8 +2428,9 @@ def _check_recovery_source(source,context,db):
             evidence._managed_artifact(None,item['artifact'],context=context,db=db)
     for certificate in content.get('stopped',[]):
         if certificate['reference']['authority']!=authority:continue
-        identity=_check_stopped_certificate(context,db,certificate)
-        historical=certificate.get('linked') and evidence._linked_component_closed(evidence._linked_basis_root(certificate['linked']),writer=(context,db))
+        identity=_check_stopped_certificate(context,db,certificate,writer=writer)
+        historical=certificate.get('linked') and evidence._linked_component_closed(evidence._linked_basis_root(certificate['linked']),
+            writer=writer if writer is not None else (context,db))
         if certificate.get('writer_stop') and identity['status']=='live' and not historical:
             key=d3._digest(certificate['reference'])
             d3._require(source.ready_inputs is not None and key in source.ready_inputs,'Ready source needs its actual bounded input observation')
@@ -2479,18 +2564,232 @@ def _scoped_writer_locations(locations,contexts):
     return dict(locations) | {context.directory:(context,3) for context in contexts}
 
 
+def _d4_owned_transition(journal,key):
+    record=journal['manifest']['enrollment']['record'];_,prior=_scoped_prior(journal['plan'])
+    affected={tuple(member[k] for k in ('repository_id','checkout_id','client')) for member in journal['manifest']['enrollment']['affected']}
+    before=_scoped_entries(prior).get(key);after=_scoped_entries(record).get(key)
+    return key in affected and (before is None or after is None or _scoped_projection(prior,key)!=_scoped_projection(record,key)
+        or before[2]['activation']!=after[2]['activation'])
+
+
+def _d4_taskless_permission(journal,context,db,project):
+    """Stored physical identities locate an owner; only fresh authority/grant facts permit bookkeeping."""
+    from runtime import evidence
+    from runtime.startup import decode_project_record,canonical_scope_projection
+    rows=db.execute('select scope_id,physical_identity from checkouts where project_id=? limit 4097',(project,)).fetchall()
+    d3._require(0<len(rows)<=4096,'Taskless D4 source Project identity is unavailable or excessive')
+    identities={};roots={}
+    for scope_id,raw in rows:
+        identity=task_state.json_object(raw)
+        task_state._fields(identity,('version','project_id','repository_id','checkout_id','project_root','project_binding',
+            'primary_root','repository_root','git_dir','git_common_dir','bindings'))
+        d3._require(type(identity['version']) is int and identity['version']==1 and identity['project_id']==project and
+            scope_id==d3._digest([3,project,identity['repository_id'],identity['checkout_id']]),'Taskless D4 source physical identity differs')
+        task_state._canonical_path(identity['project_root']);task_state._canonical_binding(identity['project_binding'])
+        identities[scope_id]=identity;roots[d3._digest([identity['project_root'],identity['project_binding']])]=identity
+    d3._require(len(roots)==1,'Taskless D4 source Project authority is ambiguous')
+    identity=next(iter(roots.values()));root=Path(identity['project_root'])
+    d3._require(evidence._binding(root)==identity['project_binding'],'Taskless D4 source Project physical ownership changed')
+    observed=d3._authority_observation(root,{'paths':0,'bytes':0},canonical_only=True)
+    record=journal['manifest']['enrollment']['record'];_,prior=_scoped_prior(journal['plan'])
+    own=project==record['project_id'] and str(root)==record['project_root'] and identity['project_binding']==record['project_binding']
+    d3._require(not observed['error'],'Taskless D4 source current Project authority is unavailable')
+    candidates=[]
+    if observed['record'] is not None:
+        d3._require(observed['record']['project_id']==project,'Taskless D4 source current Project owner changed')
+        candidates.append(('current',observed['record']))
+    if own:
+        candidates.extend((phase,value) for phase,value in (('before',prior),('after',record)) if value and value.get('schema_version')==2)
+    else:d3._require(observed['record'] is not None,'Taskless D4 source current Project authority is unavailable')
+    proofs={}
+    for phase,value in candidates:
+        decoded=decode_project_record(value)
+        for key,(_,_,entry) in _scoped_entries(value).items():
+            configuration=entry['configuration']
+            if configuration is None or configuration['runtime']!=dict(schema_version=3,state_dir=str(context.directory)):continue
+            if phase!='current' and not _d4_owned_transition(journal,key):continue
+            if phase=='current' and entry['activation']['status']=='suspended':continue
+            projection=canonical_scope_projection(decoded,repository_id=key[0],checkout_id=key[1],client=key[2])
+            if projection is None:continue
+            if phase=='current' and projection['membership']['included'] is not True:continue
+            projection=_canonical_plain(projection);scope_id=d3._digest([3,project,key[0],key[1]])
+            if identities.get(scope_id)!=task_state._physical_identity(projection):continue
+            d3._require(configuration['runtime_digest']==task_state.runtime_fingerprint() and
+                configuration['policy_digest']==policy_digest(task_state.PACKAGE),'Taskless D4 source current bookkeeping configuration changed')
+            d3._require(all(evidence._binding(Path(projection[path]))==projection['bindings'][binding]
+                for path,binding in (('repository_root','root'),('primary_root','primary_root'),('git_dir','git_dir'),('git_common_dir','git_common_dir'))),
+                'Taskless D4 source physical member bindings changed')
+            proof=dict(subject={k:projection[k] for k in ('project_id','repository_id','checkout_id','client')},phase=phase,identity=projection)
+            proofs[d3._digest(proof)]=proof
+    d3._require(proofs,'Taskless D4 source has no exact current or owned-transition bookkeeping permission')
+    return dict(project_id=project,authority=_canonical_plain(context.authority_set[0]),current=observed,
+        permitted=[proofs[key] for key in sorted(proofs)])
+
+
+def _d4_permission_facts(journal,source):
+    from runtime import evidence
+    record=journal['manifest']['enrollment']['record'];root=Path(record['project_root'])
+    d3._require(_scoped_owned_authority(journal),'Current D4 Project authority changed outside its owned transition')
+    _scoped_owner_bindings(journal['plan'])
+    target=_scoped_target(root,str(PROJECT_FILE))
+    current=d3.read_request(d3._read_file(root/PROJECT_FILE,128*1024)) if target['binding'] is not None else None
+    subjects={};sources=[];current_permissions=[];project_permissions={}
+    _,prior=_scoped_prior(journal['plan'])
+    for candidate in (prior,record):
+        if not candidate or candidate.get('schema_version')!=2:continue
+        for key,(repository,checkout,entry) in _scoped_entries(candidate).items():
+            configuration=entry['configuration']
+            if configuration and configuration['runtime'] and any(
+                    configuration['runtime']==dict(schema_version=3,state_dir=str(c.directory)) for c in source.contexts):
+                subject=dict(project_id=candidate['project_id'],repository_id=key[0],checkout_id=key[1],client=key[2])
+                subjects[d3._digest(subject)]=subject
+    by_authority={d3._digest(_canonical_plain(c.authority_set[0])):c for c in source.contexts}
+    refs={d3._digest(t['reference']):t['reference'] for t in _canonical_plain(source.content)['tasks']}
+    # Artifact ownership may be retained; explicit task requirements still need raw rows.
+    owners={}
+    for item in _canonical_plain(source.content)['artifacts']:
+        context=by_authority[d3._digest(item['authority'])]
+        with evidence._context_database(context) as db:
+            metadata,_=evidence._managed_artifact(None,item['artifact'],context=context,db=db)
+            d3._require(metadata['version']==2,'Legacy D4 body cannot gain prospective admission')
+            if metadata['owner']['task'] is not None:
+                ref=metadata['owner']['task']
+                owners[d3._digest(ref)]=(ref,evidence._source_subject(context,db,metadata))
+            else:
+                key=(str(context.database),metadata['owner']['project_id'])
+                if key not in project_permissions:
+                    project_permissions[key]=_d4_taskless_permission(journal,context,db,metadata['owner']['project_id'])
+                    for proof in project_permissions[key]['permitted']:
+                        subjects[d3._digest(proof['subject'])]=proof['subject']
+            sources.append(dict(reference=item,metadata=metadata))
+    for ref in refs.values():
+        context=by_authority[d3._digest(ref['authority'])]
+        with evidence._context_database(context) as db:
+            task=task_state._task(db,ref['scope_id'],ref['client'],ref['session_id'],ref['task_id'])
+            d3._require(task is not None,'Current D4 subject owner is unavailable')
+            owners[d3._digest(ref)]=(ref,dict(identity=task['accepted_identity'],pins=task['pins']))
+    for ref,owner in owners.values():
+        context=by_authority[d3._digest(ref['authority'])]
+        with evidence._context_database(context) as db:
+            identity=task_state._accepted_identity(owner['identity'])
+            subject={k:identity[k] for k in ('project_id','repository_id','checkout_id','client')}
+            subjects[d3._digest(subject)]=subject
+            own=identity['project_id']==record['project_id'] and identity['project_root']==str(root)
+            key=tuple(identity[k] for k in ('repository_id','checkout_id','client'))
+            transition=own and _d4_owned_transition(journal,key)
+            if transition:
+                d3._require(evidence._binding(Path(identity['project_root']))==identity['project_binding'] and
+                    all(evidence._binding(Path(identity[k]))==identity['bindings'][binding]
+                    for k,binding in (('repository_root','root'),('primary_root','primary_root'),('git_dir','git_dir'),('git_common_dir','git_common_dir'))),
+                    'D4 source subject physical bindings changed')
+            else:
+                from runtime.startup import decode_project_record,canonical_scope_projection
+                observed=d3._authority_observation(Path(identity['project_root']),{'paths':0,'bytes':0},canonical_only=True)
+                d3._require(not observed['error'] and observed['record'] is not None,'Current D4 source enrollment is unavailable')
+                current_identity=canonical_scope_projection(decode_project_record(observed['record']),repository_id=identity['repository_id'],
+                    checkout_id=identity['checkout_id'],client=identity['client'])
+                d3._require(current_identity is not None and _canonical_plain(current_identity)==identity,
+                    'Current D4 source subject enrollment changed')
+                d3._require(_scoped_entries(observed['record'])[key][2]['activation']['status']!='suspended',
+                    'Current D4 source bookkeeping permission is suspended')
+                current_permissions.append(dict(subject=subject,authority=observed))
+                for item in sources:
+                    if item['metadata']['owner']['task']==ref:
+                        permission=evidence._source_current_permission(context,dict(artifact=item['reference']['artifact'],
+                            owner=item['metadata']['owner'],created_at=item['metadata']['created_at'],pins=owner['pins']),db=db)
+                        current_permissions.append(dict(source=item['reference'],permission=permission))
+    return dict(subjects=sorted(subjects.values(),key=d3._digest),record=dict(path=str(root/PROJECT_FILE),target=target,content=current),
+        sources=sources,current_permissions=current_permissions,project_permissions=[project_permissions[key] for key in sorted(project_permissions)])
+
+
+def _check_d4_publication(source,context,db):
+    from runtime import evidence
+    lifetime=getattr(_authority_context,'publication',None)
+    d3._require(lifetime is not None and lifetime['active'] and lifetime['source'] is source,
+        'Recovery publication requires its actual active owner lifetime')
+    d3._require(all(observation['active'] and any(observation is held for held in getattr(_authority_context,'held',()))
+        for observation in lifetime['guards']) and _held_authority_guards(c.directory for c in source.contexts),
+        'Recovery publication guards expired or changed')
+    # Peer preparation reads must see this transaction's uncommitted metadata.
+    writer=(context,db)
+    _check_recovery_source(source,context,db,writer=writer)
+    for other in source.contexts:
+        if other.database!=context.database:
+            with evidence._context_database(other) as reader:_check_recovery_source(source,other,reader,writer=writer)
+    if lifetime['kind']=='operation':
+        _check_d4_grant(lifetime['grant'])
+        d3._require(_d4_permission_facts(lifetime['journal'],source)==lifetime['permissions'],
+            'Current D4 subject, source or owned enrollment transition changed')
+        for location in lifetime['markers']:
+            d3._require(_authority_owner(location)==lifetime['owner'],'D4 protective operation marker changed')
+    else:
+        d3._require(source.provenance is _RECOVERY_RELEASE_ISSUER and source.release is not None,
+            'Recovery release requires its distinct actual factory')
+        d3._require(_scoped_owned_authority(lifetime['journal']),'Recovery release owned effects changed')
+        _scoped_recovery_files(Path(source.content['identity']['plan_dir']),lifetime['journal'])
+        current=_load_journal(Path(source.content['identity']['plan_dir']))
+        d3._require(current==lifetime['journal'],'Recovery release journal changed')
+        for action in current['manifest']['actions']:
+            receipt=current['receipts'][action['id']]
+            for effect,file in zip(action['effects'],receipt['files']):
+                root=Path(action['owner']['root']);target=_scoped_target(root,effect['path'])
+                expected=effect['before'] if current['state']=='rolled_back' else effect['after']
+                binding=file['before_binding'] if current['state']=='rolled_back' else file['result_binding']
+                d3._require(_fingerprint(root,effect['path'])==expected and target['binding']==binding,
+                    'Recovery release effect changed before commit')
+    return lifetime
+
+
+@contextmanager
+def _d4_publication_batch(path,journal,contexts,request,host,owner,markers):
+    from runtime import evidence
+    if not contexts:
+        for location in markers:_atomic(location.parent,location.name+'.json',json.dumps(owner,sort_keys=True).encode())
+        yield None
+        return
+    if not isinstance(host,_D4HostCapability):raise Pending('Actual trusted D4 host authority is unavailable; bookkeeping remains pending')
+    source=_observe_recovery_source(path,journal,contexts,())
+    permissions=_d4_permission_facts(journal,source)
+    baselines=[]
+    for context in contexts:
+        with evidence._context_database(context) as db:
+            baseline=task_state._source_baseline(None,db,context=context)
+            d3._require(baseline is not None and baseline['content']['source_contract']==2,'D4 requires original source_contract2 coverage')
+            project=baseline['content']['project_id']
+            d3._require(project==journal['manifest']['enrollment']['record']['project_id'] or any(
+                subject['project_id']==project for subject in permissions['subjects']),'D4 Project owner lacks exact current subject coverage')
+            baselines.append(dict(authority=_canonical_plain(context.authority_set[0]),baseline=_canonical_plain(baseline)))
+    facts=dict(operation='protective-recovery-bookkeeping',request=request,plan=journal['plan'],identity=_canonical_plain(source.content)['identity'],
+        journal=_canonical_plain(source.content)['journal'],permissions=permissions,baselines=baselines,
+        source=_canonical_plain(source.content),generations=_canonical_plain(source.generations),created_at=source.created_at)
+    with _acquire_d4_grant(host,facts) as grant:
+        for location in markers:_atomic(location.parent,location.name+'.json',json.dumps(owner,sort_keys=True).encode())
+        lifetime=dict(active=True,kind='operation',source=source,grant=grant,permissions=permissions,journal=deepcopy(journal),
+            guards=tuple(getattr(_authority_context,'held',())),markers=tuple(markers),owner=owner,registrations={},
+            baselines={str(context.database):item['baseline'] for context,item in zip(contexts,baselines)})
+        previous=getattr(_authority_context,'publication',None);_authority_context.publication=lifetime
+        try:yield lifetime
+        finally:lifetime['active']=False;_authority_context.publication=previous
+
+
 def _scoped_register_sources(path,journal,contexts):
     """Called only under the operation's complete ordered authority guards."""
     from runtime import evidence
     if not contexts: return
-    source=_observe_recovery_source(path,journal,contexts,())
+    lifetime=getattr(_authority_context,'publication',None)
+    d3._require(lifetime is not None and lifetime['kind']=='operation','D4 source publication requires actual host acquisition')
+    source=lifetime['source']
+    d3._require(tuple(contexts)==source.contexts,'D4 registration omitted an acquired authority')
     for context in contexts:
         _check_recovery_source_global(source)
-        with evidence._context_database(context,write=True) as db:
+        with evidence._context_database(context,write=True,durable=True,before_commit=lambda db,context=context:evidence._check_recovery_registration(context,db,source)) as db:
             # Legacy/baselineless lifetimes remain unknown; never retrofit a baseline.
             d3._require(task_state._source_baseline(None,db,context=context) is not None,
                 'Existing schema3 source baseline is unavailable; preserve recovery markers')
             evidence._register_recovery_source(None,db,source,context=context)
+    d3._require(set(lifetime['registrations'])=={str(context.database) for context in contexts},'D4 all-peer registrations are incomplete')
+    for context in contexts:
+        with evidence._context_database(context) as db:evidence._check_recovery_registration(context,db,source)
 
 
 def _recovery_release_journal(identity):
@@ -2597,7 +2896,7 @@ def _observe_recovery_release(authorities,identity):
         content=_cut_recovery_content(content,list(certificates.values()),contexts)
         original=dict(heads=heads,tasks=list(tasks.values()),assignments=list(assignments.values()))
         return _RecoverySourceObservation(_canonical_freeze(content),tuple(contexts),_canonical_freeze(generations),next(iter(ages)),_RECOVERY_ISSUER,_canonical_freeze(original),
-            _recovery_ready_inputs(content,contexts))
+            _recovery_ready_inputs(content,contexts),_RECOVERY_RELEASE_ISSUER)
 
 
 def _register_recovery_release(observation):
@@ -2605,18 +2904,29 @@ def _register_recovery_release(observation):
     from runtime import evidence
     replacements=[]
     try:
-        d3._require(isinstance(observation,_RecoverySourceObservation) and observation.issuer is _RECOVERY_ISSUER
+        d3._require(isinstance(observation,_RecoverySourceObservation) and observation.issuer is _RECOVERY_ISSUER and observation.provenance is _RECOVERY_RELEASE_ISSUER
             and observation.release is not None,'Recovery release requires owner-issued observation')
         content=_canonical_plain(observation.content)
-        with _recovery_release_guards(content['authorities'],content['identity']) as (_,_,contexts):
+        with _recovery_release_guards(content['authorities'],content['identity']) as (_,journal,contexts):
             d3._require(sorted([_canonical_plain(c.authority_set[0]) for c in contexts],key=d3._digest)==sorted([_canonical_plain(c.authority_set[0]) for c in observation.contexts],key=d3._digest),
                 'Recovery release complete authority set changed')
+            lifetime=dict(active=True,kind='release',source=observation,journal=deepcopy(journal),
+                guards=tuple(getattr(_authority_context,'held',())),registrations={},baselines={})
             for context in contexts:
+                with evidence._context_database(context) as db:
+                    lifetime['baselines'][str(context.database)]=_canonical_plain(task_state._source_baseline(None,db,context=context))
+            previous=getattr(_authority_context,'publication',None);_authority_context.publication=lifetime
+            try:
+                for context in contexts:
+                    _check_recovery_source_global(observation)
+                    with evidence._context_database(context,write=True,durable=True,
+                            before_commit=lambda db,context=context:evidence._check_recovery_registration(context,db,observation)) as db:
+                        reference=evidence._register_recovery_source(None,db,observation,context=context)
+                        replacements.append(dict(authority=_canonical_plain(context.authority_set[0]),artifact=_canonical_plain(reference)))
                 _check_recovery_source_global(observation)
-                with evidence._context_database(context,write=True) as db:
-                    reference=evidence._register_recovery_source(None,db,observation,context=context)
-                    replacements.append(dict(authority=_canonical_plain(context.authority_set[0]),artifact=_canonical_plain(reference)))
-            _check_recovery_source_global(observation)
+                for context in contexts:
+                    with evidence._context_database(context) as db:evidence._check_recovery_registration(context,db,observation)
+            finally:lifetime['active']=False;_authority_context.publication=previous
         return _canonical_freeze(dict(complete=True,replacements=replacements,blockers=[]))
     except (StartupError,task_state.StateError,OSError,sqlite3.Error,ValueError,TypeError,KeyError) as error:
         return _canonical_freeze(dict(complete=False,replacements=replacements,blockers=[str(error)]))
@@ -2963,7 +3273,19 @@ def _scoped_owned_authority(journal):
     for post in reversed(enrollment["postimages"]):
         expected = post["result_binding"] or post["prepared_binding"]
         if _fingerprint(root, str(PROJECT_FILE)) == post["after"] and current["binding"] == expected:
-            return post["target"] is None or current == post["target"]
+            if post["target"] is None or current == post["target"]: return True
+            if (post["phase"] == "restore" and post["status"] == "published" and enrollment["status"] == "restored"
+                    and post["after"] is None and post["before"] is not None and post["before_binding"] is not None
+                    and post.get("delete_intent") is True and current == enrollment["before"]["target"]):
+                # Restoring absence can remove the transaction's own recorded parent directories.
+                parents = dict(post["target"]["parents"])
+                removed = set(parents) - set(current["parents"])
+                if not removed: return False
+                for name in removed:
+                    if journal["directories"].get(name) != dict(status="removed", **parents[name]): return False
+                    del parents[name]
+                return dict(post["target"], parents=parents) == current
+            return False
     return not any(p["status"] == "published" for p in enrollment["postimages"]) and current == enrollment["before"]["target"]
 
 
@@ -3146,11 +3468,12 @@ def _scoped_failure_guard(path, ownership, operation):
         raise
 
 
-def _run_scoped(plan_dir, request, operation):
+def _run_scoped(plan_dir, request, operation, *, host=None):
     """Internal scoped transaction seam; public _run retains its schema-2 gate."""
     journal = None
     ownership={"journal":None}
     try:
+        request=deepcopy(request)
         d3._require(operation in ("apply", "resume", "rollback"), "Unknown scoped operation")
         path = d3._plan_path(plan_dir)
         with d3._locked(path): plan = d3._load(path)
@@ -3213,21 +3536,22 @@ def _run_scoped(plan_dir, request, operation):
                         state="prepared", receipts={}, enrollment=None, blocked=[], directories={}, observations=[])
                     _save(path, journal)
                     ownership["journal"]=journal
-                for location in [canonical_location,*authority_locations]:
-                    _atomic(location.parent, location.name + ".json", json.dumps(owner, sort_keys=True).encode())
-                _scoped_register_sources(path,journal,source_contexts)
+                with _d4_publication_batch(path,journal,source_contexts,request,host,owner,[canonical_location,*authority_locations]):
+                    _scoped_register_sources(path,journal,source_contexts)
             def settle_sources():
                 d3._require(not any(r.get("command") and not r["command"]["stopped"] for r in journal["receipts"].values()),
                     "Scoped command descendants remain uncertain; preserve recovery markers")
                 with _scoped_source_guards(locations, owner, m) as (final_locations,source_contexts):
                     writer_locations=_scoped_writer_locations(locations,source_contexts)
                     _scoped_writers(writer_locations,affected_roots,affected_git,changed_paths=changed_paths)
-                    _scoped_register_sources(path,journal,source_contexts)
-                    for location in [canonical_location,*final_locations]:
-                        if _authority_owner(location) == owner: os.unlink(Path(str(location)+".json"))
-                    descriptor=d3._open_path(lock_root,os.O_RDONLY|os.O_DIRECTORY)
-                    try: os.fsync(descriptor)
-                    finally: os.close(descriptor)
+                    with _d4_publication_batch(path,journal,source_contexts,request,host,owner,[canonical_location,*final_locations]):
+                        _scoped_register_sources(path,journal,source_contexts)
+                        for location in [canonical_location,*final_locations]:
+                            d3._require(_authority_owner(location)==owner,'D4 marker changed before final removal')
+                        for location in [canonical_location,*final_locations]:os.unlink(Path(str(location)+".json"))
+                        descriptor=d3._open_path(lock_root,os.O_RDONLY|os.O_DIRECTORY)
+                        try: os.fsync(descriptor)
+                        finally: os.close(descriptor)
             journal["blocked"] = []
             observation = request.get("observations")
             if observation:

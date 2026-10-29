@@ -16,6 +16,15 @@ from runtime import state
 from runtime.startup import ProjectScope, RuntimeSettings, StartupError, policy_digest
 
 
+def _run_d4_fixture(fixture, request, operation):
+    """Issue fresh internal test-host authority; this does not qualify a native provider."""
+    changes = fixture.changes
+    class Host:
+        def acquire_d4_bookkeeping(self, facts, issue):return issue(facts)
+    with changes._bootstrap_d4_host(Host(), issuer=changes._D4_HOST_BOOTSTRAP_ISSUER) as host:
+        return changes._run_scoped(fixture.directory, request, operation, host=host)
+
+
 class EvidenceTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='vibe-evidence-')
@@ -981,13 +990,97 @@ if __name__ == '__main__':
     unittest.main()
 
 
-class CanonicalEvidenceTests(unittest.TestCase):
-    def setUp(self):
+class D4RecoveryFixture:
+    def enroll_recovery(self, *, shared=False):
+        from tests.test_changes import ScopedChangesTests
+        from runtime import changes, onboarding
+        from runtime.startup import AcceptedScope, canonical_scope_projection, decode_project_record, _canonical_freeze, _canonical_plain
+        storage = self.fixture.root / 'recovery-authority'
+        self.recovery_fixtures = []
+
+        def fixture():
+            d4 = ScopedChangesTests(methodName='runTest');d4.setUp();self.addCleanup(d4.doCleanups)
+            return d4
+
+        def apply(d4, request):
+            for repository in request['manifest']['enrollment']['record']['repositories']:
+                for checkout in repository['checkouts']:
+                    checkout['clients'][0]['configuration']['runtime'] = dict(schema_version=3, state_dir=str(storage))
+            request['approval']['manifest_digest'] = onboarding._digest(request['manifest'])
+            self.assertFalse((storage / 'runtime.sqlite3').exists())
+            result = _run_d4_fixture(d4, request, 'apply')
+            self.assertEqual(result['exit_code'], 0, result)
+            return request
+
+        dependency = None
+        if shared:
+            other = fixture()
+            other_request = apply(other, other.scoped_request())
+            dependency = other.repo / 'AGENTS.md'
+
+        d4 = fixture();d4.repo = self.fixture.repo
+        pointer = '@' + str(dependency) + '\n' if dependency else ''
+        (d4.repo / 'AGENTS.md').write_text('product rules\nlegacy process\n' + pointer)
+        d4.scoped_inspect()
+        proposal = d4.scoped_proposal()
+        action = proposal['assessments']['repositories'][0]['actions'][0]
+        action['text'] += pointer
+        action['after'] = hashlib.sha256(action['text'].encode()).hexdigest()
+        onboarding.record_plan(d4.directory, proposal)
+        request = d4.scoped_request(prepared=True)
+        record = request['manifest']['enrollment']['record']
+        if dependency:
+            record['shared_policy'] = [dict(path=str(dependency), sha256=hashlib.sha256(dependency.read_bytes()).hexdigest())]
+            record['repositories'][0]['checkouts'][0]['clients'][0]['configuration']['shared_dependencies'] = [str(dependency)]
+        apply(d4, request)
+        authority = d4.repo / '.vibe-coding-workflow/project.json'
+        published = json.loads(authority.read_text())
+        self.assertEqual(published, record)
+        repository = published['repositories'][0];checkout = repository['checkouts'][0]
+        identity = canonical_scope_projection(decode_project_record(published),
+            repository_id=repository['repository_id'], checkout_id=checkout['checkout_id'], client='codex')
+        self.recovery_fixtures.append((d4, request))
+        if shared:
+            self.assertNotEqual(published['project_id'], other_request['manifest']['enrollment']['record']['project_id'])
+            self.recovery_fixtures.append((other, other_request))
+        self.recovery_index = 0
+        # Internal scope from actual configured publication; no native activation is claimed.
+        return AcceptedScope(published['project_id'], repository['repository_id'], checkout['checkout_id'],
+            Path(published['project_root']), authority, _canonical_freeze(changes._scoped_target(d4.repo, str(authority.relative_to(d4.repo)))),
+            published['revision'], d4.repo, Path(repository['primary_root']), Path(checkout['git_dir']),
+            Path(repository['git_common_dir']), _canonical_freeze(repository['binding'] | checkout['binding']), 'codex',
+            identity['configuration']['policy_digest'], identity['configuration']['runtime_digest'], RuntimeSettings(3, storage),
+            identity, onboarding._digest(_canonical_plain(identity)),
+            _canonical_freeze(dict(kind='trusted-coordinator', **request['approval']['evidence'][0])))
+
+    def recovery(self,task):
+        from runtime import changes
+        api=self.fixture.api;context=api._evidence_context(self.scope)
+        ref=api._canonical_plain(api._artifact_owner(self.scope,task).task)
+        d4,request=self.recovery_fixtures[self.recovery_index];self.recovery_index+=1
+        candidate=api.capture_candidate(self.scope,api._load_plan(self.scope,self.fixture.identity))
+        result=_run_d4_fixture(d4,request,'resume');self.assertEqual(result['exit_code'],0,result)
+        self.assertEqual(api.capture_candidate(self.scope,api._load_plan(self.scope,self.fixture.identity)),candidate)
+        old,source=self.recovery_head(d4,context)
+        self.assertTrue(any(item['reference']==ref for item in source['tasks']))
+        with self.assertRaises(StartupError):api._observe_closure((context,),ref)
+        return d4,request,context,ref,source,old
+
+    def recovery_head(self,d4,context):
+        from runtime import changes
+        _,heads=changes._recovery_sources(context)
+        selected=[(pointer,content) for pointer,content in heads if content['identity']['plan_dir']==str(d4.directory)]
+        self.assertEqual(len(selected),1)
+        return selected[0]
+
+
+class CanonicalEvidenceTests(D4RecoveryFixture, unittest.TestCase):
+    def setUp(self, *, d4_recovery=False, shared=False):
         from tests.test_state import canonical_scope
         self.fixture = EvidenceTests(methodName='runTest')
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
-        self.fixture.scope = canonical_scope(self.fixture.scope)
+        self.fixture.scope = self.enroll_recovery(shared=shared) if d4_recovery else canonical_scope(self.fixture.scope)
         self.scope = self.fixture.scope
         state.start_task(self.scope, self.fixture.identity | dict(mode='editable', decision_ref='user:accepted'))
         self.fixture.plan()
@@ -1379,12 +1472,14 @@ class AssignedCancelledClosureTests(unittest.TestCase):
         with self.assertRaisesRegex(StartupError,'issued pointer'):f.changes._stopped_assignment_certificate(compact['stopped'],changed)
         self.assertTrue(f.changes.inspect_lifecycle_recovery(context.authority_set,(ref,))['complete'])
         for operation in ('resume','rollback'):
-            self.assertEqual(f.changes._run_scoped(f.directory,request,operation)['exit_code'],0)
+            self.assertEqual(_run_d4_fixture(f,request,operation)['exit_code'],0)
 
 
-class ReadyClosureTests(unittest.TestCase):
+class ReadyClosureTests(D4RecoveryFixture, unittest.TestCase):
     """Real ready verification and owner stop; fixture host authority is unqualified."""
-    setUp = CanonicalEvidenceTests.setUp
+    def setUp(self):
+        CanonicalEvidenceTests.setUp(self, d4_recovery=
+            self._testMethodName == 'test_actual_ready_d4_cut_precedes_closure_and_retired_raw_removal')
 
     def ready(self):
         from runtime.engine import RuntimeEvent
@@ -1501,23 +1596,19 @@ class ReadyClosureTests(unittest.TestCase):
         with api._context_database(context) as db:self.assertEqual(state._task(db,state._scope_id(self.scope),'codex','parent','task'),closed)
 
     def test_actual_ready_d4_cut_precedes_closure_and_retired_raw_removal(self):
-        from tests.test_changes import ScopedChangesTests
         from runtime import changes
         api=self.fixture.api;task,_=self.stopped();context=api._evidence_context(self.scope)
         ref=api._canonical_plain(api._artifact_owner(self.scope,task).task)
-        d4=ScopedChangesTests(methodName='runTest');d4.setUp();self.addCleanup(d4.doCleanups)
-        request=d4.scoped_request()
-        for repository in request['manifest']['enrollment']['record']['repositories']:
-            for checkout in repository['checkouts']:checkout['clients'][0]['configuration']['runtime']=dict(schema_version=3,state_dir=str(context.directory))
-        from runtime import onboarding
-        request['approval']['manifest_digest']=onboarding._digest(request['manifest'])
-        result=changes._run_scoped(d4.directory,request,'apply');self.assertEqual(result['exit_code'],0,result)
-        source=changes._observe_recovery_source(d4.directory,changes._load_journal(d4.directory),(context,),(ref,))
-        with api._context_database(context,write=True) as db:old=api._register_recovery_source(None,db,source,context=context)
+        d4,request=self.recovery_fixtures[0]
+        candidate=api.capture_candidate(self.scope,api._load_plan(self.scope,self.fixture.identity))
+        result=_run_d4_fixture(d4,request,'resume');self.assertEqual(result['exit_code'],0,result)
+        self.assertEqual(api.capture_candidate(self.scope,api._load_plan(self.scope,self.fixture.identity)),candidate)
+        old,source=self.recovery_head(d4,context)
+        self.assertTrue(any(item['reference']==ref for item in source['tasks']))
         with self.assertRaises(StartupError):api._observe_closure((context,),ref)
-        observed=changes._observe_recovery_release(context.authority_set,dict(source.content['identity']))
+        observed=changes._observe_recovery_release(context.authority_set,dict(source['identity']))
         with api._context_database(context) as db:
-            originals=[r for r,_ in api._recovery_source_history(context,db,dict(old),dict(source.content['identity']))]
+            originals=[r for r,_ in api._recovery_source_history(context,db,dict(old),dict(source['identity']))]
         released=changes._register_recovery_release(observed);self.assertTrue(released['complete'],released)
         with api._context_database(context) as db:
             current=state._task(db,state._scope_id(self.scope),'codex','parent','task')
@@ -1527,12 +1618,12 @@ class ReadyClosureTests(unittest.TestCase):
         self.assertEqual(compact['outcome'],'ready');self.assertTrue(compact['scope_guidance'])
         api._retire_closed_task(context,ref)
         retained={a['artifact']['name'] for a in observed.content['artifacts']}
-        for item in list(source.content['artifacts']):
+        for item in list(source['artifacts']):
             if item['artifact']['name'] not in retained:(context.directory/'evidence'/item['artifact']['name']).unlink(missing_ok=True)
         for item in originals:(context.directory/'evidence'/item['name']).unlink(missing_ok=True)
         self.assertTrue(changes.inspect_lifecycle_recovery(context.authority_set,(ref,))['complete'])
         for operation in ('resume','rollback'):
-            result=changes._run_scoped(d4.directory,request,operation);self.assertEqual(result['exit_code'],0,result)
+            result=_run_d4_fixture(d4,request,operation);self.assertEqual(result['exit_code'],0,result)
 
 
     def test_ready_source_mutation_during_stop_rolls_back(self):
@@ -1681,9 +1772,18 @@ class ReadyClosureTests(unittest.TestCase):
                 finally:scenario.doCleanups()
 
 
-class CancelledBarrierClosureTests(unittest.TestCase):
+class CancelledBarrierClosureTests(D4RecoveryFixture, unittest.TestCase):
     """Actual synchronous barriers; independent fixture host authority remains unqualified."""
-    setUp = CanonicalEvidenceTests.setUp
+    def setUp(self):
+        consumers = {
+            'test_cancelled_barrier_complete_stop_d4_cut_closure_and_retired_recovery',
+            'test_independent_raw_consumer_protects_cancelled_task_after_d4_cut',
+            'test_cancelled_source_mutation_during_d4_cut_keeps_raw_support',
+            'test_cancelled_new_input_during_d4_cut_keeps_raw_support',
+        }
+        CanonicalEvidenceTests.setUp(self, d4_recovery=self._testMethodName in consumers,
+            shared=self._testMethodName == 'test_independent_raw_consumer_protects_cancelled_task_after_d4_cut')
+
     ready = ReadyClosureTests.ready
     stop_request = ReadyClosureTests.stop_request
 
@@ -1714,29 +1814,13 @@ class CancelledBarrierClosureTests(unittest.TestCase):
         for key in ('state','revision','retirement','pins','lifecycle'):self.assertEqual(stopped[key],task[key])
         return stopped,request
 
-    def recovery(self,task):
-        from tests.test_changes import ScopedChangesTests
-        from runtime import changes,onboarding
-        api=self.fixture.api;context=api._evidence_context(self.scope)
-        ref=api._canonical_plain(api._artifact_owner(self.scope,task).task)
-        d4=ScopedChangesTests(methodName='runTest');d4.setUp();self.addCleanup(d4.doCleanups)
-        request=d4.scoped_request()
-        for repository in request['manifest']['enrollment']['record']['repositories']:
-            for checkout in repository['checkouts']:checkout['clients'][0]['configuration']['runtime']=dict(schema_version=3,state_dir=str(context.directory))
-        request['approval']['manifest_digest']=onboarding._digest(request['manifest'])
-        self.assertEqual(changes._run_scoped(d4.directory,request,'apply')['exit_code'],0)
-        source=changes._observe_recovery_source(d4.directory,changes._load_journal(d4.directory),(context,),(ref,))
-        with api._context_database(context,write=True) as db:old=api._register_recovery_source(None,db,source,context=context)
-        with self.assertRaises(StartupError):api._observe_closure((context,),ref)
-        return d4,request,context,ref,source,old
-
     def test_cancelled_barrier_complete_stop_d4_cut_closure_and_retired_recovery(self):
         from runtime import changes
         api=self.fixture.api;task,_=self.stopped()
         d4,request,context,ref,source,old=self.recovery(task)
-        observed=changes._observe_recovery_release(context.authority_set,dict(source.content['identity']))
+        observed=changes._observe_recovery_release(context.authority_set,dict(source['identity']))
         with api._context_database(context) as db:
-            originals=[r for r,_ in api._recovery_source_history(context,db,dict(old),dict(source.content['identity']))]
+            originals=[r for r,_ in api._recovery_source_history(context,db,dict(old),dict(source['identity']))]
         self.assertTrue(changes._register_recovery_release(observed)['complete'])
         with api._context_database(context) as db:
             current=state._task(db,state._scope_id(self.scope),'codex','parent','task')
@@ -1755,12 +1839,12 @@ class CancelledBarrierClosureTests(unittest.TestCase):
             self.assertEqual(marker['outcome'],'cancelled');self.assertEqual(marker['created_at'],task['lifecycle']['created_at'])
             changes._check_stopped_certificate(context,db,compact['stopped'])
         retained={a['artifact']['name'] for a in observed.content['artifacts']}
-        for item in source.content['artifacts']:
+        for item in source['artifacts']:
             if item['artifact']['name'] not in retained:(context.directory/'evidence'/item['artifact']['name']).unlink(missing_ok=True)
         for item in originals:(context.directory/'evidence'/item['name']).unlink(missing_ok=True)
         self.assertTrue(changes.inspect_lifecycle_recovery(context.authority_set,(ref,))['complete'])
         for operation in ('resume','rollback'):
-            result=changes._run_scoped(d4.directory,request,operation);self.assertEqual(result['exit_code'],0,result)
+            result=_run_d4_fixture(d4,request,operation);self.assertEqual(result['exit_code'],0,result)
 
 
     def test_failed_and_stale_barriers_retain_actual_historical_verification(self):
@@ -1877,11 +1961,11 @@ class CancelledBarrierClosureTests(unittest.TestCase):
         from runtime import changes
         api=self.fixture.api;task,_=self.stopped();_,_,context,ref,source,_=self.recovery(task)
         _,_,_,_,other,_=self.recovery(task)
-        observed=changes._observe_recovery_release(context.authority_set,dict(source.content['identity']))
+        observed=changes._observe_recovery_release(context.authority_set,dict(source['identity']))
         self.assertTrue(changes._register_recovery_release(observed)['complete'])
         inspected=changes.inspect_lifecycle_recovery(context.authority_set,())
         self.assertTrue(any(r['kind']=='task' and r['reference']==ref and r['need']=='raw' and
-            r['root']['identity']==dict(other.content['identity']) for r in inspected['requirements']))
+            r['root']['identity']==dict(other['identity']) for r in inspected['requirements']))
         with self.assertRaisesRegex(StartupError,'raw task body'):api._observe_closure((context,),ref)
 
 
@@ -1915,7 +1999,7 @@ class CancelledBarrierClosureTests(unittest.TestCase):
     def test_cancelled_source_mutation_during_d4_cut_keeps_raw_support(self):
         from runtime import changes
         api=self.fixture.api;task,_=self.stopped();_,_,context,ref,source,old=self.recovery(task)
-        observed=changes._observe_recovery_release(context.authority_set,dict(source.content['identity']));original=api._artifact
+        observed=changes._observe_recovery_release(context.authority_set,dict(source['identity']));original=api._artifact
         def mutate(scope,value,**kwargs):
             result=original(scope,value,**kwargs)
             if value.get('kind')=='d4-recovery-source' and value.get('version')==2:
@@ -1932,7 +2016,7 @@ class CancelledBarrierClosureTests(unittest.TestCase):
     def test_cancelled_new_input_during_d4_cut_keeps_raw_support(self):
         from runtime import changes
         api=self.fixture.api;task,_=self.stopped();_,_,context,ref,source,old=self.recovery(task)
-        observed=changes._observe_recovery_release(context.authority_set,dict(source.content['identity']));original=api._artifact
+        observed=changes._observe_recovery_release(context.authority_set,dict(source['identity']));original=api._artifact
         def mutate(scope,value,**kwargs):
             result=original(scope,value,**kwargs)
             if value.get('kind')=='d4-recovery-source' and value.get('version')==2:
@@ -2135,8 +2219,8 @@ class CancelledClosureTests(unittest.TestCase):
         self.api.close_task(f.release_fixture_scope,selected|dict(expected_revision=task['revision'],expected_pins=task['pins']),observed)
         self.api._retire_closed_task(context,ref)
         self.assertTrue(f.changes.inspect_lifecycle_recovery(context.authority_set,(ref,))['complete'])
-        resumed=f.changes._run_scoped(f.directory,request,'resume');self.assertEqual(resumed['exit_code'],0,resumed)
-        rolled=f.changes._run_scoped(f.directory,request,'rollback');self.assertEqual(rolled['exit_code'],0,rolled)
+        resumed=_run_d4_fixture(f,request,'resume');self.assertEqual(resumed['exit_code'],0,resumed)
+        rolled=_run_d4_fixture(f,request,'rollback');self.assertEqual(rolled['exit_code'],0,rolled)
         self.assertTrue(f.changes.inspect_lifecycle_recovery(context.authority_set,(ref,))['complete'])
 
     def test_retired_artifact_attribution_requires_retained_owned_compact(self):
@@ -2235,7 +2319,7 @@ class CancelledClosureTests(unittest.TestCase):
         with self.assertRaises(state.StateError):self.close()
 
 
-class LinkedVerificationTests(unittest.TestCase):
+class LinkedVerificationTests(D4RecoveryFixture, unittest.TestCase):
     """Synthetic trusted coordinator sources; actual disposable check receipts, no native qualification."""
     def setUp(self):
         from types import SimpleNamespace
@@ -2244,22 +2328,37 @@ class LinkedVerificationTests(unittest.TestCase):
         from runtime import evidence
         self.api = evidence
         self.members = []
+        d4_recovery = self._testMethodName in {
+            'test_linked_non_success_mixed_required_merged_history_survives_d4_retirement',
+            'test_linked_no_verifier_native_history_survives_d4_retirement_and_guidance',
+        }
         for number in range(2):
             f = EvidenceTests(methodName='runTest'); f.setUp(); self.addCleanup(f.doCleanups)
             f.scope = canonical_scope(f.scope)
+            if d4_recovery and number == 0:
+                self.current_record(f)
+                self.fixture = f
+                f.scope = self.enroll_recovery()
+                if self._testMethodName == 'test_linked_non_success_mixed_required_merged_history_survives_d4_retirement':
+                    with (f.scope.git_dir / 'info/exclude').open('a') as exclude:
+                        exclude.write('\n/AGENTS.md\n')
+                self.scope = f.scope
             state.start_task(f.scope, f.identity | dict(mode='editable', decision_ref='user:accepted'))
-            proxy = SimpleNamespace(repo=f.repo, base=f.root, assertIsNone=self.assertIsNone)
-            record, path = CanonicalAcquisitionTests.record(proxy)
-            identity = evidence._canonical_plain(f.scope.accepted_identity)
-            record['project_id'] = identity['project_id']
-            record['repositories'][0]['repository_id'] = identity['repository_id']
-            record['repositories'][0]['checkouts'][0]['checkout_id'] = identity['checkout_id']
-            config = record['repositories'][0]['checkouts'][0]['clients'][0]['configuration']
-            config.update(identity['configuration'])
-            path.write_text(json.dumps(record))
+            if not (d4_recovery and number == 0):self.current_record(f)
             self.members.append(f)
         self.selected = self.members[0]
         self.establish()
+
+    def current_record(self,f):
+        from types import SimpleNamespace
+        from tests.test_startup import CanonicalAcquisitionTests
+        record,path=CanonicalAcquisitionTests.record(SimpleNamespace(repo=f.repo,base=f.root,assertIsNone=self.assertIsNone))
+        identity=self.api._canonical_plain(f.scope.accepted_identity)
+        record['project_id']=identity['project_id'];record['repositories'][0]['repository_id']=identity['repository_id']
+        record['repositories'][0]['checkouts'][0]['checkout_id']=identity['checkout_id']
+        record['repositories'][0]['checkouts'][0]['clients'][0]['configuration'].update(identity['configuration'])
+        path.write_text(json.dumps(record))
+        return path
 
     def task(self, f):
         with state._database(f.scope) as db:
@@ -2393,9 +2492,8 @@ class LinkedVerificationTests(unittest.TestCase):
         self.assertEqual(self.api._linked_source(pointer),content)
 
     def test_linked_non_success_mixed_required_merged_history_survives_d4_retirement(self):
-        from runtime import changes,delegation,onboarding
+        from runtime import changes,delegation
         from runtime.engine import RuntimeEvent
-        from tests.test_changes import ScopedChangesTests
         delivery=dict(provider='fixture',repository='owner/repo',target='main',pull_request='fixture:required-non-success')
         self.establish(delivery)
         peer=self.members[1];plan=self.api._read(peer.scope,self.task(peer)['evidence']['plan'])
@@ -2418,17 +2516,18 @@ class LinkedVerificationTests(unittest.TestCase):
         with patch.object(self.api,'_verify_member',side_effect=AssertionError('Historical lifecycle invoked fresh verification')), \
              patch.object(delegation,'_reserve_operation',side_effect=AssertionError('Historical lifecycle invented a verifier/barrier')):
             for f in self.members:state._retain_ready_stop(f.scope,self.stop_request(f,pointer))
-            d4=ScopedChangesTests(methodName='runTest');d4.setUp();self.addCleanup(d4.doCleanups);request=d4.scoped_request()
-            for repository in request['manifest']['enrollment']['record']['repositories']:
-                for checkout in repository['checkouts']:checkout['clients'][0]['configuration']['runtime']=dict(schema_version=3,state_dir=str(contexts[0].directory))
-            request['approval']['manifest_digest']=onboarding._digest(request['manifest'])
-            applied=changes._run_scoped(d4.directory,request,'apply');self.assertEqual(applied['exit_code'],0,applied)
-            source=changes._observe_recovery_source(d4.directory,changes._load_journal(d4.directory),contexts,refs)
+            d4,request=self.recovery_fixtures[0];candidates=self.input_rows()
+            applied=_run_d4_fixture(d4,request,'resume');self.assertEqual(applied['exit_code'],0,applied)
+            self.assertEqual(self.input_rows(),candidates)
+            _,source=self.recovery_head(d4,contexts[0])
             for context in contexts:
-                with self.api._context_database(context,write=True) as db:self.api._register_recovery_source(None,db,source,context=context)
-            authorities=self.api._canonical_plain(source.content['authorities'])
+                self.assertEqual(self.recovery_head(d4,context)[1],source)
+            authorities=self.api._canonical_plain(source['authorities'])
+            self.assertEqual(sorted(authorities,key=self.api._digest),
+                sorted([self.api._canonical_plain(c.authority_set[0]) for c in contexts],key=self.api._digest))
+            self.assertTrue(all(any(item['reference']==ref for item in source['tasks']) for ref in refs))
             prepared=self.api._prepare_linked_closure(self.api._observe_linked_preparation(pointer,authorities));self.assertTrue(prepared['complete'])
-            released=changes._register_recovery_release(changes._observe_recovery_release(authorities,dict(source.content['identity'])))
+            released=changes._register_recovery_release(changes._observe_recovery_release(authorities,dict(source['identity'])))
             self.assertTrue(released['complete'],released)
             recovery=changes.inspect_lifecycle_recovery(authorities,refs);self.assertTrue(recovery['complete'],recovery['blockers'])
             self.assertFalse(any(edge['need']=='raw' and edge['kind']=='task' and edge['reference'] in refs for edge in recovery['requirements']))
@@ -2452,7 +2551,7 @@ class LinkedVerificationTests(unittest.TestCase):
                     self.assertEqual(marker['created_at'],originals[index]['lifecycle']['created_at']);self.assertEqual(marker['outcome'],originals[index]['state'])
                     self.assertEqual(state._metadata(db,closed[index]['lifecycle']['compact']['name'])['closed_at'],closed[index]['lifecycle']['safe_closed_at'])
             for action in ('resume','rollback','rollback'):
-                outcome=changes._run_scoped(d4.directory,request,action);self.assertEqual(outcome['exit_code'],0,outcome)
+                outcome=_run_d4_fixture(d4,request,action);self.assertEqual(outcome['exit_code'],0,outcome)
                 recovery=changes.inspect_lifecycle_recovery(authorities,refs);self.assertTrue(recovery['complete'],dict(action=action,blockers=recovery['blockers']))
         self.assertEqual(self.api._linked_source(pointer),content)
 
@@ -2646,8 +2745,7 @@ class LinkedVerificationTests(unittest.TestCase):
     def test_linked_historical_failed_aggregate_is_not_nulled(self):self.existing_aggregate_cannot_become_absent(historical=True)
 
     def test_linked_no_verifier_native_history_survives_d4_retirement_and_guidance(self):
-        from runtime import changes,delegation,onboarding
-        from tests.test_changes import ScopedChangesTests
+        from runtime import changes,delegation
         finding=dict(id='unverified-optional',severity='info',scope='general',status='optional',location='app.py:1',
             scenario='Actual optional historical suggestion',evidence='Original fixture report',counterevidence='No acceptance claim')
         reviewed=self.selected.review(findings=[finding]);task=self.task(self.selected)
@@ -2655,17 +2753,18 @@ class LinkedVerificationTests(unittest.TestCase):
         assessment['dispositions']=[dict(finding_id=finding['id'],status='accepted',reference='user:optional-result-retained')]
         self.api.assess_review(self.selected.scope,self.selected.request(attempt_id=reviewed['attempt_id'],assessment=assessment))
         captured,originals,contexts,refs=self.no_verifier_stops();root=captured['reference']
-        d4=ScopedChangesTests(methodName='runTest');d4.setUp();self.addCleanup(d4.doCleanups);request=d4.scoped_request()
-        for repository in request['manifest']['enrollment']['record']['repositories']:
-            for checkout in repository['checkouts']:checkout['clients'][0]['configuration']['runtime']=dict(schema_version=3,state_dir=str(contexts[0].directory))
-        request['approval']['manifest_digest']=onboarding._digest(request['manifest'])
-        applied=changes._run_scoped(d4.directory,request,'apply');self.assertEqual(applied['exit_code'],0,applied)
-        source=changes._observe_recovery_source(d4.directory,changes._load_journal(d4.directory),contexts,refs)
+        d4,request=self.recovery_fixtures[0];candidates=self.input_rows()
+        applied=_run_d4_fixture(d4,request,'resume');self.assertEqual(applied['exit_code'],0,applied)
+        self.assertEqual(self.input_rows(),candidates)
+        _,source=self.recovery_head(d4,contexts[0])
         for context in contexts:
-            with self.api._context_database(context,write=True) as db:self.api._register_recovery_source(None,db,source,context=context)
-        authorities=self.api._canonical_plain(source.content['authorities'])
+            self.assertEqual(self.recovery_head(d4,context)[1],source)
+        authorities=self.api._canonical_plain(source['authorities'])
+        self.assertEqual(sorted(authorities,key=self.api._digest),
+            sorted([self.api._canonical_plain(c.authority_set[0]) for c in contexts],key=self.api._digest))
+        self.assertTrue(all(any(item['reference']==ref for item in source['tasks']) for ref in refs))
         prepared=self.api._prepare_linked_closure(self.api._observe_linked_preparation(root,authorities));self.assertTrue(prepared['complete'])
-        released=changes._register_recovery_release(changes._observe_recovery_release(authorities,dict(source.content['identity'])))
+        released=changes._register_recovery_release(changes._observe_recovery_release(authorities,dict(source['identity'])))
         self.assertTrue(released['complete'],released)
         recovery=changes.inspect_lifecycle_recovery(authorities,refs);self.assertTrue(recovery['complete'],recovery['blockers'])
         self.assertFalse(any(edge['kind']=='task' and edge['reference'] in refs and edge['need']=='raw' for edge in recovery['requirements']))
@@ -2686,7 +2785,7 @@ class LinkedVerificationTests(unittest.TestCase):
                 guidance=delegation._closure_guidance(context,db,delegation._ledger(None,db,context=context));self.assertEqual(len(guidance['retained']),1)
                 if index==0:self.assertTrue(guidance['sources'])
         for action in ('resume','rollback','rollback'):
-            outcome=changes._run_scoped(d4.directory,request,action);self.assertEqual(outcome['exit_code'],0,outcome)
+            outcome=_run_d4_fixture(d4,request,action);self.assertEqual(outcome['exit_code'],0,outcome)
             recovery=changes.inspect_lifecycle_recovery(authorities,refs);self.assertTrue(recovery['complete'],dict(action=action,blockers=recovery['blockers']))
 
     def test_linked_stop_actual_selected_ready_and_peer_verifying_issue_exact_certificates(self):
@@ -3946,6 +4045,7 @@ class LinkedVerificationTests(unittest.TestCase):
         extra=EvidenceTests(methodName='runTest');extra.setUp();self.addCleanup(extra.doCleanups)
         extra.scope=canonical_scope(extra.scope)
         state.start_task(extra.scope,extra.identity | dict(mode='editable',decision_ref='user:accepted'))
+        self.current_record(extra)
         observations=self.observations();original_observe=observations['observe']
         source=self.retained(extra,dict(version=1,kind='linked-integration-observation',
             inputs_digest=self.api._digest(self.input_rows()),criteria=dict(together='passed'),observed_at=101,
@@ -3961,6 +4061,23 @@ class LinkedVerificationTests(unittest.TestCase):
             return original(reference,**kwargs)
         with patch.object(self.api,'_linked_source',side_effect=read):result=self.verify(observations)
         self.assertTrue(result['implementation_verified'])
+
+    def test_observer_cannot_rewrite_original_linked_producer_request(self):
+        observations=self.observations();original=observations['observe']
+        request=self.selected.request(purpose='completion')
+        def observe(facts):
+            request['purpose']='merge-evidence'
+            return original(facts)
+        observations['observe']=observe
+        result=self.api.verify_linked(self.selected.scope,request,observations)
+        self.assertEqual(request['purpose'],'merge-evidence')
+        self.assertTrue(result['implementation_verified'])
+        self.assertEqual(result['task']['state'],'ready')
+        retained=self.api._linked_source(result['verification'])
+        self.assertEqual(retained['purpose'],'completion')
+        selected=next(row for row in retained['members'] if row['task']==retained['selected'])
+        verification=self.api._read(self.selected.scope,selected['verification'])
+        self.assertEqual(verification['purpose'],'completion')
 
     def test_callback_result_is_snapshotted_before_retained_source_reads(self):
         observations=self.observations();observe=observations['observe'];held=[]

@@ -291,9 +291,11 @@ def _closure_guidance(context,db,records):
         metadata=state._metadata_record(row);owner=metadata['owner'].get('task')
         if owner is None:continue
         _require(owner['authority']==evidence._canonical_plain(context.authority_set[0]),'Foreign retained guidance owner remains protected')
+        compact=evidence._read(None,dict(name=row[0],digest=row[1]),context=context,db=db)
+        if evidence._bookkeeping_record(context,db,dict(name=row[0],digest=row[1]),compact):continue
         marker=state._retired(db,'task',{key:owner[key] for key in ('scope_id','client','session_id','task_id')})
         if marker is None:continue
-        compact=evidence._read(None,dict(name=row[0],digest=row[1]),context=context,db=db);linked=None
+        linked=None
         if compact.get('kind')=='linked-closure-preparation':
             support=evidence._linked_retained_component(evidence._linked_basis_root(compact['stopped']['linked']),compact['stopped']['linked']['authorities'],writer=(context,db))
             _require(not support.get('discovered_authorities'),'Retained guidance source guards are incomplete')

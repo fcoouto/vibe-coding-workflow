@@ -34,6 +34,10 @@ MAX_ARTIFACT = 4 * 1024 * 1024
 MAX_OUTPUT = 128 * 1024
 COVERAGE = {'general', 'security', 'behavior'}
 IDENTITY = ('client', 'session_id', 'task_id', 'scope_ref', 'expected_revision')
+_CONTENT_ACQUISITION=ContextVar('content_acquisition',default=None)
+_SOURCE_BIRTH=ContextVar('source_publication_birth',default=None)
+_SOURCE_BIRTH_ISSUER=object()
+_FOREIGN_PLAN_ISSUER=object()
 
 
 def _require(value, message):
@@ -113,6 +117,33 @@ class _ArtifactOwner:
     task: object
     pins: object
     purpose: str = 'task'
+
+
+@dataclass(frozen=True)
+class _SourceMandateOwner:
+    birth: object
+
+
+@dataclass(frozen=True)
+class _ForeignIntentOwner:
+    plan: object
+    source: object
+    content: object
+    created_at: int
+
+
+@dataclass(frozen=True)
+class _LinkedPublicationPlan:
+    scope: object
+    request: object
+    content: object
+    snapshots: object
+    acquired: object
+    observed: object
+    dependencies: object
+    producer: object
+    issuer: object
+    state: object
 
 
 @dataclass(frozen=True)
@@ -202,10 +233,16 @@ def _register_recovery_source(scope, db, source, *, context=None):
     _require((scope is None) != (context is None), 'Select exactly one existing evidence authority')
     selected = context or _evidence_context(scope)
     _check_context(selected, db)
-    changes._check_recovery_source(source, selected, db)
+    lifetime=changes._check_d4_publication(source, selected, db)
+    prior_registration=lifetime['registrations'].get(str(selected.database))
+    if prior_registration is not None:
+        _check_recovery_registration(selected,db,source)
+        _require(prior_registration['reference'] is not None,'Recovery registration is already in progress')
+        return _canonical_freeze(prior_registration['reference'])
     baseline = state._source_baseline(None, db, context=selected)
     _require(baseline is not None, 'Recovery source baseline is unavailable; preserve operation markers')
     baseline = _canonical_plain(baseline)
+    _require(baseline==lifetime['baselines'][str(selected.database)],'Recovery original baseline changed after authenticated acquisition')
     content = _canonical_plain(source.content)
     identity = content['identity']
     edges = baseline['dependencies']
@@ -224,11 +261,17 @@ def _register_recovery_source(scope, db, source, *, context=None):
         comparable = dict(content, previous=prior.get('previous'))
         comparable['journal'] = dict(comparable['journal'], observed_at=prior['journal']['observed_at'])
         if comparable == prior:
+            lifetime['registrations'][str(selected.database)]=dict(baseline=baseline,expected=baseline,
+                content=prior,created_at=created,dependencies=_recovery_source_dependencies(prior,_canonical_plain(selected.authority_set[0])),reference=previous)
+            _check_recovery_registration(selected,db,source)
             return _canonical_freeze(previous)
     content['previous'] = previous if content['version']==1 else None
     dependencies = _recovery_source_dependencies(content,_canonical_plain(selected.authority_set[0]))
+    registration=dict(baseline=baseline,expected=baseline,content=content,created_at=created,dependencies=dependencies,reference=None)
+    lifetime['registrations'][str(selected.database)]=registration
     owner = _RecoveryOwner(baseline['content']['project_id'], source, created, tuple(_canonical_freeze(d) for d in dependencies), _canonical_freeze(content))
     reference = _artifact(None, content, context=selected, owner=owner, db=db)
+    registration['reference']=reference
     edges = [e for e in edges if e['reference']['identity'] != identity]
     edges.append(dict(kind='recovery',reference=dict(identity=identity,artifact=reference)))
     edges.sort(key=lambda e: _raw(e))
@@ -236,8 +279,41 @@ def _register_recovery_source(scope, db, source, *, context=None):
     metadata = state._metadata(db, baseline['reference']['name'])
     metadata['dependencies'] = edges
     db.execute('update evidence_metadata set data=? where name=?', (_raw(metadata).decode(),baseline['reference']['name']))
-    changes._check_recovery_source(source, selected, db)
+    registration['expected']=dict(baseline,dependencies=edges)
+    _check_recovery_registration(selected,db,source)
     return _canonical_freeze(reference)
+
+
+def _check_recovery_registration(context,db,source,owner=None):
+    from runtime import changes
+    lifetime=changes._check_d4_publication(source,context,db)
+    registration=lifetime['registrations'].get(str(context.database))
+    _require(registration is not None,'Recovery owner has no actual registration acquisition')
+    baseline=registration['baseline'];content=_canonical_plain(source.content)
+    matches=[edge for edge in baseline['dependencies'] if edge['reference']['identity']==content['identity']]
+    _require(len(matches)<=1,'Recovery original baseline head is ambiguous')
+    previous=matches[0]['reference']['artifact'] if matches else None
+    content['previous']=previous if content['version']==1 else None
+    if registration['reference']==previous and previous is not None:
+        prior=_recovery_source_history(context,db,previous,content['identity'])[0][1]
+        content['previous']=prior.get('previous');content['journal']['observed_at']=prior['journal']['observed_at']
+    dependencies=_recovery_source_dependencies(content,_canonical_plain(context.authority_set[0]))
+    _require(content==registration['content'] and dependencies==registration['dependencies'] and source.created_at==registration['created_at'],
+        'Recovery content, true previous head, original age or dependencies changed')
+    actual=_canonical_plain(state._source_baseline(None,db,context=context))
+    _require(actual==registration['expected'],'Recovery baseline differs from its exact owned overlay')
+    if owner is not None:
+        _require(owner.project_id==baseline['content']['project_id'] and owner.created_at==source.created_at and
+            _canonical_plain(owner.content)==content and [_canonical_plain(d) for d in owner.dependencies]==dependencies,
+            'Recovery owner differs from authoritative source/head/age/dependencies')
+    reference=registration['reference']
+    if reference is not None:
+        metadata,raw=_managed_artifact(None,reference,context=context,db=db)
+        _require(json.loads(raw)==content and metadata['class']=='compact' and metadata['version']==2 and
+            metadata['owner']==dict(kind='project',project_id=baseline['content']['project_id'],task=None) and
+            metadata['created_at']==source.created_at and metadata['closed_at'] is None and not metadata['targets'] and
+            metadata['export'] is None and metadata['dependencies']==dependencies,'Recovery registered source overlay changed')
+    return registration
 
 
 def _register_source_baseline(scope, db, creation):
@@ -310,17 +386,25 @@ def _check_context(context, db=None):
 
 
 @contextmanager
-def _context_database(context, *, write=False):
+def _context_database(context, *, write=False,durable=False,before_commit=None):
     _check_context(context)
     db = None
     try:
         db = sqlite3.connect(context.database.as_uri() + ('?mode=rw' if write else '?mode=ro'), uri=True, timeout=0.1)
         db.execute('pragma trusted_schema=off')
+        if durable:
+            _require(write,'Durable publication requires its source write transaction')
+            mode=db.execute('pragma journal_mode').fetchone()[0]
+            _require(mode in {'delete','truncate','persist','wal'},'Source intent journal mode cannot establish durable publication')
+            expected=2 if mode=='wal' else 3
+            db.execute('pragma synchronous='+str(expected))
+            _require(db.execute('pragma synchronous').fetchone()[0]==expected,'Source intent durability setting is unavailable')
         db.execute('begin immediate' if write else 'begin')
         _check_context(context, db)
         yield db
         _check_context(context, db)
         if write:
+            if before_commit is not None:before_commit(db)
             db.commit()
     except sqlite3.Error:
         raise state.StateError('Evidence authority registration unavailable or locked') from None
@@ -1337,6 +1421,23 @@ def _retire_closed_task(context, task_ref):
 
 
 def _registered_owner(scope, context, owner, db):
+    if isinstance(owner,_SourceMandateOwner):
+        birth=owner.birth
+        _require(_SOURCE_BIRTH.get() is birth and birth['issuer'] is _SOURCE_BIRTH_ISSUER and
+            birth['scope'] is scope and birth['db'] is db and birth['context']==context,
+            'Mandate requires its actual source-publication birth transaction')
+        _registered_owner(scope,context,birth['owner'],db)
+        metadata,_=_managed_artifact(None,birth['reference'],context=context,db=db)
+        _require(metadata==birth['metadata'] and metadata['version']==2,'Mandate source birth changed')
+        return metadata['owner'],metadata['owner']['task']
+    if isinstance(owner,_ForeignIntentOwner):
+        _validate_publication_plan(owner.plan)
+        source=_canonical_plain(owner.source)
+        mandate=_source_mandate(context,source['reference'],db=db)
+        _source_current_permission(context,mandate['content']['source'],db=db)
+        _require(_canonical_plain(owner.content)==_intent_content(owner.plan,source,mandate) and
+            owner.created_at==mandate['metadata']['created_at'],'Foreign intent owner/content/original age changed')
+        return mandate['metadata']['owner'],mandate['metadata']['owner']['task']
     if isinstance(owner,_PreparationOwner):
         ref=_canonical_plain(owner.reference);facts=_check_preparation_observation(owner.observation,writer=(context,db))
         member=_preparation_member(facts,ref)
@@ -1354,10 +1455,14 @@ def _registered_owner(scope, context, owner, db):
             'Closure registration differs from existing owner-derived facts')
         return dict(kind='project',project_id=facts['task']['accepted_identity']['project_id'],task=ref),ref
     if isinstance(owner, _LinkedOwner):
+        if owner.publication is not None:
+            _check_foreign_intents(owner.publication,writer=(context,db))
+            _require([_canonical_plain(edge) for edge in owner.dependencies]==_publication_dependencies(owner.publication),
+                'Foreign publication dependencies differ from actual acquired sources/intents')
         return _registered_owner(scope, context, owner.task_owner, db)
     if isinstance(owner, _RecoveryOwner):
         from runtime import changes
-        changes._check_recovery_source(owner.source, context, db)
+        _check_recovery_registration(context,db,owner.source,owner)
         baseline = state._source_baseline(None, db, context=context)
         _require(baseline is not None and baseline['content']['project_id'] == owner.project_id, 'Recovery Project owner changed')
         return dict(kind='project', project_id=owner.project_id, task=None), None
@@ -1377,6 +1482,7 @@ def _registered_owner(scope, context, owner, db):
         and reference['scope_id'] == state._scope_id(scope), 'Artifact owner authority changed')
     task = state._task(db, reference['scope_id'], reference['client'], reference['session_id'], reference['task_id'])
     _require(task is not None and task['pins'] == _canonical_plain(owner.pins), 'Artifact original task owner is unavailable')
+    state._compatible(scope, task)
     state._assert_open(task)
     _require(state._physical_identity(task['accepted_identity']) == state._physical_identity(_canonical_plain(scope.accepted_identity)),
         'Artifact original task physical owner changed')
@@ -1387,7 +1493,12 @@ def _artifact_dependencies(value):
     references = {}
     def visit(item):
         if isinstance(item, dict):
-            if set(item) == {'name', 'digest'}:
+            if set(item) in ({'authority','artifact'},{'authority','reference'}):
+                ref=item.get('artifact',item.get('reference'))
+                _authority_artifact(dict(authority=item['authority'],reference=ref))
+                qualified=dict(authority=item['authority'],artifact=ref)
+                references[_raw(qualified)]=dict(kind='artifact',reference=qualified)
+            elif set(item) == {'name', 'digest'}:
                 state._artifact_reference(item)
                 references[_raw(item)] = dict(kind='artifact', reference=item)
             else:
@@ -1397,6 +1508,542 @@ def _artifact_dependencies(value):
     visit(value)
     _require(len(references) < 4096, 'Artifact dependency bound exceeded')
     return list(references.values())
+
+
+def _mandate_name(reference):
+    return _digest(['source-import-mandate',reference])[:32]+'.json'
+
+
+def _source_subject(context,db,metadata):
+    owner=metadata['owner'].get('task')
+    _require(owner is not None and owner['authority']==_canonical_plain(context.authority_set[0]),
+        'Source bookkeeping needs its actual task owner')
+    task=_linked_raw_task(db,owner)
+    if task is not None:
+        _require(task['pins']['schema_version']==3 and task['lifecycle']['created_at']<=metadata['created_at'],
+            'Source original task age/pins differ')
+        return dict(identity=task['accepted_identity'],pins=task['pins'],scope_ref=task['scope_ref'],
+            closed_at=task['lifecycle']['safe_closed_at'],live=True)
+    marker=state._retired(db,'task',{key:owner[key] for key in ('scope_id','client','session_id','task_id')})
+    rows=db.execute("select name,digest from evidence_metadata where class='compact' and status='live' limit 4097").fetchall()
+    _require(len(rows)<=4096,'Source owner compact lookup exceeds bound');found=[]
+    for name,digest in rows:
+        other=state._metadata(db,name)
+        if other['owner']!=metadata['owner']:continue
+        body=_read(None,dict(name=name,digest=digest),context=context,db=db)
+        if not isinstance(body,dict) or body.get('kind')!='task-closure':continue
+        _require(marker is not None and not marker['evidence_expired'] and body['identity']==owner and
+            marker['pins_digest']==_digest(body['pins']) and marker['outcome']==body['outcome'] and
+            marker['created_at']==body['created_at']==other['created_at'] and other['closed_at'] is not None and
+            marker['retired_at']>=other['closed_at']>=metadata['created_at'],'Source retired owner lacks its exact dated closure')
+        found.append(dict(identity=body['accepted_identity'],pins=body['pins'],scope_ref=body['stopped']['scope_ref'],
+            closed_at=other['closed_at'],live=False))
+    _require(len(found)==1,'Source bookkeeping owner is unavailable or ambiguous')
+    return found[0]
+
+
+def _source_current_permission(context,source,*,db=None):
+    """Reobserve current private-bookkeeping enrollment; never assert native readiness."""
+    from runtime import onboarding
+    from runtime.startup import decode_project_record,canonical_scope_projection
+    with _preparation_database(context,None if db is None else (context,db)) as reader:
+        metadata=state._metadata(reader,source['artifact']['name'])
+        _require(metadata is not None and metadata['status']=='live' and metadata['owner']==source['owner'] and
+            metadata['created_at']==source['created_at'],'Source current owner/age/status changed')
+        subject=_source_subject(context,reader,metadata)
+    identity=subject['identity'];project=Path(identity['project_root'])
+    observed=onboarding._authority_observation(project,{'paths':0,'bytes':0},canonical_only=True)
+    _require(not observed['error'] and observed['record'] is not None,'Current source enrollment authority is unavailable')
+    record=decode_project_record(observed['record']);data=_canonical_plain(record.data)
+    current=canonical_scope_projection(record,repository_id=identity['repository_id'],checkout_id=identity['checkout_id'],client=identity['client'])
+    _require(current is not None,'Current source enrollment is unavailable');current=_canonical_plain(current)
+    _require(state._physical_identity(current)==state._physical_identity(identity) and current['membership']['included'] and
+        current['configuration']['runtime']==dict(schema_version=3,state_dir=str(context.directory)) and
+        current['configuration']['runtime_digest']==state.runtime_fingerprint() and
+        current['configuration']['policy_digest']==policy_digest(state.PACKAGE),'Current source bookkeeping permission/configuration changed')
+    selected=next(c for r in data['repositories'] if r['repository_id']==identity['repository_id']
+        for c in r['checkouts'] if c['checkout_id']==identity['checkout_id'])
+    client=next(c for c in selected['clients'] if c['client']==identity['client'])
+    _require(client['activation']['status']!='suspended','Current source bookkeeping permission is suspended')
+    if subject['live']:
+        _require(_digest(current)==source['pins']['accepted_scope_digest'],'Active source enrollment changed since its accepted publisher')
+    bindings={identity['project_root']:identity['project_binding']}
+    bindings.update({identity[k]:identity['bindings'][label] for k,label in
+        (('repository_root','root'),('primary_root','primary_root'),('git_dir','git_dir'),('git_common_dir','git_common_dir'))})
+    _require(all(_binding(Path(path))==binding for path,binding in bindings.items()),'Current source physical enrollment changed')
+    path=project/state.PROJECT_FILE
+    raw=onboarding._read_file(path,onboarding.MAX_REQUEST,expected_binding=observed['target']['binding'])
+    _require(json_object(raw)==observed['record'],'Source authority changed during permission observation')
+    return dict(path=str(path),stat=_closure_file_stat(path),sha256=hashlib.sha256(raw).hexdigest(),projection=current)
+
+
+def _mandate_content(birth):
+    metadata=birth['metadata'];subject=_source_subject(birth['context'],birth['db'],metadata)
+    return dict(version=1,kind='source-import-mandate',source=dict(authority=_canonical_plain(birth['context'].authority_set[0]),
+        artifact=birth['reference'],owner=metadata['owner'],scope_ref=subject['scope_ref'],pins=subject['pins'],
+        created_at=metadata['created_at'],managed_binding=metadata['managed']),operation='protective-import-bookkeeping')
+
+
+def _source_mandate(context,source_ref,*,db=None):
+    with _preparation_database(context,None if db is None else (context,db)) as reader:
+        source=state._metadata(reader,source_ref['name'])
+        _require(source is not None and source['version']==2 and source['managed']['sha256']==source_ref['digest'],
+            'Source lacks prospective publication provenance')
+        name=_mandate_name(source_ref);metadata=state._metadata(reader,name)
+        _require(metadata is not None,'Source has no source-publication bookkeeping mandate')
+        ref=dict(name=name,digest=metadata['managed']['sha256']);actual,raw=_managed_artifact(None,ref,context=context,db=reader)
+        value=json.loads(raw);state._fields(value,('version','kind','source','operation'))
+        binding=value['source'];state._fields(binding,('authority','artifact','owner','scope_ref','pins','created_at','managed_binding'))
+        subject=_source_subject(context,reader,source)
+        _require(type(value['version']) is int and value['version']==1 and value['kind']=='source-import-mandate' and
+            value['operation']=='protective-import-bookkeeping' and binding==dict(authority=_canonical_plain(context.authority_set[0]),
+                artifact=source_ref,owner=source['owner'],scope_ref=subject['scope_ref'],pins=subject['pins'],created_at=source['created_at'],managed_binding=source['managed']) and
+            actual['version']==2 and actual['class']=='compact' and actual['owner']==source['owner'] and
+            actual['created_at']==source['created_at'] and actual['closed_at'] in (None,subject['closed_at']) and
+            actual['dependencies']==[dict(kind='task',reference=source['owner']['task'])] and not actual['targets'] and actual['export'] is None,
+            'Source bookkeeping mandate differs from actual publication/owner/age')
+        return dict(reference=ref,metadata=actual,content=value)
+
+
+def _issue_source_mandate(scope,context,db,owner,reference,metadata):
+    publisher=owner.task_owner if isinstance(owner,_LinkedOwner) else owner
+    if not isinstance(publisher,_ArtifactOwner) or publisher.task is None:return
+    _require(scope is not None,'Source publication mandate needs its actual accepted publisher')
+    birth=dict(scope=scope,context=context,db=db,owner=publisher,reference=reference,metadata=metadata,issuer=_SOURCE_BIRTH_ISSUER)
+    token=_SOURCE_BIRTH.set(birth)
+    try:_artifact_registered(scope,_mandate_content(birth),context,_SourceMandateOwner(birth),db)
+    finally:_SOURCE_BIRTH.reset(token)
+
+
+def _bookkeeping_record(context,db,reference,body):
+    if not isinstance(body,dict):return False
+    if body.get('kind')=='source-import-mandate':
+        _require(_source_mandate(context,body['source']['artifact'],db=db)['reference']==reference,
+            'Bookkeeping mandate is not its actual publication-owned receipt')
+        return True
+    if body.get('kind')=='foreign-content-intent':
+        _require(any(record['reference']==reference for record in _source_intents(context,body['source']['artifact'],db=db)),
+            'Bookkeeping intent is not its actual source-owned receipt')
+        return True
+    return False
+
+
+def _linked_producer(scope,request,snapshot,db):
+    """Authenticate the actual synchronous producer, not a supplied operation label."""
+    from runtime import delegation
+    task=snapshot['task'];reference=snapshot['reference']
+    verification=_read(scope,snapshot['verification_ref'],db=db)
+    record=next((r for r in delegation._ledger(scope,db) if r['id']==verification['barrier_id']),None)
+    dispatch='verify:'+str(request['expected_revision'])+':'+request['purpose']
+    _require(record is not None and record['owner']==dict(scope_id=reference['scope_id'],
+        **{key:task[key] for key in ('client','session_id','task_id')},dispatch_id=dispatch) and
+        record['data']['role']=='coordinator' and record['data']['status']=='settled' and
+        _read(scope,record['body']['operation'],db=db)==dict(id=dispatch,kind='completion-verification',
+            decision_ref=task['decision_ref'],claims_digest=_digest(record['data']['claims'])),
+        'Foreign publication lacks its actual original synchronous producer')
+    reconciliation=_read(scope,record['data']['reconciliation'],db=db)
+    _require(reconciliation==dict(version=1,kind='synchronous-verification',barrier_id=record['id'],
+        verification=snapshot['verification_ref'],revision=task['revision']),
+        'Foreign publication producer differs from the exact settled verifier')
+    return dict(id=record['id'],dispatch_id=dispatch,assignment=record['data']['assignment'],
+        reconciliation=record['data']['reconciliation'])
+
+
+def _validate_publication_plan(plan,*,writer=None):
+    _require(isinstance(plan,_LinkedPublicationPlan) and plan.issuer is _FOREIGN_PLAN_ISSUER and plan.state['active'],
+        'Foreign admission requires its live actual producer observation')
+    from runtime import changes
+    _require(changes._held_authority_guards(plan.state['directories']), 'Foreign publication authority guards expired')
+    scope=plan.scope;context=_evidence_context(scope)
+    with _preparation_database(context,writer) as db:
+        _recheck_linked_rows(scope,db,_canonical_plain(plan.snapshots))
+        selected=next(row for row in _canonical_plain(plan.snapshots) if row['reference']==_canonical_plain(plan.content)['selected'])
+        _require(_linked_producer(scope,_canonical_plain(plan.request),selected,db)==_canonical_plain(plan.producer),
+            'Foreign publication producer identity changed')
+        _registered_owner(scope,context,_artifact_owner(scope,selected['task']),db)
+    _require(_digest(_canonical_plain(plan.content))==plan.state['reference']['digest'], 'Foreign publication payload changed')
+    return context
+
+
+def _intent_key(plan,source):
+    selected=next(s for s in _canonical_plain(plan.snapshots) if s['reference']==_canonical_plain(plan.content)['selected'])
+    return _digest(dict(source=_canonical_plain(source),destination=selected['reference'],pins=selected['task']['pins'],
+        producer=_canonical_plain(plan.producer),entry_revision=plan.request['expected_revision']))
+
+
+def _intent_name(plan,source):return _intent_key(plan,source)[:32]+'.json'
+
+
+def _intent_content(plan,source,mandate):
+    content=_canonical_plain(plan.content);selected=next(s for s in _canonical_plain(plan.snapshots) if s['reference']==content['selected'])
+    original=mandate['content']['source']
+    return dict(version=1,kind='foreign-content-intent',mandate=dict(authority=source['authority'],artifact=mandate['reference']),
+        logical_key=_intent_key(plan,source),source={key:original[key] for key in ('authority','artifact','owner','created_at')},
+        destination=dict(authority=selected['reference']['authority'],task=selected['reference'],scope_ref=selected['task']['scope_ref'],
+            pins=selected['task']['pins'],entry_revision=plan.request['expected_revision'],expected_revision=selected['task']['revision'],
+            producer_id=_canonical_plain(plan.producer),request_digest=_digest(_canonical_plain(plan.request)),artifact=plan.state['reference']),
+        observed_at=plan.state['observed_at'])
+
+
+def _source_intents(context,source_ref,*,db=None):
+    """Direct source-owned discovery, including protective incomplete destinations."""
+    with _preparation_database(context,None if db is None else (context,db)) as reader:
+        mandate=_source_mandate(context,source_ref,db=reader);source=mandate['content']['source'];found=[]
+        rows=reader.execute("select name,digest from evidence_metadata where class='compact' and status='live' limit 4097").fetchall()
+        _require(len(rows)<=4096,'Source intent discovery exceeds bound')
+        for name,digest in rows:
+            metadata=state._metadata(reader,name)
+            if metadata['owner']!=source['owner']:continue
+            ref=dict(name=name,digest=digest);body=_read(None,ref,context=context,db=reader)
+            if not isinstance(body,dict) or body.get('kind')!='foreign-content-intent' or body.get('source',{}).get('artifact')!=source_ref:continue
+            state._fields(body,('version','kind','mandate','logical_key','source','destination','observed_at'))
+            target=body['destination'];state._fields(target,('authority','task','scope_ref','pins','entry_revision','expected_revision','producer_id','request_digest','artifact'))
+            expected=dict(source=dict(authority=source['authority'],reference=source_ref),destination=target['task'],pins=target['pins'],
+                producer=target['producer_id'],entry_revision=target['entry_revision'])
+            _require(body['version']==1 and body['source']=={key:source[key] for key in ('authority','artifact','owner','created_at')} and
+                body['mandate']==dict(authority=source['authority'],artifact=mandate['reference']) and body['logical_key']==_digest(expected) and
+                name==body['logical_key'][:32]+'.json' and target['authority']==target['task']['authority'] and
+                metadata['version']==2 and metadata['class']=='compact' and metadata['created_at']==source['created_at'] and
+                metadata['closed_at'] in (None,mandate['metadata']['closed_at']) and not metadata['targets'] and metadata['export'] is None and
+                metadata['dependencies']==[dict(kind='task',reference=source['owner']['task']),
+                    dict(kind='artifact',reference=dict(authority=source['authority'],artifact=source_ref)),
+                    dict(kind='artifact',reference=body['mandate'])], 'Source-owned foreign intent binding changed')
+            _authority_artifact(dict(authority=target['authority'],reference=target['artifact']));state._task_reference(target['task'])
+            state._validate_pins(target['pins']);state._integer(body['observed_at'],'intent observation age')
+            found.append(dict(reference=ref,metadata=metadata,content=body))
+        return found
+
+
+def _linked_publication_plan(scope,request,content,snapshots,acquired,observed_sources,dependencies):
+    from runtime import changes
+    context=_evidence_context(scope);selected=next(s for s in snapshots if s['reference']==content['selected'])
+    with _context_database(context) as db:producer=_linked_producer(scope,request,selected,db)
+    inputs=_linked_inputs(snapshots);projection=_linked_projection(selected['reference'],selected['plan'])
+    fresh={}
+    shared,delivered,sources,deliveries=_linked_outcomes(projection,_digest(inputs),acquired,snapshots,selected['reference'],observed=fresh)
+    for snapshot in snapshots:
+        _linked_source(dict(authority=snapshot['reference']['authority'],reference=snapshot['verification_ref']),observed=fresh)
+    blockers=sorted(set(shared+[message for row in snapshots for message in row['blockers']]))
+    expected=dict(version=1,kind='linked-verification',purpose=request['purpose'],projection=projection,inputs=inputs,
+        inputs_digest=_digest(inputs),observations=acquired,members=[dict(task=row['reference'],revision=row['task']['revision'],
+            generation=row['generation'],verification=row['verification_ref']) for row in snapshots],selected=selected['reference'],
+        publication_revision=selected['task']['revision']+1,implementation_verified=not blockers,delivery_complete=delivered,
+        deliveries=deliveries,blockers=blockers)
+    expected_dependencies=[dict(kind='task',reference=row['reference']) for row in snapshots if row['reference']!=selected['reference']]
+    expected_dependencies += [dict(kind='artifact',reference=dict(authority=row['reference']['authority'],artifact=row['verification_ref'])) for row in snapshots]
+    expected_dependencies += [dict(kind='artifact',reference=dict(authority=source['authority'],artifact=source['reference']))
+        for source in sources if _raw(source) in fresh]
+    _require(content==expected and dependencies==expected_dependencies and observed_sources==fresh,
+        'Foreign publication plan differs from actual approved producer/source facts')
+    directories={context.directory,*[s['context'].directory for s in snapshots],
+        *[Path(source['authority']['directory']) for source,_ in observed_sources.values()]}
+    _require(changes._held_authority_guards(directories),'Foreign publication plan lacks its complete actual guards')
+    # Conflicting replay is rejected before allocation. Recover a durable planned identity first.
+    plan=_LinkedPublicationPlan(scope,_canonical_freeze(request),_canonical_freeze(content),tuple(_canonical_freeze(row) for row in snapshots),
+        _canonical_freeze(acquired),_canonical_freeze(observed_sources),_canonical_freeze(dependencies),_canonical_freeze(producer),
+        _FOREIGN_PLAN_ISSUER,dict(active=True,directories=directories,reference=None,observed_at=state._owner_time(),intents={}))
+    prior=[]
+    for source,_ in observed_sources.values():
+        if source['authority']==_canonical_plain(context.authority_set[0]):continue
+        source_context=_reference_context(source['authority'])
+        with _context_database(source_context) as db:
+            metadata=state._metadata(db,source['reference']['name']);reverse=_reverse_source_authorities(source_context,db,metadata)
+            try:records=_source_intents(source_context,source['reference'],db=db)
+            except state.StateError:
+                _require(_canonical_plain(context.authority_set[0]) in reverse,'Independent source lacks prospective bookkeeping mandate')
+                records=[]
+            for intent in records:
+                if intent['content']['logical_key']==_intent_key(plan,source):prior.append(intent)
+    if prior:
+        original=prior[0]['content'];planned=original['destination']['artifact']
+        _require(all(item['content']['destination']['artifact']==planned and item['content']['observed_at']==original['observed_at'] for item in prior) and
+            planned['digest']==_digest(content) and original['destination']['request_digest']==_digest(request),
+            'Foreign publication replay conflicts with its original payload/request')
+        plan.state.update(reference=planned,observed_at=original['observed_at'])
+    else:plan.state['reference']=dict(name=uuid.uuid4().hex+'.json',digest=_digest(content))
+    _validate_publication_plan(plan)
+    return plan
+
+
+def _commit_foreign_intent(plan,source):
+    """Durably publish protective source intent before any destination transaction."""
+    destination=_validate_publication_plan(plan);context=_reference_context(source['authority'])
+    _require(context.directory!=destination.directory and _raw(source) in plan.observed,'Intent source was not actually acquired by this producer')
+    with _context_database(context,write=True,durable=True) as db:
+        mandate=_source_mandate(context,source['reference'],db=db)
+        _source_current_permission(context,mandate['content']['source'],db=db)
+        content=_intent_content(plan,source,mandate)
+        found=next((record for record in _source_intents(context,source['reference'],db=db) if record['reference']['name']==_intent_name(plan,source)),None)
+        if found is None:
+            owner=_ForeignIntentOwner(plan,_canonical_freeze(source),_canonical_freeze(content),mandate['metadata']['created_at'])
+            reference=_artifact(None,content,context=context,owner=owner,db=db)
+            found=dict(reference=reference,metadata=state._metadata(db,reference['name']),content=content)
+        else:_require(found['content']==content,'Foreign source intent replay changed original bindings')
+        _source_current_permission(context,mandate['content']['source'],db=db)
+    # This is reached only after actual source COMMIT succeeds.
+    plan.state['intents'][_raw(source)]=found
+    return found
+
+
+def _check_foreign_intents(plan,*,writer=None):
+    destination=_validate_publication_plan(plan,writer=writer)
+    _check_foreign_intent_sources(plan)
+    return destination
+
+
+def _check_foreign_intent_sources(plan):
+    from runtime import changes
+    _require(plan.state['active'] and changes._held_authority_guards(plan.state['directories']),
+        'Foreign source final check outlived its complete guards')
+    for key,original in plan.state['intents'].items():
+        source=_canonical_plain(plan.observed[key][0]);context=_reference_context(source['authority'])
+        with _context_database(context) as db:
+            mandate=_source_mandate(context,source['reference'],db=db)
+            _source_current_permission(context,mandate['content']['source'],db=db)
+            actual=next((r for r in _source_intents(context,source['reference'],db=db) if r['reference']==original['reference']),None)
+            _require(actual==original and actual['content']==_intent_content(plan,source,mandate), 'Foreign source intent changed before destination commit')
+            metadata,_=_managed_artifact(None,source['reference'],context=context,db=db)
+            _require(metadata==_canonical_plain(plan.observed[key][1]), 'Foreign source changed before destination commit')
+
+
+def _publication_dependencies(plan):
+    dependencies=_canonical_plain(plan.dependencies)
+    for key,record in sorted(plan.state['intents'].items(),key=lambda pair:pair[0]):
+        dependencies.append(dict(kind='artifact',reference=dict(authority=_canonical_plain(plan.observed[key][0]['authority']),artifact=record['reference'])))
+    return dependencies
+
+
+def _linked_publication_entry(scope,request):
+    """Unpublished settled attempts cannot be restarted using a newly observed revision."""
+    with state._database(scope) as db:
+        task=_task(db,scope,request);verification=task.get('evidence',{}).get('verification')
+        if verification is None:return
+        previous=task['evidence'].get('linked_verification')
+        _require(previous is not None,'Prior verifier has no exact linked publication; explicit operation recovery is required before rerun')
+        content=_linked_source(previous,db=db)
+        row=next((row for row in content['members'] if row['task']==content['selected']),None)
+        _require(row is not None and row['verification']==verification and content['publication_revision']==task['revision'],
+            'Prior linked producer is unpublished or changed; no automatic restart is admitted')
+
+
+def _content_dependencies(dependencies,authority):
+    sources={}
+    for edge in dependencies:
+        kind=edge['kind'];ref=edge['reference']
+        if kind=='task':continue
+        _require(kind in {'artifact','assignment','recovery'},'Unsupported content demand remains unadmitted')
+        selected=ref.get('authority',authority)
+        target=ref['assignment'] if kind=='assignment' else ref.get('artifact',ref)
+        source=dict(authority=selected,reference=target);_authority_artifact(source)
+        sources[_raw(source)]=source
+    return list(sources.values())
+
+
+def _owner_dependencies(value,owner,task_ref=None):
+    if isinstance(owner,_SourceMandateOwner):dependencies=[]
+    elif isinstance(owner,_ForeignIntentOwner):
+        dependencies=[dict(kind='artifact',reference=dict(authority=_canonical_plain(owner.source['authority']),artifact=_canonical_plain(owner.source['reference']))),
+            dict(kind='artifact',reference=_canonical_plain(owner.content)['mandate'])]
+    else:
+        special=isinstance(owner,(_RecoveryOwner,_LinkedOwner,_ClosureOwner,_PreparationOwner))
+        dependencies=[_canonical_plain(edge) for edge in owner.dependencies] if special else _artifact_dependencies(value)
+    if task_ref is not None and not isinstance(owner,_PreparationOwner):
+        dependencies.insert(0,dict(kind='task',reference=task_ref))
+    return dependencies
+
+
+@contextmanager
+def _current_content_acquisition(scope,request):
+    """A real current accepted producer; cached facts or a mapping cannot issue it."""
+    _require(isinstance(scope,AcceptedScope),'Content acquisition needs its actual current accepted producer')
+    context=_evidence_context(scope)
+    with _context_database(context) as db:
+        task=_task(db,scope,request,revision=False,allow_cancelled=True)
+        owner=_artifact_owner(scope,task);_registered_owner(scope,context,owner,db)
+    token=_CONTENT_ACQUISITION.set((scope,context,owner))
+    try:yield
+    finally:_CONTENT_ACQUISITION.reset(token)
+
+
+def _admitted_body_route(source,metadata,consumer):
+    """Follow actual admitted edges; parser compatibility cannot promote old blind refs."""
+    pending=[consumer];seen=set()
+    while pending:
+        current=pending.pop();key=_raw(current)
+        if key in seen:continue
+        seen.add(key);_require(len(seen)<=4096,'Content admission route exceeds bound')
+        context=_reference_context(current['authority'])
+        with _context_database(context) as db:
+            parent,raw=_managed_artifact(None,current['reference'],context=context,db=db)
+        if parent['version']!=2:continue
+        if current==source:return True
+        children=_content_dependencies(parent['dependencies'],current['authority'])
+        if source in children:
+            if source['authority']==current['authority']:return True
+            selected=_reference_context(source['authority'])
+            with _context_database(selected) as db:
+                reverse=_reverse_source_authorities(selected,db,metadata,include_intents=False)
+                if current['authority'] in reverse:return True
+                for record in _source_intents(selected,source['reference'],db=db):
+                    target=record['content']['destination']
+                    receipt=dict(authority=source['authority'],reference=record['reference'])
+                    if target['authority']==current['authority'] and target['artifact']==current['reference'] and receipt in children and parent['owner']['task']==target['task']:
+                        return True
+            raise state.StateError('Prospective foreign source lacks its exact source-owned destination admission')
+        body=json.loads(raw)
+        if parent['class']=='compact' and body.get('kind') in {'task-closure','linked-closure-preparation'}:
+            linked=body.get('stopped',{}).get('linked')
+            if linked:
+                _linked_stop_shape(linked)
+                _require(parent['owner'].get('task')==body['identity'] and parent['created_at']==body['created_at'],
+                    'Projected source owner/age differs from its issued compact')
+                members={_raw(row['task']) for row in linked['members']}
+                if _raw(metadata['owner'].get('task')) in members and any(
+                        original['reference']==source and original['metadata']==metadata for original in linked['sources']):return True
+        pending.extend(children)
+    return False
+
+
+def _check_content_consumption(source,metadata,consumer):
+    if metadata['version']==1:return
+    if consumer is not None:
+        _authority_artifact(consumer)
+        _require(_admitted_body_route(source,metadata,consumer),'Legacy or unadmitted consumer cannot acquire prospective source content')
+        return
+    from runtime import changes
+    acquisition=_CONTENT_ACQUISITION.get()
+    _require(acquisition is not None,'Prospective content requires an admitted consumer or actual current acquisition')
+    scope,destination,owner=acquisition
+    with _context_database(destination) as db:_registered_owner(scope,destination,owner,db)
+    authority=_canonical_plain(destination.authority_set[0])
+    if authority!=source['authority']:
+        selected=_reference_context(source['authority'])
+        _require(changes._held_authority_guards([destination.directory,selected.directory]),'Current foreign acquisition lacks actual source/destination guards')
+        with _context_database(selected) as db:
+            reverse=_reverse_source_authorities(selected,db,metadata)
+            original=_reverse_source_authorities(selected,db,metadata,include_intents=False)
+        if authority not in original:
+            mandate=_source_mandate(selected,source['reference'])
+            _source_current_permission(selected,mandate['content']['source'])
+        _require(changes._held_authority_guards([Path(a['directory']) for a in reverse]),
+            'Current foreign acquisition lacks complete source authority guards')
+
+
+def _reverse_source_authorities(context,db,metadata,*,include_intents=True):
+    """Structural discoverability only; it never asserts an independent stop."""
+    from runtime import changes
+    authority=_canonical_plain(context.authority_set[0]);found={_raw(authority):authority}
+    baseline,sources=changes._recovery_sources(context,validate_stops=False)
+    if baseline is not None and baseline['content']['source_contract']==2:
+        for ref,value in sources:
+            for _,prior in _recovery_source_history(context,db,ref,value['identity'],validate_stops=False):
+                found.update({_raw(other):other for other in prior['authorities']})
+    if include_intents and metadata['version']==2 and metadata['class']=='compact':
+        local=dict(name=Path(metadata['managed']['path']).name,digest=metadata['managed']['sha256'])
+        value=_read(None,local,context=context,db=db)
+        if value.get('kind')=='foreign-content-intent':
+            records=_source_intents(context,value['source']['artifact'],db=db)
+            _require(any(record['reference']==local for record in records),'Foreign receipt lacks exact source ownership')
+            other=value['destination']['authority'];found[_raw(other)]=other
+    mandate=None
+    if include_intents:
+        try:mandate=_source_mandate(context,dict(name=Path(metadata['managed']['path']).name,digest=metadata['managed']['sha256']),db=db)
+        except state.StateError:pass
+    if mandate is not None:
+        for record in _source_intents(context,mandate['content']['source']['artifact'],db=db):
+            other=record['content']['destination']['authority'];found[_raw(other)]=other
+    owner=metadata['owner'].get('task')
+    if owner is not None:
+        task=_linked_raw_task(db,owner)
+        plan_refs=[]
+        if task is not None and 'evidence' in task:
+            evidence=task['evidence']
+            plan_refs=[entry['plan'] for entry in [evidence,*evidence.get('history',[])] if 'plan' in entry]
+        elif task is None:
+            rows=db.execute("select name,digest from evidence_metadata where class='compact' and status='live' limit 4097").fetchall()
+            _require(len(rows)<=4096,'Source reverse discovery exceeds its live bound')
+            marker=state._retired(db,'task',{key:owner[key] for key in ('scope_id','client','session_id','task_id')})
+            closed=[]
+            for name,digest in rows:
+                compact_meta=state._metadata(db,name)
+                if compact_meta['owner']!=metadata['owner']:continue
+                value=_read(None,dict(name=name,digest=digest),context=context,db=db)
+                if value.get('kind')!='task-closure':continue
+                _require(marker is not None and not marker['evidence_expired'] and value['identity']==owner and
+                    compact_meta['closed_at'] is not None and marker['created_at']==value['created_at']==compact_meta['created_at'] and
+                    marker['outcome']==value['outcome'] and marker['pins_digest']==_digest(value['pins']) and
+                    marker['retired_at']>=compact_meta['closed_at'],'Retired reverse-discovery owner lacks its exact dated closure')
+                closed.append(value)
+            _require(len(closed)==1,'Retired reverse-discovery closure is unavailable or ambiguous')
+            for source in closed[0]['sources']:
+                ref=source['reference'];selected=ref.get('authority',authority)
+                target=ref.get('artifact',ref)
+                target_metadata=state._metadata(db,target['name'])
+                if selected==authority and target_metadata is not None and target_metadata['status']=='live' and target_metadata['owner']==metadata['owner']:
+                    value=_read(None,target,context=context,db=db)
+                    if isinstance(value,dict) and value.get('version')==2 and 'linked' in value:plan_refs.append(target)
+        for plan_ref in {_raw(ref):ref for ref in plan_refs}.values():
+            plan_meta,raw=_managed_artifact(None,plan_ref,context=context,db=db)
+            _require(plan_meta['owner']==metadata['owner'],'Source discovery plan owner differs')
+            plan=json.loads(raw)
+            if plan.get('version')==2:
+                _plan(plan);projection=_linked_projection(owner,plan)
+                found.update({_raw(row['task']['authority']):row['task']['authority'] for row in projection['participants']})
+    return sorted(found.values(),key=_raw)
+
+
+def _admit_content_dependencies(context,db,dependencies,*,owner=None):
+    """Serialize admission with local retirement intent; cached bytes confer no right."""
+    from runtime import changes
+    _check_context(context,db)
+    # A supplied deferred transaction must obtain the write reservation before reading sources.
+    db.execute('update evidence_metadata set status=status where 0')
+    authority=_canonical_plain(context.authority_set[0]);observed=[]
+    for source in _content_dependencies(dependencies,authority):
+        foreign=source['authority']!=authority
+        selected=_reference_context(source['authority']) if foreign else context
+        if foreign:
+            _require(changes._held_authority_guards([context.directory,selected.directory]),
+                'Foreign content admission requires actual source/destination guards before the write transaction')
+        with _preparation_database(selected,(context,db)) as reader:
+            metadata,raw=_managed_artifact(None,source['reference'],context=selected,db=reader)
+            if foreign:
+                if isinstance(owner,_RecoveryOwner):
+                    lifetime=changes._check_d4_publication(owner.source,context,db)
+                    _require(lifetime['kind']=='release' or any(item['reference']==dict(authority=source['authority'],artifact=source['reference'])
+                        and item['metadata']==metadata for item in lifetime['permissions']['sources']),
+                        'D4 body is outside its exact authorized source acquisition')
+                    _require(metadata['version']==2,'Legacy foreign source remains unadmitted')
+                    observed.append((source,metadata,hashlib.sha256(raw).hexdigest()))
+                    continue
+                reverse=_reverse_source_authorities(selected,reader,metadata)
+                _require(authority in reverse and changes._held_authority_guards([Path(a['directory']) for a in reverse]),
+                    'Foreign content destination is not in its complete reverse-discoverable inventory')
+            observed.append((source,metadata,hashlib.sha256(raw).hexdigest()))
+    return observed
+
+
+@contextmanager
+def _artifact_content_guards(context,value,owner):
+    from runtime import changes
+    authority=_canonical_plain(context.authority_set[0])
+    sources=_content_dependencies(_owner_dependencies(value,owner),authority)
+    foreign=[source for source in sources if source['authority']!=authority]
+    if not foreign:yield;return
+    pending={context.directory,*[Path(source['authority']['directory']) for source in foreign]}
+    if changes._held_authority_guards(pending):yield;return
+    _require(not getattr(changes._authority_context,'held',()),'Foreign content registration cannot expand a partial guard set')
+    for _ in range(4096):
+        with changes._authority_guards(pending):
+            expanded=set(pending)
+            for source in foreign:
+                selected=_reference_context(source['authority'])
+                with _context_database(selected) as reader:
+                    metadata,_=_managed_artifact(None,source['reference'],context=selected,db=reader)
+                    expanded.update(Path(a['directory']) for a in _reverse_source_authorities(selected,reader,metadata))
+            if expanded!=pending:pending=expanded;continue
+            yield;return
+    raise state.StateError('Foreign content guard discovery did not converge')
 
 
 def _artifact(scope, value, *, context=None, owner=None, db=None):
@@ -1418,7 +2065,7 @@ def _artifact(scope, value, *, context=None, owner=None, db=None):
     _require((scope is None) != (context is None), 'Select exactly one existing evidence authority')
     context = context or _evidence_context(scope)
     if db is None:
-        with _context_database(context, write=True) as connection:
+        with _artifact_content_guards(context,value,owner),_context_database(context, write=True) as connection:
             return _artifact_registered(scope, value, context, owner, connection)
     _check_context(context, db)
     return _artifact_registered(scope, value, context, owner, db)
@@ -1428,6 +2075,13 @@ def _artifact_registered(scope, value, context, owner, db):
     metadata_owner, task_ref = _registered_owner(scope, context, owner, db)
     raw = _raw(value)
     _require(len(raw) <= MAX_ARTIFACT, 'Evidence artifact size limit exceeded')
+    recovery = isinstance(owner, _RecoveryOwner)
+    if recovery or isinstance(owner,(_ClosureOwner,_PreparationOwner)):
+        _require(value == _canonical_plain(owner.content), 'Artifact differs from owner-derived content')
+    if isinstance(owner,_SourceMandateOwner):_require(value==_mandate_content(owner.birth),'Mandate differs from actual publication birth')
+    if isinstance(owner,_ForeignIntentOwner):_require(value==_canonical_plain(owner.content),'Intent differs from actual owner-derived content')
+    dependencies = _owner_dependencies(value,owner,task_ref)
+    _admit_content_dependencies(context,db,dependencies,owner=owner)
     folder = context.directory / 'evidence'
     try:
         folder.mkdir(mode=0o700)
@@ -1435,7 +2089,12 @@ def _artifact_registered(scope, value, context, owner, db):
         pass
     state._private(folder, True)
     parents = {str(folder): _binding(folder), str(context.directory): _binding(context.directory)}
-    name = state._source_baseline_name(_canonical_plain(owner.creation.authority)) if isinstance(owner, _BaselineOwner) else uuid.uuid4().hex + '.json'
+    if isinstance(owner,_SourceMandateOwner):name=_mandate_name(owner.birth['reference'])
+    elif isinstance(owner,_ForeignIntentOwner):name=_intent_name(owner.plan,owner.source)
+    elif isinstance(owner,_LinkedOwner) and owner.publication is not None:
+        _require(value==_canonical_plain(owner.publication.content),'Foreign publication payload differs from actual plan')
+        name=owner.publication.state['reference']['name']
+    else:name = state._source_baseline_name(_canonical_plain(owner.creation.authority)) if isinstance(owner, _BaselineOwner) else uuid.uuid4().hex + '.json'
     path = folder / name
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)
     with os.fdopen(descriptor, 'wb') as stream:
@@ -1449,21 +2108,16 @@ def _artifact_registered(scope, value, context, owner, db):
     finally:
         os.close(directory_fd)
     digest = hashlib.sha256(raw).hexdigest()
-    recovery = isinstance(owner, _RecoveryOwner)
-    if recovery or isinstance(owner,(_ClosureOwner,_PreparationOwner)): _require(value == _canonical_plain(owner.content), 'Artifact differs from owner-derived content')
-    dependencies = [_canonical_plain(d) for d in owner.dependencies] if recovery or isinstance(owner, (_LinkedOwner,_ClosureOwner,_PreparationOwner)) else _artifact_dependencies(value)
-    if task_ref is not None and not isinstance(owner,_PreparationOwner):
-        dependencies.insert(0, dict(kind='task', reference=task_ref))
     baseline = isinstance(owner, _BaselineOwner)
-    created = owner.creation.created_at if baseline else owner.created_at if recovery or isinstance(owner,(_ClosureOwner,_PreparationOwner)) else state._owner_time()
-    content_class = 'compact' if baseline or recovery or isinstance(owner,(_ClosureOwner,_PreparationOwner)) else 'detail'
+    created = owner.birth['metadata']['created_at'] if isinstance(owner,_SourceMandateOwner) else owner.creation.created_at if baseline else owner.created_at if recovery or isinstance(owner,(_ClosureOwner,_PreparationOwner,_ForeignIntentOwner)) else state._owner_time()
+    content_class = 'compact' if baseline or recovery or isinstance(owner,(_ClosureOwner,_PreparationOwner,_SourceMandateOwner,_ForeignIntentOwner)) else 'detail'
     if baseline:
         expected = dict(version=1, kind='authority-source-baseline', source_contract=2,
             authority=_canonical_plain(owner.creation.authority), project_id=owner.project_id,
             created_at=created, runtime_digest=state.runtime_fingerprint())
         _require(value == expected and not dependencies, 'Baseline content differs from fresh owner provenance')
         state._check_creation(context.database, owner.creation, db)
-    data = dict(version=1, owner=metadata_owner, created_at=created, **{'class': content_class}, bytes=len(raw),
+    data = dict(version=2, owner=metadata_owner, created_at=created, **{'class': content_class}, bytes=len(raw),
         status='live', closed_at=None, dependencies=dependencies, targets=[], export=None,
         managed=dict(path=str(path), binding=dict(device=info.st_dev, inode=info.st_ino), parents=parents,
             sha256=digest, mode=stat.S_IMODE(info.st_mode), bytes=info.st_size))
@@ -1473,7 +2127,9 @@ def _artifact_registered(scope, value, context, owner, db):
     _require(all(_binding(Path(parent)) == binding for parent, binding in parents.items())
         and _binding(path) == data['managed']['binding'], 'Artifact identity changed before registration')
     db.execute('insert into evidence_metadata values(?,?,?,?,?,?,?,?,?)', row)
-    return dict(name=path.name, digest=digest)
+    reference=dict(name=path.name,digest=digest)
+    _issue_source_mandate(scope,context,db,owner,reference,data)
+    return reference
 
 
 def _managed_artifact(scope, reference, *, context=None, db=None):
@@ -2760,13 +3416,14 @@ def _reference_context(authority):
         (_canonical_freeze(authority),), 'Existing approved linked task authority')
 
 
-def _linked_source(reference, *, observed=None, db=None):
+def _linked_source(reference, *, observed=None, db=None,consumer=None,require_admission=False):
     _authority_artifact(reference)
     context = _reference_context(reference['authority'])
     def consume(connection):
         _check_context(context,connection)
         metadata=state._metadata(connection,reference['reference']['name'])
         value=_read(None,reference['reference'],context=context,db=connection)
+        if require_admission:_check_content_consumption(reference,metadata,consumer)
         _require(state._metadata(connection,reference['reference']['name'])==metadata,'Linked source metadata changed during consumption')
         if observed is not None:
             key=_raw(reference)
@@ -2809,6 +3466,7 @@ def _capture_pinned(context, task, plan):
 class _LinkedOwner:
     task_owner: object
     dependencies: tuple
+    publication: object = None
 
 
 def _linked_members(scope, request, observations, *, lifecycle=False):
@@ -2972,14 +3630,15 @@ def _linked_lifecycle_member(snapshot,content):
     _linked_execution_member(snapshot)
 
 
-def _linked_lifecycle_outcomes(content,snapshots,*,observed):
+def _linked_lifecycle_outcomes(content,snapshots,*,observed,consumer):
     """Reproduce actual result facts without promoting them to passing readiness."""
     result=_linked_outcomes(content['projection'],content['inputs_digest'],content['observations'],snapshots,
-        content['selected'],observed=observed,require_shared_support=True)
+        content['selected'],observed=observed,require_shared_support=True,consumer=consumer)
     shared,delivered,_,deliveries=result;local=[]
     for member in content['members']:
         if member['verification'] is None:continue
-        verification=_linked_source(dict(authority=member['task']['authority'],reference=member['verification']),observed=observed)
+        verification=_linked_source(dict(authority=member['task']['authority'],reference=member['verification']),observed=observed,
+            consumer=consumer,require_admission=True)
         _require(isinstance(verification['blockers'],list),'Original linked local result is unavailable')
         local.extend(verification['blockers'])
     if content.get('kind')=='linked-verification':
@@ -3046,12 +3705,12 @@ def _linked_terminal_snapshot(reference):
     return snapshot
 
 
-def _linked_terminal_facts(references,selected,acquired,authorities,*,original_authorities=None):
+def _linked_terminal_facts(references,selected,acquired,authorities,*,original_authorities=None,consumer=None):
     snapshots=[_linked_terminal_snapshot(ref) for ref in references];projection=_linked_projection(selected,next(s['plan'] for s in snapshots if s['reference']==selected))
     _require([s['reference'] for s in snapshots]==[p['task'] for p in projection['participants']] and
         all(_linked_projection(s['reference'],s['plan'])==projection for s in snapshots),'Lifecycle scope contracts are incomplete or divergent')
     inputs=_linked_inputs(snapshots);observed={}
-    _,delivered,_,deliveries=_linked_outcomes(projection,_digest(inputs),acquired,snapshots,selected,observed=observed,require_shared_support=True)
+    _,delivered,_,deliveries=_linked_outcomes(projection,_digest(inputs),acquired,snapshots,selected,observed=observed,require_shared_support=True,consumer=consumer)
     roots=_linked_source_refs(acquired)
     for snapshot in snapshots:
         roots.append(dict(authority=snapshot['reference']['authority'],reference=snapshot['plan_ref']))
@@ -3102,7 +3761,7 @@ def _linked_capture_record(pointer,*,writer=None):
 def _linked_bound_basis(pointer,authorities,*,writer=None):
     original,metadata=_linked_capture_record(pointer,writer=writer)
     actual=_linked_terminal_facts([m['task'] for m in original['members']],original['content']['selected'],original['content']['observations'],authorities,
-        original_authorities=original['authorities'])
+        original_authorities=original['authorities'],consumer=pointer)
     _require(actual==original,'Factual lifecycle member/input/source snapshot changed')
     bound=deepcopy(original);bound['basis']=deepcopy(pointer)
     bound['sources'].append(dict(reference=deepcopy(pointer),metadata=metadata,stat=_closure_file_stat(Path(metadata['managed']['path']))))
@@ -3118,7 +3777,7 @@ def _acquire_linked_basis(scope,request,observations):
     pending={_raw(ref['authority']):ref['authority'] for ref in references};acquired=None
     from runtime import changes
     for _ in range(4096):
-        with changes._authority_guards([Path(a['directory']) for a in pending.values()]):
+        with changes._authority_guards([Path(a['directory']) for a in pending.values()]),_current_content_acquisition(scope,request):
             snapshots=[_linked_terminal_snapshot(ref) for ref in references];inputs=_linked_inputs(snapshots)
             if acquired is None:acquired=json_object(_raw(observations['observe'](_canonical_freeze(dict(projection=projection,projection_digest=_digest(projection),inputs=inputs,inputs_digest=_digest(inputs))))),limit=MAX_ARTIFACT)
             roots=_linked_source_refs(acquired)+[dict(authority=s['reference']['authority'],reference=s['plan_ref']) for s in snapshots]
@@ -3187,7 +3846,7 @@ def _linked_stop_basis(pointer,authorities):
             bindings=bindings,inputs=inputs))
     inputs=_linked_inputs(snapshots)
     _require(inputs==content['inputs'] and _digest(inputs)==content['inputs_digest'],'Linked stop member inputs changed')
-    blockers,delivered,_,deliveries=_linked_lifecycle_outcomes(content,snapshots,observed=observed)
+    blockers,delivered,_,deliveries=_linked_lifecycle_outcomes(content,snapshots,observed=observed,consumer=pointer)
     sources=[]
     for key,(reference,metadata) in sorted(observed.items()):
         path=Path(metadata['managed']['path'])
@@ -3422,7 +4081,7 @@ def _linked_retained_component(pointer,authorities,*,writer=None):
     _require([dict(reference=reference,metadata=metadata,stat=_closure_file_stat(Path(metadata['managed']['path']))) for _,(reference,metadata) in sorted(observed.items())]==basis['sources'],
         'Retained linked original source facts changed')
     snapshots=[dict(reference=m['reference'],plan=m['plan'],candidate=m['candidate']) for m in members]
-    blockers,delivered,_,deliveries=_linked_lifecycle_outcomes(content,snapshots,observed=observed)
+    blockers,delivered,_,deliveries=_linked_lifecycle_outcomes(content,snapshots,observed=observed,consumer=pointer)
     _require(delivered and deliveries==basis['deliveries'],'Retained linked shared/exact delivery source support changed')
     sources={}
     while pending:
@@ -3523,7 +4182,7 @@ def _linked_stopped_basis(pointer,authorities,*,writer=None,fresh=False):
     actual=[dict(reference=reference,metadata=metadata,stat=_closure_file_stat(Path(metadata['managed']['path'])))
         for _,(reference,metadata) in sorted(observed.items())]
     _require(actual==basis['sources'],'Linked retained source support changed')
-    blockers,delivered,_,deliveries=_linked_lifecycle_outcomes(content,snapshots,observed=observed)
+    blockers,delivered,_,deliveries=_linked_lifecycle_outcomes(content,snapshots,observed=observed,consumer=pointer)
     _require(delivered and deliveries==basis['deliveries'],'Linked acceptance or exact required delivery changed')
     return basis
 
@@ -3910,23 +4569,25 @@ def _linked_preparation_reader(authorities):
         _PREPARATION_READER.reset(token)
 
 
-def _check_linked_preparation_certificate(context,db,certificate,*,preparation_reader=None):
+def _check_linked_preparation_certificate(context,db,certificate,*,preparation_reader=None,writer=None):
     if preparation_reader is not None:
         _require(type(preparation_reader) is _PreparationReader,'Preparation reader is foreign or expired')
+        _require(writer is None,'Preparation inspection reader cannot replace an active writer')
         preparation_reader.check(context,db,certificate)
         return
+    writer=writer if writer is not None else (context,db)
     basis=certificate['linked'];authorities=certificate['preparation']['authorities']
-    if _linked_component_closed(_linked_basis_root(basis),writer=(context,db)):
-        _check_retained_linked_certificate(_linked_retained_component(_linked_basis_root(basis),authorities,writer=(context,db)),certificate)
+    if _linked_component_closed(_linked_basis_root(basis),writer=writer):
+        _check_retained_linked_certificate(_linked_retained_component(_linked_basis_root(basis),authorities,writer=writer),certificate)
         return
-    facts=_linked_preparation_facts(_linked_basis_root(basis),authorities,writer=(context,db))
+    facts=_linked_preparation_facts(_linked_basis_root(basis),authorities,writer=writer)
     _require(not facts.get('discovered_authorities') and _digest(facts)==certificate['preparation']['component_digest'],
         'D4 prepared component facts changed')
-    receipts=[_preparation_receipt(facts,m['reference'],writer=(context,db)) for m in facts['members']]
+    receipts=[_preparation_receipt(facts,m['reference'],writer=writer) for m in facts['members']]
     _require(all(receipts),'D4 requires every actual prepared replacement')
-    own=_preparation_receipt(facts,certificate['reference'],writer=(context,db))
+    own=_preparation_receipt(facts,certificate['reference'],writer=writer)
     _require(own['artifact']==certificate['preparation']['reference'],'D4 preparation pointer differs from actual owner receipt')
-    _check_preparation_inputs(facts,writer=(context,db))
+    _check_preparation_inputs(facts,writer=writer)
 
 
 def _linked_inputs(snapshots):
@@ -3934,12 +4595,12 @@ def _linked_inputs(snapshots):
         candidate_digest=_digest(row['candidate'])) for row in snapshots]
 
 
-def _linked_outcomes(projection, inputs_digest, acquired, snapshots, selected_ref, *, observed=None,require_shared_support=False):
+def _linked_outcomes(projection, inputs_digest, acquired, snapshots, selected_ref, *, observed=None,require_shared_support=False,consumer=None):
     """Validate retained source correspondence; trusted acquisition owns its provenance/semantics."""
     state._fields(acquired, ('scope_decision','shared','deliveries'))
     _bounded(acquired, MAX_ARTIFACT)
     blockers=[]; sources=[]
-    decision=_linked_source(acquired['scope_decision'],observed=observed);sources.append(acquired['scope_decision'])
+    decision=_linked_source(acquired['scope_decision'],observed=observed,consumer=consumer,require_admission=True);sources.append(acquired['scope_decision'])
     _require(decision.get('kind') == 'linked-scope-decision' and type(decision.get('version')) is int and decision['version'] == 1
         and decision.get('projection_digest') == _digest(projection)
         and decision.get('decision_ref') == next(s['plan']['decision_ref'] for s in snapshots if s['reference']==selected_ref), 'Linked complete scope decision is unsupported')
@@ -3955,7 +4616,7 @@ def _linked_outcomes(projection, inputs_digest, acquired, snapshots, selected_re
             and 0 < len(row['evidence']) <= 64, 'Shared source support is unavailable')
         supported=False
         for reference in row['evidence']:
-            source=_linked_source(reference,observed=observed);sources.append(reference)
+            source=_linked_source(reference,observed=observed,consumer=consumer,require_admission=True);sources.append(reference)
             if (type(source.get('version')) is int and source['version'] == 1 and source.get('kind') == 'linked-integration-observation'
                     and source.get('inputs_digest') == inputs_digest and isinstance(source.get('criteria'),dict)
                     and source['criteria'].get(row['id']) == row['status']):
@@ -3975,7 +4636,7 @@ def _linked_outcomes(projection, inputs_digest, acquired, snapshots, selected_re
         state._integer(row['observed_at'],'original delivery observation time');state._text(row['revision'],'observed delivery revision')
         source={}
         if row['source'] is not None:
-            try:source=_linked_source(row['source'],observed=observed)
+            try:source=_linked_source(row['source'],observed=observed,consumer=consumer,require_admission=True)
             except (StartupError,OSError):pass
             sources.append(row['source'])
         supported=(source.get('kind') == 'linked-delivery-observation' and type(source.get('version')) is int and source['version'] == 1
@@ -4013,7 +4674,7 @@ def _recheck_linked_sources(scope, db, acquired, snapshots, observed, *, aggrega
         try:
             current={}
             connection=db if Path(reference['authority']['database'])==state._path(scope) else None
-            _linked_source(reference,observed=current,db=connection)
+            _linked_source(reference,observed=current,db=connection,consumer=aggregate,require_admission=True)
             _require(current[key][1]==metadata,'Linked retained source metadata changed')
         except (StartupError,OSError):
             if key in strong:raise state.StateError('Linked implementation source changed before publication') from None
@@ -4042,7 +4703,9 @@ def verify_linked(scope, request, observations):
     The callback is bounded, local and read-only; no public JSON/CLI route exists.
     """
     _request(request, ('purpose',), ('reuse','security_impact'))
+    request=deepcopy(request)
     _require(request['purpose'] in {'completion','merge-evidence'}, 'Invalid linked verification purpose')
+    _linked_publication_entry(scope,request)
     selected_ref,projection,members=_linked_members(scope,deepcopy(request),observations)
     observe=observations['observe']
     for row in members:
@@ -4052,7 +4715,7 @@ def verify_linked(scope, request, observations):
     directories={Path(row['reference']['authority']['directory']) for row in members}
     acquired=None
     while True:
-        with _authority_guards(directories):
+        with _authority_guards(directories),_current_content_acquisition(scope,request):
             snapshots=[_linked_snapshot(row['reference']) for row in members]
             _require(all(s['task']['revision']==m['revision'] for s,m in zip(snapshots,members)), 'Linked member changed during verification')
             inputs=_linked_inputs(snapshots)
@@ -4065,6 +4728,16 @@ def verify_linked(scope, request, observations):
             if expanded!=directories:
                 directories=expanded
                 continue  # Release every partial guard before acquiring the complete sorted set.
+            for source in sources:
+                context=_reference_context(source['authority'])
+                try:
+                    with _context_database(context) as reader:
+                        metadata,_=_managed_artifact(None,source['reference'],context=context,db=reader)
+                        expanded.update(Path(authority['directory']) for authority in _reverse_source_authorities(context,reader,metadata))
+                except (StartupError,OSError):pass  # Semantic strong/optional source checks below preserve the actual outcome.
+            if expanded!=directories:
+                directories=expanded
+                continue
             observed_sources={}
             shared_blockers,delivered,sources,deliveries=_linked_outcomes(projection,facts['inputs_digest'],acquired,snapshots,selected_ref,observed=observed_sources)
             for row in snapshots:
@@ -4082,33 +4755,39 @@ def verify_linked(scope, request, observations):
                 delivery_complete=delivered,deliveries=deliveries,blockers=blockers)
             dependencies=[dict(kind='task',reference=s['reference']) for s in final if s['reference']!=selected_ref]
             dependencies += [dict(kind='artifact',reference=dict(authority=s['reference']['authority'],artifact=s['verification_ref'])) for s in final]
-            dependencies += [dict(kind='artifact',reference=dict(authority=reference['authority'],artifact=reference['reference'])) for reference in sources]
-            with state._database(scope,write=True) as db:
-                current=_task(db,scope,dict(request,expected_revision=selected['task']['revision']))
-                _recheck_linked_rows(scope,db,final)
-                owner=_LinkedOwner(_artifact_owner(scope,current),tuple(_canonical_freeze(d) for d in dependencies))
-                db.execute('savepoint linked_publication')
-                reference=_artifact(scope,content,owner=owner,db=db)
-                if _recheck_linked_sources(scope,db,acquired,final,observed_sources):
-                    # One conservative correction; the first file remains a protected orphan.
-                    db.execute('rollback to linked_publication')
-                    delivered=False
-                    deliveries=[dict(row,status='unknown') for row in deliveries]
-                    content.update(delivery_complete=False,deliveries=deliveries)
+            dependencies += [dict(kind='artifact',reference=dict(authority=reference['authority'],artifact=reference['reference']))
+                for reference in sources if _raw(reference) in observed_sources]
+            publication=_linked_publication_plan(scope,request,content,final,acquired,observed_sources,dependencies)
+            try:
+                for source,metadata in observed_sources.values():
+                    if source['authority']==selected_ref['authority']:continue
+                    source_context=_reference_context(source['authority'])
+                    with _context_database(source_context) as reader:
+                        reverse=_reverse_source_authorities(source_context,reader,metadata,include_intents=False)
+                    if selected_ref['authority'] not in reverse:_commit_foreign_intent(publication,source)
+                with state._database(scope,write=True) as db:
+                    current=_task(db,scope,dict(request,expected_revision=selected['task']['revision']))
+                    _recheck_linked_rows(scope,db,final)
+                    owner=_LinkedOwner(_artifact_owner(scope,current),
+                        tuple(_canonical_freeze(d) for d in _publication_dependencies(publication)),publication)
                     reference=_artifact(scope,content,owner=owner,db=db)
-                    _recheck_linked_sources(scope,db,acquired,final,observed_sources)
-                db.execute('release linked_publication')
-                _recheck_linked_rows(scope,db,final)
-                pointer=dict(authority=selected_ref['authority'],reference=reference)
-                _require(_linked_source(pointer,db=db)==content,'Linked aggregate changed before publication')
-                current['evidence']['linked_verification']=pointer
-                if not blockers and request['purpose']=='completion':
-                    current['state']='ready'
-                    for condition in current['conditions']:
-                        if 'continuation' in condition:condition['continuation']['revoked']=True
-                elif current['state']=='ready':current['state']='verifying'
-                current['revision']+=1
-                state._save(db,state._scope_id(scope),current)
+                    _require(not _recheck_linked_sources(scope,db,acquired,final,observed_sources),
+                        'Linked delivery changed after source intent; publication remains incomplete')
+                    _recheck_linked_rows(scope,db,final)
+                    pointer=dict(authority=selected_ref['authority'],reference=reference)
+                    _require(_linked_source(pointer,db=db)==content,'Linked aggregate changed before publication')
+                    _check_foreign_intents(publication,writer=(_evidence_context(scope),db))
+                    current['evidence']['linked_verification']=pointer
+                    if not blockers and request['purpose']=='completion':
+                        current['state']='ready'
+                        for condition in current['conditions']:
+                            if 'continuation' in condition:condition['continuation']['revoked']=True
+                    elif current['state']=='ready':current['state']='verifying'
+                    current['revision']+=1
+                    state._save(db,state._scope_id(scope),current)
+                    # Independent final permission/source check follows all destination SQL writes.
+                    _check_foreign_intent_sources(publication)
+            finally:publication.state['active']=False
             break
     return dict(ok=True,verified=not blockers,implementation_verified=not blockers,delivery_complete=delivered,
         merge_authority=False,task=current,blockers=blockers,verification=pointer,deliveries=deliveries)
@@ -4153,7 +4832,7 @@ def _revalidate_linked(scope, task, *, update_ready=False):
                 _require(_linked_projection(current['reference'],current['plan'])==content['projection'],'Linked approved contract changed')
             inputs=_linked_inputs(snapshots)
             _require(inputs==content['inputs'] and _digest(inputs)==content['inputs_digest'],'Linked member inputs are stale')
-            blockers,delivered,_,deliveries=_linked_outcomes(content['projection'],content['inputs_digest'],content['observations'],snapshots,content['selected'],observed=observed_sources)
+            blockers,delivered,_,deliveries=_linked_outcomes(content['projection'],content['inputs_digest'],content['observations'],snapshots,content['selected'],observed=observed_sources,consumer=pointer)
             for row in snapshots:
                 _linked_source(dict(authority=row['reference']['authority'],reference=row['verification_ref']),observed=observed_sources)
             blockers=sorted(set(content['blockers']+blockers+[message for row in snapshots for message in row['blockers']]))
