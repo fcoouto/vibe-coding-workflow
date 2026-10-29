@@ -1929,27 +1929,107 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
         self.assertFalse(result['complete']);self.assertEqual(self.changes._recovery_sources(context)[1][0][0],old)
 
     def test_recovery_release_independent_current_root_keeps_original_proof_route(self):
-        from runtime import evidence
-        _,context,task_ref,identity,old=self.recovery_release_fixture()
+        from dataclasses import replace
+        from runtime import evidence,state
+        from runtime.startup import _canonical_freeze,canonical_scope_projection,decode_project_record
         other=ScopedChangesTests(methodName='runTest');other.setUp();self.addCleanup(other.doCleanups)
-        request=other.scoped_request()
-        request['manifest']['enrollment']['record']['repositories'][0]['checkouts'][0]['clients'][0]['configuration']['runtime']=dict(schema_version=3,state_dir=str(context.directory))
-        request['approval']['manifest_digest']=onboarding._digest(request['manifest'])
-        applied=other.changes._run_scoped(other.directory,request,'apply');self.assertEqual(applied['exit_code'],0,applied)
-        journal=other.changes._load_journal(other.directory)
-        source=self.changes._observe_recovery_source(other.directory,journal,(context,),(task_ref,))
-        with evidence._context_database(context,write=True) as db:evidence._register_recovery_source(None,db,source,context=context)
+        request,contexts=self.d4_bookkeeping_request();context=contexts[0];scope=self.d4_bookkeeping_scopes[0]
+        record=request['manifest']['enrollment']['record'];repository=record['repositories'][0];checkout=repository['checkouts'][0]
+        projection=evidence._canonical_plain(canonical_scope_projection(decode_project_record(record),
+            repository_id=repository['repository_id'],checkout_id=checkout['checkout_id'],client='codex'))
+        scope=replace(scope,authority_target=_canonical_freeze(request['manifest']['enrollment']['before']['target']),
+            authority_revision=record['revision'],accepted_identity=_canonical_freeze(projection),accepted_scope_digest=state._digest(projection))
+        owner=dict(client='codex',session_id='session',task_id='task',scope_ref='request:1')
+        state.start_task(scope,dict(owner,mode='editable',decision_ref='user:1'))
+        _,certificate=self.stop_assignment_fixture(scope,owner)
+        task_ref=certificate['reference'];proof=certificate['retirement']['proof']
+        proof_root=dict(authority=evidence._canonical_plain(context.authority_set[0]),artifact=proof)
+        with evidence._context_database(context) as db:
+            original_task=state._task(db,task_ref['scope_id'],task_ref['client'],task_ref['session_id'],task_ref['task_id'])
+            original_proof=evidence._read(None,proof,context=context,db=db)
+        self.assertEqual(original_task['state'],'cancelled');self.assertNotIn('writer_stop',original_task)
+        self.assertEqual(original_proof['version'],1)
+        self.assertEqual(original_proof['kind'],'stopped-writer-reconciliation')
+        observed=[];original_observe=self.changes._observe_recovery_source
+        active=(self.directory,request,self.plan())
+        def observe(path,journal,acquired,task_refs):
+            directory,approved,plan=active
+            self.assertEqual(path,directory)
+            self.assertEqual(journal['manifest'],approved['manifest'])
+            self.assertEqual(journal['approval'],approved['approval']);self.assertEqual(journal['plan'],plan)
+            self.assertEqual(journal['transaction_id'],approved['manifest']['transaction_id'])
+            self.assertEqual(journal['manifest_digest'],onboarding._digest(approved['manifest']))
+            self.assertIn(journal['state'],('prepared','applied'))
+            self.assertEqual(task_refs,())
+            self.assertEqual([(item.directory,item.database,item.authority_set) for item in acquired],
+                [(context.directory,context.database,context.authority_set)])
+            source=original_observe(path,journal,acquired,(task_ref,))
+            self.assertEqual([evidence._canonical_plain(item['reference']) for item in source.content['tasks']],[task_ref])
+            self.assertEqual([evidence._canonical_plain(item) for item in source.content['artifacts']],[proof_root])
+            observed.append((path,source))
+            return source
+        with patch.object(self.changes,'_observe_recovery_source',side_effect=observe):
+            applied=self.run_with_d4_host(request,'apply');self.assertEqual(applied['exit_code'],0,applied)
+            published=json.loads((self.repo/PROJECT_FILE).read_text())
+            accepted=canonical_scope_projection(decode_project_record(published),repository_id=scope.repository_id,
+                checkout_id=scope.checkout_id,client='codex')
+            self.assertEqual(evidence._canonical_plain(accepted),evidence._canonical_plain(scope.accepted_identity))
+            journal_a=(self.directory/'transaction.json').read_bytes()
+            canonical_a=self.changes._scoped_target(self.repo,str(PROJECT_FILE))
+            effects_a={Path(action['owner']['root'])/effect['path']:self.changes._scoped_target(Path(action['owner']['root']),effect['path'])
+                for action in request['manifest']['actions'] for effect in action['effects']}
+            second=other.scoped_request()
+            second['manifest']['enrollment']['record']['repositories'][0]['checkouts'][0]['clients'][0]['configuration']['runtime']=dict(schema_version=3,state_dir=str(context.directory))
+            second['approval']['manifest_digest']=onboarding._digest(second['manifest'])
+            effects_b={Path(action['owner']['root'])/effect['path'] for action in second['manifest']['actions'] for effect in action['effects']}
+            self.assertTrue(effects_a);self.assertTrue(effects_b);self.assertTrue(set(effects_a).isdisjoint(effects_b))
+            self.assertNotEqual(self.repo/PROJECT_FILE,other.repo/PROJECT_FILE)
+            active=(other.directory,second,other.plan())
+            applied=other.run_with_d4_host(second,'apply');self.assertEqual(applied['exit_code'],0,applied)
+        self.assertEqual([path for path,_ in observed],[self.directory,self.directory,other.directory,other.directory])
+        self.assertEqual((self.directory/'transaction.json').read_bytes(),journal_a)
+        self.assertEqual(self.changes._scoped_target(self.repo,str(PROJECT_FILE)),canonical_a)
+        for path,target in effects_a.items():
+            self.assertEqual(self.changes._scoped_target(path.parent,path.name),target)
+        identities=[]
+        for fixture,approved in ((self,request),(other,second)):
+            journal=self.changes._load_journal(fixture.directory)
+            self.changes._scoped_journal_shape(journal);self.changes._scoped_recovery_files(fixture.directory,journal)
+            self.assertEqual(journal['state'],'applied');self.assertEqual(journal['manifest'],approved['manifest'])
+            self.assertTrue(self.changes._scoped_owned_authority(journal))
+            identities.append(dict(plan_dir=str(fixture.directory),transaction_id=journal['transaction_id'],manifest_digest=journal['manifest_digest']))
+        identity,other_identity=identities;self.assertNotEqual(identity,other_identity)
+        _,sources=self.changes._recovery_sources(context)
+        self.assertEqual(len(sources),2)
+        for current in identities:
+            reference,body=next((reference,body) for reference,body in sources if body['identity']==current)
+            self.assertEqual([task['reference'] for task in body['tasks']],[task_ref])
+            self.assertEqual(body['artifacts'],[proof_root])
+        with evidence._context_database(context) as db:
+            self.assertEqual(state._task(db,task_ref['scope_id'],task_ref['client'],task_ref['session_id'],task_ref['task_id']),original_task)
+            self.assertEqual(evidence._read(None,proof,context=context,db=db),original_proof)
+        inspected=self.changes.inspect_lifecycle_recovery(context.authority_set,())
+        self.assertTrue(inspected['complete'],inspected)
+        for current in identities:
+            self.assertTrue(any(row['kind']=='task' and row['need']=='raw' and row['reference']==task_ref
+                and row['root']['identity']==current for row in inspected['requirements']))
+            self.assertTrue(any(row['kind']=='artifact' and row['reference']==proof_root
+                and row['root']['identity']==current for row in inspected['requirements']))
         released=self.changes._register_recovery_release(self.changes._observe_recovery_release(context.authority_set,identity))
         self.assertTrue(released['complete'],released)
         inspected=self.changes.inspect_lifecycle_recovery(context.authority_set,())
         self.assertTrue(inspected['complete'],inspected)
         routes=[r for r in inspected['requirements'] if r['kind']=='task' and r['reference']==task_ref]
         self.assertTrue(any(r['need']=='identity' and r['root']['identity']==identity for r in routes))
-        self.assertTrue(any(r['need']=='raw' and r['root']['identity']==dict(source.content['identity']) for r in routes))
-        other_release=self.changes._register_recovery_release(self.changes._observe_recovery_release(context.authority_set,dict(source.content['identity'])))
+        self.assertTrue(any(r['need']=='raw' and r['root']['identity']==other_identity for r in routes))
+        other_release=self.changes._register_recovery_release(self.changes._observe_recovery_release(context.authority_set,other_identity))
         self.assertTrue(other_release['complete'],other_release)
         inspected=self.changes.inspect_lifecycle_recovery(context.authority_set,())
+        self.assertTrue(inspected['complete'],inspected)
         self.assertFalse(any(r['kind']=='task' and r['reference']==task_ref and r['need']=='raw' for r in inspected['requirements']))
+        with evidence._context_database(context) as db:
+            self.assertEqual(state._task(db,task_ref['scope_id'],task_ref['client'],task_ref['session_id'],task_ref['task_id']),original_task)
+            self.assertEqual(evidence._read(None,proof,context=context,db=db),original_proof)
 
     def test_recovery_release_rechecks_selected_raw_row_not_just_stopped_fields(self):
         from runtime import evidence,state
