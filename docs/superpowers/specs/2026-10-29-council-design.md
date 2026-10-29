@@ -1,7 +1,7 @@
 # Council
 
-Status: proposed design, awaiting user approval. Written on 29 October 2026.
-No Council execution or implementation is authorized by this document alone.
+Status: approved by the user, including proposed defaults, on 29 October 2026.
+The user authorized writing the implementation plan next; no Council run has been requested.
 
 ## Intent
 
@@ -43,9 +43,9 @@ The user subsequently selected a fresh synthesis context. It avoids carrying an
 individual investigator's conversational commitment into the final assessment;
 it does not prove absence of model-family bias or guarantee correctness.
 
-## Proposed defaults for approval
+## Approved defaults
 
-These are designer recommendations, not decisions already made by the user:
+The user approved these designer recommendations with the complete design:
 
 - Three investigative seats: one native and two OpenRouter, preferably from three
   distinct model families. Avoid purchasing the native member's model again.
@@ -137,8 +137,7 @@ tools and publish it to the shared evidence set. Research gathered during
 investigation is included in the common packet before critique begins. Freeze
 that packet at the critique barrier. Later findings can identify a gap or qualify
 the synthesis, but cannot be represented as having received Council-wide critique.
-This is a proposed bounded
-research bridge, not unrestricted network access for external workers. Do not send
+This is a bounded research bridge, not unrestricted network access for external workers. Do not send
 private repository text in web searches. Each finding states what was inspected,
 what was inferred and what remains unverified. Inaccessible sources remain gaps.
 
