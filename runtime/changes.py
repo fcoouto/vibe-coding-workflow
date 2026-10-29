@@ -22,6 +22,7 @@ import uuid
 
 from runtime import onboarding as d3
 from runtime import state as task_state
+from runtime import recovery_uses
 from runtime.startup import (PROJECT_FILE, ProjectScope, StartupError, checkout,
                              policy_digest, runtime_settings, _canonical_freeze, _canonical_plain)
 
@@ -2211,6 +2212,8 @@ def _cut_recovery_content(content,certificates,contexts):
     content['tasks']=[t for t in content['tasks'] if d3._digest(t['reference']) not in cut]
     content['artifacts']=[a for a in content['artifacts'] if (d3._digest(a['authority']),d3._digest(a['artifact'])) in retained]
     content.update(version=2,stopped=certificates,previous=None)
+    if 'use_contract' in content:
+        content['use_contract']=_project_recovery_uses(content,contexts,[content['use_contract']])
     return content
 
 
@@ -2247,12 +2250,57 @@ def _recovery_generation(db,tasks,assignments):
     return d3._digest(rows)
 
 
-def _recovery_owner_refs(manifest,context,task_refs):
+def _historical_recovery_roots(manifest,context,db,task,reference):
+    """Recognize only the same physical member's removed, actually changed shared dependency."""
+    from runtime import evidence
+    from runtime.startup import decode_project_record,canonical_scope_projection
+    identity=task_state._accepted_identity(task['accepted_identity'])
+    record=manifest['enrollment']['record']
+    changed={str(Path(action['owner']['root'])/effect['path']) for action in manifest['actions'] for effect in action['effects']
+        if effect['before']!=effect['after']}
+    if not any(row['path'] in changed for row in identity['shared_policy']):return []
+    if identity['project_id']!=record['project_id'] or identity['project_root']!=record['project_root']:
+        return []
+    observed=d3._authority_observation(Path(identity['project_root']),{'paths':0,'bytes':0},canonical_only=True)
+    if observed['error'] or observed['record'] is None:return []
+    current=observed['record'];key=tuple(identity[k] for k in ('repository_id','checkout_id','client'))
+    if current.get('schema_version')!=2 or key not in _scoped_entries(current):return []
+    projection=canonical_scope_projection(decode_project_record(current),repository_id=key[0],checkout_id=key[1],client=key[2])
+    if projection is None:return []
+    projection=_canonical_plain(projection)
+    # Only removed dependency declarations and client suspension may differ.
+    expected=deepcopy(identity);expected['shared_policy']=projection['shared_policy']
+    if projection!=expected or _scoped_entries(current)[key][2]['activation']['status']!='suspended':return []
+    configuration=projection['configuration']
+    if configuration['runtime']!=dict(schema_version=3,state_dir=str(context.directory)):return []
+    # The responsible stop validator decides whether original historical pins remain supported.
+    baseline=task_state._source_baseline(None,db,context=context)
+    if baseline is None or baseline['content']['project_id']!=record['project_id'] or baseline['content']['source_contract']!=2:return []
+    proposed=canonical_scope_projection(decode_project_record(record),repository_id=key[0],checkout_id=key[1],client=key[2])
+    if proposed is None or _canonical_plain(proposed)!=projection:return []
+    if _scoped_entries(record)[key][2]['activation']['status']!='suspended':return []
+    if evidence._binding(Path(identity['project_root']))!=identity['project_binding']:return []
+    if any(evidence._binding(Path(identity[path]))!=identity['bindings'][binding] for path,binding in
+            (('repository_root','root'),('primary_root','primary_root'),('git_dir','git_dir'),('git_common_dir','git_common_dir'))):return []
+    old={row['path']:row for row in identity['shared_policy']}
+    if any(old.get(row['path'])!=row for row in projection['shared_policy']):return []
+    removed=set(old)-{row['path'] for row in projection['shared_policy']}
+    effects=[dict(action_id=action['id'],path=effect['path']) for action in manifest['actions'] for effect in action['effects']
+        if effect['before']!=effect['after'] and str(Path(action['owner']['root'])/effect['path']) in removed]
+    if not effects or not (task.get('retirement') or task.get('writer_stop')):return []
+    certificate=_stopped_certificate(context,db,dict(reference=reference,pins=task['pins']))
+    _check_stopped_certificate(context,db,certificate)
+    proof=dict(authority=reference['authority'],artifact=_stop_envelope(task)['proof'])
+    return [dict(purpose='historical-stop',reference=dict(kind='task',reference=reference),task=reference,proof=proof,effect=effect)
+        for effect in effects]
+
+
+def _recovery_owner_refs(manifest,context,task_refs,*,use_roots=None):
     """Select actual affected-writer proofs; never inspect user payloads for lookalike refs."""
     from runtime import evidence,delegation
     roots,_=_scoped_writer_roots(manifest)
     changed_paths=_scoped_changed_paths(manifest)
-    tasks=[]; assignments={}; references=[]
+    tasks=[]; assignments={}; references=[];reasons={}
     authority=_canonical_plain(context.authority_set[0])
     with evidence._context_database(context) as db:
         records=delegation._ledger(None,db,context=context)
@@ -2268,6 +2316,12 @@ def _recovery_owner_refs(manifest,context,task_refs):
             named=any(_canonical_plain(r)==ref for r in task_refs)
             if not (named or unresolved or relevant and (task.get('retirement') or task.get('writer_stop'))): continue
             tasks.append(dict(reference=ref,revision=task['revision'],pins=task['pins'],turn_id=task['turn_id']))
+            if use_roots is not None:
+                selected=_historical_recovery_roots(manifest,context,db,task,ref)
+                if not selected or named:selected.append(dict(purpose='content',reference=dict(kind='task',reference=ref)))
+                reasons[d3._digest(ref)]=[dict(root=root,dependencies=[dict(kind='task',reference=ref)]) for root in selected]
+                use_roots.extend(reasons[d3._digest(ref)])
+            start=len(references)
             for record in records:
                 if all(record['owner'][k]==ref[k] for k in ('scope_id','client','session_id','task_id')): assignments[record['id']]=record
             if task.get('retirement') or task.get('writer_stop'):
@@ -2278,13 +2332,25 @@ def _recovery_owner_refs(manifest,context,task_refs):
                     record=delegation._linked_attempt(None,scope_id,task,attempt,records,context=context,db=db,artifact_refs=references)
                     d3._require(record is not None,'Recovery task attempt has unknown ownership')
                     assignments[record['id']]=record
+            if use_roots is not None:
+                for reason in reasons[d3._digest(ref)]:
+                    reason['dependencies'].extend(dict(kind='artifact',reference=dict(authority=authority,artifact=artifact))
+                        for artifact in references[start:])
         for record in assignments.values():
             row=db.execute('select id,scope_id,client,session_id,task_id,dispatch_id,data from assignments where id=?',(record['id'],)).fetchone()
+            start=len(references)
             delegation._record(None,row,db=db,context=context,artifact_refs=references)
+            if use_roots is not None:
+                owner=dict(authority=authority,**{k:record['owner'][k] for k in ('scope_id','client','session_id','task_id')})
+                assignment=dict(authority=authority,id=record['id'],owner=record['owner'],assignment=record['data']['assignment'])
+                for reason in reasons[d3._digest(owner)]:
+                    reason['dependencies'].append(dict(kind='assignment',reference=assignment))
+                    reason['dependencies'].extend(dict(kind='artifact',reference=dict(authority=authority,artifact=artifact))
+                        for artifact in references[start:])
     return tasks,[dict(authority=authority,id=r['id'],owner=r['owner'],assignment=r['data']['assignment']) for r in assignments.values()],references
 
 
-def _collect_recovery_references(manifest,contexts,task_refs=()):
+def _collect_recovery_references(manifest,contexts,task_refs=(),*,use_roots=None):
     from runtime import evidence,delegation
     by_authority={d3._digest(_canonical_plain(c.authority_set[0])):c for c in contexts}
     tasks={}; assignments={}; artifacts={}; foreign={}; pending=[]; seen=set()
@@ -2295,7 +2361,7 @@ def _collect_recovery_references(manifest,contexts,task_refs=()):
             seen.add(key); pending.append((kind,authority,reference))
     for context in contexts:
         authority=_canonical_plain(context.authority_set[0])
-        selected,selected_assignments,roots=_recovery_owner_refs(manifest,context,task_refs)
+        selected,selected_assignments,roots=_recovery_owner_refs(manifest,context,task_refs,use_roots=use_roots)
         for task in selected: tasks[d3._digest(task['reference'])]=task
         for assignment in selected_assignments:
             assignments[d3._digest(assignment)]=assignment
@@ -2336,7 +2402,11 @@ def _collect_recovery_references(manifest,contexts,task_refs=()):
             continue
         with evidence._context_database(context) as db:
             if kind=='artifact':
-                metadata,_=evidence._managed_artifact(None,reference,context=context,db=db)
+                metadata,raw=evidence._managed_artifact(None,reference,context=context,db=db)
+                if use_roots is not None:
+                    body=json.loads(raw)
+                    d3._require(not (isinstance(body,dict) and body.get('kind')=='d4-recovery-source' and 'use_contract' in body),
+                        'Restricted recovery wrapper requires exact owner admission projection')
                 artifacts[d3._digest([authority,reference])]=dict(authority=authority,artifact=reference)
                 for edge in metadata['dependencies']: dependency(edge,authority)
             elif kind=='task':
@@ -2351,6 +2421,71 @@ def _collect_recovery_references(manifest,contexts,task_refs=()):
                 assignments[d3._digest(reference)]=reference
                 for root in roots: enqueue('artifact',authority,root)
     return list(tasks.values()),list(assignments.values()),list(artifacts.values()),list(foreign.values())
+
+
+def _recovery_use_graph(content,contexts):
+    """Read the full acquired graph; annotations never replace its typed dependencies."""
+    from runtime import evidence
+    by_authority={d3._digest(_canonical_plain(c.authority_set[0])):c for c in contexts}
+    direct=[dict(kind='task',reference=t['reference']) for t in content['tasks']]
+    direct.extend(dict(kind='assignment',reference=a) for a in content['assignments'])
+    direct.extend(dict(kind='artifact',reference=a) for a in content['artifacts'])
+    metadata={};owners={}
+    for pointer in content['artifacts']:
+        context=by_authority[d3._digest(pointer['authority'])]
+        with evidence._context_database(context) as db:
+            observed,raw=evidence._managed_artifact(None,pointer['artifact'],context=context,db=db)
+        # An outer inventory cannot turn an inherited restricted body into fresh content.
+        body=json.loads(raw)
+        d3._require(not (isinstance(body,dict) and body.get('kind')=='d4-recovery-source' and 'use_contract' in body),
+            'Restricted recovery wrapper requires exact owner admission projection')
+        name=recovery_uses.key(pointer)
+        metadata[name]=[recovery_uses.qualify_dependency(edge,pointer['authority']) for edge in observed['dependencies']]
+        owners[name]=observed['owner']['task']
+    return direct,metadata,owners
+
+
+def _build_recovery_uses(content,contexts,reasons):
+    """Freeze each actual selected reason before graph deduplication can hide a mixed role."""
+    direct,metadata,owners=_recovery_use_graph(content,contexts)
+    roots=[reason['root'] for reason in reasons];edges=[]
+    for index,reason in enumerate(reasons):
+        root=reason['root'];historical=root['purpose']=='historical-stop'
+        pending=[(None,edge,'retention-only' if historical else 'content') for edge in reason['dependencies']]
+        seen=set()
+        while pending:
+            parent,dependency,purpose=pending.pop()
+            if historical and purpose=='retention-only':
+                ref=dependency['reference'];kind=dependency['kind']
+                if kind in ('artifact','recovery'):
+                    owned=owners.get(recovery_uses.key(ref))==root['task']
+                elif kind=='task':owned=ref==root['task']
+                else:owned=dict(authority=ref['authority'],**{k:ref['owner'][k] for k in ('scope_id','client','session_id','task_id')})==root['task']
+                if not owned:purpose='content'
+            route=recovery_uses.key([parent,dependency,purpose])
+            if route in seen:continue
+            d3._require(len(edges)<recovery_uses.MAX_ROWS,'Recovery rooted use closure exceeds bound')
+            seen.add(route);edges.append(dict(root=index,parent=parent,dependency=dependency,purpose=purpose))
+            # Every flattened direct dependency keeps each actual rooted reason as well.
+            if parent is not None:pending.append((None,dependency,purpose))
+            if dependency['kind'] in ('artifact','recovery'):
+                pointer=dependency['reference'];name=recovery_uses.key(pointer)
+                d3._require(name in metadata,'Recovery use has an unacquired managed parent')
+                pending.extend((pointer,child,purpose) for child in metadata[name])
+    try:
+        contract=recovery_uses.build(roots,edges)
+        recovery_uses.check_coverage(contract,direct,metadata)
+        return contract
+    except recovery_uses.UseContractError as exc:raise Pending(str(exc)) from None
+
+
+def _project_recovery_uses(content,contexts,contracts,legacy_routes=()):
+    """Release may remove proved routes; unknown replacements cannot invent admission."""
+    direct,metadata,_=_recovery_use_graph(content,contexts)
+    try:
+        contract=recovery_uses.merge([*contracts,recovery_uses.build([],[],legacy_routes)])
+        return recovery_uses.project(contract,direct,metadata)
+    except recovery_uses.UseContractError as exc:raise Pending(str(exc)) from None
 
 
 def _existing_recovery_age(contexts,identity):
@@ -2376,7 +2511,8 @@ def _observe_recovery_source(path, journal, contexts, task_refs):
     raw=d3._read_file(path/'transaction.json',MAX_JOURNAL,private=True)
     d3._require(d3.read_request(raw)==journal,'Recovery journal changed during source observation')
     _scoped_journal_shape(journal); contexts=tuple(contexts)
-    tasks,assignments,artifacts,foreign=_collect_recovery_references(journal['manifest'],contexts,task_refs)
+    use_roots=[]
+    tasks,assignments,artifacts,foreign=_collect_recovery_references(journal['manifest'],contexts,task_refs,use_roots=use_roots)
     d3._require(not foreign,'Recovery requires another physical authority')
     for ref in task_refs:
         task_state._task_reference(_canonical_plain(ref))
@@ -2386,15 +2522,33 @@ def _observe_recovery_source(path, journal, contexts, task_refs):
         journal=dict(sha256=hashlib.sha256(raw).hexdigest(),observed_at=task_state._owner_time(),state=journal['state']),
         authorities=canonical([_canonical_plain(c.authority_set[0]) for c in contexts]),tasks=canonical(tasks),assignments=canonical(assignments),artifacts=canonical(artifacts),previous=None)
     from runtime import evidence
-    prior_cuts=[]; supersedes=[]
+    if any(reason['root']['purpose']=='historical-stop' for reason in use_roots):
+        content['use_contract']=_build_recovery_uses(content,contexts,use_roots)
+    prior_cuts=[];supersedes=[];contracts=[];legacy_sources=[]
+    if 'use_contract' in content:contracts.append(content['use_contract'])
     for context in contexts:
+        authority=_canonical_plain(context.authority_set[0])
         _,sources=_recovery_sources(context)
-        for _,prior in sources:
-            if prior['identity']==content['identity'] and prior['version']==2:
-                prior_cuts.extend(prior['stopped']); supersedes.extend(prior['supersedes'])
+        for reference,prior in sources:
+            if prior['identity']!=content['identity']:continue
+            with evidence._context_database(context) as db:
+                history=evidence._recovery_source_history(context,db,reference,content['identity'])
+            for prior_reference,prior_body in history:
+                if 'use_contract' in prior_body:contracts.append(prior_body['use_contract'])
+                else:
+                    origin=dict(authority=authority,artifact=prior_reference,identity=prior_body['identity'],journal_sha256=prior_body['journal']['sha256'])
+                    legacy_sources.append((origin,prior_body))
+            if prior['version']==2:
+                prior_cuts.extend(prior['stopped']);supersedes.extend(prior['supersedes'])
+    if contracts:
+        legacy_routes=[recovery_uses.legacy_projection(origin,body) for origin,body in legacy_sources]
+        try:content['use_contract']=recovery_uses.merge([*contracts,recovery_uses.build([],[],legacy_routes)])
+        except recovery_uses.UseContractError as exc:raise Pending(str(exc)) from None
     if prior_cuts or supersedes:
         content=_cut_recovery_content(content,list({d3._digest(c):c for c in prior_cuts}.values()),contexts)
         content['supersedes']=sorted({d3._digest(c):c for c in supersedes}.values(),key=d3._digest)
+    elif contracts:
+        content['use_contract']=_project_recovery_uses(content,contexts,[content['use_contract']])
     generations={}
     for context in contexts:
         authority=_canonical_plain(context.authority_set[0])
@@ -2718,6 +2872,9 @@ def _check_d4_publication(source,context,db):
             with evidence._context_database(other) as reader:_check_recovery_source(source,other,reader,writer=writer)
     if lifetime['kind']=='operation':
         _check_d4_grant(lifetime['grant'])
+        approved=_canonical_plain(lifetime['grant'].facts)
+        d3._require(approved['source']==_canonical_plain(source.content) and approved['generations']==_canonical_plain(source.generations)
+            and approved['created_at']==source.created_at,'D4 source content differs from actual approved acquisition')
         d3._require(_d4_permission_facts(lifetime['journal'],source)==lifetime['permissions'],
             'Current D4 subject, source or owned enrollment transition changed')
         for location in lifetime['markers']:
@@ -2854,7 +3011,7 @@ def _observe_recovery_release(authorities,identity):
     from runtime import evidence
     identity=_canonical_plain(identity)
     with _recovery_release_guards(authorities,identity) as (path,journal,contexts):
-        heads=[]; supersedes=[]; tasks={};assignments={};artifacts={};certificates={}; generations={};ages=set()
+        heads=[]; supersedes=[]; tasks={};assignments={};artifacts={};certificates={}; generations={};ages=set();contracts=[];legacy_sources=[]
         for context in contexts:
             authority=_canonical_plain(context.authority_set[0])
             baseline,sources=_recovery_sources(context)
@@ -2870,6 +3027,10 @@ def _observe_recovery_release(authorities,identity):
                 history=evidence._recovery_source_history(context,db,reference,identity)
             for prior_ref,content in history:
                 _validate_recovery_references(content,contexts)
+                if 'use_contract' in content:contracts.append(content['use_contract'])
+                else:
+                    origin=dict(authority=authority,artifact=prior_ref,identity=content['identity'],journal_sha256=content['journal']['sha256'])
+                    legacy_sources.append((origin,content))
                 if content['version']==2:
                     for row in content['supersedes']: supersedes.append(row)
                     for c in content['stopped']:certificates[d3._digest(c['reference'])]=c
@@ -2893,6 +3054,10 @@ def _observe_recovery_release(authorities,identity):
             authorities=canonical([_canonical_plain(c.authority_set[0]) for c in contexts]),tasks=canonical(list(tasks.values())),
             assignments=canonical(list(assignments.values())),artifacts=canonical(list(artifacts.values())),previous=None,
             supersedes=canonical(list({d3._digest(row):row for row in supersedes}.values())))
+        if contracts:
+            legacy_routes=[recovery_uses.legacy_projection(origin,body) for origin,body in legacy_sources]
+            try:content['use_contract']=recovery_uses.merge([*contracts,recovery_uses.build([],[],legacy_routes)])
+            except recovery_uses.UseContractError as exc:raise Pending(str(exc)) from None
         content=_cut_recovery_content(content,list(certificates.values()),contexts)
         original=dict(heads=heads,tasks=list(tasks.values()),assignments=list(assignments.values()))
         return _RecoverySourceObservation(_canonical_freeze(content),tuple(contexts),_canonical_freeze(generations),next(iter(ages)),_RECOVERY_ISSUER,_canonical_freeze(original),

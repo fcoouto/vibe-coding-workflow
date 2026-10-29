@@ -2997,7 +2997,7 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
             retired=copy.deepcopy(task);retired.update(state='cancelled',revision=task['revision']+1,retirement=dict(proof_digest=reference['digest'],proof=reference,
                 observation_ref='fixture:stopped',coordinator_ref='fixture:owner',previous_revision=task['revision']))
             state._save(db,state._scope_id(scope),retired)
-        result=self.changes._run_scoped(self.directory,request,'apply');self.assertEqual(result['exit_code'],0,result)
+        result=self.run_with_d4_host(request,'apply');self.assertEqual(result['exit_code'],0,result)
         _,sources=self.changes._recovery_sources(context)
         source=next(content for _,content in sources if content['identity']['plan_dir']==str(self.directory))
         self.assertTrue(any(item['reference']['task_id']=='historical-consumer' for item in source['tasks']))
