@@ -427,3 +427,77 @@ class CouncilFlowTests(CouncilCase):
         with patch.object(council.snapshot, 'MAX_PATHS', 5), self.assertRaisesRegex(ValueError, 'phase_artifact_headroom'):
             self.prepare()
         self.assertFalse((self.root / 'round-one-investigate-external-one').exists())
+
+    def test_rejected_reused_native_child_records_truthful_stop_without_acceptance(self):
+        self.prepare(); self.investigations()
+        packet = council.packet(self.run, 'critique', 'native')
+        receipt = dict(issued_id=packet['issued_id'], child_id='child-investigate', supervisor_id='coordinator',
+            observed_model='native-frontier', observed_effort='max', fork_turns='all',
+            local_execution_stopped=True, accepted=False, checks=['Observed reused child and confirmed local stop.'],
+            report='Rejected answer from reused child must not become deliberation evidence.')
+        council.record_native(self.run, 'critique', 'native', receipt)
+        native = council.status(self.run)['members']['critique']['native']
+        self.assertEqual(native['state'], 'rejected')
+        self.assertTrue(native['local_execution_stopped'])
+        self.external('critique', 'external-one'); self.external('critique', 'external-two')
+        synthesis = council.packet(self.run, 'synthesis', 'native')
+        self.assertNotIn(receipt['report'], synthesis['reports'])
+        self.assertIn('Participant 1: rejected', synthesis['execution_observations'])
+        self.assertIn('fresh context not confirmed', synthesis['execution_observations'])
+        self.assertEqual(council.status(self.run)['outcome'], 'partial')
+
+    def test_fresh_synthesis_receives_frozen_anonymous_execution_gaps_and_unknown_telemetry(self):
+        private_reason = 'vendor/private-model on private-provider unavailable; child-private-reference'
+        self.request['roster']['external-two'] = dict(kind='external', unavailable_reason=private_reason, selection='native:private-discovery')
+        self.prepare(); packet = council.packet(self.run, 'investigate', 'native')
+        council.record_native(self.run, 'investigate', 'native', dict(
+            issued_id=packet['issued_id'], child_id='private-investigator-child', supervisor_id='coordinator',
+            observed_model=None, observed_effort=None, fork_turns='none', controls_verified=True,
+            local_execution_stopped=True, accepted=True, checks=['Verified configured controls, scope and evidence.'],
+            report='Verified evidence with unknown execution telemetry.'))
+        worker = self.external('investigate', 'external-one')
+        self.native('critique')
+        # A later changed result cannot rewrite the already frozen phase observations.
+        path = Path(worker['worker_run']) / 'result.json'
+        result = json.loads(path.read_text()); result['state'] = 'failed'
+        result['failure'] = dict(category='auth', reason='private-provider/private-account')
+        path.write_text(json.dumps(result))
+        worker = self.external('critique', 'external-one', state='failed')
+        path = Path(worker['worker_run']) / 'result.json'
+        result = json.loads(path.read_text()); result['failure'] = dict(category='deadline', reason='private-session-identity')
+        path.write_text(json.dumps(result))
+        synthesis = council.packet(self.run, 'synthesis', 'native')
+        observations = synthesis['execution_observations']
+        self.assertIn('Participant 1', observations)
+        self.assertIn('investigate', observations)
+        self.assertIn('critique', observations)
+        self.assertIn('unavailable', observations)
+        self.assertIn('details withheld from deliberation', observations)
+        self.assertIn('model telemetry unavailable', observations)
+        self.assertIn('effort telemetry unavailable', observations)
+        self.assertIn('failed', observations)
+        self.assertIn('deadline', observations)
+        self.assertIn('no verified evidence included', observations)
+        self.assertIn('Participant 2: accepted', observations)
+        for identity in (private_reason, 'private-provider', 'private-session-identity', 'private-investigator-child', 'native-frontier', 'vendor/frontier', 'external-one', 'external-two'):
+            self.assertNotIn(identity, observations)
+
+    def test_synthesis_discloses_frozen_verification_gap_and_late_unreviewed_evidence(self):
+        import os
+        self.prepare(); self.native('investigate')
+        self.external('investigate', 'external-one', state='awaiting_verification')
+        late = self.external('investigate', 'external-two')
+        path = Path(late['worker_run']) / 'result.json'
+        with council._locked(self.run) as value:
+            late_wall = value['started_wall'] + 601
+        os.utime(path, (late_wall, late_wall))
+        with patch.object(council.time, 'monotonic', return_value=time.monotonic() + 601), patch.object(council.time, 'time', return_value=time.time() + 601):
+            self.critiques()
+            packet = council.packet(self.run, 'synthesis', 'native')
+        observations = packet['execution_observations']
+        self.assertIn('Participant 2: awaiting_verification', observations)
+        self.assertIn('report lacks native verification', observations)
+        self.assertIn('Participant 3: late', observations)
+        self.assertIn('late/unreviewed evidence', observations)
+        self.assertNotIn('initial-2.md', packet['reports'])
+        self.assertNotIn('initial-3.md', packet['reports'])

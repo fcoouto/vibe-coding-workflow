@@ -112,6 +112,17 @@ sources nor later report changes may enter this round after freezing; disclose
 late evidence as unreviewed limitations. Exactly one critique round is supported.
 Synthesis receives the frozen initial reports, critiques and shared research in a
 fresh native context and must verify decisive citations and preserved dissent.
+Native packets also return bounded `execution_observations` Markdown (empty during
+investigation). Pass it with the supplied reports/research when dispatching native
+critique or synthesis. Each closed phase freezes these observations alongside its
+report membership: anonymous Participant 1/2/3 labels, allowlisted states/failure
+categories, missing verification, late/unreviewed evidence, local-stop observations
+and unknown model/effort telemetry. These preserve execution gaps in a fresh context
+without treating excluded reports as evidence. Unavailable selections receive a
+generic qualification cause and “details withheld from deliberation”; exact reasons
+remain in the private audit record. Model/provider/child/session identities and raw
+diagnostic or check text are never copied into this summary. No additional snapshot
+file or change to phase-artifact headroom is required.
 
 ## Record, recover and finish
 
@@ -119,8 +130,10 @@ fresh native context and must verify decisive citations and preserved dissent.
 `controls_verified`: `issued_id`, actual `child_id`, `supervisor_id`, `observed_model`,
 `observed_effort`, `fork_turns`, `local_execution_stopped: true`, Boolean `accepted`,
 nonempty native `checks` and bounded Markdown `report`. Known accepted settings must match
-the selected maximum and fresh context; child identities must differ from the
-coordinator and earlier children. Accepted model/effort observations may be null
+the selected maximum and fresh context; accepted child identities must differ from
+the coordinator and earlier children. A truthful rejected receipt may retain the
+actual reused child and settings with confirmed local stop, so recovery can settle
+ownership without accepting its answer. Accepted model/effort observations may be null
 only with optional `controls_verified: true` and native checks verifying the configured
 request and supported maximum controls; status preserves unknowns and limitations.
 Known contradictions still reject acceptance. For an observed refusal before any child existed,

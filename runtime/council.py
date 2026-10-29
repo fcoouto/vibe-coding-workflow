@@ -209,6 +209,48 @@ def _settled(observed):
                and item.get('local_execution_stopped') is True for item in observed.values())
 
 
+def _execution_summary(phase, observed):
+    descriptions = {
+        'accepted': 'accepted report included; native scope/evidence verification recorded',
+        'unavailable': 'no qualified selected execution option was available; details withheld from deliberation',
+        'missing': 'no attempt or report observed before phase closed; no verified evidence included',
+        'rejected': 'verification rejected the report; no verified evidence included',
+        'failed': 'execution failed; no verified evidence included',
+        'unresolved': 'execution unresolved; no verified evidence included',
+        'late': 'late/unreviewed evidence settled after the phase deadline; no verified evidence included',
+        'awaiting_verification': 'report lacks native verification; no verified evidence included',
+        'issued': 'dispatch remains unsettled; no verified evidence included',
+        'prepared': 'execution remains unsettled; no verified evidence included',
+        'running': 'execution remains unsettled; no verified evidence included',
+    }
+    categories = {'context', 'unknown', 'authentication', 'budget', 'permission', 'rate_limit',
+                  'service', 'invalid_request', 'runtime', 'incomplete_output', 'deadline',
+                  'integration', 'runtime_or_output', 'interrupted'}
+    lines = ['## ' + phase + ' execution observations']
+    for number, member in enumerate(MEMBERS, 1):
+        item = observed.get(member, {})
+        state = item.get('state')
+        state = state if isinstance(state, str) and state in descriptions else 'unresolved'
+        facts = [descriptions[state]]
+        failure = item.get('failure')
+        category = failure.get('category') if isinstance(failure, dict) else None
+        if isinstance(category, str) and category in categories:
+            facts.append('failure category: ' + category)
+        if state not in ('unavailable', 'missing'):
+            for key in ('model', 'effort'):
+                if item.get('observed_' + key) is None:
+                    facts.append(key + ' telemetry unavailable')
+            if member == 'native' and item.get('fork_turns') != 'none':
+                facts.append('fresh context not confirmed')
+            if item.get('on_time') is False:
+                facts.append('deadline compliance not established; late or timing-uncertain evidence excluded')
+            facts.append('local stop observed' if item.get('local_execution_stopped') is True else 'local stop unconfirmed')
+        lines.append('- Participant ' + str(number) + ': ' + state + '; ' + '; '.join(facts) + '.')
+    summary = '\n'.join(lines)
+    _report(summary)
+    return summary
+
+
 def _freeze(run, value, phase, observed):
     names = {}
     for number, member in enumerate(MEMBERS, 1):
@@ -221,6 +263,7 @@ def _freeze(run, value, phase, observed):
     if phase == 'investigate':
         names['research.md'] = _digest(_read(run / 'research.md', REPORT_LIMIT))
     value['frozen'].update(names)
+    value.setdefault('phase_execution', {})[phase] = _execution_summary(phase, observed)
 
 
 def _check_frozen(run, value):
@@ -310,6 +353,8 @@ def packet(run: Path, phase: str, member: str, *, native_receipt=None) -> dict:
             return dict(base, kind='native', issued_id=issued_id, model=seat['model'], reasoning_effort=seat['effort'],
                         fork_turns='none', input_tokens=seat['input_tokens'], output_tokens=seat['output_tokens'],
                         steps=seat['steps'], reports=reports,
+                        execution_observations='\n\n'.join(value.get('phase_execution', {}).get(item, '')
+                            for item in PHASES if item in value.get('phase_execution', {})),
                         research=_read(run / 'research.md', REPORT_LIMIT).decode('utf-8') if phase != 'investigate' else '')
         _require(native_receipt is None, 'native_admission_for_external')
         brief = {key: seat[key] for key in ('model', 'model_display_name', 'provider', 'effort', 'input_tokens',
@@ -340,8 +385,9 @@ def record_native(run: Path, phase: str, member: str, receipt: dict) -> None:
                  and receipt['issued_id'] == item['issued_id']
                  and (_text(receipt['child_id']) or receipt['child_id'] is None and receipt['accepted'] is False)
                  and receipt['supervisor_id'] == item['supervisor_id'], 'invalid_native_receipt')
-        _require(receipt['child_id'] is None or receipt['child_id'] != value['coordinator_chat_id'] and all(other.get('receipt', {}).get('child_id') != receipt['child_id']
-                     for other in value['members'].values()), 'fresh_native_child_required')
+        _require(not receipt['accepted'] or receipt['child_id'] != value['coordinator_chat_id'] and all(
+            other.get('receipt', {}).get('child_id') != receipt['child_id']
+            for other in value['members'].values()), 'fresh_native_child_required')
         _require(all(receipt[key] is None or _text(receipt[key])
                      for key in ('observed_model', 'observed_effort', 'fork_turns')), 'invalid_native_settings_observation')
         seat = value['roster']['native']
