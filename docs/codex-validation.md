@@ -2,7 +2,7 @@
 
 25 October 2026. Scope: D1 startup orientation, not completed project onboarding or workflow enforcement.
 
-This records the original D1 snapshot. The shared-parser extraction and Claude packaging addition have subsequent [cross-client regression evidence](claude-and-superset-validation.md).
+This records the original D1 snapshot. The shared-parser extraction and Claude packaging addition have subsequent [cross-client regression evidence](claude-validation.md).
 
 ## Candidate
 

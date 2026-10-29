@@ -20,7 +20,7 @@ Private Project-plan schema 2 is not an enrollment record. Startup still reads s
 | `policy_digest` | SHA-256 over sorted `policies/*.md`: filename, NUL, file bytes, NUL, repeated |
 | `runtime` (optional) | Codex D2 opt-in: schema version and private external state directory; see the [runtime contract](runtime.md) |
 
-Additional project fields remain available to later slices. Require the current native client in `clients`. Superset is a host, not a client ID or an enrollment signal. This startup record does not distinguish host surfaces; qualify the actual launch separately.
+Additional project fields remain available to later slices. Require the current native client in `clients`. This startup record does not distinguish host surfaces; qualify the actual launch separately.
 
 The current public schema-1 resolver applies optional `runtime` only to Codex. A dual-client record keeps Claude `SessionStart` orientation but does not enable Claude file guards or task controls. Internal read-only canonical acquisition now observes and compares project authority, checkout, physical bindings, dependencies, runtime location and qualification; public startup/task dispatch still uses schema-1 enrollment. Only independently observed qualification facts can yield an active canonical scope. See [Claude's prepared guard boundary](claude-code.md#prepared-file-guard).
 

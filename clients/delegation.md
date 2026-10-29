@@ -4,7 +4,7 @@ Read this contract only when preparing, observing or recovering native delegated
 
 ## Observe the route and select settings
 
-The package provides Codex CLI/Desktop native observation; schema-2 native lifecycle qualification remains pending. Qualify the actual surface/version and required controls before relying on them. Superset and non-native fallback remain suspended. Approval alone cannot make an unsupported route executable.
+The package provides Codex CLI/Desktop native observation; schema-2 native lifecycle qualification remains pending. Qualify the actual surface/version and required controls before relying on them. Approval alone cannot make an unsupported route executable.
 
 Use `discover_native_workers` in the [Codex adapter](../runtime/adapters/codex.py) to inspect current surface, native version and catalog with the coordinator's actual exposed dispatch controls. Select suitable worker settings under policy, retaining the control observation and expected capability digest. Explicit model/effort selection requires supported controls and `fork_turns="none"`; otherwise supply supported inheritance and its evidence only when suitable. Missing controls are limitations, not permission to change coordinator or global settings.
 

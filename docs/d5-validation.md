@@ -1,6 +1,6 @@
 # D5 checks and review validation
 
-26 October 2026. D5 implementation, independent review and disposable native acceptance are complete for Codex CLI 0.163.0 and local Codex Desktop 26.1021.31345 with bundled Codex 0.164.0-alpha.11.1. Desktop qualification covers automatic startup orientation and the D5 checks/review/completion lifecycle below. Repository merge enforcement remains unqualified under D7. Native operation remains the default; Superset controls/dispatch remain implementation suspended in the retained future design.
+26 October 2026. D5 implementation, independent review and disposable native acceptance are complete for Codex CLI 0.163.0 and local Codex Desktop 26.1021.31345 with bundled Codex 0.164.0-alpha.11.1. Desktop qualification covers automatic startup orientation and the D5 checks/review/completion lifecycle below. Repository merge enforcement remains unqualified under D7. Native operation remains the default.
 
 ## Implemented behavior
 
@@ -18,7 +18,7 @@ Codex encrypts native delegation messages, including those exposed to tool hooks
 | Package validator | Passed; skill entries remain 149/143 words | Package structure and instruction budgets, not client execution |
 | Independent general/security review | Two P1 findings fixed; scoped re-review clear | Final transaction checks concurrent reservations; detached command children cannot silently produce passing evidence |
 | Independent fix verification | Six affected tests passed | Both reproduced defects and exact-proof/public-control regressions |
-| Instruction walkthroughs | Seven scenarios passed | Applicable procedures load; unrelated onboarding/Superset material stays unloaded |
+| Instruction walkthroughs | Seven scenarios passed | Applicable procedures load; unrelated onboarding material stays unloaded |
 | Native collector qualification | Positive, duplicate and mismatch cases observed | Actual native identity/result correlation, separate from mocked protocol tests |
 | Final public CLI/native lifecycle | Passed on exact frozen runtime/test/script hashes | Real check reconciliation, independent review, completion and subsequent stale-evidence rejection |
 | Installed Desktop lifecycle | Passed on the frozen installed candidate | Actual startup context, failed/missing evidence blockers, native Luna review, readiness and rejection after an outside-hook edit |

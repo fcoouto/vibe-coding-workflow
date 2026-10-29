@@ -28,7 +28,7 @@ Native evidence is delegated instruction execution and actual inspect/plan CLI u
 
 ## Limits and handoff
 
-The helper checks structure, paths, hashes, revisions, references and declared coverage; it cannot authenticate upstream ownership or establish semantic completeness by itself. The reviewed replacement has a complete independent semantic assessment, but it remains blocked on user choices. D3 did not enroll a project, install tools, or test Superset. D4 separately owns authorized adoption, apply journaling and recovery; D5–D7 retain later task-evidence, dispatch and merge-enforcement work. A digest or `ready_for_review` state grants no authority or readiness.
+The helper checks structure, paths, hashes, revisions, references and declared coverage; it cannot authenticate upstream ownership or establish semantic completeness by itself. The reviewed replacement has a complete independent semantic assessment, but it remains blocked on user choices. D3 did not enroll a project or install tools. D4 separately owns authorized adoption, apply journaling and recovery; D5–D7 retain later task-evidence, dispatch and merge-enforcement work. A digest or `ready_for_review` state grants no authority or readiness.
 
 ## Project-aware private planning — 27 October 2026
 

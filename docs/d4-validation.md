@@ -1,6 +1,6 @@
 # D4 onboarding validation
 
-26 October 2026. Transaction implementation, independent review and bounded disposable adoption checks are complete. **Successful full project enrollment remains unqualified:** the disposable project has no qualified repository gate or complete client-operation evidence. Native operation remains the default; Superset stays a separate optional integration in the retained future design, with implementation suspended.
+26 October 2026. Transaction implementation, independent review and bounded disposable adoption checks are complete. **Successful full project enrollment remains unqualified:** the disposable project has no qualified repository gate or complete client-operation evidence. Native operation remains the default.
 
 ## Implementation and review
 
@@ -52,7 +52,7 @@ Evidence: `/Users/fcouto/.local/share/vcw-validation/d4-testing-_myp6ei2`, with 
 
 Private evidence: `/Users/fcouto/.local/share/vcw-validation/d4-implementation-ujrhepc9`. Final adoption is in `adoption-final/`; earlier evidence remains unchanged. Final adoption report SHA-256: `cca71c1b86098e055afa1ea9ec022035ff785d3e38b5cd8f6032b3b585d2e20c`. Native report SHA-256: `218b9d969697ab03611df6a7a08c2f20e479fc10371e5dce938c62e6642bc59f`.
 
-Package/helper tests, delegated instruction execution and fresh native startup are separate evidence categories. Missing mandatory project mechanisms must remain pending; a temporary qualification record or `applied` result cannot establish task or merge readiness. Validation performed no live project enrollment, global installation, Superset change or release publication.
+Package/helper tests, delegated instruction execution and fresh native startup are separate evidence categories. Missing mandatory project mechanisms must remain pending; a temporary qualification record or `applied` result cannot establish task or merge readiness. Validation performed no live project enrollment, global installation or release publication.
 
 ## Private Project-plan boundary — 27 October 2026
 

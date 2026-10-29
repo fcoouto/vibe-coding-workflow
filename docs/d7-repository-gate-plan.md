@@ -2,7 +2,7 @@
 
 Implementation plan · 26 October 2026 · Bounded fixture inspector implemented; production publishing and repository enforcement remain unqualified.
 
-**Goal:** require a trusted final verification result before a supported repository merge. D5 establishes local completion evidence; D6 reconciles managed writers; D7 makes the repository enforce accepted merge requirements. Superset is not a dependency and remains implementation suspended. Behavioral qualification and usage reporting retain their [D9 owners](onboard-my-project-plan.md#d9-qualification-usage-and-pilot).
+**Goal:** require a trusted final verification result before a supported repository merge. D5 establishes local completion evidence; D6 reconciles managed writers; D7 makes the repository enforce accepted merge requirements. Behavioral qualification and usage reporting retain their [D9 owners](onboard-my-project-plan.md#d9-qualification-usage-and-pilot).
 
 Follow [Merge Readiness](../policies/08-merge-readiness.md), [Code Review](../policies/06-code-review.md), [Security Review](../policies/04-security-review.md) and [Tests and Builds](../policies/05-tests-and-builds.md). Use standard-library Python and existing evidence formats. No new database, agent launcher, billing route or automatic project adjustments.
 
