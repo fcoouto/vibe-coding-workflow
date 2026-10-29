@@ -32,7 +32,7 @@ Files: scripts/openrouter_workers.py; tests/test_openrouter_workers.py.
 - [x] Write failing behavioral tests for input isolation, replay refusal, event/accounting reduction and failed/timeout execution.
 - [x] Implement a private run directory, restrictive OpenCode configuration, bounded subprocess lifecycle and sanitized progress.
 - [x] Reuse installed Habblaud transport; qualify event delivery against the actual local Habblaud receiver.
-- [x] Run focused tests and package validation; attempt the broader repository suite and report its incomplete result below.
+- [x] Run focused tests, package validation and the full repository suite; record their separate results below.
 
 ### Task 2: Supervisor contract and qualification
 
@@ -63,11 +63,39 @@ authoritative. Private run receipts and reviewer-bound source hashes are kept
 outside the repository. No broad write/permission capability is qualified.
 
 Package and skill validation pass; eleven worker tests and twenty-two existing
-proposal tests pass. The full repository run was interrupted after more than twenty
+proposal tests pass. The initial full repository run was interrupted after more than twenty
 minutes in the unchanged core evidence/lifecycle tests. It had emitted one failure;
 the test at that progress position passed on a focused rerun. The exact earlier
 failure traceback was not available, so its cause remains unresolved. The final
 interrupt stack was in `LinkedVerificationTests.test_linked_non_success_mixed_required_merged_history_survives_d4_retirement`,
-through lifecycle recovery and repeated linked snapshots. This is not a passing
-full-suite result or release approval. Genesis receives that separate regression gap;
+through lifecycle recovery and repeated linked snapshots. That initial run did not establish
+a full-suite pass or release approval. Genesis received that separate regression gap;
 its reserved core implementation remains untouched.
+
+## Remaining verification, 29 October 2026
+
+The pilot was applied cleanly to primary revision
+`cb4bac920d31927a7d6f5ddef90d51c8b42c0a56` in the isolated verification checkout.
+Candidate `6cf0c6912295ba64c506f77e385f30b8a53aa1ac` has tracked tree
+`d024a4d885cd6c4247da5e01a66d451aa5707aee`, identical to Genesis's local integration
+`26f5590dcf3c5a072816e55045ef32b945519f4e`. All 108 tracked source hashes remained
+unchanged throughout the run.
+
+The complete verbose, fail-fast repository suite passed: **962 tests in
+5933.361 seconds, exit code 0**. The full named log, source hashes, command, Python
+version and timings are retained in private verification evidence. The earlier
+uncaptured failure did not recur; its original cause remains unknown. SQLite
+ResourceWarnings were retained in the log and are separate from test failures.
+No runtime changes or additional OpenRouter inference were needed for this pass.
+
+A no-inference check against isolated OpenCode 1.19.5 confirmed the pilot's final
+wildcard permission denies skill access. The pinned runtime's system-prompt builder
+returns before listing skills under that denial. Global external-skill discovery
+may occur internally; this is not evidence of model access or an OS sandbox.
+Package validation, skill validation and whitespace checks pass separately.
+
+This full-suite result applies to the bounded read-only pilot integration above.
+Later Observability caller revision `9a6e060a610c65590381151a22989af57903beec` and
+unintegrated Genesis core changes are not covered by this frozen run. Their owners
+retain their separate validation responsibilities. External editing, global
+activation and publication remain outside this verification outcome.
