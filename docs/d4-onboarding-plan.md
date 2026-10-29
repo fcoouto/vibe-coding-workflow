@@ -15,7 +15,7 @@ Current D4 explicitly rejects schema-2 private Project plans immediately after l
 - Add `runtime/changes.py`, focused tests in `tests/test_changes.py`, and extend `scripts/workflow.py` with only `onboard apply`, `onboard resume` and `onboard rollback`. Add narrow dispatcher cases to `tests/test_runtime.py`.
 - Reuse D3's private plan directory and plan identity, source/package pins, exact action proposal, input fingerprints and revision checks. The caller supplies `--plan-dir`; D4 does not provision a shared runtime data directory or alter startup/state contracts.
 - The coordinator must verify actual user/session authorization through trusted host evidence and record its reference. A bounded, versioned D4 apply input binds that reference to the exact D3 plan revision/digest, D4 manifest digest/content, target checkout and approved scope; runtime verifies the binding and freshness. A changed manifest invalidates approval for affected work. JSON cannot authenticate human intent, and D3 free-text authorization/evidence grants no authority. Add no authentication service. If required host/user evidence is unavailable, remain pending.
-- Keep native operation as the default. Do not add a Superset onboarding question. Superset enable/disable remains a separate optional integration in the retained future design, after qualification; implementation is suspended.
+- Keep native operation as the default. Optional integrations remain separate from project onboarding.
 - Do not add a generic installer catalog or arbitrary command rollback mechanism. Use Toolkit procedures and the exact actions from the approved plan.
 
 ## Transaction identity, locks and journal

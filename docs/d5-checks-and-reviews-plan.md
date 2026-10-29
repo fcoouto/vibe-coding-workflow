@@ -2,7 +2,7 @@
 
 Implementation plan · 26 October 2026 · Implemented; see [validation](d5-validation.md) for independent review, native proof and limits.
 
-**Goal:** verify current checks, general review and applicable security review before accepting task completion. Native Codex remains the default. Superset integration and its Enable/Disable skill remain implementation suspended; native worker routing belongs to D6, and repository merge enforcement remains D7.
+**Goal:** verify current checks, general review and applicable security review before accepting task completion. Native Codex remains the default. Native worker routing belongs to D6, and repository merge enforcement remains D7.
 
 **Basis:** the [approved deliverable](onboard-my-project-plan.md#5-small-deliverables), [Tests and Builds](../policies/05-tests-and-builds.md), [Code Review](../policies/06-code-review.md), [Security Review](../policies/04-security-review.md) and existing [task runtime](../clients/runtime.md). These contracts retain their full requirements. Use Python 3.11+, the standard library and OpenAI's `skill-creator` authoring standard.
 
@@ -70,12 +70,12 @@ Then use an authorized D4 enrollment update to select a fresh private state dire
 
 ## 5. Guidance, review and validation
 
-**Owner: Luna, medium effort.** Write `clients/evidence.md` with controls, loading triggers and honest limits; link it from the task runtime only when checks/reviews/completion apply. Update relevant client guidance, README, validator paths and [coverage map](policy-sources.md). Keep full policies authoritative; no new skill or repeated policy text is needed. Runtime guidance loads no Toolkit checkout, onboarding procedure or Superset material.
+**Owner: Luna, medium effort.** Write `clients/evidence.md` with controls, loading triggers and honest limits; link it from the task runtime only when checks/reviews/completion apply. Update relevant client guidance, README, validator paths and [coverage map](policy-sources.md). Keep full policies authoritative; no new skill or repeated policy text is needed. Runtime guidance loads no Toolkit checkout or onboarding procedure.
 
 Independently exercise instruction paths for a trivial change, nontrivial change, sensitive change, unavailable reviewer, scoped fix and stale completion. Verify applicable contracts load and unrelated material stays unloaded. Sol performs independent general and applicable security review after implementation; address findings through scoped fixes and rechecks.
 
 Run focused evidence/adapter/state/dispatcher tests, the complete unit suite, `python3 -B scripts/validate.py` and `git diff --check`. Validate any changed skill entry point separately. Record a complete disposable native check/review/completion task, then an edit that makes its evidence stale. Report package validation, helper tests and observed client execution separately.
 
-**Completion:** the qualified native path accepts current, sufficient proof and refuses missing, stale, forged or blocking evidence. D6 retains worker model/effort selection from cached platform guidance, native dispatch and concurrent ownership while preserving coordinator settings; Superset controls remain implementation suspended. D7 retains repository enforcement. No live project enrollment or release archive is part of D5 implementation proof.
+**Completion:** the qualified native path accepts current, sufficient proof and refuses missing, stale, forged or blocking evidence. D6 retains worker model/effort selection from cached platform guidance, native dispatch and concurrent ownership while preserving coordinator settings. D7 retains repository enforcement. No live project enrollment or release archive is part of D5 implementation proof.
 
 **Downstream reuse:** [D7 merge assurance](d7-repository-gate-plan.md) consumes candidate-bound evidence through a trusted repository verifier. [D9 qualification and usage](onboard-my-project-plan.md#d9-qualification-usage-and-pilot) reuse D5 fixtures, private artifacts and verified-acceptance identities. Native completion and hook receipts alone establish neither behavioral qualification nor authoritative task consumption.

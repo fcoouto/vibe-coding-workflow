@@ -214,7 +214,7 @@ class StateTests(unittest.TestCase):
 
     def test_canonical_retirement_retains_exact_four_key_historical_pins(self):
         self.scope = canonical_scope(self.scope)
-        self.test_historical_retirement_requires_exact_stopped_writer_proof_and_preserves_pins()
+        self.test_historical_retirement_requires_exact_stopped_writer_proof_and_preserves_pins(canonical=True)
 
 
     def test_canonical_entry_rejects_mutable_scope_snapshots_before_initialization(self):
@@ -501,7 +501,7 @@ class StateTests(unittest.TestCase):
         self.assertIsNone(self.status()['task']['lifecycle']['safe_closed_at'])
 
 
-    def test_historical_retirement_requires_exact_stopped_writer_proof_and_preserves_pins(self):
+    def test_historical_retirement_requires_exact_stopped_writer_proof_and_preserves_pins(self, *, canonical=False):
         import hashlib
         self.start()
         old = self.status()["task"]
@@ -524,8 +524,20 @@ class StateTests(unittest.TestCase):
         request["stop_proof"] = dict(path=str(path), sha256=hashlib.sha256(raw).hexdigest())
         with self.assertRaises(self.api().StateError):
             self.api().retire_task(self.scope, request | dict(expected_revision=1))
-        with patch.object(self.api(), "runtime_fingerprint", return_value="new-runtime"):
+        if canonical:
+            self.assertEqual(set(historical["pins"]), {"schema_version", "policy_digest", "runtime_digest", "accepted_scope_digest"})
+            with self.api()._database(self.scope) as db:
+                metadata = db.execute("select * from evidence_metadata order by name").fetchall()
+            with patch.object(self.api(), "runtime_fingerprint", return_value="new-runtime"), \
+                    self.assertRaisesRegex(self.api().StateError, "Installed runtime differs"):
+                self.api().retire_task(self.scope, request)
+            with self.api()._database(self.scope) as db:
+                self.assertEqual(self.api()._task(db, self.api()._scope_id(self.scope), "codex", "session", "task"), historical)
+                self.assertEqual(db.execute("select * from evidence_metadata order by name").fetchall(), metadata)
             result = self.api().retire_task(self.scope, request)
+        else:
+            with patch.object(self.api(), "runtime_fingerprint", return_value="new-runtime"):
+                result = self.api().retire_task(self.scope, request)
         self.assertEqual(result["task"]["state"], "cancelled")
         self.assertEqual(result["task"]["pins"], historical["pins"])
         self.assertEqual(self.status()["task"]["task_id"], "new")

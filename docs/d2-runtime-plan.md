@@ -4,11 +4,11 @@
 
 **Goal:** add durable task state, a narrow Codex action guard, conservative invalidation, bounded Stop handling and independent diagnostics.
 
-**Basis:** the [D2 deliverable](onboard-my-project-plan.md#5-small-deliverables), [approved contracts](../policies/00-index.md) and [delegation backend decision](superset-feature-map.md#delegation-backend). Use Python 3.11+ and its standard library. Keep each step independently reviewable.
+**Basis:** the [D2 deliverable](onboard-my-project-plan.md#5-small-deliverables) and [approved contracts](../policies/00-index.md). Use Python 3.11+ and its standard library. Keep each step independently reviewable.
 
 ## Scope and current evidence
 
-- Native operation is the default. D2 introduces no Superset dependency, discovery, onboarding question or backend framework. The later connection skill remains optional and project-scoped.
+- Native operation is the default. D2 introduces no backend framework.
 - Keep Codex and Claude startup behavior. Qualify the new lifecycle on Codex first; Claude lifecycle follows D8. D2 does not require a Claude account.
 - D3–D4 own onboarding and recovery; D5 owns check/review verification and readiness; D6 owns worker model/effort selection, dispatch and resource reservations while preserving coordinator settings; D7 owns repository enforcement. D2 does not grant these capabilities early.
 - Use disposable enrollment fixtures until D4. Existing startup-only enrollment must not silently enable writes to runtime state or guards. No real project enrollment or settings changes belong to this slice.
@@ -130,7 +130,7 @@ Use a failing behavioral test, smallest implementation and focused rerun for eac
 - [x] Use disposable repositories/state, reviewed hook definitions and normal client trust. Preserve the authorized model, provider, account and permission settings; do not copy credentials or weaken isolation to make a probe run. If an isolated authorized path is unavailable, mark native qualification blocked rather than substituting a fixture.
 - [x] Observe CLI read-only denial, editable patch, post-tool invalidation including delayed completion, bounded continuation and correlated interruption. On the bundled app-server, observe read-only/editable guards, invalidation and bounded continuation, plus one controlled correlated Interrupt while unchanged Stop output was held. The earlier ordinary two-tool Interrupt attempts remain unqualified; this controlled case does not remove the read-first correlation limit. See [validation](d2-validation.md).
 - [x] On CLI, separately test unenrolled/legacy enrollment, missing/disabled/untrusted/modified hooks, malformed output, crash, timeout and state lock. Record actual tool outcomes; do not infer fail-closed behavior from intended responses. Bundled failure cases remain untested.
-- [x] Keep Superset absent from the isolated environment without changing user hooks; preserve Claude startup regressions. Desktop UI, Claude lifecycle and model policy compliance remain unqualified.
+- [x] Preserve Claude startup regressions. Desktop UI, Claude lifecycle and model policy compliance remain unqualified.
 - [x] Record versions, candidate digests, trust/settings, outcomes and limitations. Local dispatcher p95 and context limits were measured; native p95 and token savings are not claimed. Root's final independent review was clear. Bundled failure and delayed-Post matrix cases remain untested.
 
 ## Completion boundary
