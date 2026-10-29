@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Opt-in read-only OpenCode workers. Native supervisors own acceptance."""
 import argparse
+from contextlib import nullcontext
 from email.utils import parsedate_to_datetime
 import fcntl
 import importlib
@@ -333,7 +334,7 @@ def stop_process(proc):
         time.sleep(.01)
 
 
-def execute(run, executable, auth_data, publish=None):
+def execute(run, executable, auth_data, publish=None, *, launch_guard=None):
     run = Path(run)
     brief = json.loads((run / 'brief.json').read_text())
     with (run / 'execution.lock').open('a') as lock:
@@ -341,12 +342,12 @@ def execute(run, executable, auth_data, publish=None):
         if json.loads((run / 'result.json').read_text())['state'] != 'prepared': raise ValueError('already_started')
         original = signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
         try:
-            return _execute(run, brief, Path(executable), Path(auth_data), publish)
+            return _execute(run, brief, Path(executable), Path(auth_data), publish, launch_guard=launch_guard)
         finally:
             signal.signal(signal.SIGTERM, original)
 
 
-def _execute(run, brief, executable, auth_data, publish):
+def _execute(run, brief, executable, auth_data, publish, *, launch_guard=None):
     workspace = run / 'workspace'
     config = configuration(brief, workspace)
     auth_data = auth_data.resolve()
@@ -395,7 +396,8 @@ def _execute(run, brief, executable, auth_data, publish):
         elif any(key in brief for key in ('evidence', 'permission_qualification', 'capabilities', 'input_tokens', 'output_tokens')):
             raise ValueError('forged_council_marker')
         with settings.admission(brief['source_root'], route, root=run.parent, opencode=executable,
-                                auth_data=auth_data, revision=stamp['revision'], scope_id=stamp['scope_id']):
+                                auth_data=auth_data, revision=stamp['revision'], scope_id=stamp['scope_id']), (
+                                    launch_guard() if launch_guard else nullcontext()):
             if time.monotonic() >= deadline: raise TimeoutError()
             proc = subprocess.Popen([str(executable), 'run', '--pure', '--format', 'json', '--agent', 'pilot',
                                      '--model', 'openrouter/' + brief['model'], '--title', brief['task_id']],
