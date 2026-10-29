@@ -744,7 +744,7 @@ def _recovery_files(path, root, journal, cleanup=True):
 def _fresh(plan, journal=None, *, external_owned=()):
     """Normalize only receipt-owned paths; unrelated inputs retain D3 freshness checks."""
     root = Path(plan["identity"]["repository_root"])
-    current = d3._snapshot(root, d3._file_targets(plan["actions"]))
+    current = d3._snapshot(root, d3._snapshot_targets(plan))
     previous = plan["identity"]
     owned = _owned(journal) if journal else {}
     owned.update({key:(None,None) for key in external_owned})

@@ -352,16 +352,21 @@ def _file_targets(actions):
             targets.append(_relative(action.get("target")))
     return targets
 
+def _snapshot_targets(plan):
+    names = {name for name in plan["identity"]["fingerprints"] if not name.startswith("instruction:")}
+    return sorted(names | set(_file_targets(plan["actions"])))
+
 def _snapshot(root, targets=(), *, budget=None):
     identity = checkout(root)
     _require(identity is not None and identity[0] == root, "Selected checkout identity changed")
     code, raw = _git(root, "ls-files", "--cached", "--others", "--exclude-standard", "-z")
     _require(code == 0, "Cannot enumerate checkout files")
     names = sorted(set(os.fsdecode(name) for name in raw.split(b"\x00") if name))
-    _require(len(names) <= MAX_PATHS, "Checkout path limit exceeded; inventory remains incomplete")
+    observed_names = sorted(set(names) | {_relative(name) for name in targets})
+    _require(len(observed_names) <= MAX_PATHS, "Checkout path limit exceeded; inventory remains incomplete")
     fingerprints = {}
     total = 0
-    for name in names:
+    for name in observed_names:
         _relative(name)
         fingerprints[name] = (_inspection_fingerprint(root, name, budget)
                               if budget is not None else _fingerprint(root, name))
@@ -369,7 +374,7 @@ def _snapshot(root, targets=(), *, budget=None):
         _require(total <= MAX_TOTAL, "Checkout byte limit exceeded; inventory remains incomplete")
     instructions = []
     directories = {root, *root.parents}
-    for name in [*names, *targets]:
+    for name in observed_names:
         directory = (root / name).parent
         while directory.is_relative_to(root):
             directories.add(directory)
@@ -432,7 +437,7 @@ def _source_blockers(plan, observed):
 
 def _current(plan):
     root = Path(plan["identity"]["repository_root"])
-    snapshot = _snapshot(root, _file_targets(plan["actions"]))
+    snapshot = _snapshot(root, _snapshot_targets(plan))
     sources = _sources(plan["sources"]["declared"])
     package = _package_pins()
     changes = []
@@ -765,9 +770,6 @@ def _project_observations(scope, sources, assessments=None):
             assessment = by_root.get(repository["root"], {})
             targets = _observed_targets(assessment)
             repository["snapshot"] = _snapshot(Path(repository["root"]), targets, budget=budget)
-            for name in targets:
-                if name not in repository["snapshot"]["fingerprints"]:
-                    repository["snapshot"]["fingerprints"][name] = _inspection_fingerprint(Path(repository["root"]), name, budget)
             if assessment.get("actions") or assessment.get("identity", {}).get("targets"):
                 repository["targets"] = _target_observations(assessment, repository["snapshot"]["fingerprints"], budget=budget)
             if any(value["status"] not in ("read", "absent") for value in repository["snapshot"]["fingerprints"].values()):
@@ -1563,11 +1565,12 @@ def record_plan(plan_dir, request):
         for key, old in previous.items():
             if incoming[key] != old:
                 _remember_decision(plan, old)
-        # New file destinations add instruction scopes even when Git ignores their directories.
-        expanded = _snapshot(Path(plan["identity"]["repository_root"]), _file_targets(plan["actions"]))
+        # New file destinations add raw fingerprints and instruction scopes even when Git ignores them.
+        targets = _file_targets(plan["actions"])
+        expanded = _snapshot(Path(plan["identity"]["repository_root"]), targets)
         fingerprints = plan["identity"]["fingerprints"]
         fingerprints.update({key: value for key, value in expanded["fingerprints"].items()
-                             if key.startswith("instruction:") and key not in fingerprints})
+                             if (key.startswith("instruction:") or key in targets) and key not in fingerprints})
         known = {row["path"] for row in plan["identity"]["instructions"]}
         plan["identity"]["instructions"].extend(row for row in expanded["instructions"] if row["path"] not in known)
         blockers = _validate_proposal(plan)
