@@ -35,6 +35,7 @@ MAX_OUTPUT = 128 * 1024
 COVERAGE = {'general', 'security', 'behavior'}
 IDENTITY = ('client', 'session_id', 'task_id', 'scope_ref', 'expected_revision')
 _CONTENT_ACQUISITION=ContextVar('content_acquisition',default=None)
+_DIAGNOSTIC_CLEANUP=ContextVar('diagnostic_cleanup',default=False)
 _SOURCE_BIRTH=ContextVar('source_publication_birth',default=None)
 _SOURCE_BIRTH_ISSUER=object()
 _FOREIGN_PLAN_ISSUER=object()
@@ -546,9 +547,9 @@ def _closure_assignment_projection(context,db,task,records):
 
 def _lifecycle_requirements(context, roots, *, db):
     """Follow typed managed-content consumers; exact inserted owner edges are attribution."""
-    authority=_canonical_plain(context.authority_set[0]);pending=list(roots);seen=set();requirements=[]
+    authority=_canonical_plain(context.authority_set[0]);pending=[(edge,edge['owner']) for edge in roots];seen=set();requirements=[]
     while pending:
-        edge=pending.pop(0);key=_raw(edge)
+        edge,origin=pending.pop(0);key=_raw([edge,origin])
         if key in seen:continue
         seen.add(key);_require(len(seen)<=4096,'Lifecycle dependency traversal exceeds bound')
         kind=edge['kind'];reference=edge['reference'];need=edge['need']
@@ -577,6 +578,18 @@ def _lifecycle_requirements(context, roots, *, db):
             selected=reference.get('authority',authority)
             _require(selected==authority,'Foreign content consumer remains protected')
             ref=reference.get('artifact',reference)
+            metadata=state._metadata(db,ref['name'])
+            if metadata is not None and metadata['status']!='live':
+                proof=_diagnostic_proof(context,db,ref)
+                parent=edge['owner'].get('artifact') if edge['owner'].get('authority')==authority else None
+                original=origin.get('artifact') if origin.get('authority')==authority else None
+                historical=[proof['execution'],proof['closure'],proof['mandate']['reference'],proof['execution_mandate']['reference']]
+                _require((origin==proof['owner'] or original in historical)
+                    and parent in (proof['execution'],proof['closure'],proof['mandate']['reference']),
+                    'Independent current consumer requires unavailable diagnostic content')
+                requirements[-1]=dict(edge,need='diagnostic-provenance')
+                pending.append((dict(owner=dict(authority=authority,artifact=ref),kind='task',reference=proof['owner'],need='identity'),origin))
+                continue
             metadata,raw=_managed_artifact(None,ref,context=context,db=db)
             value=json.loads(raw)
             for dependency in metadata['dependencies']:
@@ -584,10 +597,10 @@ def _lifecycle_requirements(context, roots, *, db):
                 if child['kind']=='task' and child['reference']==metadata['owner'].get('task') and value.get('kind')!='linked-verification':
                     child_need='identity'
                 _require(child['kind'] in {'task','artifact'},'Unknown owner dependency requires its original raw support')
-                pending.append(dict(owner=dict(authority=authority,artifact=ref),**child,need=child_need))
+                pending.append((dict(owner=dict(authority=authority,artifact=ref),**child,need=child_need),origin))
         else:
             raise state.StateError('Assignment, delivery or recovery body needs owner-specific closure support')
-    return sorted(requirements,key=_raw)
+    return sorted({_raw(edge):edge for edge in requirements}.values(),key=_raw)
 
 
 def _closure_file_stat(path):
@@ -607,12 +620,14 @@ def _closure_recovery_files(recovery):
     return files
 
 
-def _closure_recovery(context,task_ref):
+def _closure_recovery(context,task_ref=None):
+    """Inspect all current D4 roots, with optional named-task D4 stop correspondence."""
     from runtime import changes
     authorities=[_canonical_plain(context.authority_set[0])]
-    result=_canonical_plain(changes._inspect_lifecycle_recovery_guarded(authorities,[task_ref]))
+    task_refs=[] if task_ref is None else [task_ref]
+    result=_canonical_plain(changes._inspect_lifecycle_recovery_guarded(authorities,task_refs))
     before=_closure_recovery_files(result)
-    latest=_canonical_plain(changes._inspect_lifecycle_recovery_guarded(authorities,[task_ref]))
+    latest=_canonical_plain(changes._inspect_lifecycle_recovery_guarded(authorities,task_refs))
     _require(latest==result and _closure_recovery_files(latest)==before,'Recovery source moved during closure observation')
     return result,before
 
@@ -815,23 +830,20 @@ def _closure_facts(context, task_ref, db, recovery, *, recovery_files=None):
     _require(not any(edge['kind']=='task' and edge['reference']==task_ref and edge['need']=='raw' for edge in requirements),
         'An independent current consumer still requires the raw task body')
     # Every existing managed file is accounted and physically bound; unregistered orphans protect.
-    physical=[];compact=task['lifecycle']['compact']
-    for item in observed['metadata']:
-        ref=item['reference'];path=Path(item['metadata']['managed']['path']);before=_closure_file_stat(path)
-        metadata,raw=_managed_artifact(None,ref,context=context,db=db)
-        _require(_closure_file_stat(path)==before,'Managed source moved during closure read')
-        owner=metadata['owner'];body=json.loads(raw)
+    physical=_historical_inventory(context,db,observed['metadata']);compact=task['lifecycle']['compact']
+    for item in physical:
+        ref=item['reference'];metadata=item['metadata'];owner=metadata['owner']
         _require(owner.get('kind')=='project' and owner.get('project_id')==task['accepted_identity']['project_id'],
             'Unknown or foreign evidence owner remains protected')
         _require(owner['task'] is None or owner['task']['authority']==authority,'Foreign evidence task owner remains protected')
         if owner['task'] is None:
+            body=_read(None,ref,context=context,db=db)
             _require(metadata['class']=='compact' and body.get('kind') in {'authority-source-baseline','d4-recovery-source'}
                 or metadata['class']=='detail' and ref in guidance['references'],
                 'Scope-owned consumer dependencies require existing guidance/review owner integration')
-        physical.append(dict(reference=ref,metadata=metadata,stat=before))
     folder=context.directory/'evidence'
     names=sorted(p.name for p in folder.iterdir()) if folder.exists() else []
-    _require(len(names)<=4096 and names==sorted(item['reference']['name'] for item in observed['metadata']),
+    _require(len(names)<=4096 and names==sorted(item['reference']['name'] for item in physical if item['stat'] is not None),
         'Unaccounted evidence content remains protected')
     # Normalize only the owner-written closure envelope and its one retained compact artifact.
     task=dict(task,lifecycle=dict(created_at=task['lifecycle']['created_at'],safe_closed_at=None,closure=None,compact=None))
@@ -922,17 +934,19 @@ def _linked_closure_facts(context,task_ref,pointer,authorities,recovery,files,*,
             roots.extend(dict(owner=dict(authority=authority,source='native-guidance'),kind='artifact',reference=ref,need='content') for ref in guidance['references'])
             requirements.extend(_lifecycle_requirements(other,roots,db=db))
             if not local_members:continue
-            observed=observations[_raw(local_members[0]['reference'])];allowed={row['task']['accepted_identity']['project_id'] for row in observed['tasks']};physical=[]
-            for item in observed['metadata']:
-                metadata,raw=_managed_artifact(None,item['reference'],context=other,db=db);body=json.loads(raw);owner=metadata['owner']
+            observed=observations[_raw(local_members[0]['reference'])];allowed={row['task']['accepted_identity']['project_id'] for row in observed['tasks']}
+            physical=_historical_inventory(other,db,observed['metadata'])
+            for item in physical:
+                metadata=item['metadata'];owner=metadata['owner']
                 _require(owner['kind']=='project' and owner['project_id'] in allowed and
                     (owner['task'] is None or owner['task']['authority']==authority),'Unknown linked closure content owner remains protected')
-                if owner['task'] is None:_require(metadata['class']=='compact' and body.get('kind') in {'authority-source-baseline','d4-recovery-source'} or
-                    metadata['class']=='detail' and item['reference'] in guidance['references'],'Unknown linked scope content remains protected')
-                physical.append(dict(reference=item['reference'],metadata=metadata,stat=_closure_file_stat(Path(metadata['managed']['path']))))
+                if owner['task'] is None:
+                    body=_read(None,item['reference'],context=other,db=db)
+                    _require(metadata['class']=='compact' and body.get('kind') in {'authority-source-baseline','d4-recovery-source'} or
+                        metadata['class']=='detail' and item['reference'] in guidance['references'],'Unknown linked scope content remains protected')
             physicals[_raw(authority)]=physical
             _require(sorted(path.name for path in (other.directory/'evidence').iterdir())==sorted(
-                [item['reference']['name'] for item in observed['metadata']]+[ref['name'] for ref in excluded]),'Unaccounted linked closure content remains protected')
+                [item['reference']['name'] for item in physical if item['stat'] is not None]+[ref['name'] for ref in excluded]),'Unaccounted linked closure content remains protected')
     issued={(_raw(a['reference']['authority']),a['reference']['id']) for m in component['members'] for a in m['certificate'].get('assignments',[])}
     _require(not any(edge['need']=='raw' and (edge['kind']=='task' and _raw(edge['reference']) in owners or
         edge['kind']=='assignment' and (_raw(edge['reference']['authority']),edge['reference']['id']) in issued) for edge in requirements),
@@ -1058,12 +1072,9 @@ def _linked_retirement_facts(context,task_ref,pointer,authorities,*,writer=None,
     with _preparation_database(context,writer) as db:observed=state.inspect_dependencies(db,task_ref)
     _require(not [value for value in observed['blockers'] if value!='Assignment body requires original task; exact assignment certificate integration is required'],
         'Linked original event/assignment ownership remains uncertain')
-    physical=[]
     with _preparation_database(context,writer) as db:
-        for item in observed['metadata']:
-            metadata,_=_managed_artifact(None,item['reference'],context=context,db=db)
-            physical.append(dict(reference=item['reference'],metadata=metadata,stat=_closure_file_stat(Path(metadata['managed']['path']))))
-    _require(sorted(path.name for path in (context.directory/'evidence').iterdir())==sorted(item['reference']['name'] for item in observed['metadata']),
+        physical=_historical_inventory(context,db,observed['metadata'])
+    _require(sorted(path.name for path in (context.directory/'evidence').iterdir())==sorted(item['reference']['name'] for item in physical if item['stat'] is not None),
         'Unaccounted content protects linked retirement')
     task=member['task'];closure=member['closure'];observed.pop('digest')
     projection={key:closure['content'][key] for key in ('outcomes','reviews','workers','numerical','verifications','native_guidance','scope_guidance','sources')}
@@ -1264,7 +1275,10 @@ def _check_closure_observation(context, db, task_ref, observations, *, new_compa
     _require(current==expected,'Closure rows, source heads, generation or metadata changed')
     _require(all(_binding(Path(path))==binding for path,binding in facts['bindings'].items()),'Closure checkout binding changed')
     for item in facts['physical']:
-        _require(_closure_file_stat(Path(item['metadata']['managed']['path']))==item['stat'],'Closure source bytes or physical identity changed')
+        if item['stat'] is None:
+            _require(_historical_inventory(context,db,[item])==[item],'Historical diagnostic absence changed')
+        else:
+            _require(_closure_file_stat(Path(item['metadata']['managed']['path']))==item['stat'],'Closure source bytes or physical identity changed')
         for path,binding in item['metadata']['managed']['parents'].items():
             _require(_binding(Path(path))==binding,'Closure content parent changed')
     _require(all(_closure_file_stat(Path(path))==value for path,value in facts['recovery_files'].items()),'Recovery source changed before closure commit')
@@ -1286,7 +1300,8 @@ def _check_closure_observation(context, db, task_ref, observations, *, new_compa
             and hashlib.sha256(delegation._read_bytes(Path(path))).hexdigest()==original['digest'],
             'Guidance cache source changed before closure commit')
     names=sorted(path.name for path in (context.directory/'evidence').iterdir())
-    expected=sorted([item['reference']['name'] for item in current['metadata']]+([] if compact is None or 'linked_retirement' in facts else [compact['name']]))
+    expected=sorted(item['reference']['name'] for item in _historical_inventory(context,db,_evidence_inventory_rows(db))
+        if item['stat'] is not None)
     _require(names==expected,'Unaccounted content appeared before closure commit')
     if compact is not None:
         _require(_read(None,compact,context=context,db=db)==_retirement_content(facts),'Compact support differs from original owner facts')
@@ -1372,6 +1387,298 @@ def close_task(scope, request, observations):
             return dict(ok=True,task=task)
 
 
+def _evidence_inventory_rows(db):
+    rows=db.execute('select name,digest,owner_key,class,created_at,closed_at,status,bytes,data from evidence_metadata order by name limit 4097').fetchall()
+    _require(len(rows)<=4096,'Evidence inventory exceeds its observation bound')
+    return [dict(reference=dict(name=row[0],digest=row[1]),metadata=state._metadata_record(row)) for row in rows]
+
+
+def _diagnostic_proof(context, db, reference):
+    """Authenticate one ordinary diagnostic and its surviving original proof, never its release."""
+    from runtime import changes
+    _check_context(context,db);state._artifact_reference(reference)
+    metadata=state._metadata(db,reference['name'])
+    _require(metadata is not None and metadata['version']==2 and metadata['class']=='detail'
+        and metadata['export'] is None and not metadata['targets'],'Diagnostic metadata is unavailable or unsupported')
+    subject=_source_subject(context,db,metadata);owner=metadata['owner']['task']
+    _require(not subject['live'] and subject['closed_at'] is not None,'Diagnostic owner is not safely retired')
+    closures=[]
+    for row in _evidence_inventory_rows(db):
+        other=row['metadata']
+        if other['owner']!=metadata['owner'] or other['class']!='compact' or other['status']!='live':continue
+        body=_read(None,row['reference'],context=context,db=db)
+        if body.get('kind')=='task-closure':closures.append((row['reference'],other,body))
+    _require(len(closures)==1,'Diagnostic needs unique retained ordinary closure')
+    closure,closure_meta,compact=closures[0]
+    _require(not compact.get('stopped',{}).get('linked') and compact['identity']==compact['stopped']['reference']==owner
+        and compact['pins']==subject['pins']==compact['stopped']['pins']
+        and compact['accepted_identity']==subject['identity'] and compact['created_at']==closure_meta['created_at']
+        and closure_meta['closed_at']==subject['closed_at'],'Diagnostic original ordinary closure differs')
+    changes._check_stopped_certificate(context,db,compact['stopped'])
+    outcomes=[row for row in compact['outcomes'] if row['attempt'].get('kind')=='check'
+        and row.get('execution',{}).get('output')==reference]
+    _require(len(outcomes)==1,'Diagnostic output has ambiguous execution correspondence')
+    outcome=outcomes[0];attempt=outcome['attempt'];execution_ref=attempt['execution']
+    execution_meta,raw=_managed_artifact(None,execution_ref,context=context,db=db);execution=json.loads(raw)
+    state._fields(execution,('command','tool','output','result'))
+    _require(outcome['execution']==dict(command=execution['command'],tool=execution['tool'],output=execution['output'],
+        result={key:value for key,value in execution['result'].items() if key!='private_output'})
+        and execution['output']==reference,'Diagnostic execution projection differs')
+    expected_owner=dict(kind='project',project_id=subject['identity']['project_id'],task=owner)
+    for ref,other in ((reference,metadata),(execution_ref,execution_meta)):
+        _require(other['owner']==expected_owner and other['class']=='detail'
+            and compact['created_at']<=other['created_at']<=subject['closed_at'] and ref in compact['artifacts']
+            and dict(reference=ref,created_at=other['created_at'],owner=other['owner'],bytes=other['bytes'],unit='bytes') in compact['sources'],
+            'Diagnostic original source provenance differs')
+    _require(metadata['dependencies']==[dict(kind='task',reference=owner)]
+        and execution_meta['dependencies']==[dict(kind='task',reference=owner),*_artifact_dependencies(execution)]
+        and closure_meta['owner']==expected_owner and closure_meta['dependencies']==[
+            dict(kind='task',reference=owner),*[dict(kind='artifact',reference=ref) for ref in compact['artifacts']]],
+        'Diagnostic original dependency correspondence differs')
+    certificates=[row for row in compact['stopped'].get('assignments',[]) if row['reference']['id']==outcome['assignment_id']]
+    _require(len(certificates)==1 and outcome['assignment_id']==attempt['id']==execution['result']['id'],
+        'Diagnostic original assignment differs')
+    certificate=certificates[0];assignment=state._retired_assignment(db,attempt['id'])
+    _require(assignment is not None and state._retired(db,'assignment',certificate['reference']['owner'])==assignment
+        and not assignment['evidence_expired'] and assignment['created_at']==certificate['created_at']
+        and assignment['request_digest']==certificate['request_digest'] and assignment['pins_digest']==_digest(compact['pins'])
+        and assignment['outcome']==outcome['outcome']==certificate['reconciliation']['outcome'],
+        'Diagnostic retired assignment certificate differs')
+    numbers=[row for row in compact['numerical'] if row['source']==execution_ref]
+    _require(len(numbers)==2 and {row['field'] for row in numbers}=={'exit_code','output_bytes'},
+        'Diagnostic original numerical coverage differs')
+    for number in numbers:
+        field=number['field']
+        _require(number['value']==execution['result'][field]==attempt[field]
+            and number['unit']==('bytes' if field=='output_bytes' else 'exit-code')
+            and number['created_at']==execution_meta['created_at'] and number['assignment_id']==attempt['id']
+            and number['owner']==certificate['reference']['owner'] and number['status']==execution['result']['status'],
+            'Diagnostic authoritative numerical receipt differs')
+    mandate=_source_mandate(context,reference,db=db);execution_mandate=_source_mandate(context,execution_ref,db=db)
+    _require(_bookkeeping_record(context,db,mandate['reference'],mandate['content'])
+        and _bookkeeping_record(context,db,execution_mandate['reference'],execution_mandate['content']),
+        'Diagnostic publication mandates differ')
+    path=context.directory/'evidence'/reference['name'];managed=metadata['managed']
+    _require(managed['path']==str(path) and managed['sha256']==reference['digest']
+        and all(_binding(Path(parent))==binding for parent,binding in managed['parents'].items()),
+        'Diagnostic physical parents or reference changed')
+    present=os.path.lexists(path)
+    if metadata['status']=='live':
+        _,raw=_managed_artifact(None,reference,context=context,db=db);availability='live'
+    else:
+        _require(metadata['closed_at']==subject['closed_at'],'Diagnostic intent lacks original closure date')
+        _require(metadata['status']!='expired' or not present,'Expired diagnostic content reappeared')
+        if present:raw=_managed_content(context,reference,metadata);availability='pending-present'
+        else:raw=None;availability='expired' if metadata['status']=='expired' else 'pending-absent'
+    if raw is not None:
+        diagnostic=json.loads(raw);state._fields(diagnostic,('text','truncated','redacted_lines','redaction'))
+        _require(isinstance(diagnostic['text'],str) and type(diagnostic['truncated']) is bool
+            and type(diagnostic['redacted_lines']) is int and diagnostic['redacted_lines']>=0
+            and isinstance(diagnostic['redaction'],str),'Diagnostic original shape differs')
+    marker=state._retired(db,'task',{key:owner[key] for key in ('scope_id','client','session_id','task_id')})
+    return dict(reference=reference,metadata=metadata,owner=owner,closed_at=subject['closed_at'],availability=availability,
+        execution=execution_ref,execution_metadata=execution_meta,execution_body=execution,closure=closure,compact=compact,
+        mandate=mandate,execution_mandate=execution_mandate,task_marker=marker,assignment_marker=assignment)
+
+
+def _historical_inventory(context, db, rows):
+    """Observe physical files or exact intent-backed diagnostic absence, never substitute bodies."""
+    _require(len(rows)<=4096,'Historical evidence inventory exceeds bound')
+    physical=[]
+    for row in rows:
+        reference=row['reference'];metadata=row['metadata'];path=Path(metadata['managed']['path'])
+        _require(state._metadata(db,reference['name'])==metadata,'Historical metadata changed')
+        if metadata['status']=='live':
+            before=_closure_file_stat(path);_,raw=_managed_artifact(None,reference,context=context,db=db)
+            _require(isinstance(json.loads(raw),dict) and _closure_file_stat(path)==before,'Historical content changed')
+        else:
+            proof=_diagnostic_proof(context,db,reference)
+            before=None if proof['availability'] in {'expired','pending-absent'} else _closure_file_stat(path)
+        physical.append(dict(reference=reference,metadata=metadata,stat=before))
+    return physical
+
+
+def _diagnostic_consumers(context, db, proof, recovery):
+    """Report incomplete acquisition as protection, never as an empty consumer set."""
+    try:
+        return _observe_diagnostic_consumers(context,db,proof,recovery)
+    except StartupError as error:
+        return dict(complete=False,required=[],blockers=[str(error)])
+    except (OSError,ValueError,TypeError,KeyError,IndexError,AttributeError,RecursionError,sqlite3.Error):
+        return dict(complete=False,required=[],blockers=['Diagnostic current consumer coverage is incomplete'])
+
+
+def _observe_diagnostic_consumers(context, db, proof, recovery):
+    """Classify actual consumer roots; only exact retired bookkeeping routes retain provenance."""
+    from runtime import delegation
+    authority=_canonical_plain(context.authority_set[0]);owner=proof['owner'];output=proof['reference']
+    _require(recovery['complete'] and not recovery['blockers'] and not recovery['discovered_authorities']
+        and recovery['authorities']==[authority],'Diagnostic recovery coverage is incomplete or foreign')
+    baseline=state._source_baseline(None,db,context=context)
+    _require(baseline is not None and baseline['content']['source_contract']==2
+        and baseline['content']['project_id']==proof['metadata']['owner']['project_id'],
+        'Diagnostic prospective recovery provenance is unavailable')
+    _require(_reverse_source_authorities(context,db,proof['metadata'])==[authority],
+        'Diagnostic reverse consumers include another authority')
+    _require(not _source_intents(context,output,db=db),'Diagnostic has an issued foreign destination intent')
+    _require(not _source_intents(context,proof['execution'],db=db),'Diagnostic execution has a foreign destination intent')
+    rows=_evidence_inventory_rows(db);physical=_historical_inventory(context,db,rows)
+    _require(sorted(path.name for path in (context.directory/'evidence').iterdir())==
+        sorted(row['reference']['name'] for row in physical if row['stat'] is not None),'Diagnostic inventory is incomplete')
+    records={};blockers=[];required=[]
+    for row in rows:
+        metadata=row['metadata'];ref=row['reference']
+        _require(metadata['owner']['kind']=='project' and metadata['owner']['project_id']==proof['metadata']['owner']['project_id'],
+            'Diagnostic inventory contains foreign or unknown owners')
+        _require(metadata['export'] is None and not metadata['targets'],'Managed copies remain protected')
+        body=_read(None,ref,context=context,db=db) if metadata['status']=='live' else None
+        records[_raw(ref)]=(metadata,body)
+        if body is not None and body.get('kind')=='linked-closure-preparation':
+            selected=metadata['owner'].get('task')
+            if selected is None or state._retired(db,'task',{key:selected[key] for key in ('scope_id','client','session_id','task_id')}) is None:
+                blockers.append('Issued unretired linked preparation retains its inventory')
+    historical={_raw(ref) for ref in (proof['execution'],proof['closure'],proof['mandate']['reference'],proof['execution_mandate']['reference'])}
+    allowed={_raw(ref) for ref in (proof['execution'],proof['closure'],proof['mandate']['reference'])}
+    def needs(edges,root,historic=False):
+        pending=[(edge,root) for edge in edges];seen=set()
+        while pending:
+            edge,parent=pending.pop();kind=edge['kind']
+            if kind=='task':continue
+            _require(kind in {'artifact','assignment','recovery'},'Unknown diagnostic consumer dependency')
+            ref=edge['reference']
+            _require(ref.get('authority',authority)==authority,'Foreign diagnostic consumer remains protected')
+            ref=ref.get('artifact',ref.get('assignment',ref.get('reference',ref)))
+            if ref==output:
+                if historic and _raw(parent) in allowed:continue
+                return True
+            key=_raw(ref)
+            if key in seen:continue
+            seen.add(key);_require(len(seen)<=4096,'Diagnostic consumer traversal exceeds bound')
+            _require(key in records,'Diagnostic consumer content is unavailable')
+            metadata,body=records[key]
+            if body is None:
+                _diagnostic_proof(context,db,ref)
+                continue
+            pending.extend((child,ref) for child in [*metadata['dependencies'],*_artifact_dependencies(body)])
+        return False
+    for key,(metadata,body) in records.items():
+        if key==_raw(output) or body is None:continue
+        ref=dict(name=Path(metadata['managed']['path']).name,digest=metadata['managed']['sha256'])
+        if needs([*metadata['dependencies'],*_artifact_dependencies(body)],ref,key in historical):required.append(ref)
+    observed=state.inspect_dependencies(db,owner)
+    _require(not observed['blockers'],'Diagnostic live row ownership is uncertain')
+    for row in observed['tasks']:
+        if row['task'].get('lifecycle',{}).get('safe_closed_at') is not None:
+            blockers.append('Issued unretired closure retains its authority inventory')
+        if needs(_artifact_dependencies(row['task']),row['reference']):required.append(row['reference'])
+    ledger=delegation._ledger(None,db,context=context)
+    guidance=delegation._closure_guidance(context,db,ledger)
+    for reference in guidance['references']:
+        if needs([dict(kind='artifact',reference=reference)],dict(authority=authority,source='native-guidance')):
+            required.append(reference)
+    for record in ledger:
+        ref=dict(authority=authority,id=record['id'])
+        if needs(_artifact_dependencies(record),ref):required.append(ref)
+    for edge in recovery['requirements']:
+        if edge['kind']=='task' and edge['reference']==owner and edge['need']=='raw':required.append(edge['owner'])
+        elif edge['kind']!='task' and needs([edge],edge['owner']):required.append(edge['owner'])
+    if required:blockers.append('Independent or unclassified consumers require diagnostic content')
+    return dict(complete=True,required=required,blockers=sorted(set(blockers)))
+
+
+def _cleanup_diagnostics(context):
+    """Bounded ordinary age cleanup; shared cap and other content classes remain incomplete."""
+    from runtime import changes
+    report=dict(expired=[],pending=[],protected=[],limitations=[
+        'Ordinary diagnostic age cleanup only; Project cap, temporary/export and compact expiry remain incomplete'])
+    if _DIAGNOSTIC_CLEANUP.get() or getattr(changes._authority_context,'held',()):
+        report['limitations'].append('Cleanup deferred within existing publication or authority guards')
+        return report
+    errors=(StartupError,OSError,ValueError,TypeError,KeyError,IndexError,AttributeError,RecursionError,sqlite3.Error)
+    token=_DIAGNOSTIC_CLEANUP.set(True)
+    try:
+        with changes._authority_guards([context.directory]):
+            with _context_database(context) as db:
+                rows=_evidence_inventory_rows(db);candidates={}
+                for row in rows:
+                    metadata=row['metadata'];ref=row['reference']
+                    if metadata['status']=='delete_pending':report['pending'].append(ref);candidates[_raw(ref)]=ref
+                    if metadata['class']!='compact' or metadata['status']!='live':continue
+                    try:
+                        body=_read(None,ref,context=context,db=db)
+                        if body.get('kind')=='task-closure' and not body.get('stopped',{}).get('linked'):
+                            for outcome in body['outcomes']:
+                                if outcome['attempt'].get('kind')=='check' and 'execution' in outcome:
+                                    output=outcome['execution']['output'];candidates[_raw(output)]=output
+                    except errors:
+                        report['limitations'].append('Some retained owners are unavailable; cleanup coverage is incomplete')
+                ordered=sorted(candidates.values(),key=lambda ref:(state._metadata(db,ref['name'])['created_at'],ref['name']))
+            for reference in ordered:
+                try:
+                    def acquire(db):
+                        proof=_diagnostic_proof(context,db,reference)
+                        _require(state._owner_time()>=proof['closed_at']+604800,'Diagnostic has not reached seven days after safe closure')
+                        permission=_source_current_permission(context,proof['execution_mandate']['content']['source'],db=db)
+                        recovery,files=_closure_recovery(context)
+                        consumers=_diagnostic_consumers(context,db,proof,recovery)
+                        _require(consumers['complete'] and not consumers['blockers'],'; '.join(consumers['blockers']))
+                        _require(_closure_recovery_files(recovery)==files,'Diagnostic recovery sources changed')
+                        return proof,permission
+                    with _context_database(context,write=True,durable=True) as db:
+                        proof,permission=acquire(db)
+                        if proof['availability']=='expired':
+                            report['expired'].append(reference)
+                            continue
+                        metadata=proof['metadata']
+                        if metadata['status']=='live':
+                            pending=dict(metadata,status='delete_pending',closed_at=proof['closed_at'])
+                            db.execute('update evidence_metadata set status=?,closed_at=?,data=? where name=?',
+                                ('delete_pending',proof['closed_at'],_raw(pending).decode(),reference['name']))
+                            _require(state._metadata(db,reference['name'])==pending,'Diagnostic pending intent differs')
+                    if reference not in report['pending']:report['pending'].append(reference)
+                    with _context_database(context,write=True,durable=True) as db:
+                        current,current_permission=acquire(db)
+                        _require(current['availability'] in {'pending-present','pending-absent'} and current_permission==permission,
+                            'Diagnostic permission or pending ownership changed')
+                        folder=context.directory/'evidence'
+                        descriptor=os.open(folder,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+                        try:
+                            info=os.fstat(descriptor)
+                            _require(dict(device=info.st_dev,inode=info.st_ino)==current['metadata']['managed']['parents'][str(folder)],
+                                'Diagnostic evidence directory changed')
+                            if current['availability']=='pending-present':
+                                _require(_source_current_permission(context,current['execution_mandate']['content']['source'],db=db)==permission,
+                                    'Diagnostic enrollment permission changed before unlink')
+                                _managed_content(context,reference,current['metadata'])
+                                info=os.fstat(descriptor)
+                                _require(all(_binding(Path(parent))==binding
+                                    for parent,binding in current['metadata']['managed']['parents'].items())
+                                    and _binding(folder)==dict(device=info.st_dev,inode=info.st_ino),
+                                    'Diagnostic evidence parent changed before unlink')
+                                info=os.stat(reference['name'],dir_fd=descriptor,follow_symlinks=False)
+                                _require(dict(device=info.st_dev,inode=info.st_ino)==current['metadata']['managed']['binding']
+                                    and stat.S_ISREG(info.st_mode) and info.st_uid==os.getuid() and info.st_nlink==1
+                                    and stat.S_IMODE(info.st_mode)==current['metadata']['managed']['mode']
+                                    and info.st_size==current['metadata']['managed']['bytes'],
+                                    'Diagnostic pathname was replaced')
+                                os.unlink(reference['name'],dir_fd=descriptor)
+                            else:_require(not os.path.lexists(folder/reference['name']),'Absent pending diagnostic reappeared')
+                            os.fsync(descriptor)
+                        finally:os.close(descriptor)
+                        _require(not os.path.lexists(folder/reference['name']) and all(_binding(Path(parent))==binding
+                            for parent,binding in current['metadata']['managed']['parents'].items()),
+                            'Diagnostic content or parent changed after unlink')
+                        expired=dict(current['metadata'],status='expired')
+                        db.execute('update evidence_metadata set status=?,data=? where name=?',('expired',_raw(expired).decode(),reference['name']))
+                        _require(state._metadata(db,reference['name'])==expired,'Diagnostic expiry metadata differs')
+                    report['pending'].remove(reference);report['expired'].append(reference)
+                except errors as error:
+                    report['protected'].append(dict(reference=reference,reason=str(error) if isinstance(error,StartupError)
+                        else 'Diagnostic owner, consumers, age or physical release remains unproven'))
+    finally:_DIAGNOSTIC_CLEANUP.reset(token)
+    return report
+
+
 def _diagnostic_output_routes(context, db, task_ref):
     """Observe typed diagnostic provenance; content requirements and permissions stay intact."""
     from runtime import changes,delegation
@@ -1426,59 +1733,11 @@ def _diagnostic_output_routes(context, db, task_ref):
             item=dict(reference=output,execution=execution_ref,closure=closure,routes=[],blockers=[])
             report['outputs'].append(item)
             try:
-                state._artifact_reference(output);state._artifact_reference(execution_ref)
-                _,output_meta,diagnostic=records[_raw(output)]
-                _,execution_meta,execution=records[_raw(execution_ref)]
-                subject=_source_subject(context,db,output_meta)
-                _require(not subject['live'] and subject['closed_at']==closure_meta['closed_at']
-                    and subject['identity']==compact['accepted_identity'] and subject['pins']==compact['pins'],
-                    'Diagnostic owner lacks its exact retired dated closure')
-                changes._check_stopped_certificate(context,db,compact['stopped'])
-                _require(compact['identity']==compact['stopped']['reference']==task_ref
-                    and compact['pins']==compact['stopped']['pins'] and compact['created_at']==closure_meta['created_at'],
-                    'Diagnostic closure owner or original age differs')
-                state._fields(execution,('command','tool','output','result'))
-                _require(projected==dict(command=execution['command'],tool=execution['tool'],output=execution['output'],
-                    result={k:v for k,v in execution['result'].items() if k!='private_output'}) and execution['output']==output,
-                    'Diagnostic execution correspondence differs')
-                state._fields(diagnostic,('text','truncated','redacted_lines','redaction'))
-                _require(isinstance(diagnostic['text'],str) and type(diagnostic['truncated']) is bool
-                    and type(diagnostic['redacted_lines']) is int and diagnostic['redacted_lines']>=0
-                    and isinstance(diagnostic['redaction'],str),'Diagnostic shape differs')
-                expected_owner=dict(kind='project',project_id=subject['identity']['project_id'],task=task_ref)
-                for ref,metadata,body in ((output,output_meta,diagnostic),(execution_ref,execution_meta,execution)):
-                    _require(metadata['owner']==expected_owner and metadata['class']=='detail'
-                        and compact['created_at']<=metadata['created_at']<=subject['closed_at']
-                        and ref in compact['artifacts'] and dict(reference=ref,created_at=metadata['created_at'],
-                            owner=metadata['owner'],bytes=metadata['bytes'],unit='bytes') in compact['sources']
-                        and metadata['dependencies']==[dict(kind='task',reference=task_ref),*_artifact_dependencies(body)],
-                        'Diagnostic source provenance differs')
-                _require(closure_meta['owner']==expected_owner and closure_meta['dependencies']==[
-                    dict(kind='task',reference=task_ref),*[dict(kind='artifact',reference=ref) for ref in compact['artifacts']]],
-                    'Diagnostic compact dependency correspondence differs')
-                certificates=[c for c in compact['stopped'].get('assignments',[]) if c['reference']['id']==outcome['assignment_id']]
-                _require(len(certificates)==1 and outcome['assignment_id']==attempt['id']==execution['result']['id'],
-                    'Diagnostic execution assignment differs')
-                certificate=certificates[0];assignment=state._retired_assignment(db,outcome['assignment_id'])
-                _require(assignment is not None and state._retired(db,'assignment',certificate['reference']['owner'])==assignment
-                    and not assignment['evidence_expired'] and assignment['created_at']==certificate['created_at']
-                    and assignment['request_digest']==certificate['request_digest'] and assignment['pins_digest']==_digest(compact['pins'])
-                    and assignment['outcome']==outcome['outcome']==certificate['reconciliation']['outcome'],
-                    'Diagnostic assignment certificate differs')
-                numbers=[n for n in compact['numerical'] if n['source']==execution_ref]
-                _require(len(numbers)==2 and {n['field'] for n in numbers}=={'exit_code','output_bytes'},
-                    'Diagnostic numerical source coverage differs')
-                for number in numbers:
-                    field=number['field']
-                    _require(number['value']==execution['result'][field]==attempt[field]
-                        and number['unit']==('bytes' if field=='output_bytes' else 'exit-code')
-                        and number['created_at']==execution_meta['created_at'] and number['assignment_id']==attempt['id']
-                        and number['owner']==certificate['reference']['owner'] and number['status']==execution['result']['status'],
-                        'Diagnostic numerical receipt differs')
-                mandate=_source_mandate(context,output,db=db)
-                _require(_bookkeeping_record(context,db,mandate['reference'],mandate['content']),
-                    'Diagnostic birth mandate differs')
-                report['closed_at']=subject['closed_at']
+                proof=_diagnostic_proof(context,db,output)
+                _require(proof['owner']==task_ref and proof['execution']==execution_ref and proof['closure']==closure,
+                    'Diagnostic classification differs from its actual owner proof')
+                mandate=proof['mandate']
+                report['closed_at']=proof['closed_at']
                 item['routes']=[dict(owner=execution_ref,kind='execution',disposition='diagnostic-provenance',
                     reason='Exact diagnostic child; execution and numerical evidence remain content-required'),
                     dict(owner=closure,kind='compact',disposition='diagnostic-provenance',
@@ -2205,6 +2464,7 @@ def _artifact(scope, value, *, context=None, owner=None, db=None):
     _require((scope is None) != (context is None), 'Select exactly one existing evidence authority')
     context = context or _evidence_context(scope)
     if db is None:
+        _cleanup_diagnostics(context)
         with _artifact_content_guards(context,value,owner),_context_database(context, write=True) as connection:
             return _artifact_registered(scope, value, context, owner, connection)
     _check_context(context, db)
@@ -2283,6 +2543,11 @@ def _managed_artifact(scope, reference, *, context=None, db=None):
         _check_context(context, db)
         metadata = state._metadata(db, reference['name'])
     _require(metadata is not None and metadata['status'] == 'live', 'Artifact accounting unavailable or expired')
+    return metadata, _managed_content(context,reference,metadata)
+
+
+def _managed_content(context, reference, metadata):
+    """Validate exact managed bytes; the caller owns its separate lifecycle-status permission."""
     managed = metadata['managed']
     path = context.directory / 'evidence' / reference['name']
     _require(managed['path'] == str(path) and managed['sha256'] == reference['digest'], 'Artifact metadata reference mismatch')
@@ -2297,7 +2562,7 @@ def _managed_artifact(scope, reference, *, context=None, db=None):
         and dict(device=info.st_dev, inode=info.st_ino) == managed['binding'] and stat.S_IMODE(info.st_mode) == managed['mode']
         and info.st_size == managed['bytes'] == len(raw) and hashlib.sha256(raw).hexdigest() == managed['sha256'],
         'Artifact physical ownership changed')
-    return metadata, raw
+    return raw
 
 
 def _read(scope, reference, *, context=None, db=None):
@@ -4168,8 +4433,9 @@ def _linked_retained_component(pointer,authorities,*,writer=None):
         context=_reference_context(ref['authority'])
         with _preparation_database(context,writer) as db:
             if _raw(ref['authority']) not in checked:
-                checked.add(_raw(ref['authority']));names=[row[0] for row in db.execute('select name from evidence_metadata limit 4097')]
-                _require(len(names)<=4096 and sorted(path.name for path in (context.directory/'evidence').iterdir())==sorted(names),
+                checked.add(_raw(ref['authority']));physical=_historical_inventory(context,db,_evidence_inventory_rows(db))
+                _require(sorted(path.name for path in (context.directory/'evidence').iterdir())==
+                    sorted(row['reference']['name'] for row in physical if row['stat'] is not None),
                     'Unaccounted content protects retained linked support')
             prepared=_linked_owned_preparation(context,db,ref);body=prepared['content'];stopped=body['stopped'];changes._stopped_certificate_shape(stopped)
             retained=stopped['linked'];_linked_stop_shape(retained)
@@ -4387,10 +4653,10 @@ def _linked_preparation_facts(pointer,authorities,*,writer=None):
             for record in records:refs.extend(edge['reference'] for edge in _artifact_dependencies(record))
             pending.extend(dict(authority=ref['authority'],artifact=source) for source in refs)
             members.append(dict(reference=ref,task=dict(task,lifecycle=dict(created_at=task['lifecycle']['created_at'],safe_closed_at=None,closure=None,compact=None)),certificate=certificate,projection=projection,guidance=guidance))
-            metadata=[state._metadata_record(r) for r in db.execute('select name,digest,owner_key,class,created_at,closed_at,status,bytes,data from evidence_metadata limit 4097')]
-            _require(len(metadata)<=4096,'Preparation evidence metadata exceeds bound')
+            physical=_historical_inventory(context,db,_evidence_inventory_rows(db))
             folder=context.directory/'evidence'
-            _require(sorted(path.name for path in folder.iterdir())==sorted(Path(m['managed']['path']).name for m in metadata),
+            _require(sorted(path.name for path in folder.iterdir())==
+                sorted(row['reference']['name'] for row in physical if row['stat'] is not None),
                 'Unaccounted evidence content protects preparation')
     pending.append(dict(authority=pointer['authority'],artifact=pointer['reference']));sources={}
     while pending:
@@ -4530,8 +4796,9 @@ def _check_preparation_inputs(facts,*,writer=None):
             authority=_raw(ref['authority'])
             if authority not in checked:
                 checked.add(authority)
-                names=[row[0] for row in db.execute('select name from evidence_metadata limit 4097')]
-                _require(len(names)<=4096 and sorted(path.name for path in (context.directory/'evidence').iterdir())==sorted(names),
+                physical=_historical_inventory(context,db,_evidence_inventory_rows(db))
+                _require(sorted(path.name for path in (context.directory/'evidence').iterdir())==
+                    sorted(row['reference']['name'] for row in physical if row['stat'] is not None),
                     'Unaccounted preparation content appeared before commit')
         if not closed:_check_ready_inputs(original['inputs'])
         guidance=member['guidance']
