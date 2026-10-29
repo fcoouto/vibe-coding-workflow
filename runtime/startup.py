@@ -927,47 +927,52 @@ def _acquired_dependency(location, budget):
     return dict(path=str(location), status=fp["status"] if target else "unreadable", target=target)
 
 
-def acquire_canonical_project(event, package, *, authority_path=None, qualifier=None, deadline=None):
-    """Read named canonical authority and current facts; leave public startup gated.
+@dataclass(frozen=True)
+class CanonicalMembershipAcquisition:
+    """Physical enrollment facts without client activation or evidence write authority."""
+    status: str
+    reason: str
+    record: CanonicalRecord | None
+    authority_path: Path | None
+    authority_target: object
+    observation: object
 
-    qualifier is an internal trusted-owner, local read-only callback. Its verified
-    durable qualification/current facts are never inferred from enrollment JSON.
-    The trusted callback receives the shared monotonic deadline and must obey it.
-    """
+
+def _acquire_canonical_membership(cwd: Path, *, authority_path: Path | None, budget: dict) -> CanonicalMembershipAcquisition:
+    """Observe one bounded authority candidate set and the actual selected checkout."""
     from runtime import onboarding as d3
-    from runtime.state import runtime_fingerprint
 
-    pointer = None
+    pointer = record = target = observation = None
+    missing_checkout = False
     def result(status, reason):
-        return CanonicalAcquisition(ScopeResolution(status, None, reason), pointer)
+        if missing_checkout and status == "conflict":
+            reason = "checkout_unavailable"
+        return CanonicalMembershipAcquisition(status, reason, record, pointer, target,
+            _canonical_freeze(observation) if observation is not None else None)
     try:
-        now = time.monotonic()
-        if deadline is not None and (type(deadline) not in (int, float) or not math.isfinite(deadline)):
-            raise StartupError("Invalid acquisition deadline")
-        # Reserve one second of the native hook's five-second budget for adaptation.
-        budget = {"paths": 0, "bytes": 0, "deadline": min(deadline, now + 4) if deadline is not None else now + 4}
-        _check_observation_deadline(budget)
-        if qualifier is not None and not callable(qualifier):
-            raise StartupError("Invalid internal qualification owner")
-        if not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", event.client):
-            raise StartupError("Invalid client identity")
-        d3._no_links(event.cwd)
-        root = repository_root(event.cwd)
+        d3._no_links(cwd)
+        root = repository_root(cwd)
         _check_observation_deadline(budget)
         if root is None:
-            return result("outside", "not_enrolled")
-        _check_observation_deadline(budget)
-        observed, error = d3._checkout_observation(str(root), budget)
-        if error:
-            return result("conflict", "identity_changed")
-        candidates = {root, *root.parents, Path(observed["primary_root"]), *Path(observed["primary_root"]).parents}
+            missing_checkout = True
+            selected = cwd.resolve(strict=True)
+            candidates = {selected, *selected.parents}
+            observed = None
+        else:
+            _check_observation_deadline(budget)
+            observed, error = d3._checkout_observation(str(root), budget)
+            if error:
+                return result("conflict", "identity_changed")
+            selected = cwd.resolve(strict=True)
+            candidates = {selected, *selected.parents, root, *root.parents,
+                          Path(observed["primary_root"]), *Path(observed["primary_root"]).parents}
         if authority_path is not None:
             explicit = _canonical_path(str(authority_path))
             if explicit.name != PROJECT_FILE.name or explicit.parent.name != PROJECT_FILE.parent.name:
                 raise StartupError("Invalid explicit authority route")
             d3._no_links(explicit)
             candidates.add(explicit.parent.parent)
-        if len(candidates) > d3.MAX_PATHS:
+        if budget["paths"] + len(candidates) > d3.MAX_PATHS:
             raise StartupError("Canonical candidate limit exceeded")
         budget["paths"] += len(candidates)
         present = []
@@ -991,11 +996,11 @@ def acquire_canonical_project(event, package, *, authority_path=None, qualifier=
         _check_observation_deadline(budget)
         project = Path(data["project_root"])
         pointer = Path(item["path"])
+        target = _canonical_freeze(item["target"])
         if pointer != project / PROJECT_FILE:
             return result("conflict", "authority_conflict")
-        if data["kind"] == "standalone" and observed["primary_root"] != str(project):
-            pointer = None
-            return result("outside", "not_enrolled")
+        if observed is None:
+            return result("conflict", "checkout_unavailable")
         primary = Path(observed["primary_root"])
         membership = data["membership"]
         included = primary.is_relative_to(project) and any(primary.is_relative_to(project / p) for p in membership["include"])
@@ -1004,6 +1009,50 @@ def acquire_canonical_project(event, package, *, authority_path=None, qualifier=
         observation.update(project_root=str(project), project_binding=d3._filesystem_binding(project),
             membership="excluded" if excluded else "included" if included else "outside",
             conflicting_authorities=[], dependencies=[], qualification=None, runtime_location=None)
+        _check_observation_deadline(budget)
+        return result("observed", "authority_observed")
+    except (StartupError, OSError, TypeError, KeyError, RecursionError, subprocess.SubprocessError):
+        return result("conflict", "observation_unavailable")
+
+
+def acquire_canonical_project(event, package, *, authority_path=None, qualifier=None, deadline=None):
+    """Read named canonical authority and current facts; leave public startup gated.
+
+    qualifier is an internal trusted-owner, local read-only callback. Its verified
+    durable qualification/current facts are never inferred from enrollment JSON.
+    The trusted callback receives the shared monotonic deadline and must obey it.
+    """
+    from runtime.state import runtime_fingerprint
+
+    pointer = None
+    def result(status, reason):
+        return CanonicalAcquisition(ScopeResolution(status, None, reason), pointer)
+    try:
+        now = time.monotonic()
+        if deadline is not None and (type(deadline) not in (int, float) or not math.isfinite(deadline)):
+            raise StartupError("Invalid acquisition deadline")
+        # Reserve one second of the native hook's five-second budget for adaptation.
+        budget = {"paths": 0, "bytes": 0, "deadline": min(deadline, now + 4) if deadline is not None else now + 4}
+        _check_observation_deadline(budget)
+        if qualifier is not None and not callable(qualifier):
+            raise StartupError("Invalid internal qualification owner")
+        if not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", event.client):
+            raise StartupError("Invalid client identity")
+        acquired = _acquire_canonical_membership(event.cwd, authority_path=authority_path, budget=budget)
+        pointer = acquired.authority_path
+        if acquired.reason == "checkout_unavailable":
+            pointer = None
+            return result("outside", "not_enrolled")
+        if acquired.status != "observed":
+            return result(acquired.status, acquired.reason)
+        record = acquired.record
+        data = _canonical_plain(record.data)
+        observation = _canonical_plain(acquired.observation)
+        observed = observation
+        root, project = Path(observation["root"]), Path(data["project_root"])
+        if data["kind"] == "standalone" and observed["primary_root"] != str(project):
+            pointer = None
+            return result("outside", "not_enrolled")
         selected = next((c for r in data["repositories"] if r["primary_root"] == observed["primary_root"]
                          for c in r["checkouts"] if c["root"] == str(root)), None)
         entry = next((e for e in selected["clients"] if e["client"] == event.client), None) if selected else None
@@ -1020,7 +1069,7 @@ def acquire_canonical_project(event, package, *, authority_path=None, qualifier=
         _check_observation_deadline(budget)
         installed = dict(policy_digest=policy_digest(package), runtime_digest=runtime_fingerprint(),
             clients=[event.client] if (package / "clients" / (event.client + ".md")).is_file() else [], package_root=str(package))
-        facts = dict(authority=dict(path=str(pointer), target=item["target"]), observation=observation,
+        facts = dict(authority=dict(path=str(pointer), target=_canonical_plain(acquired.authority_target)), observation=observation,
                      client=event.client, installed=installed)
         _check_observation_deadline(budget)
         resolution = resolve_canonical_scope(record, **facts)
@@ -1028,7 +1077,7 @@ def acquire_canonical_project(event, package, *, authority_path=None, qualifier=
             observation["qualification"] = qualifier(record, _canonical_freeze(facts | {"deadline": budget["deadline"]}))
             _check_observation_deadline(budget)
             # The trusted callback may inspect facts, but it cannot normalize changed authority bytes.
-            if d3._authority_observation(project, budget, canonical_only=True) != item:
+            if _acquire_canonical_membership(event.cwd, authority_path=authority_path, budget=budget) != acquired:
                 return result("conflict", "authority_conflict")
             resolution = resolve_canonical_scope(record, **facts)
         _check_observation_deadline(budget)

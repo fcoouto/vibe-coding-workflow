@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 from contextvars import ContextVar
 import fcntl
+import math
 import os
 from pathlib import Path
 import sqlite3
@@ -12,7 +13,8 @@ import time
 import uuid
 
 from runtime import evidence, state
-from runtime.startup import PROJECT_FILE, checkout, json_object, read_git, _canonical_freeze, _canonical_plain
+from runtime.startup import (PROJECT_FILE, checkout, json_object, read_git, _canonical_freeze,
+                             _canonical_plain, _acquire_canonical_membership, _check_observation_deadline)
 
 
 MAX_CONFIG = 64 * 1024
@@ -64,7 +66,7 @@ def _check_parents(parents):
         _require(path.is_dir() and not path.is_symlink() and evidence._binding(path) == binding)
 
 
-def _location(value):
+def _location(value, *, deadline=None):
     path = _path(value)
     _parents(path, existing=True)
     _require(not path.is_relative_to(state.PACKAGE.resolve()))
@@ -78,29 +80,29 @@ def _location(value):
     existing = next(p for p in (path, *path.parents) if p.exists())
     _require(existing.is_dir())
     code, _ = read_git(existing, '-c', 'safe.bareRepository=all', 'rev-parse', '--absolute-git-dir',
-                       limit=4096, discovery=True, timeout=2)
+                       limit=4096, discovery=True, timeout=2, deadline=deadline)
     _require(code != 0)
     return path
 
 
 @contextmanager
-def _machine_guard(*, create=False):
+def _machine_guard(*, create=False, deadline=None):
     path = _path(_machine_config_path())
     original_parents = _parents(path, existing=True)
     if not path.parent.exists():
         if not create:
             yield path, None, None
             return
-        _location(path.parent)
+        _location(path.parent, deadline=deadline)
         state._prepare_directory(path.parent)
-    _location(path.parent)
+    _location(path.parent, deadline=deadline)
     state._private(path.parent, True)
     parents = _parents(path)
     descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         info = os.fstat(descriptor)
         _require(dict(device=info.st_dev, inode=info.st_ino) == parents[str(path.parent)])
-        deadline = time.monotonic() + 5
+        deadline = min(deadline, time.monotonic() + 5) if deadline is not None else time.monotonic() + 5
         while True:
             try:
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -158,14 +160,14 @@ def _publish(path, descriptor, parents, value, *, expected):
             pass
 
 
-def _ready_context(config, machine_parents):
+def _ready_context(config, machine_parents, *, deadline=None):
     state._fields(config, ('version', 'state', 'private_data_dir', 'parents', 'machine_parents',
                           'authority', 'provenance', 'owner', 'created_at'))
     _require(type(config['version']) is int and config['version'] == 1 and config['state'] == 'ready'
              and config['machine_parents'] == machine_parents)
     _check_parents(config['parents'])
     _check_parents(config['machine_parents'])
-    root = _location(config['private_data_dir'])
+    root = _location(config['private_data_dir'], deadline=deadline)
     state._private(root, True)
     authority = config['authority']
     _require(authority['database'] == str(root / 'review-evidence' / 'runtime.sqlite3')
@@ -356,7 +358,7 @@ def _observe_target(target):
     return dict(path=str(root), binding=evidence._binding(root), parents=_parents(root), git=git)
 
 
-def _owners(config, context, db):
+def _owners(config, context, db, *, budget=None):
     _provenance(config, context, db)
     rows = db.execute('select name,digest from evidence_metadata order by name limit 4097').fetchall()
     _require(len(rows) <= MAX_RECORDS)
@@ -372,6 +374,8 @@ def _owners(config, context, db):
     total = 0
     owners = []
     for name, digest in rows:
+        if budget is not None:
+            _check_observation_deadline(budget)
         if name == config['provenance']['name']:
             continue
         reference = dict(name=name, digest=digest)
@@ -410,8 +414,153 @@ def _resolved(owner):
     return dict(ok=True, status='resolved', **{key: owner[key] for key in ('owner', 'reference', 'created_at')})
 
 
+def _enrolled_selection(acquired, budget):
+    """Bind included Repository accounting to its existing configured Project store."""
+    _require(acquired.status == 'observed')
+    data = _canonical_plain(acquired.record.data)
+    observed = _canonical_plain(acquired.observation)
+    target = _canonical_plain(acquired.authority_target)
+    project = Path(data['project_root'])
+    _require(acquired.authority_path == project / PROJECT_FILE
+        and target['path'] == str(acquired.authority_path)
+        and target['fingerprint']['status'] == 'read'
+        and target['parents'].get(str(project)) == data['project_binding']
+        and observed['project_root'] == str(project)
+        and observed['project_binding'] == data['project_binding']
+        and observed['membership'] == 'included')
+    directories = {str(project): data['project_binding']}
+    roots = {str(project), observed['root'], observed['primary_root'], observed['git_dir'], observed['git_common_dir']}
+    for repo in data['repositories']:
+        entries = [(repo[key], binding) for key, binding in repo['binding'].items()]
+        entries += [(selected[key], binding) for selected in repo['checkouts']
+                    for key, binding in selected['binding'].items()]
+        for path, binding in entries:
+            _require(path not in directories or directories[path] == binding)
+            directories[path] = binding
+            roots.add(path)
+    for key, binding in observed['binding'].items():
+        path = observed[key]
+        _require(path not in directories or directories[path] == binding)
+        directories[path] = binding
+    for path, binding in target['parents'].items():
+        _require(path not in directories or directories[path] == binding)
+    matches = [repo for repo in data['repositories'] if repo['primary_root'] == observed['primary_root']]
+    _require(len(matches) == 1)
+    repo = matches[0]
+    _require(repo['membership'] == 'joined' and repo['git_common_dir'] == observed['git_common_dir']
+        and all(observed['binding'][key] == binding for key, binding in repo['binding'].items()))
+    selected = next((entry for entry in repo['checkouts'] if entry['root'] == observed['root']), None)
+    if selected is not None:
+        _require(selected['git_dir'] == observed['git_dir']
+            and all(observed['binding'][key] == binding for key, binding in selected['binding'].items()))
+    else:
+        _require(not any(entry['binding']['root'] == observed['binding']['root'] for entry in repo['checkouts']))
+    stores, selected_stores = set(), set()
+    for member in data['repositories']:
+        if member['membership'] != 'joined':
+            continue
+        for entry in member['checkouts']:
+            for client in entry['clients']:
+                config = client['configuration']
+                if config is not None and config['runtime'] is not None:
+                    runtime = config['runtime']
+                    _require(runtime['schema_version'] == 3)
+                    stores.add(runtime['state_dir'])
+                    if member is repo:
+                        selected_stores.add(runtime['state_dir'])
+    _require(len(stores) == 1 and selected_stores == stores)
+    directory = _location(next(iter(stores)), deadline=budget['deadline'])
+    _require(not any(directory.is_relative_to(Path(root)) or Path(root).is_relative_to(directory) for root in roots))
+    state._private(directory, True)
+    database = directory / 'runtime.sqlite3'
+    state._sidecars(database)
+    authority = state._authority_identity(database)
+    context = evidence.EvidenceAuthorityContext(directory, database,
+        _canonical_freeze(authority['directory_binding']), _canonical_freeze(authority['database_binding']),
+        (_canonical_freeze(authority),), 'observed enrolled Project accounting; read only')
+    evidence._check_context(context)
+    _check_observation_deadline(budget)
+    return data, observed, authority, context
+
+
+def _enrolled_baseline(context, project_id, budget):
+    _check_observation_deadline(budget)
+    with evidence._context_database(context) as db:
+        baseline = state._source_baseline(None, db, context=context)
+        _require(baseline is not None and baseline['content']['project_id'] == project_id)
+    _check_observation_deadline(budget)
+    return baseline
+
+
+def _enrolled_history(config, context, db, observed, budget):
+    owners = _owners(config, context, db, budget=budget)
+    root = Path(observed['root'])
+    primary = Path(observed['primary_root'])
+    for owner in owners:
+        _check_observation_deadline(budget)
+        original = owner['target']
+        old_root = Path(original['path'])
+        _require(not (root.is_relative_to(old_root) or old_root.is_relative_to(root)
+            or primary.is_relative_to(old_root) or old_root.is_relative_to(primary)
+            or original['binding'] in (observed['binding']['root'], observed['binding']['primary_root'])
+            or original['git']['binding']['git_common_dir'] == observed['binding']['git_common_dir']))
+    return owners
+
+
+def acquire_enrolled_accounting(target, *, deadline=None):
+    """Resolve existing Project accounting facts without activation, setup or writes."""
+    try:
+        now = time.monotonic()
+        _require(deadline is None or type(deadline) in (int, float) and math.isfinite(deadline))
+        budget = dict(paths=0, bytes=0, deadline=min(deadline, now + 4) if deadline is not None else now + 4)
+        _check_observation_deadline(budget)
+        _require(isinstance(target, (str, Path)) and len(str(target)) <= 4096)
+        selected = Path(target).resolve(strict=True)
+        if selected.is_file():
+            selected = selected.parent
+        _require(selected.is_dir())
+        acquired = _acquire_canonical_membership(selected, authority_path=None, budget=budget)
+        if acquired.status == 'outside':
+            return dict(ok=False, status='outside', reason=acquired.reason)
+        data, observed, authority, context = _enrolled_selection(acquired, budget)
+        baseline = _enrolled_baseline(context, data['project_id'], budget)
+        with _machine_guard(deadline=budget['deadline']) as (path, descriptor, parents):
+            config = _configuration(path, descriptor)
+            history = dict(complete=False, reason='machine_configuration_absent')
+            temporary_context = owners = None
+            if config is not None:
+                temporary_context = _ready_context(config, parents, deadline=budget['deadline'])
+                roots = [Path(observed['root']), Path(observed['primary_root'])]
+                _require(not any(temporary_context.directory.is_relative_to(root)
+                    or root.is_relative_to(temporary_context.directory) or path.is_relative_to(root) for root in roots))
+                with evidence._context_database(temporary_context) as db:
+                    owners = _enrolled_history(config, temporary_context, db, observed, budget)
+                history = dict(complete=True, reason='authenticated_no_related_history')
+            _require(_acquire_canonical_membership(selected, authority_path=None, budget=budget) == acquired)
+            # Reopen after the first transaction ends so committed baseline changes are visible.
+            _require(_enrolled_baseline(context, data['project_id'], budget) == baseline)
+            _require(_configuration(path, descriptor) == config
+                and (config is not None or not os.path.lexists(path)))
+            if config is not None:
+                _require(_ready_context(config, parents, deadline=budget['deadline']) == temporary_context)
+                with evidence._context_database(temporary_context) as db:
+                    _require(_enrolled_history(config, temporary_context, db, observed, budget) == owners)
+            _check_observation_deadline(budget)
+            result = dict(ok=True, status='resolved', owner=dict(kind='project', project_id=data['project_id'], task=None),
+                reference=_canonical_plain(baseline['reference']), created_at=baseline['content']['created_at'],
+                authority=authority, checkout={key: observed[key] for key in
+                    ('root', 'primary_root', 'git_dir', 'git_common_dir', 'binding')},
+                age_basis='authority_provenance', temporary_history=history)
+        return result
+    except (*_ERRORS, RuntimeError):
+        return _protected()
+
+
 def resolve_owner(target):
-    """Resolve one ordinary never-enrolled Repository; unsupported cases allocate nothing."""
+    """Resolve existing enrolled accounting before ordinary temporary ownership."""
+    enrolled = acquire_enrolled_accounting(target)
+    if enrolled['status'] != 'outside':
+        return enrolled
     try:
         with _machine_guard() as (path, descriptor, parents):
             config = _configuration(path, descriptor)

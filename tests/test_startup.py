@@ -813,6 +813,19 @@ class CanonicalAcquisitionTests(unittest.TestCase):
         event = codex.normalize(dict(self.payload, cwd=str(cwd or self.repo)))
         return startup.acquire_canonical_project(event, PACKAGE, **kwargs)
 
+    def test_shared_membership_acquisition_exposes_observed_authority_without_activation(self):
+        from runtime import startup
+        value, path = self.record()
+        observed = startup._acquire_canonical_membership(self.repo, authority_path=None,
+            budget={"paths": 0, "bytes": 0})
+        self.assertNotEqual(observed.status, "outside")
+        self.assertEqual(observed.authority_path, path)
+        self.assertIsNotNone(observed.authority_target)
+        self.assertEqual(observed.record.data["project_id"], value["project_id"])
+        self.assertEqual(observed.observation["root"], str(self.repo))
+        self.assertEqual(observed.observation["membership"], "included")
+        self.assertEqual(self.acquire().resolution.reason, "qualification_unobserved")
+
     def test_actual_standalone_missing_qualification_is_configured_without_writes(self):
         value, path = self.record()
         before = path.read_bytes()
