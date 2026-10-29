@@ -2649,26 +2649,75 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
         self.assertFalse(self.changes.inspect_lifecycle_recovery(context.authority_set,())['complete'])
 
     def test_recovery_ignores_payload_lookalikes_and_unrelated_new_tasks(self):
+        from dataclasses import replace
         from runtime import evidence,state
-        request,fixture,context=self.scoped_recovery_request()
-        self.assertEqual(self.changes._run_scoped(self.directory,request,'apply')['exit_code'],0)
+        from runtime.startup import _canonical_freeze,canonical_scope_projection,decode_project_record
+        request,contexts=self.d4_bookkeeping_request();context=contexts[0];scope=self.d4_bookkeeping_scopes[0]
+        record=request['manifest']['enrollment']['record'];repository=record['repositories'][0];checkout=repository['checkouts'][0]
+        projection=evidence._canonical_plain(canonical_scope_projection(decode_project_record(record),
+            repository_id=repository['repository_id'],checkout_id=checkout['checkout_id'],client='codex'))
+        scope=replace(scope,authority_target=_canonical_freeze(request['manifest']['enrollment']['before']['target']),
+            authority_revision=record['revision'],accepted_identity=_canonical_freeze(projection),accepted_scope_digest=state._digest(projection))
+        owner=dict(client='codex',session_id='selected-session',task_id='selected-task',scope_ref='selected')
+        state.start_task(scope,dict(owner,mode='read-only',decision_ref='fixture'))
+        named=dict(authority=evidence._canonical_plain(context.authority_set[0]),scope_id=state._scope_id(scope),
+            **{key:owner[key] for key in ('client','session_id','task_id')})
         with evidence._context_database(context,write=True) as db:
-            row=db.execute('select scope_id,client,session_id,task_id from tasks').fetchone()
-            task=state._task(db,*row)
+            task=state._task(db,named['scope_id'],named['client'],named['session_id'],named['task_id'])
             fake=dict(name='a'*32+'.json',digest='b'*64)
             task['evidence']=dict(version=1,plan=fake,candidate=fake,attempts=[],history=[dict(report=dict(authority={'not':'ownership'},reference=fake))])
-            state._save(db,state._scope_id(fixture.scope),task)
-        journal=self.changes._load_journal(self.directory)
-        named=dict(authority=state._authority_identity(state._path(fixture.scope)),scope_id=row[0],client=row[1],session_id=row[2],task_id=row[3])
-        before=self.changes._observe_recovery_source(self.directory,journal,(context,),(named,))
-        self.assertEqual(len(before.content['tasks']),1)
-        self.assertEqual(before.content['artifacts'],())
-        state.start_task(fixture.scope,dict(client='codex',session_id='unrelated-session',task_id='unrelated-task',scope_ref='unrelated',mode='read-only',decision_ref='fixture'))
-        with evidence._context_database(context,write=True) as db:
-            first=evidence._register_recovery_source(None,db,before,context=context)
-            later=self.changes._observe_recovery_source(self.directory,journal,(context,),(named,))
-            second=evidence._register_recovery_source(None,db,later,context=context)
+            state._save(db,state._scope_id(scope),task)
+        expected_plan=self.plan();directory=self.directory;operation='apply';observed=[];registered=[]
+        original_observe=self.changes._observe_recovery_source;original_register=evidence._register_recovery_source
+        def observe(path,journal,acquired,task_refs):
+            self.assertEqual(path,directory)
+            self.assertEqual(journal['manifest'],request['manifest'])
+            self.assertEqual(journal['approval'],request['approval'])
+            self.assertEqual(journal['plan'],expected_plan)
+            self.assertEqual(journal['transaction_id'],request['manifest']['transaction_id'])
+            self.assertIn(journal['state'],{'apply':('prepared','applied'),'resume':('applied',)}[operation])
+            self.assertEqual(task_refs,())
+            self.assertEqual([(item.directory,item.database,item.authority_set) for item in acquired],
+                [(context.directory,context.database,context.authority_set)])
+            source=original_observe(path,journal,acquired,(named,))
+            self.assertEqual([evidence._canonical_plain(item['reference']) for item in source.content['tasks']],[named])
+            self.assertEqual(source.content['artifacts'],())
+            observed.append(source)
+            return source
+        def register(selected_scope,db,source,*,context=None):
+            self.assertTrue(any(source is item for item in observed))
+            lifetime=self.changes._authority_context.publication
+            self.assertTrue(lifetime['active']);self.assertIs(lifetime['source'],source)
+            reference=original_register(selected_scope,db,source,context=context)
+            body=evidence._canonical_plain(evidence._read(None,evidence._canonical_plain(reference),context=context,db=db))
+            self.assertEqual([item['reference'] for item in body['tasks']],[named])
+            self.assertEqual(body['artifacts'],[])
+            self.assertEqual(original_register(selected_scope,db,source,context=context),reference)
+            registered.append(evidence._canonical_plain(reference))
+            return reference
+        with patch.object(self.changes,'_observe_recovery_source',side_effect=observe),patch.object(evidence,'_register_recovery_source',side_effect=register):
+            result=self.run_with_d4_host(request,operation)
+        self.assertEqual(result['exit_code'],0,result)
+        self.assertEqual(len(observed),2);self.assertEqual(len(registered),2)
+        before=observed[-1];first=registered[-1];journal=(directory/'transaction.json').read_bytes()
+        state.start_task(scope,dict(client='codex',session_id='unrelated-session',task_id='unrelated-task',scope_ref='unrelated',mode='read-only',decision_ref='fixture'))
+        with evidence._context_database(context) as db:
+            self.changes._check_recovery_source(before,context,db)
+        operation='resume'
+        with patch.object(self.changes,'_observe_recovery_source',side_effect=observe),patch.object(evidence,'_register_recovery_source',side_effect=register):
+            result=self.run_with_d4_host(request,operation)
+        self.assertEqual(result['exit_code'],0,result)
+        self.assertEqual(len(observed),4);self.assertEqual(len(registered),4)
+        self.assertEqual((directory/'transaction.json').read_bytes(),journal)
+        for later,second in zip(observed[2:],registered[2:]):
+            self.assertEqual(later.generations,before.generations)
             self.assertEqual(first,second)
+        with evidence._context_database(context) as db:
+            self.changes._check_recovery_source(before,context,db)
+            baseline=state._source_baseline(None,db,context=context)
+            self.assertEqual(evidence._canonical_plain(baseline['dependencies'][0]['reference']['artifact']),first)
+            selected=state._task(db,named['scope_id'],named['client'],named['session_id'],named['task_id'])
+            self.assertEqual(selected['evidence'],task['evidence'])
         self.assertTrue(self.changes.inspect_lifecycle_recovery(context.authority_set,())['complete'])
 
     def test_recovery_unknown_typed_dependency_blocks_instead_of_guessing(self):
