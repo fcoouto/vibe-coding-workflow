@@ -808,7 +808,7 @@ class EnrolledReviewStorageTests(unittest.TestCase):
             ReviewStorageTests.tree_snapshot(other.scope.runtime.state_dir), project_record.read_bytes()), before)
 
     def test_committed_baseline_removal_between_reads_is_seen_by_final_transaction(self):
-        from contextlib import contextmanager
+        from contextlib import closing, contextmanager
         import sqlite3
         from runtime import evidence, state
 
@@ -827,7 +827,7 @@ class EnrolledReviewStorageTests(unittest.TestCase):
             if is_project_store and len(project_transactions) == 1:
                 authority = state._canonical_plain(context.authority_set[0])
                 baseline_name = state._source_baseline_name(authority)
-                with sqlite3.connect(project_database) as external:
+                with closing(sqlite3.connect(project_database)) as external:
                     external.execute("delete from evidence_metadata where name=?", (baseline_name,))
                     external.commit()
                 post_mutation_snapshot.append(ReviewStorageTests.tree_snapshot(context.directory))
