@@ -1079,6 +1079,20 @@ def acquire_canonical_project(event, package, *, authority_path=None, qualifier=
             # The trusted callback may inspect facts, but it cannot normalize changed authority bytes.
             if _acquire_canonical_membership(event.cwd, authority_path=authority_path, budget=budget) != acquired:
                 return result("conflict", "authority_conflict")
+            # Reobserve selected inputs without adopting later facts into the qualified decision.
+            for dependency in observation["dependencies"]:
+                fresh = _acquired_dependency(Path(dependency["path"]), budget)
+                if fresh != dependency:
+                    return result("suspended", "dependency_changed" if fresh["status"] == "read" else "dependency_unobserved")
+            if observation["runtime_location"] is not None:
+                fresh = _acquired_runtime_location(Path(config["runtime"]["state_dir"]), package, data, observation, budget)
+                if fresh != observation["runtime_location"]:
+                    return result("conflict", "observation_unavailable")
+            if (policy_digest(package) != installed["policy_digest"]
+                    or runtime_fingerprint() != installed["runtime_digest"]
+                    or ([event.client] if (package / "clients" / (event.client + ".md")).is_file() else []) != installed["clients"]
+                    or str(package.resolve(strict=True)) != installed["package_root"]):
+                return result("suspended", "configuration_changed")
             resolution = resolve_canonical_scope(record, **facts)
         _check_observation_deadline(budget)
         return CanonicalAcquisition(resolution, pointer)

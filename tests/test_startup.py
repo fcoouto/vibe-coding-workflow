@@ -920,6 +920,93 @@ class CanonicalAcquisitionTests(unittest.TestCase):
         self.assertEqual(self.acquire(qualifier=lambda record, facts: proof).resolution.reason, "qualification_changed")
         self.assertEqual(self.acquire(qualifier=proof).resolution.status, "conflict")
 
+    def active_shared_dependency(self):
+        import hashlib
+        value, path = self.record()
+        shared = self.repo / "guide.md"; shared.write_text("accepted guide")
+        value["shared_policy"] = [dict(path=str(shared), sha256=hashlib.sha256(shared.read_bytes()).hexdigest())]
+        config = value["repositories"][0]["checkouts"][0]["clients"][0]["configuration"]
+        config["shared_dependencies"] = [str(shared)]
+        return shared, config, self.activate(value, path)
+
+    def test_selected_dependency_changed_during_qualification_cannot_be_active(self):
+        shared, _, proof = self.active_shared_dependency()
+        self.assertEqual(self.acquire(qualifier=lambda record, facts: proof).resolution.status, "active")
+        for mutation in ("bytes", "same-bytes-replacement", "removed"):
+            shared.write_text("accepted guide")
+            def change(record, facts):
+                if mutation == "bytes":
+                    shared.write_text("changed during qualification")
+                elif mutation == "same-bytes-replacement":
+                    replacement = shared.with_suffix(".copy")
+                    replacement.write_bytes(shared.read_bytes()); replacement.replace(shared)
+                else:
+                    shared.unlink()
+                return proof
+            with self.subTest(mutation=mutation):
+                result = self.acquire(qualifier=change).resolution
+                self.assertNotEqual(result.status, "active")
+                self.assertIsNone(result.scope)
+
+    def test_runtime_location_changed_during_qualification_cannot_be_active(self):
+        _, config, proof = self.active_shared_dependency()
+        location = Path(config["runtime"]["state_dir"])
+        for mutation in ("repository", "safe-directory", "link"):
+            def change(record, facts):
+                if mutation == "link":
+                    location.symlink_to(self.base, target_is_directory=True)
+                else:
+                    location.mkdir()
+                    if mutation == "repository":
+                        self.git(location, "init", "-q")
+                return proof
+            with self.subTest(mutation=mutation):
+                result = self.acquire(qualifier=change).resolution
+                self.assertNotEqual(result.status, "active")
+                self.assertIsNone(result.scope)
+            if location.is_symlink():
+                location.unlink()
+            else:
+                shutil.rmtree(location)
+
+    def test_installed_pins_changed_during_qualification_cannot_be_active(self):
+        from runtime import startup, state
+        _, _, proof = self.active_shared_dependency()
+        for owner, name in ((startup, "policy_digest"), (state, "runtime_fingerprint")):
+            original = getattr(owner, name)
+            changed = []
+            def read(*args):
+                return "0" * 64 if changed else original(*args)
+            def change(record, facts):
+                changed.append(True)
+                return proof
+            with self.subTest(pin=name), patch.object(owner, name, side_effect=read):
+                result = self.acquire(qualifier=change).resolution
+                self.assertNotEqual(result.status, "active")
+                self.assertIsNone(result.scope)
+
+    def test_post_qualification_observation_keeps_original_deadline(self):
+        from runtime import startup
+        _, _, proof = self.active_shared_dependency()
+        clock = [100.0]
+        qualified = []
+        original = startup._acquired_runtime_location
+        def observe(*args):
+            if qualified:
+                self.assertEqual(args[-1]["deadline"], 102.0)
+                clock[0] = 102.0
+            return original(*args)
+        def qualify(record, facts):
+            self.assertEqual(facts["deadline"], 102.0)
+            qualified.append(True)
+            clock[0] = 101.5
+            return proof
+        with patch.object(startup.time, "monotonic", side_effect=lambda: clock[0]), \
+                patch.object(startup, "_acquired_runtime_location", side_effect=observe):
+            result = self.acquire(qualifier=qualify, deadline=102.0).resolution
+        self.assertNotEqual(result.status, "active")
+        self.assertIsNone(result.scope)
+
     def test_authority_changed_during_same_byte_read_or_qualification_is_rejected(self):
         from runtime import onboarding
         value, path = self.record()
