@@ -10,6 +10,9 @@ import sys
 import time
 from unittest.mock import patch
 from runtime import openrouter_settings as settings
+from runtime import council_snapshot
+from tests.council_fixtures import CouncilCase
+import hashlib
 from tests.openrouter_fixtures import enroll, configure
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'scripts/openrouter_workers.py'
@@ -526,6 +529,137 @@ else:
         finally:
             try: os.kill(pid, signal.SIGKILL)
             except ProcessLookupError: pass
+
+
+
+class CouncilWorkerTests(CouncilCase):
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location('council_workers', SCRIPT)
+        cls.api = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.api)
+
+    def setUp(self):
+        super().setUp()
+        (self.repo / 'evidence.txt').write_text('approved evidence')
+        self.snapshot = self.root / 'evidence'
+        self.manifest = council_snapshot.capture(self.repo, self.snapshot, self.approved(['evidence.txt']))
+        self.brief = dict(task_id='council-one', role='Investigator', specialty='Independent analysis',
+            coordinator_chat_id=str(uuid.uuid4()), model='vendor/model', model_display_name='Model',
+            provider='provider', objective='Analyze evidence.txt', source_root=str(self.repo),
+            files=['evidence.txt'], timeout_seconds=5, steps=4, approval_ref='approved', effort='high',
+            council=dict(run_id='round-one', phase='investigate', member_id='external-one'),
+            input_tokens=10000, output_tokens=4096,
+            capabilities=dict(model='vendor/model', provider='provider', context_length=20000,
+                max_output_tokens=8000, max_input_tokens=12000, tools=True,
+                reasoning={'efforts': ['low', 'high']}, observed_at='2026-10-29T00:00:00Z',
+                source='controlled endpoint fixture'),
+            permission_qualification=dict(opencode_sha256=hashlib.sha256(self.executable.read_bytes()).hexdigest(),
+                version='1.19.5', profile='council-readonly-v1', evidence='local controlled qualification'))
+
+    def prepare(self, **changes):
+        self.assertTrue(callable(getattr(self.api, 'prepare_council', None)), 'Council preparation is required')
+        return self.api.prepare_council(self.root, dict(self.brief, **changes), self.snapshot, self.manifest)
+
+    def test_two_isolated_council_runs_keep_endpoint_allowances_and_pin(self):
+        first = self.prepare()
+        second = self.prepare(task_id='council-two', output_tokens=6000,
+            capabilities=dict(self.brief['capabilities'], reasoning={'fixed': 'high'}))
+        for run, output, fixed in [(first, 4096, False), (second, 6000, True)]:
+            brief = json.loads((run / 'brief.json').read_text())
+            model = self.api.configuration(brief)['provider']['openrouter']['models']['vendor/model']
+            self.assertEqual(model['options']['maxOutputTokens'], output)
+            self.assertEqual(model['options']['provider'], {'only': ['provider'], 'allow_fallbacks': False})
+            self.assertEqual('reasoning' in model['options'], not fixed)
+            self.assertEqual(model['limit']['input'], 10000)
+            self.api._verify_council_copy(run / 'workspace', brief['evidence']['workspace_manifest'])
+            self.assertTrue((run / 'workspace/.git').is_dir())
+        self.assertNotEqual(first / 'workspace', second / 'workspace')
+        pilot = {k: v for k, v in self.brief.items() if k not in (
+            'council', 'capabilities', 'input_tokens', 'output_tokens', 'permission_qualification')}
+        self.assertEqual(self.api.configuration(pilot)['provider']['openrouter']['models']['vendor/model']['options']['maxOutputTokens'], 2048)
+
+    def test_council_rejects_unverified_limits_effort_and_markers(self):
+        cases = [dict(output_tokens=8001), dict(input_tokens=12001), dict(input_tokens=17000),
+            dict(effort='low'), dict(capabilities=dict(self.brief['capabilities'], tools=False)),
+            dict(capabilities=dict(self.brief['capabilities'], provider='other')),
+            dict(council=dict(self.brief['council'], phase='synthesis')),
+            dict(permission_qualification={}), dict(evidence={'route': 'council'})]
+        for changes in cases:
+            with self.subTest(changes=changes), self.assertRaises(ValueError): self.prepare(**changes)
+        self.assertFalse((self.root / self.brief['task_id']).exists())
+        with self.assertRaises(ValueError): self.api.prepare(self.root, self.brief)
+
+    def test_council_requires_manifest_files_and_immutable_source(self):
+        with self.assertRaises(ValueError): self.prepare(files=['not-approved'])
+        (self.snapshot / 'evidence.txt').chmod(0o600)
+        (self.snapshot / 'evidence.txt').write_text('tampered')
+        with self.assertRaises(ValueError): self.prepare()
+
+    def test_council_disable_before_spawn_and_replay(self):
+        run = self.prepare()
+        settings.disable(self.repo, {'expected_revision': self.settings['revision']})
+        with patch.object(self.api.subprocess, 'Popen', wraps=self.api.subprocess.Popen) as spawn:
+            result = self.api.execute(run, self.executable, self.auth)
+        self.assertEqual(sum(call.args[0][0] == str(self.executable) for call in spawn.call_args_list), 0)
+        self.assertEqual(result['failure']['reason'], 'openrouter_disabled')
+        with self.assertRaisesRegex(ValueError, 'already_started'): self.api.execute(run, self.executable, self.auth)
+
+    def test_council_real_fixture_single_spawn_and_qualified_binary_binding(self):
+        count = self.temporary / 'spawns'
+        self.executable.write_text('#!/usr/bin/env python3\nimport json\nfrom pathlib import Path\n'
+            + f'with Path({str(count)!r}).open("a") as f: f.write("spawn\\n")\n'
+            + 'print(json.dumps({"type":"text","part":{"text":"fixture result"}}))\n'
+            + 'print(json.dumps({"type":"step_finish","part":{"reason":"stop","cost":0,"tokens":{"input":1,"output":1}}}))\n')
+        self.brief['permission_qualification']['opencode_sha256'] = hashlib.sha256(self.executable.read_bytes()).hexdigest()
+        run = self.prepare()
+        result = self.api.execute(run, self.executable, self.auth)
+        self.assertEqual(result['state'], 'awaiting_verification')
+        self.assertTrue(result['local_execution_stopped'])
+        with self.assertRaisesRegex(ValueError, 'already_started'): self.api.execute(run, self.executable, self.auth)
+        self.assertEqual(count.read_text().splitlines(), ['spawn'])
+        other = self.prepare(task_id='second-run', output_tokens=1024)
+        self.assertEqual(self.api.execute(other, self.executable, self.auth)['state'], 'awaiting_verification')
+        self.assertNotEqual(run / 'workspace', other / 'workspace')
+        second = self.prepare(task_id='changed-runtime')
+        self.executable.write_text('#!/bin/sh\nexit 0\n')
+        result = self.api.execute(second, self.executable, self.auth)
+        self.assertEqual(result['state'], 'unresolved')
+        self.assertEqual(count.read_text().splitlines(), ['spawn', 'spawn'])
+
+    def test_council_changed_copy_and_forged_route_never_launch(self):
+        for index, change in enumerate(('copy', 'marker')):
+            run = self.prepare(task_id=f'invalid-{index}')
+            if change == 'copy':
+                (run / 'workspace/evidence.txt').chmod(0o600)
+                (run / 'workspace/evidence.txt').write_text('changed')
+            else:
+                brief = json.loads((run / 'brief.json').read_text())
+                del brief['council']
+                (run / 'brief.json').write_text(json.dumps(brief))
+            with patch.object(self.api.subprocess, 'Popen', wraps=self.api.subprocess.Popen) as spawn:
+                result = self.api.execute(run, self.executable, self.auth)
+            self.assertEqual(sum(call.args[0][0] == str(self.executable) for call in spawn.call_args_list), 0)
+            self.assertEqual(result['state'], 'unresolved')
+
+
+    def test_council_honors_small_endpoint_and_larger_finite_step_budget(self):
+        run = self.prepare(input_tokens=2000, output_tokens=1024, steps=9, timeout_seconds=301,
+            capabilities=dict(self.brief['capabilities'], context_length=4096,
+                max_output_tokens=1024, max_input_tokens=2000))
+        model = self.api.configuration(json.loads((run / 'brief.json').read_text()))['provider']['openrouter']['models']['vendor/model']
+        self.assertEqual(model['options']['maxOutputTokens'], 1024)
+
+
+    def test_council_oversized_report_stops_without_persisting_excess(self):
+        self.executable.write_text('#!/usr/bin/env python3\nimport json\n'
+            + 'print(json.dumps({"type":"text","part":{"text":"x" * (128 * 1024)}}))\n')
+        self.brief['permission_qualification']['opencode_sha256'] = hashlib.sha256(self.executable.read_bytes()).hexdigest()
+        run = self.prepare()
+        result = self.api.execute(run, self.executable, self.auth)
+        self.assertEqual(result['state'], 'unresolved')
+        self.assertLessEqual(len(result['response'].encode()), 128 * 1024)
+        self.assertTrue(result['local_execution_stopped'])
 
 
 if __name__ == '__main__': unittest.main()
