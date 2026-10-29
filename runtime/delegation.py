@@ -268,8 +268,8 @@ def _closure_guidance(context,db,records):
         result=dict(reference=reference,created_at=metadata['created_at'],owner=metadata['owner'],guidance=value)
         references[evidence._raw(reference)]=result
         return result
-    def assignment(body,reference,created_at,request_digest):
-        discovery=evidence._read(None,body['discovery'],context=context,db=db)
+    def assignment(body,reference,created_at,request_digest,discovery=None):
+        if discovery is None:discovery=evidence._read(None,body['discovery'],context=context,db=db)
         guidance=body['guidance'];state._fields(guidance,('snapshot_ref','snapshot_digest','checked_at','freshness'))
         surface=body['binding']['client_surface'];original=source(guidance['snapshot_ref']);surfaces.add(surface)
         _guidance(original['guidance'],dict(client_surface=surface,applicability=dict(client_version=discovery['native_version'],
@@ -295,6 +295,25 @@ def _closure_guidance(context,db,records):
         if evidence._bookkeeping_record(context,db,dict(name=row[0],digest=row[1]),compact):continue
         marker=state._retired(db,'task',{key:owner[key] for key in ('scope_id','client','session_id','task_id')})
         if marker is None:continue
+        retained_support=evidence._retained_for_owner(context,db,owner)
+        if retained_support is not None:
+            if retained_support['reference']!=dict(name=row[0],digest=row[1]):continue
+            compact=retained_support['content']
+            certificates=[item for item in compact['stopped'].get('assignments',[]) if item['role'] in NATIVE_ROLES]
+            _require(len(compact['native_sources'])==len(compact['native_guidance'])==len(certificates),
+                'Retained native source coverage differs from issued certificates')
+            for certificate in certificates:
+                matches=[item for item in compact['native_sources'] if item['assignment']==certificate['reference']]
+                _require(len(matches)==1,'Retained native source is unavailable or ambiguous')
+                original=matches[0]
+                actual=assignment(original,certificate['reference'],certificate['created_at'],certificate['request_digest'],
+                    discovery=original['discovery']['content'])
+                _require(actual in compact['native_guidance'],'Retained native correspondence differs from original qualified projection')
+            for original in compact['scope_guidance']:
+                _require(source(original['reference'])==original,'Retained scope guidance changed')
+            retained.append(dict(reference=retained_support['reference'],identity=owner,marker=marker,
+                assignments=[[item['id'],item['marker']] for item in compact['assignment_markers']]))
+            continue
         linked=None
         if compact.get('kind')=='linked-closure-preparation':
             support=evidence._linked_retained_component(evidence._linked_basis_root(compact['stopped']['linked']),compact['stopped']['linked']['authorities'],writer=(context,db))
