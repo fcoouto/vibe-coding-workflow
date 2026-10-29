@@ -239,6 +239,117 @@ def _recovery_source_history(context,db,reference,identity,*,validate_stops=True
     return history
 
 
+def _recovery_use_inputs(context,db,reference,identity,*,content=None):
+    """Actual local comparison inputs; complete certificate/foreign work remains pending."""
+    _check_context(context,db)
+    baseline=state._source_baseline(None,db,context=context)
+    _require(baseline is not None and baseline['content']['source_contract']==2,'Recovery use baseline is unavailable')
+    baseline=_canonical_plain(baseline);authority=_canonical_plain(context.authority_set[0])
+    heads=[edge['reference']['artifact'] for edge in baseline['dependencies'] if edge['reference']['identity']==identity]
+    _require(len(heads)<=1 and reference==(heads[0] if heads else None),'Recovery use input is not its actual baseline head')
+    history=[];jobs=[];metadata={};local_sources=[];seen=set();age=None
+    current=reference
+    while current is not None:
+        key=_raw(current)
+        _require(key not in seen and len(seen)<4096,'Recovery source history is cyclic or excessive');seen.add(key)
+        actual,raw=_managed_artifact(None,current,context=context,db=db);body=json.loads(raw)
+        _recovery_source_shape(body,identity)
+        _require(actual['class']=='compact' and actual['owner']==dict(kind='project',project_id=baseline['content']['project_id'],task=None)
+            and actual['closed_at'] is None and not actual['targets'] and actual['export'] is None,
+            'Recovery use source owner differs from original baseline')
+        _require(actual['dependencies']==_recovery_source_dependencies(body,authority),'Recovery typed metadata dependencies differ from owner source')
+        if age is None:age=actual['created_at']
+        _require(actual['created_at']==age,'Recovery source history original age or owner changed')
+        history.append(dict(reference=current,metadata=actual,content=body))
+        for certificate in body.get('stopped',[]):
+            jobs.append(dict(kind='stopped-certificate',authority=certificate['reference']['authority'],
+                source=dict(authority=authority,artifact=current),certificate=certificate))
+        current=body['previous']
+    for item in (content or {}).get('artifacts',[]):
+        if item['authority']!=authority:
+            jobs.append(dict(kind='managed-source',reference=item));continue
+        actual,_=_managed_artifact(None,item['artifact'],context=context,db=db)
+        local_sources.append(dict(reference=item['artifact'],metadata=actual))
+        from runtime import recovery_uses
+        metadata[recovery_uses.key(item)]=[recovery_uses.qualify_dependency(edge,authority) for edge in actual['dependencies']]
+    return dict(authority=authority,baseline=baseline,identity=identity,reference=reference,history=history,jobs=jobs,
+        metadata=metadata,local_sources=local_sources)
+
+
+def _recovery_admission_projection(inputs):
+    """Pure legacy relationship comparisons, never an admitted-use result or permission."""
+    from runtime import recovery_uses
+    routes={}
+    for item in inputs['history']:
+        body=item['content']
+        recovery_uses._require('use_contract' not in body,'Restricted inventory cannot create legacy permission')
+        origin=dict(authority=inputs['authority'],artifact=item['reference'],identity=body['identity'],journal_sha256=body['journal']['sha256'])
+        recovery_uses._authority(origin['authority']);recovery_uses._artifact(origin['artifact'])
+        recovery_uses._identity(origin['identity']);recovery_uses._hash(origin['journal_sha256'])
+        destinations={}
+        for authority in body['authorities']:
+            recovery_uses._authority(authority);destinations[recovery_uses.key(authority)]=authority
+        recovery_uses._require(len(destinations)<=recovery_uses.MAX_ROWS,'Recovery legacy destination bound exceeded')
+        row=dict(origin=origin,destinations=[destinations[key] for key in sorted(destinations)])
+        key=recovery_uses.key(origin)
+        recovery_uses._require(key not in routes or routes[key]==row,'Conflicting legacy route origin')
+        routes[key]=deepcopy(row)
+        recovery_uses._require(len(routes)<=recovery_uses.MAX_ROWS,'Recovery legacy origin bound exceeded')
+    return dict(legacy_routes=sorted(routes.values(),key=recovery_uses.key),jobs=deepcopy(inputs['jobs']))
+
+
+def _recovery_registration_projection(content,created_at,inputs):
+    """Derive the actual local body/replay from approved source and baseline comparisons."""
+    from runtime import recovery_uses
+    content=deepcopy(content);original=deepcopy(content);baseline=inputs['baseline'];identity=content['identity']
+    state._integer(created_at,'original D4 source creation time')
+    _require(identity==inputs['identity'],'Recovery projection source identity changed')
+    heads=[edge['reference']['artifact'] for edge in baseline['dependencies'] if edge['reference']['identity']==identity]
+    _require(len(heads)<=1,'Recovery projection original baseline head is ambiguous')
+    previous=heads[0] if heads else None
+    _require(previous==inputs['reference'] and (not inputs['history'] if previous is None else
+        bool(inputs['history']) and inputs['history'][0]['reference']==previous),'Recovery projection original head changed')
+    reference=None
+    if previous is not None:
+        prior=inputs['history'][0];_require(prior['metadata']['created_at']==created_at,'Original D4 source age differs from observed first source')
+        comparable=dict(content,previous=prior['content']['previous'])
+        comparable['journal']=dict(comparable['journal'],observed_at=prior['content']['journal']['observed_at'])
+        if comparable==prior['content']:content=deepcopy(prior['content']);reference=previous
+    if reference is None:content['previous']=previous if content['version']==1 else None
+    dependencies=_recovery_source_dependencies(content,inputs['authority'])
+    admission=_recovery_admission_projection(inputs)
+    if 'use_contract' in content:
+        try:
+            contract=recovery_uses.validate(content['use_contract'])
+            _require(all(row in contract['legacy_routes'] for row in admission['legacy_routes']),
+                'Recovery projection lost inherited legacy restrictions')
+            _require(not any(job['kind']=='managed-source' for job in inputs['jobs']),
+                'Recovery use projection requires external managed inputs')
+            recovery_uses.check_coverage(contract,[recovery_uses.qualify_dependency(edge,inputs['authority']) for edge in dependencies],inputs['metadata'])
+        except recovery_uses.UseContractError as error:raise state.StateError(str(error)) from None
+    return dict(source=original,created_at=created_at,inputs=deepcopy(inputs),previous=previous,reference=reference,
+        content=content,dependencies=dependencies,admission=admission)
+
+
+def _check_recovery_projection(context,db,source,lifetime):
+    """Recheck only actual local reads; the caller has already checked its real lifetime."""
+    expected=lifetime['registration_projections'][str(context.database)];inputs=expected['inputs']
+    _require(inputs['baseline']==lifetime['baselines'][str(context.database)],'Recovery projection original baseline changed')
+    for item in inputs['history']:
+        actual,raw=_managed_artifact(None,item['reference'],context=context,db=db)
+        _require(actual==item['metadata'] and json.loads(raw)==item['content'],'Recovery projection history changed')
+    for item in inputs['local_sources']:
+        actual,_=_managed_artifact(None,item['reference'],context=context,db=db)
+        expected_metadata=deepcopy(item['metadata'])
+        registration=lifetime['registrations'].get(str(context.database))
+        if item['reference']==inputs['baseline']['reference'] and registration is not None:
+            expected_metadata['dependencies']=registration['expected']['dependencies']
+        _require(actual==expected_metadata,'Recovery projection managed source changed')
+    actual=_recovery_registration_projection(_canonical_plain(source.content),source.created_at,inputs)
+    _require(actual==expected,'Recovery registration projection changed')
+    return actual
+
+
 def _register_recovery_source(scope, db, source, *, context=None):
     """Retain an inspected D4 source and its reverse edge in one existing transaction."""
     from runtime import changes
@@ -255,7 +366,8 @@ def _register_recovery_source(scope, db, source, *, context=None):
     _require(baseline is not None, 'Recovery source baseline is unavailable; preserve operation markers')
     baseline = _canonical_plain(baseline)
     _require(baseline==lifetime['baselines'][str(selected.database)],'Recovery original baseline changed after authenticated acquisition')
-    content = _canonical_plain(source.content)
+    projection=_check_recovery_projection(selected,db,source,lifetime)
+    content = deepcopy(projection['content'])
     identity = content['identity']
     edges = baseline['dependencies']
     matches = [e for e in edges if e['reference']['identity'] == identity]
@@ -270,15 +382,12 @@ def _register_recovery_source(scope, db, source, *, context=None):
             and metadata['class'] == 'compact' and metadata['owner'] == dict(kind='project',project_id=baseline['content']['project_id'],task=None),
             'Prior recovery source ownership changed')
         _require(metadata['created_at']==created,'Original D4 source age differs from observed first source')
-        comparable = dict(content, previous=prior.get('previous'))
-        comparable['journal'] = dict(comparable['journal'], observed_at=prior['journal']['observed_at'])
-        if comparable == prior:
+        if projection['reference']==previous:
             lifetime['registrations'][str(selected.database)]=dict(baseline=baseline,expected=baseline,
                 content=prior,created_at=created,dependencies=_recovery_source_dependencies(prior,_canonical_plain(selected.authority_set[0])),reference=previous)
             _check_recovery_registration(selected,db,source)
             return _canonical_freeze(previous)
-    content['previous'] = previous if content['version']==1 else None
-    dependencies = _recovery_source_dependencies(content,_canonical_plain(selected.authority_set[0]))
+    dependencies = projection['dependencies']
     registration=dict(baseline=baseline,expected=baseline,content=content,created_at=created,dependencies=dependencies,reference=None)
     lifetime['registrations'][str(selected.database)]=registration
     owner = _RecoveryOwner(baseline['content']['project_id'], source, created, tuple(_canonical_freeze(d) for d in dependencies), _canonical_freeze(content))
@@ -301,15 +410,10 @@ def _check_recovery_registration(context,db,source,owner=None):
     lifetime=changes._check_d4_publication(source,context,db)
     registration=lifetime['registrations'].get(str(context.database))
     _require(registration is not None,'Recovery owner has no actual registration acquisition')
-    baseline=registration['baseline'];content=_canonical_plain(source.content)
-    matches=[edge for edge in baseline['dependencies'] if edge['reference']['identity']==content['identity']]
-    _require(len(matches)<=1,'Recovery original baseline head is ambiguous')
-    previous=matches[0]['reference']['artifact'] if matches else None
-    content['previous']=previous if content['version']==1 else None
+    baseline=registration['baseline'];projection=_check_recovery_projection(context,db,source,lifetime)
+    content=projection['content'];dependencies=projection['dependencies'];previous=projection['previous']
     if registration['reference']==previous and previous is not None:
-        prior=_recovery_source_history(context,db,previous,content['identity'])[0][1]
-        content['previous']=prior.get('previous');content['journal']['observed_at']=prior['journal']['observed_at']
-    dependencies=_recovery_source_dependencies(content,_canonical_plain(context.authority_set[0]))
+        _recovery_source_history(context,db,previous,content['identity'])
     _require(content==registration['content'] and dependencies==registration['dependencies'] and source.created_at==registration['created_at'],
         'Recovery content, true previous head, original age or dependencies changed')
     actual=_canonical_plain(state._source_baseline(None,db,context=context))
