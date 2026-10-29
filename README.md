@@ -32,4 +32,8 @@ For an explicitly selected existing project, use [onboard-my-project](skills/onb
 
 Use [review-my-project](skills/review-my-project/SKILL.md) to review selected repositories and areas with safe local evidence. It does not enroll repositories. Until managed target-owner reconciliation is available, limited findings are returned in chat and detailed reports are not saved.
 
+## Observability
+
+Use the separate [Manage Observability Integration](skills/manage-observability/SKILL.md) skill to prepare optional integration setup, status, scope or enable/disable requests for a selected Project. Its name is provider-neutral; Langfuse is the first planned option. The skill currently provides guidance and identifies prerequisites; persistent settings, connection management and live collection are not implemented.
+
 [Development guide](AGENTS.md)

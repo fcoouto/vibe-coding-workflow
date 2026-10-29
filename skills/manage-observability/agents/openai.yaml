@@ -1,0 +1,4 @@
+interface:
+  display_name: "Manage Observability Integration"
+  short_description: "Prepare optional observability integration setup"
+  default_prompt: "Use $manage-observability to prepare observability setup for the selected Project."

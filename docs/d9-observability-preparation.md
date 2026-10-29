@@ -60,6 +60,8 @@ Reuse canonical D9 enable/disable, privacy and [shared retention](onboard-my-pro
 
 Future collection must follow D9's [selective workflow policy](onboard-my-project-plan.md#selective-workflow-collection), including owner-resolved task/scope eligibility, minimal observations, complete qualified accounting and source-side filtering. The local preparation flag and supplied report do not establish that eligibility, implement sampling or filter any exporter. Do not add conversation classification, source refresh or collection authority to this pure helper.
 
+The separate [Manage Observability Integration skill](../skills/manage-observability/SKILL.md) is the provider-neutral entry point for explicitly requested integration preparation/status and future enable/disable handling. Its local procedure states current capability gaps; it does not add a caller, grant persistent opt-in or turn this projection into an export payload. Routine tasks and unrelated general Q&A do not load it.
+
 D9b acceptance still requires the native-only coordinator/worker/reviewer task, authoritative source reconciliation and preceding D7b proof. Exports require destination permissions, a qualified metrics-only payload and disclosure of destination retention/access behavior; eligible metrics do not require remote deletion qualification or plugin deletion logic. Local evidence retention remains unchanged. D11 remains last and requires supported target-version dashboards and observed scope/filter behavior. Preparation and unit fixtures pass none of those gates. No integration account, service connection, dashboard or collector is activated by this slice.
 
 ## Validation recorded on 28 October 2026
