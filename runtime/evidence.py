@@ -2541,6 +2541,9 @@ def _artifact_registered(scope, value, context, owner, db):
         targets=_canonical_plain(owner.targets) if temporary else [], export=None,
         managed=dict(path=str(path), binding=dict(device=info.st_dev, inode=info.st_ino), parents=parents,
             sha256=digest, mode=stat.S_IMODE(info.st_mode), bytes=info.st_size))
+    if temporary and owner.creation is None:
+        from runtime.screening import _fresh
+        data['screening'] = _fresh()
     owner_key = ('temporary:' + metadata_owner['id'] if temporary else 'project:' + metadata_owner['project_id'])
     row = (path.name, digest, owner_key, content_class, created, None, 'live', len(raw), _raw(data).decode())
     state._metadata_record(row)

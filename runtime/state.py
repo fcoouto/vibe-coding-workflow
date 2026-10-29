@@ -293,7 +293,7 @@ def _metadata_record(row):
     name = row[0]
     value = json_object(row[8])
     _fields(value, ("version", "owner", "created_at", "class", "bytes", "status", "closed_at",
-                    "dependencies", "targets", "export", "managed"))
+                    "dependencies", "targets", "export", "managed"), ("screening",))
     if type(value["version"]) is not int or value["version"] not in (1, 2):
         raise StateError("Unsupported evidence metadata")
     owner = value["owner"]
@@ -357,6 +357,45 @@ def _metadata_record(row):
             _fields(git["binding"], ("root", "primary_root", "git_dir", "git_common_dir"))
             for field in git["binding"]:
                 _canonical_path(git[field]); _canonical_binding(git["binding"][field])
+    if "screening" in value:
+        _screening_record(value["screening"])
+        if (owner["kind"] != "temporary" or value["class"] != "compact"
+                or value["status"] != "live" or value["closed_at"] is not None
+                or not value["targets"] or value["dependencies"] or value["export"] is not None
+                or value["created_at"] != owner["created_at"]):
+            raise StateError("Screening accounting requires its live temporary owner anchor")
+    return value
+
+
+def _screening_ticket(value):
+    _fields(value, ("sequence", "nonce", "ceiling_ms"))
+    if (type(value["sequence"]) is not int or value["sequence"] != 1
+            or type(value["ceiling_ms"]) is not int or value["ceiling_ms"] != 300000
+            or not isinstance(value["nonce"], str) or not re.fullmatch(r"[0-9a-f]{32}", value["nonce"])):
+        raise StateError("Invalid screening ticket")
+    return value
+
+
+def _screening_record(value):
+    _fields(value, ("version", "birth", "limit_ms", "revision", "charged_ms", "settled_sequence",
+                    "reservation", "last_receipt"))
+    for name in ("version", "limit_ms", "revision", "charged_ms", "settled_sequence"):
+        _integer(value[name], "screening " + name)
+    if (value["version"] != 1 or value["birth"] != "temporary-owner-publication"
+            or value["limit_ms"] != 300000):
+        raise StateError("Unsupported screening accounting")
+    reservation, receipt = value["reservation"], value["last_receipt"]
+    if reservation is not None:
+        _screening_ticket(reservation)
+    if receipt is not None:
+        _fields(receipt, ("ticket", "disposition"))
+        _screening_ticket(receipt["ticket"])
+        if receipt["disposition"] != "charged-full":
+            raise StateError("Unsupported screening disposition")
+    shape = (value["revision"], value["charged_ms"], value["settled_sequence"],
+             reservation is not None, receipt is not None)
+    if shape not in ((0, 0, 0, False, False), (1, 0, 0, True, False), (2, 300000, 1, False, True)):
+        raise StateError("Inconsistent screening accounting")
     return value
 
 

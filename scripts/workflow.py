@@ -29,6 +29,10 @@ def control_main():
         storage_actions.add_parser("prepare", add_help=False)
         storage_actions.add_parser("project-owner", add_help=False)
         storage_actions.add_parser("owner", add_help=False).add_argument("--cwd", required=True)
+        screening = storage_actions.add_parser("screening", add_help=False)
+        screening_actions = screening.add_subparsers(dest="screening_action", required=True)
+        for name in ("status", "reserve", "settle"):
+            screening_actions.add_parser(name, add_help=False)
         task = commands.add_parser("task", add_help=False)
         actions = task.add_subparsers(dest="action", required=True)
         for name in ("start", "update", "status", "retire"):
@@ -85,6 +89,17 @@ def control_main():
                 if set(request) != {"private_data_dir"} or not isinstance(request["private_data_dir"], str):
                     raise StartupError("Expected an explicit private_data_dir")
                 report = review_storage.prepare_storage(Path(request["private_data_dir"]))
+            elif args.action == "screening":
+                from runtime import state
+                request = json_object(sys.stdin.buffer.read(MAX_INPUT + 1))
+                extra = {"status": (), "reserve": ("expected_revision",), "settle": ("ticket",)}[args.screening_action]
+                state._fields(request, ("selection", *extra))
+                if args.screening_action == "status":
+                    report = review_storage.screening_status(request["selection"])
+                elif args.screening_action == "reserve":
+                    report = review_storage.reserve_screening(request["selection"], request["expected_revision"])
+                else:
+                    report = review_storage.settle_screening(request["selection"], request["ticket"])
             elif args.action == "owner":
                 report = review_storage.resolve_owner(Path(args.cwd))
             elif args.action == "project-owner":
@@ -183,7 +198,10 @@ def control_main():
         reason = str(error)
     except (ImportError, ValueError, TypeError, KeyError, OSError, RecursionError, subprocess.TimeoutExpired):
         reason = "Invalid task input, enrollment or local runtime"
-    print(json.dumps({"ok": False, "error": reason}))
+    report = {"ok": False, "error": reason}
+    if sys.argv[1:3] == ["storage", "screening"]:
+        report.update(status="protected", admitted=False, screening=None, revision=None)
+    print(json.dumps(report))
     return 1
 
 

@@ -13,6 +13,7 @@ import time
 import uuid
 
 from runtime import evidence, state
+from runtime.screening import screening_status, reserve_screening, settle_screening
 from runtime.startup import (PROJECT_FILE, checkout, json_object, read_git, _canonical_freeze,
                              _canonical_plain, _acquire_canonical_membership, _check_observation_deadline)
 
@@ -21,6 +22,7 @@ MAX_CONFIG = 64 * 1024
 MAX_RECORDS = 4096
 _ACTIVE_PRODUCER = ContextVar('temporary_storage_producer', default=None)
 _PRODUCER_BUDGET = ContextVar('temporary_storage_observation_budget', default=None)
+_MACHINE_ACQUISITION = ContextVar('temporary_machine_acquisition', default=None)
 _ERRORS = (OSError, state.StartupError, sqlite3.Error, ValueError, TypeError, KeyError,
            RecursionError, subprocess.SubprocessError)
 
@@ -133,8 +135,12 @@ def _machine_guard(*, create=False, deadline=None):
                 time.sleep(0.01)
         _check_parents(parents)
         _check_parents(original_parents)
-        yield path, descriptor, parents
-        _check_parents(parents)
+        token = _MACHINE_ACQUISITION.set(dict(path=path, descriptor=descriptor, parents=parents, contexts=[]))
+        try:
+            yield path, descriptor, parents
+            _check_parents(parents)
+        finally:
+            _MACHINE_ACQUISITION.reset(token)
     finally:
         os.close(descriptor)
 
@@ -198,6 +204,9 @@ def _ready_context(config, machine_parents, *, deadline=None):
         _canonical_freeze(authority['directory_binding']), _canonical_freeze(authority['database_binding']),
         (_canonical_freeze(authority),), 'explicit machine-private temporary evidence authority')
     evidence._check_context(context)
+    acquired = _MACHINE_ACQUISITION.get()
+    if acquired is not None and acquired['parents'] == machine_parents:
+        acquired['contexts'].append(context)
     return context
 
 
@@ -316,6 +325,8 @@ def _check_producer(context, db, owner):
             _require(observed == {key: content[key] for key in ('root', 'membership', 'members')})
         else:
             _require(_observe_target(Path(targets[0]['path']), budget=budget) == targets[0])
+        from runtime.screening import _check_birth
+        _check_birth(context, db, targets, budget)
     return metadata_owner
 
 
@@ -782,7 +793,7 @@ def _existing_project_owner(owners, facts, budget):
     raise _HistoryConflict(related)
 
 
-def _temporary_project_result(scope, budget, *, scope_guard):
+def _temporary_project_result(scope, budget, *, scope_guard, control=None):
     facts = _observe_temporary_project(scope['project_root'], scope['member_checkouts'], scope['membership'], budget)
     _require(scope['authority']['sha256'] == 'absent')
     targets = [facts['root'], *facts['members']]
@@ -793,6 +804,15 @@ def _temporary_project_result(scope, budget, *, scope_guard):
             return _pending()
         context = _ready_context(config, parents, deadline=budget['deadline'])
         _storage_outside(context, path, targets)
+        if control is not None:
+            def reobserve():
+                scope_guard()
+                _require(_configuration_snapshot(path, descriptor) == snapshot
+                    and _ready_context(config, parents, deadline=budget['deadline']) == context
+                    and _observe_temporary_project(scope['project_root'], scope['member_checkouts'],
+                        scope['membership'], budget) == facts)
+            return control.access(config, context,
+                lambda owners: _existing_project_owner(owners, facts, budget), reobserve, budget)
         with evidence._context_database(context) as db:
             owners = _owners(config, context, db, budget=budget)
             existing = _existing_project_owner(owners, facts, budget)
@@ -851,6 +871,10 @@ def _scope_root_target(scope, budget):
 
 def resolve_project_owner(project_scope, *, deadline=None):
     """Acquire one declared Project's accounting; do not prepare storage or enroll it."""
+    return _project_owner_result(project_scope, deadline=deadline)
+
+
+def _project_owner_result(project_scope, *, deadline=None, control=None):
     from runtime import onboarding as d3
     try:
         budget = _budget(deadline)
@@ -874,12 +898,12 @@ def resolve_project_owner(project_scope, *, deadline=None):
                      and scope['authority']['sha256'] == 'absent'
                      and any(root.is_relative_to(root / name) for name in scope['membership']['include'])
                      and not any(root.is_relative_to(root / name) for name in scope['membership']['exclude']))
-            result = _temporary_target_result(members[0], budget=budget, scope_guard=scope_guard)
+            result = _temporary_target_result(members[0], budget=budget, scope_guard=scope_guard, control=control)
         else:
-            result = _temporary_project_result(scope, budget, scope_guard=scope_guard)
+            result = _temporary_project_result(scope, budget, scope_guard=scope_guard, control=control)
         scope_guard()
         _check_observation_deadline(budget)
-        if result.get('status') == 'protected' and 'temporary_history' not in result:
+        if control is None and result.get('status') == 'protected' and 'temporary_history' not in result:
             return _history_protected()
         return result
     except _HistoryConflict as error:
@@ -896,7 +920,7 @@ def resolve_owner(target):
     return _temporary_target_result(target)
 
 
-def _temporary_target_result(target, *, budget=None, scope_guard=None):
+def _temporary_target_result(target, *, budget=None, scope_guard=None, control=None):
     try:
         observe = lambda: _observe_target(target, **({'budget': budget} if budget is not None else {}))
         guard = {'deadline': budget['deadline']} if budget is not None else {}
@@ -910,6 +934,14 @@ def _temporary_target_result(target, *, budget=None, scope_guard=None):
             root = Path(observed['path'])
             _require(not context.directory.is_relative_to(root) and not root.is_relative_to(context.directory)
                      and not path.is_relative_to(root))
+            if control is not None:
+                def reobserve():
+                    if scope_guard is not None:
+                        scope_guard()
+                    _require(observe() == observed and _configuration_snapshot(path, descriptor) == snapshot
+                             and _ready_context(config, parents, **guard) == context)
+                return control.access(config, context,
+                    lambda owners: _existing_owner(owners, observed, budget=budget), reobserve, budget)
             with evidence._context_database(context) as db:
                 owners = _owners(config, context, db, budget=budget)
                 existing = _existing_owner(owners, observed, budget=budget)
