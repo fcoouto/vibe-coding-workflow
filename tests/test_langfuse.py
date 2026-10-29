@@ -14,6 +14,7 @@ import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
 
 
 PUBLIC_KEY = 'pk-lf-synthetic-test'
@@ -69,6 +70,10 @@ def protocol_server():
                     self.reply(fixture.projects_status, {'data': [{'id': fixture.project_id,
                         'name': 'PRIVATE_NAME', 'organization': {'name': 'PRIVATE_ORGANIZATION'}}]})
                 elif self.path.startswith('/api/public/v2/observations?'):
+                    query = parse_qs(urlsplit(self.path).query)
+                    if not all(query.get(field) for field in ('fromStartTime', 'toStartTime')):
+                        self.reply(400, {'error': 'time bounds required'})
+                        return
                     rows = []
                     if fixture.span and not fixture.read_delay:
                         span = fixture.span
@@ -113,6 +118,32 @@ def protocol_server():
 
 
 class LangfuseTests(unittest.TestCase):
+    def test_supplied_pair_is_used_without_environment_fallback(self):
+        from runtime import langfuse
+        with protocol_server() as server, patch.dict(os.environ,
+                LANGFUSE_PUBLIC_KEY='pk-lf-unrelated', LANGFUSE_SECRET_KEY='sk-lf-unrelated'):
+            pair = (PUBLIC_KEY, SECRET_KEY)
+            try:
+                langfuse.verify_project(server.url, 'lf-project', credentials=pair)
+                result = langfuse.synthetic_probe(server.url, 'lf-project',
+                    before_ingest=lambda: None, credentials=pair)
+            except TypeError:
+                self.fail('Explicit credential pairs are not supported')
+            self.assertTrue(result['verified'])
+            expected = 'Basic ' + base64.b64encode((PUBLIC_KEY + ':' + SECRET_KEY).encode()).decode()
+            self.assertTrue(server.requests)
+            self.assertTrue(all(request['headers']['Authorization'] == expected for request in server.requests))
+
+    def test_invalid_supplied_pair_cannot_fall_back_to_valid_environment(self):
+        from runtime import langfuse
+        with protocol_server() as server:
+            try:
+                with self.assertRaises(langfuse.LangfuseError):
+                    langfuse.verify_project(server.url, 'lf-project', credentials=('', ''))
+            except TypeError:
+                self.fail('Explicit credential pairs are not supported')
+            self.assertEqual(server.requests, [])
+
     def test_documented_fixed_resource_metadata_is_verified(self):
         from runtime import langfuse
         with protocol_server() as server:
@@ -140,6 +171,21 @@ class LangfuseTests(unittest.TestCase):
             self.assertEqual(len(server.requests), 1)
             expected = 'Basic ' + base64.b64encode((PUBLIC_KEY + ':' + SECRET_KEY).encode()).decode()
             self.assertEqual(server.requests[0]['headers']['Authorization'], expected)
+
+    def test_probe_readback_uses_a_fixed_time_window_containing_its_span(self):
+        from runtime import langfuse
+        with protocol_server() as server, patch.object(langfuse.time, 'time_ns', return_value=1735689600500000000):
+            server.read_delay = 1
+            result = langfuse.synthetic_probe(server.url, 'lf-project', before_ingest=lambda: None)
+            self.assertTrue(result['verified'])
+            reads = [request for request in server.requests if '/v2/observations?' in request['path']]
+            self.assertEqual(len(reads), 2)
+            for request in reads:
+                query = parse_qs(urlsplit(request['path']).query)
+                self.assertEqual(query['fromStartTime'], ['2025-01-01T00:00:00Z'])
+                self.assertEqual(query['toStartTime'], ['2025-01-01T00:00:01Z'])
+                self.assertEqual(query['traceId'], [result['trace_id']])
+            self.assertEqual(sum(request['method'] == 'POST' for request in server.requests), 1)
 
     def test_probe_posts_one_complete_metrics_only_span_and_reads_exact_record(self):
         from runtime import langfuse

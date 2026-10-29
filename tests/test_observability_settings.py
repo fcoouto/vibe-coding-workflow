@@ -299,6 +299,161 @@ class ObservabilitySettingsTests(unittest.TestCase):
             self.directory.mkdir(mode=0o700)
         self._probe_with_changed_owner(replace_parent)
 
+    def _select_os_store(self):
+        try:
+            return self.settings.configure(self.scope, dict(CONFIGURE, credential_source="os-store"))
+        except self.settings.SettingsError:
+            self.fail("Explicit OS credential source is not supported")
+
+    def test_legacy_records_keep_environment_mode_without_any_store_query(self):
+        self.settings.configure(self.scope, CONFIGURE)
+        before = self.path.read_bytes()
+        with patch("runtime.observability_credentials.load", side_effect=AssertionError("store")), \
+                patch("runtime.observability_credentials.check_available", side_effect=AssertionError("store")):
+            report = self.settings.status(self.scope)
+            self.settings.disable(self.scope, dict(expected_revision=1))
+        self.assertEqual(report.get("credential_source"), "environment")
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(json.loads(before)["version"], 1)
+
+    def test_os_source_is_explicit_and_status_disable_do_not_touch_it(self):
+        report = self._select_os_store()
+        self.assertEqual(report["credential_source"], "os-store")
+        self.assertEqual(json.loads(self.path.read_text())["version"], 2)
+        with patch("runtime.observability_credentials.load", side_effect=AssertionError("store")), \
+                patch("runtime.observability_credentials.check_available", side_effect=AssertionError("store")):
+            self.assertEqual(self.settings.status(self.scope)["credential_source"], "os-store")
+            self.settings.disable(self.scope, dict(expected_revision=1))
+
+    def test_os_lookup_failure_never_uses_environment_credentials(self):
+        from runtime.observability_credentials import CredentialError
+        self._select_os_store()
+        with patch.dict(os.environ, LANGFUSE_PUBLIC_KEY="pk-lf-unrelated", LANGFUSE_SECRET_KEY="sk-lf-unrelated"), \
+                patch("runtime.observability_credentials.load", side_effect=CredentialError("saved_credentials_unavailable")), \
+                patch("runtime.langfuse.verify_project") as verify:
+            with self.assertRaises(CredentialError):
+                self.settings.enable(self.scope, dict(expected_revision=1))
+            verify.assert_not_called()
+        self.assertFalse(self.settings.status(self.scope)["desired_opt_in"])
+
+    def test_selected_pair_is_supplied_only_after_the_owner_is_rechecked(self):
+        self._select_os_store()
+        pair = ("pk-lf-synthetic", "sk-lf-synthetic")
+        with patch("runtime.observability_credentials.load", return_value=pair), \
+                patch("runtime.langfuse.verify_project", return_value=None) as verify:
+            report = self.settings.enable(self.scope, dict(expected_revision=1))
+        verify.assert_called_once_with(CONFIGURE["destination"], CONFIGURE["langfuse_project_id"], credentials=pair)
+        self.assertTrue(report["desired_opt_in"])
+        self.assertEqual(report["credential_source"], "os-store")
+
+    def test_scope_change_during_key_lookup_prevents_any_account_request(self):
+        self._select_os_store()
+        def changed_during_lookup(*args):
+            record = json.loads(self.path.read_text())
+            self.path.write_text(json.dumps(dict(record, revision=70)))
+            return ("pk-lf-synthetic", "sk-lf-synthetic")
+        with patch("runtime.observability_credentials.load", side_effect=changed_during_lookup), \
+                patch("runtime.langfuse.verify_project") as verify:
+            with self.assertRaises(self.settings.SettingsError):
+                self.settings.enable(self.scope, dict(expected_revision=1))
+            verify.assert_not_called()
+
+    def test_store_verifies_pair_then_saves_without_enabling_or_sending_a_span(self):
+        self._select_os_store()
+        pair = ("pk-lf-synthetic", "sk-lf-synthetic")
+        events = []
+        with patch("runtime.observability_credentials.check_available", return_value=None), \
+                patch("runtime.langfuse.verify_project", side_effect=lambda *a, **k: events.append("verify")), \
+                patch("runtime.observability_credentials.store", side_effect=lambda *a, **k: events.append("store")) as save, \
+                patch("runtime.langfuse.synthetic_probe", side_effect=AssertionError("POST")):
+            report = self.settings.store_credentials(self.scope, dict(expected_revision=1), lambda: pair)
+        self.assertEqual(events, ["verify", "store"])
+        self.assertFalse(report["desired_opt_in"])
+        self.assertEqual(report["revision"], 2)
+        self.assertIn("before_change", save.call_args.kwargs)
+        self.assertNotIn(pair[1], json.dumps(report))
+
+    def test_wrong_project_verification_cannot_save_a_pair(self):
+        from runtime.langfuse import LangfuseError
+        self._select_os_store()
+        before = self.path.read_bytes()
+        with patch("runtime.observability_credentials.check_available", return_value=None), \
+                patch("runtime.langfuse.verify_project", side_effect=LangfuseError("langfuse_project_mismatch")), \
+                patch("runtime.observability_credentials.store") as save:
+            with self.assertRaises(LangfuseError):
+                self.settings.store_credentials(self.scope, dict(expected_revision=1),
+                    lambda: ("pk-lf-synthetic", "sk-lf-synthetic"))
+            save.assert_not_called()
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_stale_store_request_does_not_prompt_or_check_a_backend(self):
+        self._select_os_store()
+        with patch("runtime.observability_credentials.check_available") as check, \
+                patch("runtime.observability_credentials.store") as save:
+            def forbidden():
+                raise AssertionError("secret prompt")
+            with self.assertRaises(self.settings.SettingsError):
+                self.settings.store_credentials(self.scope, dict(expected_revision=0), forbidden)
+            check.assert_not_called()
+            save.assert_not_called()
+
+    def test_forget_is_explicit_keeps_os_mode_and_does_not_verify_or_load_keys(self):
+        self._select_os_store()
+        with patch("runtime.observability_credentials.forget", return_value=None) as forget, \
+                patch("runtime.observability_credentials.load", side_effect=AssertionError("lookup")), \
+                patch("runtime.langfuse.verify_project", side_effect=AssertionError("network")):
+            report = self.settings.forget_credentials(self.scope, dict(expected_revision=1))
+        self.assertIn("before_change", forget.call_args.kwargs)
+        self.assertEqual(report["credential_source"], "os-store")
+        self.assertFalse(report["desired_opt_in"])
+        self.assertEqual(report["revision"], 2)
+
+    def test_reconfiguration_cannot_silently_downgrade_the_selected_source(self):
+        self._select_os_store()
+        report = self.settings.configure(self.scope, dict(CONFIGURE, expected_revision=1))
+        self.assertEqual(report["credential_source"], "os-store")
+        self.assertEqual(json.loads(self.path.read_text())["version"], 2)
+
+    def test_active_consent_blocks_store_and_forget_before_prompt_or_backend(self):
+        self._select_os_store()
+        with patch("runtime.observability_credentials.load", return_value=("pk-lf-synthetic", "sk-lf-synthetic")), \
+                patch("runtime.langfuse.verify_project", return_value=None):
+            self.settings.enable(self.scope, dict(expected_revision=1))
+        with patch("runtime.observability_credentials.check_available") as check, \
+                patch("runtime.observability_credentials.forget") as forget:
+            def forbidden():
+                raise AssertionError("secret prompt")
+            with self.assertRaises(self.settings.SettingsError):
+                self.settings.store_credentials(self.scope, dict(expected_revision=2), forbidden)
+            with self.assertRaises(self.settings.SettingsError):
+                self.settings.forget_credentials(self.scope, dict(expected_revision=2))
+            check.assert_not_called()
+            forget.assert_not_called()
+
+    def test_versioned_source_fields_remain_strict(self):
+        self._select_os_store()
+        original = json.loads(self.path.read_text())
+        invalid = [dict(original, credential_source=value) for value in (None, True, [], "default")]
+        invalid += [dict(original, version=1), {key: value for key, value in original.items() if key != "credential_source"}]
+        for record in invalid:
+            self.path.write_text(json.dumps(record))
+            with self.assertRaises(self.settings.SettingsError):
+                self.settings.status(self.scope)
+
+    def test_scope_change_during_secret_entry_prevents_verification_and_write(self):
+        self._select_os_store()
+        def changed_during_entry():
+            record = json.loads(self.path.read_text())
+            self.path.write_text(json.dumps(dict(record, revision=700)))
+            return ("pk-lf-synthetic", "sk-lf-synthetic")
+        with patch("runtime.observability_credentials.check_available", return_value=None), \
+                patch("runtime.langfuse.verify_project") as verify, \
+                patch("runtime.observability_credentials.store") as save:
+            with self.assertRaises(self.settings.SettingsError):
+                self.settings.store_credentials(self.scope, dict(expected_revision=1), changed_during_entry)
+            verify.assert_not_called()
+            save.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

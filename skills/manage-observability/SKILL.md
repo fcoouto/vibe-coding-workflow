@@ -1,6 +1,6 @@
 ---
 name: manage-observability
-description: Manage an optional observability integration for an explicitly selected Project; use for setup, status, scope, enable or disable requests, not routine coding or general Q&A.
+description: Manage an optional observability integration for an explicitly selected Project; use for setup, credentials, status, scope, enable or disable requests, not routine coding or general Q&A.
 ---
 
 # Manage Observability Integration

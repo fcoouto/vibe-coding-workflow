@@ -1,6 +1,7 @@
 """Bounded, content-free Langfuse connection verification and synthetic OTLP proof."""
 
 import base64
+from datetime import datetime, timezone
 import http.client
 import ipaddress
 import json
@@ -24,6 +25,15 @@ SERVICE_NAME = "vibe-coding-workflow"
 
 class LangfuseError(StartupError):
     """Fixed diagnostic code; never retain remote bodies or credentials."""
+
+
+def validate_credentials(pair):
+    if (type(pair) is not tuple or len(pair) != 2
+            or not all(isinstance(value, str) and 1 <= len(value) <= 512
+                       and all(33 <= ord(character) <= 126 for character in value) for value in pair)
+            or ":" in pair[0]):
+        raise LangfuseError("credentials_unavailable")
+    return pair
 
 
 def validate_destination(value):
@@ -60,14 +70,11 @@ def validate_project(value):
 
 
 class _Connection:
-    def __init__(self, destination, project_id, seconds):
+    def __init__(self, destination, project_id, seconds, credentials=None):
         self.destination = validate_destination(destination)
         self.project_id = validate_project(project_id)
-        public, secret = (os.environ.get(key) for key in ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"))
-        if (not all(isinstance(value, str) and 1 <= len(value) <= 512
-                    and all(33 <= ord(character) <= 126 for character in value) for value in (public, secret))
-                or ":" in public):
-            raise LangfuseError("credentials_unavailable")
+        pair = tuple(os.environ.get(key) for key in ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY")) if credentials is None else credentials
+        public, secret = validate_credentials(pair)
         self.authorization = "Basic " + base64.b64encode((public + ":" + secret).encode()).decode()
         self.deadline = time.monotonic() + seconds
 
@@ -131,14 +138,14 @@ class _Connection:
             raise LangfuseError("langfuse_project_mismatch")
 
 
-def verify_project(destination, project_id):
-    """Verify this operation's current environment key pair, without ingesting data."""
-    _Connection(destination, project_id, REQUEST_SECONDS).verify()
+def verify_project(destination, project_id, *, credentials=None):
+    """Verify the supplied pair or current environment, without ingesting data."""
+    _Connection(destination, project_id, REQUEST_SECONDS, credentials).verify()
 
 
-def synthetic_probe(destination, project_id, *, before_ingest):
+def synthetic_probe(destination, project_id, *, before_ingest, credentials=None):
     """Send one fixed synthetic span; no task payload or automatic ingestion retry."""
-    connection = _Connection(destination, project_id, PROBE_SECONDS)
+    connection = _Connection(destination, project_id, PROBE_SECONDS, credentials)
     connection.verify()
     trace_id, observation_id = uuid.uuid4().hex, uuid.uuid4().hex[:16]
     started = time.time_ns()
@@ -166,8 +173,11 @@ def synthetic_probe(destination, project_id, *, before_ingest):
     result = dict(accepted=True, verified=False, status="pending", trace_id=trace_id,
         observation_id=observation_id, source="synthetic_smoke", native_collection_qualified=False,
         usage=None, charges=None)
+    start_second = started // 1_000_000_000
     path = "/api/public/v2/observations?" + urlencode(dict(
-        fields="core,basic,metadata,io", traceId=trace_id, limit=2))
+        fields="core,basic,metadata,io", traceId=trace_id, limit=2,
+        fromStartTime=datetime.fromtimestamp(start_second, timezone.utc).isoformat().replace("+00:00", "Z"),
+        toStartTime=datetime.fromtimestamp(start_second + 1, timezone.utc).isoformat().replace("+00:00", "Z")))
     for attempt in range(READ_ATTEMPTS):
         try:
             rows = connection.request("GET", path).get("data")

@@ -10,7 +10,7 @@ import time
 from types import SimpleNamespace
 import uuid
 
-from runtime import langfuse, startup, state
+from runtime import langfuse, observability_credentials as credentials, startup, state
 
 
 PACKAGE = Path(__file__).resolve().parents[1]
@@ -67,9 +67,13 @@ def _integer(value):
 
 def _request(action, request):
     fields = {"expected_revision", "destination", "langfuse_project_id"} if action == "configure" else {"expected_revision"}
-    if not isinstance(request, dict) or set(request) != fields or not _integer(request["expected_revision"]):
+    optional = {"credential_source"} if action == "configure" else set()
+    if (not isinstance(request, dict) or not fields <= set(request) <= fields | optional
+            or not _integer(request["expected_revision"])):
         raise SettingsError("invalid_observability_request")
     if action == "configure":
+        if "credential_source" in request and request["credential_source"] not in ("environment", "os-store"):
+            raise SettingsError("invalid_credential_source")
         return dict(request, destination=langfuse.validate_destination(request["destination"]),
                     langfuse_project_id=langfuse.validate_project(request["langfuse_project_id"]))
     return request
@@ -114,12 +118,18 @@ class _Store:
             os.close(descriptor)
         try:
             record = startup.json_object(bytes(raw), limit=MAX_CONFIG)
-            if (set(record) != FIELDS or type(record["version"]) is not int or record["version"] != 1
+            schema = record.get("version")
+            if type(schema) is not int or schema not in (1, 2):
+                raise SettingsError("invalid_observability_configuration")
+            fields = FIELDS if schema == 1 else FIELDS | {"credential_source"}
+            if (set(record) != fields
                     or not _integer(record["revision"]) or record["revision"] < 1
                     or type(record["desired_opt_in"]) is not bool
                     or record["connection_verified_at"] is not None and not _integer(record["connection_verified_at"])
                     or record["destination"] != langfuse.validate_destination(record["destination"])
                     or record["langfuse_project_id"] != langfuse.validate_project(record["langfuse_project_id"])):
+                raise SettingsError("invalid_observability_configuration")
+            if schema == 2 and record["credential_source"] not in ("environment", "os-store"):
                 raise SettingsError("invalid_observability_configuration")
             if json.dumps(record["binding"], sort_keys=True) != json.dumps(self.binding, sort_keys=True):
                 raise SettingsError("observability_configuration_scope_changed")
@@ -229,7 +239,7 @@ def _guard(scope, *, write=False, create=False):
                 raise SettingsError("observability_lock_changed")
         owner = _Store(scope, binding, root, directory, lock)
         yield owner
-    except (SettingsError, langfuse.LangfuseError):
+    except (SettingsError, langfuse.LangfuseError, credentials.CredentialError):
         raise
     except (OSError, startup.StartupError, ImportError, TypeError, ValueError, KeyError, RecursionError):
         raise SettingsError("observability_storage_unavailable") from None
@@ -244,6 +254,7 @@ def _report(record):
         revision=record["revision"] if record else 0, desired_opt_in=record["desired_opt_in"] if record else False,
         destination=record["destination"] if record else None,
         langfuse_project_id=record["langfuse_project_id"] if record else None,
+        credential_source=record.get("credential_source", "environment") if record else None,
         connection="not_checked", connection_verified_at=record["connection_verified_at"] if record else None,
         collection="unavailable", native_collection_qualified=False,
         independent_forwarding="unknown_unmanaged", remote_history="unchanged")
@@ -270,6 +281,9 @@ def _operate(scope, action, request):
             updated = dict(version=1, revision=request["expected_revision"] + 1, binding=owner.binding,
                 destination=request["destination"], langfuse_project_id=request["langfuse_project_id"],
                 desired_opt_in=False, connection_verified_at=None)
+            if "credential_source" in request or record and record["version"] == 2:
+                previous = record.get("credential_source", "environment") if record else "environment"
+                updated.update(version=2, credential_source=request.get("credential_source", previous))
         elif action == "disable":
             if not record or not record["desired_opt_in"]:
                 return _report(record)
@@ -277,14 +291,19 @@ def _operate(scope, action, request):
         else:
             if record is None:
                 raise SettingsError("observability_not_configured")
+            if action == "probe" and not record["desired_opt_in"]:
+                raise SettingsError("observability_not_enabled")
+            connection = {}
+            if record.get("credential_source", "environment") == "os-store":
+                pair = credentials.load(record["destination"], record["langfuse_project_id"])
+                owner.check()
+                connection["credentials"] = pair
             if action == "probe":
-                if not record["desired_opt_in"]:
-                    raise SettingsError("observability_not_enabled")
                 result = langfuse.synthetic_probe(record["destination"], record["langfuse_project_id"],
-                                                 before_ingest=owner.check)
+                                                 before_ingest=owner.check, **connection)
                 owner.check()
                 return dict(_report(record), probe=result)
-            langfuse.verify_project(record["destination"], record["langfuse_project_id"])
+            langfuse.verify_project(record["destination"], record["langfuse_project_id"], **connection)
             owner.check()
             updated = dict(record, revision=record["revision"] + 1, desired_opt_in=True,
                            connection_verified_at=int(time.time()))
@@ -306,3 +325,38 @@ def disable(scope, request):
 
 def probe(scope, request):
     return _operate(scope, "probe", request)
+
+
+def _credential_change(scope, request, action, read_pair=None):
+    request = _request(action, request)
+    with _guard(scope, write=True) as owner:
+        record = owner.load()
+        owner.check()
+        if request["expected_revision"] != (record["revision"] if record else 0):
+            raise SettingsError("observability_revision_conflict")
+        if record is None or record.get("credential_source", "environment") != "os-store":
+            raise SettingsError("os_credential_source_required")
+        if record["desired_opt_in"]:
+            raise SettingsError("disable_before_credentials_change")
+        if action == "store-credentials":
+            credentials.check_available()
+            owner.check()
+            pair = credentials.validate_pair(read_pair())
+            owner.check()
+            langfuse.verify_project(record["destination"], record["langfuse_project_id"], credentials=pair)
+            owner.check()
+            credentials.store(record["destination"], record["langfuse_project_id"], pair, before_change=owner.check)
+        else:
+            credentials.forget(record["destination"], record["langfuse_project_id"], before_change=owner.check)
+        owner.check()
+        updated = dict(record, revision=record["revision"] + 1, connection_verified_at=None)
+        owner.save(updated)
+        return dict(_report(updated), credential_operation="stored" if action == "store-credentials" else "forgotten")
+
+
+def store_credentials(scope, request, read_pair):
+    return _credential_change(scope, request, "store-credentials", read_pair)
+
+
+def forget_credentials(scope, request):
+    return _credential_change(scope, request, "forget-credentials")
