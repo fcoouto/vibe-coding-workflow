@@ -704,7 +704,45 @@ def _configuration_snapshot(path, descriptor):
     return config, evidence._binding(path) if config is not None else None
 
 
-def _enrolled_result(selected, acquisitions, budget, *, scope=None):
+def _enrolled_control_members(data, budget):
+    """Observe historical entries without turning excluded or absent authority into inclusion."""
+    from runtime import onboarding as d3
+    project = Path(data['project_root'])
+    result = []
+    for repository in data['repositories']:
+        primary = Path(repository['primary_root'])
+        included = primary.is_relative_to(project) and any(
+            primary.is_relative_to(project / name) for name in data['membership']['include'])
+        excluded = any(primary.is_relative_to(project / name) for name in data['membership']['exclude'])
+        membership = 'excluded' if excluded else 'included' if included else 'outside'
+        for checkout_record in repository['checkouts']:
+            _check_observation_deadline(budget)
+            acquired = _acquire_canonical_membership(Path(checkout_record['root']), authority_path=None, budget=budget)
+            _require(acquired.status in {'observed', 'outside'})
+            if acquired.status == 'observed':
+                observed = _canonical_plain(acquired.observation)
+                current = _canonical_plain(acquired.record.data)
+                if current == data:
+                    _require(acquired.authority_path == project / PROJECT_FILE
+                        and observed['project_root'] == str(project)
+                        and observed['project_binding'] == data['project_binding']
+                        and observed['membership'] == membership)
+                else:
+                    _require(repository['membership'] == 'removed' or membership != 'included')
+            else:
+                _require(repository['membership'] == 'removed' or membership != 'included')
+                observed, error = d3._checkout_observation(checkout_record['root'], budget)
+                _require(error is None)
+            expected = dict(root=checkout_record['root'], primary_root=repository['primary_root'],
+                git_dir=checkout_record['git_dir'], git_common_dir=repository['git_common_dir'],
+                binding=repository['binding'] | checkout_record['binding'])
+            _require({key: observed[key] for key in expected} == expected)
+            result.append((acquired, _canonical_freeze(expected)))
+    _check_observation_deadline(budget)
+    return tuple(result)
+
+
+def _enrolled_result(selected, acquisitions, budget, *, scope=None, control=None):
     selections = [_enrolled_selection(acquired, budget) for acquired in acquisitions]
     data, observed, authority, context = selections[0]
     _require(all((entry[0], entry[2], entry[3]) == (data, authority, context) for entry in selections))
@@ -756,11 +794,59 @@ def _enrolled_result(selected, acquisitions, budget, *, scope=None):
             authority=authority, checkout=checkouts[0], age_basis='authority_provenance', temporary_history=history)
         if scope is not None:
             result['checkouts'] = checkouts
+        if control is not None:
+            _require(config is not None and temporary_context is not None and owners is not None)
+            machine = _MACHINE_ACQUISITION.get()
+            _require(machine is not None)
+            original_parents = _canonical_freeze(parents)
+            members = _enrolled_control_members(data, budget)
+            active = True
+
+            def reobserve():
+                # A later guard, even over identical paths, cannot revive this acquisition.
+                _require(active and _MACHINE_ACQUISITION.get() is machine
+                    and machine['path'] == path and machine['descriptor'] == descriptor
+                    and machine['parents'] == _canonical_plain(original_parents)
+                    and _path(_machine_config_path()) == path
+                    and any(item is temporary_context for item in machine['contexts']))
+                info = os.fstat(descriptor)
+                _require(stat.S_ISDIR(info.st_mode) and dict(device=info.st_dev, inode=info.st_ino)
+                    == original_parents[str(path.parent)])
+                _check_observation_deadline(budget)
+                _check_parents(_canonical_plain(original_parents))
+                _require(_configuration_snapshot(path, descriptor) == snapshot
+                    and _ready_context(config, parents, deadline=budget['deadline']) == temporary_context)
+                current = [_acquire_canonical_membership(member, authority_path=None, budget=budget)
+                           for member in selected]
+                _require(current == acquisitions)
+                _require([_enrolled_selection(acquired, budget) for acquired in current] == selections)
+                _require(_enrolled_control_members(data, budget) == members)
+                _require(_enrolled_baseline(context, data['project_id'], budget) == baseline)
+                with evidence._context_database(temporary_context) as db:
+                    _require(_enrolled_history(config, temporary_context, db, observed, budget, data=data) == owners)
+                _check_parents(_canonical_plain(original_parents))
+                _require(_configuration_snapshot(path, descriptor) == snapshot)
+                _check_observation_deadline(budget)
+
+            try:
+                reobserve()
+                # E1 must call full reobserve outside its writer; no writer-local witness is issued here.
+                return control.access(project=_canonical_freeze(data), config=_canonical_freeze(config),
+                    project_context=context, temporary_context=temporary_context,
+                    accounting=_canonical_freeze(result), reobserve=reobserve, budget=budget)
+            finally:
+                # Copied ContextVars cannot revive a returned callback when a descriptor is reused.
+                active = False
     return result
 
 
 def acquire_enrolled_accounting(target, *, deadline=None, budget=None):
     """Resolve existing Project accounting facts without activation, setup or writes."""
+    return _acquire_enrolled_accounting(target, deadline=deadline, budget=budget)
+
+
+def _acquire_enrolled_accounting(target, *, deadline=None, budget=None, control=None):
+    """Internal enrolled-only control path; the public wrapper always remains read-only."""
     try:
         budget = budget if budget is not None else _budget(deadline)
         _require(isinstance(target, (str, Path)) and len(str(target)) <= 4096)
@@ -771,7 +857,7 @@ def acquire_enrolled_accounting(target, *, deadline=None, budget=None):
         acquired = _acquire_canonical_membership(selected, authority_path=None, budget=budget)
         if acquired.status == 'outside':
             return dict(ok=False, status='outside', reason=acquired.reason)
-        return _enrolled_result([selected], [acquired], budget)
+        return _enrolled_result([selected], [acquired], budget, control=control)
     except (*_ERRORS, RuntimeError):
         return _protected()
 
