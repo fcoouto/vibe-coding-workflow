@@ -36,4 +36,6 @@ Use [review-my-project](skills/review-my-project/SKILL.md) to review selected re
 
 Use the separate [Manage Observability Integration](skills/manage-observability/SKILL.md) skill to prepare optional integration setup, status, scope or enable/disable requests for a selected Project. Its name is provider-neutral; Langfuse is the first planned option. The skill currently provides guidance and identifies prerequisites; persistent settings, connection management and live collection are not implemented.
 
+Project onboarding does not configure or activate workflow observability. After onboarding completes, it may suggest this separate skill as an optional follow-up.
+
 [Development guide](AGENTS.md)

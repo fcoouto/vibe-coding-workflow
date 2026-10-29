@@ -2,6 +2,8 @@
 
 Use this for explicitly requested integration preparation, status, enablement, scope changes, disabling or dashboard access. It is independent of project enrollment. Routine coding, general Q&A and ordinary disabled tasks do not load this procedure or a provider reference.
 
+An optional reference at the end of completed onboarding is only a follow-up proposal. It does not invoke this skill or authorize configuration, credential access, connection checks or collection. This workflow needs its own explicit user request; reuse matching authorization already supplied instead of asking again.
+
 ## Current capabilities and provider selection
 
 The package supplies this skill's guidance and optional local task-status preparation. Persistent observability settings, provider connection management, collection, exports and dashboard provisioning are not implemented. Installing or invoking the skill does not activate them. Do not create an alternative settings file, collector, provider registry or command to fill those gaps.

@@ -8,6 +8,8 @@ Read the [policy index](../../../policies/00-index.md), [Project Scope](../../..
 
 Keep machine preparation in prepare-my-workspace; keep new-project creation distinct. Do not enroll the toolkit checkout just because it is the current working directory. Native operation is default. Do not ask about or discover Superset during onboarding; any Superset control is a separate optional integration, outside onboarding.
 
+Keep the plugin's workflow observability setup and activation outside this onboarding flow. Do not load its skill/provider procedures, request credentials or add its setup, connection checks or activation to the onboarding proposal, dependencies or qualification. Preserve existing settings and the project's applicable mandatory catalog/policy assessment. Only after successful onboarding completion may the final report include the [optional follow-up proposal](apply-and-recovery.md#optional-follow-up-after-completed-onboarding); do not load that completion section for inspect/plan.
+
 For an explicit `project_scope` inspection or a saved schema-2 private plan, also read [Project-aware private plans](project-plan.md). Legacy schema-1 tasks do not need that reference. Keep the common source, coverage, conflict and reporting workflow below for both formats.
 
 ## Source and plan workflow
