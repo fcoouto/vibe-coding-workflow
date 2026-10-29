@@ -10,6 +10,20 @@ Genesis owns future D9 caller integration at that report boundary, after the ord
 
 The pure helper cannot authenticate supplied data or grant export permission. Passing `enabled=True` requests local preparation only; it is not proof of the real integration's opt-in. With the default or explicit `enabled=False`, return `None` before accessing or validating `report`. Reject non-boolean enable values.
 
+### Optional local caller — 29 October 2026
+
+The user separately authorized the following local caller slice, and Genesis released its exact task/status branch, new caller tests and this subsection. This supersedes the earlier no-CLI-change boundary only for this flag. Genesis retains Project configuration, source/permission/lifetime integration, collectors, exports, dashboards and primary integration.
+
+```sh
+python3 -I -B /path/to/package/scripts/workflow.py task status --cwd /checkout --client codex --session SESSION --prepare-observability
+```
+
+The flag is available only on `task status` and defaults off. Without it, the command preserves its ordinary response and exit behavior and does not import or call the preparer. With it, the caller first obtains the ordinary status report exactly once, then passes that same report to `prepare_task_status(..., enabled=True)`. The ordinary status operation can revalidate readiness; preparation adds no refresh or further state action. This per-invocation local choice does not enable Project telemetry or establish export permission.
+
+Only flagged output adds `observability_preparation`. Success is `{status:"prepared", data:<helper result>}`. Optional import or preparation failure is `{status:"unavailable"}` with no raw exception, input or installation details. Existing owner fields and the ordinary exit result remain intact. Core status errors retain their original error behavior; cancellation and `SystemExit` are not swallowed. Source and helper inputs are not modified, and the flag performs no new configuration, persistence, collection or export.
+
+Implementation and validation stay in `scripts/workflow.py` and the new `tests/test_observability_caller.py`; the helper and core state/evidence source remain unchanged. The bounded plan is: observe a real CLI test reject the missing flag; add the narrow parser/output branch; prove default-off/no helper import, one source call, successful preparation, isolated optional failures, preserved core errors/cancellation and no state-file changes; then run caller/helper/runtime checks, package validation and independent phase review. The earlier incomplete full-regression result below remains explicit; local caller tests do not qualify native execution, usage, export/deletion or D11.
+
 ## Supported projection
 
 Enabled input must be a successful task-status report. Validate the supported structured fields below without traversing excluded content. Return independent dictionaries so later output edits cannot mutate the source report.

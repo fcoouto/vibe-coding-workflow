@@ -31,6 +31,7 @@ def control_main():
             if name == "status":
                 action.add_argument("--client", required=True, choices=("codex", "claude-code"))
                 action.add_argument("--session", required=True)
+                action.add_argument("--prepare-observability", action="store_true")
         evidence = commands.add_parser("evidence", add_help=False)
         evidence_actions = evidence.add_subparsers(dest="action", required=True)
         for name in ("plan", "status", "check", "reconcile-check", "verify"):
@@ -141,6 +142,14 @@ def control_main():
         from runtime.state import start_task, update_task, task_status, retire_task
         if args.action == "status":
             report = task_status(scope, client, args.session)
+            if args.prepare_observability:
+                try:
+                    from runtime.observability import prepare_task_status
+                    preparation = {"status": "prepared", "data": prepare_task_status(report, enabled=True)}
+                except Exception:
+                    # Optional preparation must preserve the owner's ordinary status result.
+                    preparation = {"status": "unavailable"}
+                report = dict(report, observability_preparation=preparation)
         else:
             report = {"start": start_task, "update": update_task, "retire": retire_task}[args.action](scope, request)
         print(json.dumps(report))
