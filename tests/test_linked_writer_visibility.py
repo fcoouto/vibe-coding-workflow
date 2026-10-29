@@ -271,4 +271,3 @@ class LinkedWriterVisibilityTests(unittest.TestCase):
         with self.assertRaisesRegex(state.StateError, "Unaccounted evidence content protects preparation"):
             with evidence._linked_stop_guards(pointer, authorities) as guarded:
                 evidence._linked_preparation_facts(pointer, guarded)
-
