@@ -1372,8 +1372,147 @@ def close_task(scope, request, observations):
             return dict(ok=True,task=task)
 
 
+def _diagnostic_output_routes(context, db, task_ref):
+    """Observe typed diagnostic provenance; content requirements and permissions stay intact."""
+    from runtime import changes,delegation
+    report=dict(owner=task_ref,closed_at=None,coverage='classification-only',deletion_authorized=False,outputs=[])
+    unavailable='Diagnostic provenance is incomplete or changed; original content remains protected'
+    errors=(StartupError,OSError,ValueError,TypeError,KeyError,IndexError,AttributeError,RecursionError,sqlite3.Error)
+    try:
+        _check_context(context,db);state._task_reference(task_ref)
+        authority=_canonical_plain(context.authority_set[0])
+        _require(task_ref['authority']==authority,'Diagnostic owner authority differs')
+        rows=db.execute('select name,digest from evidence_metadata order by name limit 4097').fetchall()
+        _require(len(rows)<=4096,'Diagnostic source observation exceeds bound')
+        records={};unknown=[]
+        for name,digest in rows:
+            ref=dict(name=name,digest=digest)
+            try:
+                metadata,raw=_managed_artifact(None,ref,context=context,db=db)
+                body=json.loads(raw)
+                _require(isinstance(body,dict),'Diagnostic consumer content is not an artifact object')
+                records[_raw(ref)]=(ref,metadata,body)
+            except errors:
+                unknown.append(ref)
+        closures=[row for row in records.values() if row[1]['class']=='compact'
+            and row[1]['owner'].get('task')==task_ref and row[2].get('kind')=='task-closure']
+        _require(len(closures)==1,'Diagnostic owner needs unique retained closure')
+        closure,closure_meta,compact=closures[0]
+        if compact.get('stopped',{}).get('linked'):
+            report['blockers']=['Linked diagnostic content requires its complete owner classification']
+            return report
+
+        def reaches(edges,output):
+            pending=list(edges);seen=set()
+            while pending:
+                edge=pending.pop()
+                if edge['kind']!='artifact':continue
+                ref=edge['reference']
+                if ref.get('authority',authority)!=authority:continue
+                ref=ref.get('artifact',ref.get('reference',ref))
+                if ref==output:return True
+                key=_raw(ref)
+                if key in seen:continue
+                seen.add(key);_require(len(seen)<=4096,'Diagnostic route traversal exceeds bound')
+                if key in records:
+                    _,metadata,body=records[key]
+                    pending.extend(metadata['dependencies']);pending.extend(_artifact_dependencies(body))
+            return False
+
+        for outcome in compact['outcomes']:
+            attempt=outcome['attempt'];projected=outcome.get('execution')
+            if attempt.get('kind')!='check' or projected is None:continue
+            output=projected['output'];execution_ref=attempt['execution']
+            item=dict(reference=output,execution=execution_ref,closure=closure,routes=[],blockers=[])
+            report['outputs'].append(item)
+            try:
+                state._artifact_reference(output);state._artifact_reference(execution_ref)
+                _,output_meta,diagnostic=records[_raw(output)]
+                _,execution_meta,execution=records[_raw(execution_ref)]
+                subject=_source_subject(context,db,output_meta)
+                _require(not subject['live'] and subject['closed_at']==closure_meta['closed_at']
+                    and subject['identity']==compact['accepted_identity'] and subject['pins']==compact['pins'],
+                    'Diagnostic owner lacks its exact retired dated closure')
+                changes._check_stopped_certificate(context,db,compact['stopped'])
+                _require(compact['identity']==compact['stopped']['reference']==task_ref
+                    and compact['pins']==compact['stopped']['pins'] and compact['created_at']==closure_meta['created_at'],
+                    'Diagnostic closure owner or original age differs')
+                state._fields(execution,('command','tool','output','result'))
+                _require(projected==dict(command=execution['command'],tool=execution['tool'],output=execution['output'],
+                    result={k:v for k,v in execution['result'].items() if k!='private_output'}) and execution['output']==output,
+                    'Diagnostic execution correspondence differs')
+                state._fields(diagnostic,('text','truncated','redacted_lines','redaction'))
+                _require(isinstance(diagnostic['text'],str) and type(diagnostic['truncated']) is bool
+                    and type(diagnostic['redacted_lines']) is int and diagnostic['redacted_lines']>=0
+                    and isinstance(diagnostic['redaction'],str),'Diagnostic shape differs')
+                expected_owner=dict(kind='project',project_id=subject['identity']['project_id'],task=task_ref)
+                for ref,metadata,body in ((output,output_meta,diagnostic),(execution_ref,execution_meta,execution)):
+                    _require(metadata['owner']==expected_owner and metadata['class']=='detail'
+                        and compact['created_at']<=metadata['created_at']<=subject['closed_at']
+                        and ref in compact['artifacts'] and dict(reference=ref,created_at=metadata['created_at'],
+                            owner=metadata['owner'],bytes=metadata['bytes'],unit='bytes') in compact['sources']
+                        and metadata['dependencies']==[dict(kind='task',reference=task_ref),*_artifact_dependencies(body)],
+                        'Diagnostic source provenance differs')
+                _require(closure_meta['owner']==expected_owner and closure_meta['dependencies']==[
+                    dict(kind='task',reference=task_ref),*[dict(kind='artifact',reference=ref) for ref in compact['artifacts']]],
+                    'Diagnostic compact dependency correspondence differs')
+                certificates=[c for c in compact['stopped'].get('assignments',[]) if c['reference']['id']==outcome['assignment_id']]
+                _require(len(certificates)==1 and outcome['assignment_id']==attempt['id']==execution['result']['id'],
+                    'Diagnostic execution assignment differs')
+                certificate=certificates[0];assignment=state._retired_assignment(db,outcome['assignment_id'])
+                _require(assignment is not None and state._retired(db,'assignment',certificate['reference']['owner'])==assignment
+                    and not assignment['evidence_expired'] and assignment['created_at']==certificate['created_at']
+                    and assignment['request_digest']==certificate['request_digest'] and assignment['pins_digest']==_digest(compact['pins'])
+                    and assignment['outcome']==outcome['outcome']==certificate['reconciliation']['outcome'],
+                    'Diagnostic assignment certificate differs')
+                numbers=[n for n in compact['numerical'] if n['source']==execution_ref]
+                _require(len(numbers)==2 and {n['field'] for n in numbers}=={'exit_code','output_bytes'},
+                    'Diagnostic numerical source coverage differs')
+                for number in numbers:
+                    field=number['field']
+                    _require(number['value']==execution['result'][field]==attempt[field]
+                        and number['unit']==('bytes' if field=='output_bytes' else 'exit-code')
+                        and number['created_at']==execution_meta['created_at'] and number['assignment_id']==attempt['id']
+                        and number['owner']==certificate['reference']['owner'] and number['status']==execution['result']['status'],
+                        'Diagnostic numerical receipt differs')
+                mandate=_source_mandate(context,output,db=db)
+                _require(_bookkeeping_record(context,db,mandate['reference'],mandate['content']),
+                    'Diagnostic birth mandate differs')
+                report['closed_at']=subject['closed_at']
+                item['routes']=[dict(owner=execution_ref,kind='execution',disposition='diagnostic-provenance',
+                    reason='Exact diagnostic child; execution and numerical evidence remain content-required'),
+                    dict(owner=closure,kind='compact',disposition='diagnostic-provenance',
+                    reason='Original compact records diagnostic provenance without reproducing its text'),
+                    dict(owner=mandate['reference'],kind='mandate',disposition='bookkeeping',
+                    reason='Authenticated birth mandate names the source and attributes its original task')]
+                _source_intents(context,output,db=db)
+                known={_raw(ref) for ref in (execution_ref,closure,mandate['reference'])}
+                for key,(ref,metadata,body) in records.items():
+                    if key not in known and reaches([*metadata['dependencies'],*_artifact_dependencies(body)],output):
+                        item['routes'].append(dict(owner=ref,kind='other',disposition='protected',
+                            reason='Independent or unclassified content route remains required'))
+                observed=state.inspect_dependencies(db,task_ref)
+                consumers=[(row['reference'],row['task']) for row in observed['tasks']]
+                consumers.extend((dict(authority=authority,id=row[0]),delegation._record(None,row,context=context,db=db))
+                    for row in observed['assignments'])
+                for ref,body in consumers:
+                    if reaches(_artifact_dependencies(body),output):
+                        item['routes'].append(dict(owner=ref,kind='other',disposition='protected',
+                            reason='Live task or assignment retains a content route'))
+                if unknown:item['blockers'].append('Some managed consumers are unavailable; coverage remains incomplete')
+                item['blockers'].extend(sorted({r['reason'] for r in item['routes'] if r['disposition']=='protected'}))
+            except errors:
+                item['routes']=[dict(owner=closure,kind='other',disposition='protected',reason=unavailable)]
+                item['blockers']=[unavailable]
+    except errors:
+        report['blockers']=[unavailable]
+    return report
+
+
 def _retire_closed_task(context, task_ref):
     from runtime import changes,delegation
+    protected=dict(owner=task_ref,closed_at=None,coverage='classification-only',deletion_authorized=False,outputs=[],
+        blockers=['Linked diagnostic content requires its complete owner classification'])
     with _context_database(context) as reader:
         task=_linked_raw_task(reader,task_ref)
         if task is not None:linked=task.get('writer_stop',{}).get('linked')
@@ -1396,13 +1535,13 @@ def _retire_closed_task(context, task_ref):
                     pending=sorted({_raw(a):a for a in [*complete,*facts['discovered_authorities']]}.values(),key=_raw);continue
                 if 'member' in facts:
                     marker=facts['member']['task_marker']
-                    return dict(retired=True,identity=marker['identity'],outcome=marker['outcome'])
+                    return dict(retired=True,identity=marker['identity'],outcome=marker['outcome'],diagnostic_retention=protected)
                 issued=_ClosureObservation(_canonical_freeze(facts),context,_CLOSURE_ISSUER)
                 with _context_database(context,write=True) as db:
                     _check_closure_observation(context,db,task_ref,issued)
                     _stamp_linked_retirement(context,db,task_ref,issued)
                     delegation.retire_settled(db,task_ref,issued)
-                    return state.retire_closed(db,task_ref,issued)
+                    return state.retire_closed(db,task_ref,issued) | dict(diagnostic_retention=protected)
         raise state.StateError('Linked retirement source authority closure did not converge')
     with _closure_support_guards((context,)):
         recovery,files=_closure_recovery(context,task_ref)
@@ -1417,7 +1556,8 @@ def _retire_closed_task(context, task_ref):
             _require(compact==_closure_content(facts),'Closure support or current dependencies changed')
             _stamp_linked_retirement(context,db,task_ref,issued)
             delegation.retire_settled(db,task_ref,issued)
-            return state.retire_closed(db,task_ref,issued)
+            result=state.retire_closed(db,task_ref,issued)
+            return result | dict(diagnostic_retention=_diagnostic_output_routes(context,db,task_ref))
 
 
 def _registered_owner(scope, context, owner, db):
