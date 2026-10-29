@@ -1888,8 +1888,8 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
         for ref in (old,certificate['retirement']['proof']):
             (context.directory/'evidence'/ref['name']).unlink()
         self.assertTrue(self.changes.inspect_lifecycle_recovery(context.authority_set,(task_ref,))['complete'])
-        resumed=self.changes._run_scoped(self.directory,request,'resume');self.assertEqual(resumed['exit_code'],0,resumed)
-        rolled=self.changes._run_scoped(self.directory,request,'rollback');self.assertEqual(rolled['exit_code'],0,rolled)
+        resumed=self.run_with_d4_host(request,'resume');self.assertEqual(resumed['exit_code'],0,resumed)
+        rolled=self.run_with_d4_host(request,'rollback');self.assertEqual(rolled['exit_code'],0,rolled)
         _,sources=self.changes._recovery_sources(context)
         current=sources[0][1];self.assertEqual(current['version'],2);self.assertEqual(current['stopped'],content['stopped'])
         self.assertIsNone(current['previous']);self.assertEqual(current['journal']['state'],'rolled_back')
@@ -2164,9 +2164,9 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
         return request,fixture,context
 
     def test_repeated_scoped_rollback_settles_exact_operation_markers(self):
-        request,_,context=self.scoped_recovery_request()
+        request,contexts=self.d4_bookkeeping_request();context=contexts[0]
         for action in ('apply','rollback','rollback'):
-            result=self.changes._run_scoped(self.directory,request,action)
+            result=self.run_with_d4_host(request,action)
             self.assertEqual(result['exit_code'],0,dict(action=action,result=result))
             recovery=self.changes.inspect_lifecycle_recovery(context.authority_set,())
             self.assertTrue(recovery['complete'],dict(action=action,blockers=recovery['blockers']))
@@ -2472,7 +2472,7 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
 
     def test_recovery_hooks_register_before_effect_and_after_final_journal(self):
         from runtime import evidence,state
-        request,fixture,context=self.scoped_recovery_request()
+        request,contexts=self.d4_bookkeeping_request();context=contexts[0]
         inspected=[]
         def checkpoint(stage):
             if stage=='prepared':
@@ -2485,7 +2485,7 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
                     self.assertEqual(source['tasks'],[])
                     inspected.append(True)
         with patch.object(self.changes,'_checkpoint',side_effect=checkpoint):
-            result=self.changes._run_scoped(self.directory,request,'apply')
+            result=self.run_with_d4_host(request,'apply')
         self.assertEqual(result['exit_code'],0,result)
         self.assertTrue(inspected)
         recovery=self.changes.inspect_lifecycle_recovery(context.authority_set,())
@@ -2496,18 +2496,18 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
 
     def test_recovery_final_registration_failure_keeps_markers_and_resumes(self):
         from runtime import evidence
-        request,fixture,context=self.scoped_recovery_request()
+        request,contexts=self.d4_bookkeeping_request();context=contexts[0]
         original=evidence._register_recovery_source
         def register(scope,db,source,**kwargs):
             if source.content['journal']['state']=='applied': raise self.changes.Pending('fixture final store failure')
             return original(scope,db,source,**kwargs)
         with patch.object(evidence,'_register_recovery_source',side_effect=register):
-            result=self.changes._run_scoped(self.directory,request,'apply')
+            result=self.run_with_d4_host(request,'apply')
         self.assertNotEqual(result['exit_code'],0,result)
         locations=self.changes._authority_locations([context.directory])
         self.assertTrue(all(self.changes._authority_owner(location) is not None for location in locations))
         self.assertFalse(self.changes.inspect_lifecycle_recovery(context.authority_set,())['complete'])
-        result=self.changes._run_scoped(self.directory,request,'resume')
+        result=self.run_with_d4_host(request,'resume')
         self.assertEqual(result['exit_code'],0,result)
         self.assertTrue(all(self.changes._authority_owner(location) is None for location in locations))
         self.assertTrue(self.changes.inspect_lifecycle_recovery(context.authority_set,())['complete'])
@@ -2538,12 +2538,7 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
 
     def test_recovery_two_store_admission_failure_preserves_markers_and_preimages(self):
         from runtime import evidence,state
-        request=self.scoped_request(umbrella=True)
-        fixtures=[self.recovery_authority(),self.recovery_authority()]
-        contexts=[row[1] for row in fixtures]
-        for repository,context in zip(request['manifest']['enrollment']['record']['repositories'],contexts):
-            repository['checkouts'][0]['clients'][0]['configuration']['runtime']=dict(schema_version=3,state_dir=str(context.directory))
-        request['approval']['manifest_digest']=onboarding._digest(request['manifest'])
+        request,contexts=self.d4_bookkeeping_request(umbrella=True)
         original=evidence._register_recovery_source; calls=[]
         before={a['id']:self.changes._fingerprint(Path(a['owner']['root']),a['effects'][0]['path']) for a in request['manifest']['actions']}
         def register(scope,db,source,**kwargs):
@@ -2551,7 +2546,7 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
             if len(calls)==2: raise self.changes.Pending('fixture second authority failure')
             return original(scope,db,source,**kwargs)
         with patch.object(evidence,'_register_recovery_source',side_effect=register):
-            result=self.changes._run_scoped(self.directory,request,'apply')
+            result=self.run_with_d4_host(request,'apply')
         self.assertNotEqual(result['exit_code'],0,result)
         for action in request['manifest']['actions']:
             self.assertEqual(self.changes._fingerprint(Path(action['owner']['root']),action['effects'][0]['path']),before[action['id']])
@@ -2560,7 +2555,7 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
         with evidence._context_database(contexts[0]) as db:
             baseline=state._source_baseline(None,db,context=contexts[0]); first=dict(baseline['dependencies'][0]['reference']['artifact'])
             age=state._metadata(db,first['name'])['created_at']
-        self.assertEqual(self.changes._run_scoped(self.directory,request,'resume')['exit_code'],0)
+        self.assertEqual(self.run_with_d4_host(request,'resume')['exit_code'],0)
         result=self.changes.inspect_lifecycle_recovery(contexts[0].authority_set,())
         self.assertTrue(result['complete'],result)
         self.assertEqual(len(result['dependencies']),2)
@@ -2570,8 +2565,8 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
 
     def test_recovery_inspector_protects_missing_previous_journal_and_artifact(self):
         from runtime import evidence
-        request,fixture,context=self.scoped_recovery_request()
-        self.assertEqual(self.changes._run_scoped(self.directory,request,'apply')['exit_code'],0)
+        request,contexts=self.d4_bookkeeping_request();context=contexts[0]
+        self.assertEqual(self.run_with_d4_host(request,'apply')['exit_code'],0)
         baseline,sources=self.changes._recovery_sources(context)
         previous=sources[0][1]['previous']; self.assertIsNotNone(previous)
         path=context.directory/'evidence'/previous['name']; saved=path.with_suffix('.saved'); path.rename(saved)
@@ -2643,11 +2638,7 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
 
     def test_recovery_two_store_final_failure_releases_no_markers(self):
         from runtime import evidence
-        request=self.scoped_request(umbrella=True)
-        contexts=[self.recovery_authority()[1],self.recovery_authority()[1]]
-        for repository,context in zip(request['manifest']['enrollment']['record']['repositories'],contexts):
-            repository['checkouts'][0]['clients'][0]['configuration']['runtime']=dict(schema_version=3,state_dir=str(context.directory))
-        request['approval']['manifest_digest']=onboarding._digest(request['manifest'])
+        request,contexts=self.d4_bookkeeping_request(umbrella=True)
         original=evidence._register_recovery_source; calls=[]
         def register(scope,db,source,**kwargs):
             if source.content['journal']['state']=='applied':
@@ -2655,7 +2646,7 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
                 if len(calls)==2: raise self.changes.Pending('fixture second final authority failure')
             return original(scope,db,source,**kwargs)
         with patch.object(evidence,'_register_recovery_source',side_effect=register):
-            result=self.changes._run_scoped(self.directory,request,'apply')
+            result=self.run_with_d4_host(request,'apply')
         self.assertNotEqual(result['exit_code'],0,result)
         for context in contexts:
             self.assertTrue(all(self.changes._authority_owner(location) is not None for location in self.changes._authority_locations([context.directory])))
@@ -2663,38 +2654,53 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
         shared=next(a for a in request['manifest']['actions'] if a['owner']['kind']=='project')
         target=Path(shared['owner']['root'])/shared['effects'][0]['path']; raw=target.read_bytes()
         target.write_bytes(b'external changed instruction')
-        self.assertNotEqual(self.changes._run_scoped(self.directory,request,'resume')['exit_code'],0)
+        self.assertNotEqual(self.run_with_d4_host(request,'resume')['exit_code'],0)
         self.assertEqual(target.read_bytes(),b'external changed instruction')
         target.write_bytes(raw)
         saved=target.with_name('owned-instruction-saved'); target.rename(saved)
         target.write_bytes(raw); target.chmod(0o644)
-        self.assertNotEqual(self.changes._run_scoped(self.directory,request,'resume')['exit_code'],0)
+        self.assertNotEqual(self.run_with_d4_host(request,'resume')['exit_code'],0)
         self.assertEqual(target.read_bytes(),raw)
         target.unlink(); saved.rename(target)
-        result=self.changes._run_scoped(self.directory,request,'resume')
+        result=self.run_with_d4_host(request,'resume')
         self.assertEqual(result['exit_code'],0,result)
         self.assertTrue(self.changes.inspect_lifecycle_recovery(contexts[0].authority_set,())['complete'])
 
     def test_recovery_one_original_source_age_across_all_stores_and_partial_replay(self):
         from runtime import evidence,state
-        request=self.scoped_request(); self.assertEqual(self.changes._run_scoped(self.directory,request,'apply')['exit_code'],0)
-        contexts=[self.recovery_authority()[1],self.recovery_authority()[1]]
-        journal=self.changes._load_journal(self.directory)
-        with patch.object(state,'_owner_time',return_value=100):
-            source=self.changes._observe_recovery_source(self.directory,journal,contexts,())
-        with evidence._context_database(contexts[0],write=True) as db,patch.object(state,'_owner_time',return_value=200):
-            first=evidence._register_recovery_source(None,db,source,context=contexts[0])
+        request,contexts=self.d4_bookkeeping_request(umbrella=True)
+        original=evidence._register_recovery_source;registered=[];calls=[]
+        def register(scope,db,source,**kwargs):
+            calls.append(kwargs['context'])
+            if len(calls)==2:raise self.changes.Pending('fixture interrupted second authority')
+            with patch.object(state,'_owner_time',return_value=200):
+                reference=original(scope,db,source,**kwargs)
+            self.assertEqual(state._metadata(db,reference['name'])['created_at'],100)
+            registered.append((kwargs['context'],reference))
+            return reference
+        with patch.object(state,'_owner_time',return_value=100),patch.object(evidence,'_register_recovery_source',side_effect=register):
+            partial=self.run_with_d4_host(request,'apply')
+        self.assertNotEqual(partial['exit_code'],0,partial);self.assertEqual(len(registered),1)
+        first_context,first=registered[0]
+        self.assertEqual(set(c.database for c in calls),set(c.database for c in contexts))
+        def replay_register(scope,db,source,**kwargs):
+            with patch.object(state,'_owner_time',return_value=400):
+                reference=original(scope,db,source,**kwargs)
+            self.assertEqual(state._metadata(db,reference['name'])['created_at'],100)
+            return reference
+        with patch.object(state,'_owner_time',return_value=300),patch.object(evidence,'_register_recovery_source',side_effect=replay_register):
+            replay=self.run_with_d4_host(request,'resume')
+        self.assertEqual(replay['exit_code'],0,replay)
+        second_context=next(context for context in contexts if context.database!=first_context.database)
+        with evidence._context_database(first_context) as db:
             self.assertEqual(state._metadata(db,first['name'])['created_at'],100)
-        with patch.object(state,'_owner_time',return_value=300):
-            replay=self.changes._observe_recovery_source(self.directory,journal,contexts,())
-        with evidence._context_database(contexts[1],write=True) as db,patch.object(state,'_owner_time',return_value=400):
-            second=evidence._register_recovery_source(None,db,replay,context=contexts[1])
-            self.assertEqual(state._metadata(db,second['name'])['created_at'],100)
-        with evidence._context_database(contexts[1],write=True) as db:
-            metadata=state._metadata(db,second['name']); metadata['created_at']=101
+        with evidence._context_database(second_context,write=True) as db:
+            baseline=state._source_baseline(None,db,context=second_context)
+            second=baseline['dependencies'][0]['reference']['artifact']
+            metadata=state._metadata(db,second['name']);metadata['created_at']=101
             db.execute('update evidence_metadata set created_at=?,data=? where name=?',(101,evidence._raw(metadata).decode(),second['name']))
         with self.assertRaisesRegex(self.changes.StartupError,'age'):
-            self.changes._observe_recovery_source(self.directory,journal,contexts,())
+            self.changes._observe_recovery_source(self.directory,self.changes._load_journal(self.directory),contexts,())
 
     def test_recovery_discovered_prior_authority_writer_blocks_resume_and_marker_release(self):
         from runtime import evidence,state
@@ -2736,11 +2742,7 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
     def test_recovery_registration_and_inspection_hold_no_cross_store_sqlite_transaction(self):
         from contextlib import contextmanager
         from runtime import evidence
-        request=self.scoped_request(umbrella=True)
-        contexts=[self.recovery_authority()[1],self.recovery_authority()[1]]
-        for repository,context in zip(request['manifest']['enrollment']['record']['repositories'],contexts):
-            repository['checkouts'][0]['clients'][0]['configuration']['runtime']=dict(schema_version=3,state_dir=str(context.directory))
-        request['approval']['manifest_digest']=onboarding._digest(request['manifest'])
+        request,contexts=self.d4_bookkeeping_request(umbrella=True)
         active=[]; original=evidence._context_database
         @contextmanager
         def database(context,**kwargs):
@@ -2750,7 +2752,7 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
                 with original(context,**kwargs) as db: yield db
             finally: active.pop()
         with patch.object(evidence,'_context_database',side_effect=database):
-            result=self.changes._run_scoped(self.directory,request,'apply')
+            result=self.run_with_d4_host(request,'apply')
             self.assertEqual(result['exit_code'],0,result)
             self.assertTrue(self.changes.inspect_lifecycle_recovery(contexts[0].authority_set,())['complete'])
         self.assertEqual(active,[])
@@ -2881,7 +2883,7 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
         from runtime import evidence,state
         request,scope,context,task,shared=self.historical_shared_consumer(changed=False)
         before=shared.read_bytes()
-        result=self.changes._run_scoped(self.directory,request,'apply');self.assertEqual(result['exit_code'],0,result)
+        result=self.run_with_d4_host(request,'apply');self.assertEqual(result['exit_code'],0,result)
         self.assertEqual(shared.read_bytes(),before)
         _,sources=self.changes._recovery_sources(context)
         source=next(content for _,content in sources if content['identity']['plan_dir']==str(self.directory))
