@@ -167,6 +167,20 @@ print(json.dumps({{'type':'step_finish','part':{{'reason':'stop','cost':0,'token
             self.assertNotEqual(permissions.get(tool), 'allow')
         self.assertFalse(config['provider']['openrouter']['models']['vendor/model']['options']['provider']['allow_fallbacks'])
 
+    def test_shared_tool_output_exception_is_explicitly_denied_without_auth_changes(self):
+        expected = str(self.root / 'auth/opencode/tool-output/*')
+        executable = self.fixture('import os\n'
+            + 'config = json.loads(os.environ["OPENCODE_CONFIG_CONTENT"])\n'
+            + f'assert config["permission"]["external_directory"] == {{"*": "deny", {expected!r}: "deny"}}\n'
+            + f'assert os.environ["XDG_DATA_HOME"] == {str(self.root / 'auth')!r}\n'
+            + 'print(json.dumps({"type":"text","part":{"text":"Runtime configuration verified"}}))\n'
+            + 'print(json.dumps({"type":"step_finish","part":{"reason":"stop","cost":0,"tokens":{}}}))\n')
+        for index, auth in enumerate((self.root / 'auth', self.root / 'auth/../auth')):
+            with self.subTest(auth=auth):
+                run = self.api.prepare(self.runs, dict(self.brief, task_id=f'cache-boundary-{index}'))
+                result = self.api.execute(run, executable, auth)
+                self.assertEqual(result['state'], 'awaiting_verification')
+
     def test_worker_reuses_qualified_catalog_without_a_background_refresh(self):
         exe = self.fixture("import os\nassert os.environ.get('OPENCODE_DISABLE_MODELS_FETCH') == 'true'\n"
                            "print(json.dumps({'type':'text','part':{'text':'Fixture answer'}}))\n"
@@ -555,7 +569,7 @@ class CouncilWorkerTests(CouncilCase):
                 reasoning={'efforts': ['low', 'high']}, observed_at='2026-10-29T00:00:00Z',
                 source='controlled endpoint fixture'),
             permission_qualification=dict(opencode_sha256=hashlib.sha256(self.executable.read_bytes()).hexdigest(),
-                version='1.19.5', profile='council-readonly-v1', evidence='local controlled qualification'))
+                version='1.19.5', profile='council-readonly-v2', evidence='local controlled qualification'))
 
     def prepare(self, **changes):
         self.assertTrue(callable(getattr(self.api, 'prepare_council', None)), 'Council preparation is required')
@@ -642,6 +656,11 @@ class CouncilWorkerTests(CouncilCase):
             self.assertEqual(sum(call.args[0][0] == str(self.executable) for call in spawn.call_args_list), 0)
             self.assertEqual(result['state'], 'unresolved')
 
+
+    def test_council_rejects_superseded_permission_qualification(self):
+        qualification = dict(self.brief['permission_qualification'], profile='council-readonly-v1')
+        with self.assertRaisesRegex(ValueError, 'council_permission_qualification_required'):
+            self.prepare(permission_qualification=qualification)
 
     def test_council_honors_small_endpoint_and_larger_finite_step_budget(self):
         run = self.prepare(input_tokens=2000, output_tokens=1024, steps=9, timeout_seconds=301,

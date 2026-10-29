@@ -142,7 +142,7 @@ def _council_contract(brief):
     qualification = brief['permission_qualification']
     if (not isinstance(qualification, dict)
             or set(qualification) != {'opencode_sha256', 'version', 'profile', 'evidence'}
-            or qualification['version'] != '1.19.5' or qualification['profile'] != 'council-readonly-v1'
+            or qualification['version'] != '1.19.5' or qualification['profile'] != 'council-readonly-v2'
             or not isinstance(qualification['opencode_sha256'], str)
             or not re.fullmatch('[0-9a-f]{64}', qualification['opencode_sha256'])
             or not isinstance(qualification['evidence'], str) or not qualification['evidence'].strip()):
@@ -349,6 +349,9 @@ def execute(run, executable, auth_data, publish=None):
 def _execute(run, brief, executable, auth_data, publish):
     workspace = run / 'workspace'
     config = configuration(brief, workspace)
+    auth_data = auth_data.resolve()
+    # OpenCode 1.19.5 otherwise appends an allow for shared truncated output.
+    config['permission']['external_directory'] = {'*': 'deny', str(auth_data / 'opencode/tool-output/*'): 'deny'}
     env = {k: v for k, v in os.environ.items() if k in ('PATH', 'HOME', 'TMPDIR', 'LANG', 'OPENROUTER_API_KEY')}
     for name in ('config', 'cache', 'state'):
         (run / name).mkdir(mode=0o700)
