@@ -1216,6 +1216,12 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
                 affected=sorted(affected,key=lambda x:tuple(x.values())),requires=[a["id"] for a in actions],qualification=qualification))
         return dict(schema_version=2,manifest=manifest,approval=dict(reference=ref["reference"],evidence=[ref],manifest_digest=onboarding._digest(manifest)))
 
+    def run_with_d4_host(self, request, operation):
+        class Host:
+            def acquire_d4_bookkeeping(owner, facts, issue): return issue(facts)
+        with self.changes._bootstrap_d4_host(Host(), issuer=self.changes._D4_HOST_BOOTSTRAP_ISSUER) as host:
+            return self.changes._run_scoped(self.directory, request, operation, host=host)
+
     def test_scoped_configured_publication_and_rollback_keep_public_gate(self):
         request = self.scoped_request()
         rejected = self.changes.apply_plan(self.directory, request)
@@ -2000,8 +2006,8 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
         self.assertEqual(self.changes._cut_recovery_content(cut,[certificate],(context,)),cut)
 
     def test_guarded_recovery_inspector_has_no_reentrant_locks(self):
-        request,_,context=self.scoped_recovery_request()
-        self.assertEqual(self.changes._run_scoped(self.directory,request,'apply')['exit_code'],0)
+        request,contexts=self.d4_bookkeeping_request();context=contexts[0]
+        self.assertEqual(self.run_with_d4_host(request,'apply')['exit_code'],0)
         public=self.changes.inspect_lifecycle_recovery(context.authority_set,())
         with self.changes._authority_guards([context.directory],observe=True):
             with patch.object(self.changes,'_authority_guards',side_effect=AssertionError('reentrant authority guard')), \
@@ -2023,12 +2029,10 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
 
     def test_guarded_recovery_inspector_reports_actual_missing_authority_closure(self):
         from runtime import evidence
-        request,_,first=self.scoped_recovery_request();_,second=self.recovery_authority()
-        self.assertEqual(self.changes._run_scoped(self.directory,request,'apply')['exit_code'],0)
+        request,contexts=self.d4_bookkeeping_request(umbrella=True);first,second=contexts
+        self.assertEqual(self.run_with_d4_host(request,'apply')['exit_code'],0)
         journal=self.changes._load_journal(self.directory)
         source=self.changes._observe_recovery_source(self.directory,journal,(first,second),())
-        for context in (first,second):
-            with evidence._context_database(context,write=True) as db:evidence._register_recovery_source(None,db,source,context=context)
         with self.changes._authority_guards([first.directory],observe=True):
             with patch.object(self.changes,'_authority_guards',side_effect=AssertionError('must release then reacquire')):
                 incomplete=self.changes._inspect_lifecycle_recovery_guarded(first.authority_set,())
@@ -2037,13 +2041,118 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
         public=self.changes.inspect_lifecycle_recovery(first.authority_set,())
         self.assertTrue(public['complete'],public);self.assertEqual(len(public['authorities']),2)
         self.assertEqual(public['discovered_authorities'],())
-        # A newer source can have a smaller head set while its exact v1 prior chain names another authority.
+        def snapshot():
+            result=[]
+            for context in contexts:
+                with evidence._context_database(context) as db:
+                    result.append((db.execute('select * from evidence_metadata order by name').fetchall(),
+                        {path.name:path.read_bytes() for path in (context.directory/'evidence').iterdir()}))
+            return result
+        before=snapshot()
         current=self.changes._observe_recovery_source(self.directory,journal,(first,),())
-        with evidence._context_database(first,write=True) as db:evidence._register_recovery_source(None,db,current,context=first)
+        with evidence._context_database(first,write=True) as db, \
+                self.assertRaisesRegex(self.changes.StartupError,'Recovery publication requires its actual active owner lifetime'):
+            evidence._register_recovery_source(None,db,current,context=first)
+        self.assertEqual(snapshot(),before)
+
+    def reconstructed_v1_history(self):
+        from tests.fixture_d4_history import ReconstructedV1History
+        fixture=ReconstructedV1History();self.addCleanup(fixture.cleanup)
+        return fixture
+
+    def test_reconstructed_v1_history_discovers_prior_authority_without_rewriting(self):
+        from runtime import evidence,state
+        from tests.fixture_d4_history import HISTORICAL_RUNTIME_DIGEST
+        fixture=self.reconstructed_v1_history();first,second=fixture.contexts
+        before=fixture.snapshot()
+        with evidence._context_database(first) as db:
+            baseline=state._source_baseline(None,db,context=first)
+            self.assertEqual(baseline['content']['source_contract'],2)
+            self.assertEqual(baseline['content']['runtime_digest'],HISTORICAL_RUNTIME_DIGEST)
+            self.assertNotEqual(baseline['content']['runtime_digest'],state.runtime_fingerprint())
+            self.assertEqual(baseline['content']['created_at'],fixture.AUTHORITY_CREATED_AT)
+            self.assertEqual(baseline['dependencies'],(evidence._canonical_freeze(dict(kind='recovery',reference=dict(identity=fixture.identity,artifact=fixture.head))),))
+            head=next(value for ref,value in self.changes._recovery_sources(first)[1] if ref==fixture.head)
+            self.assertEqual(head['version'],1);self.assertEqual(head['authorities'],[fixture.authorities[0]])
+            self.assertEqual(head['tasks'],[]);self.assertEqual(head['assignments'],[]);self.assertEqual(head['artifacts'],[])
+            self.assertEqual(head['previous'],fixture.prior)
+            history=evidence._recovery_source_history(first,db,fixture.head,fixture.identity)
+            self.assertEqual([ref for ref,_ in history],[fixture.head,fixture.prior])
+            self.assertIn(fixture.authorities[1],history[1][1]['authorities'])
+            for ref,body in history:
+                metadata,raw=evidence._managed_artifact(None,ref,context=first,db=db)
+                self.assertEqual(metadata['version'],1);self.assertEqual(metadata['owner'],fixture.owner)
+                self.assertEqual(metadata['created_at'],fixture.SOURCE_CREATED_AT)
+                self.assertEqual(metadata['managed']['mode'],0o400)
+                self.assertEqual(metadata['bytes'],len(raw));self.assertEqual(metadata['managed']['sha256'],hashlib.sha256(raw).hexdigest())
+                expected=[dict(kind='recovery',reference=dict(authority=fixture.authorities[0],artifact=fixture.prior))] if ref==fixture.head else []
+                self.assertEqual(metadata['dependencies'],expected)
+            for table in state.CANONICAL_TABLE_SQL:
+                if table!='evidence_metadata':self.assertEqual(db.execute('select count(*) from '+table).fetchone()[0],0)
+        with evidence._context_database(second) as db:
+            self.assertEqual(self.changes._recovery_sources(second)[1],[(fixture.second_source,history[1][1])])
+            self.assertEqual(state._metadata(db,fixture.second_source['name'])['created_at'],fixture.SOURCE_CREATED_AT)
+        for context in fixture.contexts:
+            for location in self.changes._authority_locations([context.directory]):
+                self.assertIsNone(self.changes._authority_owner(location))
+            with evidence._context_database(context) as db:
+                for table in state.CANONICAL_TABLE_SQL:
+                    if table!='evidence_metadata':self.assertEqual(db.execute('select count(*) from '+table).fetchone()[0],0)
+                for name,digest in db.execute('select name,digest from evidence_metadata'):
+                    metadata,raw=evidence._managed_artifact(None,dict(name=name,digest=digest),context=context,db=db)
+                    body=json.loads(raw)
+                    self.assertIn(body['kind'],('authority-source-baseline','d4-recovery-source'))
+                    self.assertEqual(metadata['version'],1);self.assertEqual(metadata['owner'],fixture.owner)
+                    self.assertEqual(metadata['class'],'compact');self.assertEqual(metadata['status'],'live')
+                    self.assertIsNone(metadata['closed_at']);self.assertIsNone(metadata['export']);self.assertEqual(metadata['targets'],[])
+                    self.assertEqual(metadata['managed']['mode'],0o400)
+                    self.assertEqual(metadata['created_at'],fixture.AUTHORITY_CREATED_AT if body['kind']=='authority-source-baseline' else fixture.SOURCE_CREATED_AT)
+        self.assertEqual(fixture.journal['plan']['package_pins']['runtime_digest'],HISTORICAL_RUNTIME_DIGEST)
+        self.changes._scoped_journal_shape(fixture.journal)
         with self.changes._authority_guards([first.directory],observe=True):
-            historical=self.changes._inspect_lifecycle_recovery_guarded(first.authority_set,())
-        self.assertFalse(historical['complete']);self.assertEqual(historical['discovered_authorities'],second.authority_set)
-        self.assertEqual(len(self.changes.inspect_lifecycle_recovery(first.authority_set,())['authorities']),2)
+            with patch.object(self.changes,'_authority_guards',side_effect=AssertionError('must release then reacquire')):
+                incomplete=self.changes._inspect_lifecycle_recovery_guarded(first.authority_set,())
+        self.assertFalse(incomplete['complete']);self.assertEqual(incomplete['authorities'],first.authority_set)
+        self.assertEqual(incomplete['discovered_authorities'],second.authority_set)
+        self.assertIn('recovery_authority_set_incomplete',[row['reason'] for row in incomplete['blockers']])
+        inspected=self.changes.inspect_lifecycle_recovery(first.authority_set,())
+        self.assertTrue(inspected['complete'],inspected);self.assertEqual(inspected['blockers'],())
+        self.assertEqual(inspected['discovered_authorities'],())
+        self.assertEqual({evidence._raw(evidence._canonical_plain(a)) for a in inspected['authorities']},{evidence._raw(a) for a in fixture.authorities})
+        self.assertEqual(fixture.snapshot(),before)
+
+    def test_reconstructed_v1_history_requires_retained_traversal_for_discovery(self):
+        from runtime import evidence
+        fixture=self.reconstructed_v1_history();first,second=fixture.contexts;before=fixture.snapshot()
+        history=evidence._recovery_source_history;calls=[]
+        def head_only(*args,**kwargs):
+            actual=history(*args,**kwargs);calls.append(len(actual));return actual[:1]
+        with patch.object(evidence,'_recovery_source_history',side_effect=head_only):
+            with self.changes._authority_guards([first.directory],observe=True):
+                inspected=self.changes._inspect_lifecycle_recovery_guarded(first.authority_set,())
+        self.assertTrue(calls);self.assertIn(2,calls)
+        self.assertEqual(inspected['discovered_authorities'],());self.assertEqual(inspected['authorities'],first.authority_set)
+        self.assertTrue(inspected['complete'],inspected)
+        self.assertEqual(fixture.snapshot(),before)
+
+    def test_reconstructed_v1_history_corruption_stays_protective_without_repair(self):
+        for corruption in ('missing-prior','wrong-previous-edge'):
+            with self.subTest(corruption=corruption):
+                fixture=self.reconstructed_v1_history();first,second=fixture.contexts
+                if corruption=='missing-prior':
+                    (first.directory/'evidence'/fixture.prior['name']).unlink()
+                else:
+                    with closing(sqlite3.connect(first.database)) as db,db:
+                        raw=db.execute('select data from evidence_metadata where name=?',(fixture.head['name'],)).fetchone()[0]
+                        metadata=json.loads(raw);metadata['dependencies']=[]
+                        db.execute('update evidence_metadata set data=? where name=?',(json.dumps(metadata),fixture.head['name']))
+                before=fixture.snapshot();inspected=self.changes.inspect_lifecycle_recovery(first.authority_set,())
+                self.assertFalse(inspected['complete'],inspected);self.assertTrue(inspected['blockers'])
+                if corruption=='wrong-previous-edge':
+                    self.assertIn('Recovery typed metadata dependencies differ from owner source',[row['reason'] for row in inspected['blockers']])
+                else:
+                    self.assertIn('recovery_source_unavailable',[row['reason'] for row in inspected['blockers']])
+                self.assertEqual(fixture.snapshot(),before)
 
     def scoped_recovery_request(self, *, umbrella=False):
         request=self.scoped_request(umbrella=umbrella)
@@ -2079,7 +2188,7 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
         with evidence._context_database(context) as db:
             self.assertEqual(evidence._canonical_plain(state._source_baseline(None,db,context=context)),baseline)
 
-    def d4_bookkeeping_request(self, *, umbrella=False):
+    def d4_bookkeeping_request(self, *, umbrella=False, state_root=None):
         from runtime import evidence,state
         from runtime.startup import ProjectScope,RuntimeSettings
         from tests.test_state import canonical_scope
@@ -2088,7 +2197,7 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
         for index,repository in enumerate(record['repositories']):
             checkout=repository['checkouts'][0]
             scope=canonical_scope(ProjectScope(record['project_id'],Path(checkout['root']),Path(repository['git_common_dir']),
-                policy_digest(state.PACKAGE),RuntimeSettings(2,self.base/('d4-bookkeeping-'+str(index)))),
+                policy_digest(state.PACKAGE),RuntimeSettings(2,(state_root or self.base)/('d4-bookkeeping-'+str(index)))),
                 repository_id=repository['repository_id'],checkout_id=checkout['checkout_id'],
                 primary_root=Path(repository['primary_root']),git_dir=Path(checkout['git_dir']))
             with state._database(scope,write=True,initialize=True):pass
@@ -2675,7 +2784,8 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
 
     def historical_shared_consumer(self, *, changed=True, mode_change=False):
         from runtime import startup,state
-        first=self.scoped_request(umbrella=True); contexts=[self.recovery_authority()[1],self.recovery_authority()[1]]
+        storage=tempfile.TemporaryDirectory(prefix='vcw-historical-private-');self.addCleanup(storage.cleanup)
+        first,contexts=self.d4_bookkeeping_request(umbrella=True,state_root=Path(storage.name).resolve())
         record=first['manifest']['enrollment']['record']
         action=next(a for a in first['manifest']['actions'] if a['owner']['kind']=='project')
         shared=Path(action['owner']['root'])/action['effects'][0]['path']
@@ -2691,11 +2801,15 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
             entry['activation']=copy.deepcopy(activation); entry['activation']['accepted_scope_digest']=digest
             entry['activation']['qualification_binding']['accepted_scope_digest']=digest
         first['approval']['manifest_digest']=onboarding._digest(first['manifest'])
-        self.assertNotEqual(self.changes._run_scoped(self.directory,first,'apply')['exit_code'],0)
+        pending=self.run_with_d4_host(first,'apply')
+        self.assertEqual(pending['exit_code'],2,pending)
+        self.assertFalse(pending['qualified'])
+        self.assertIn('Fresh scoped adoption qualification',str(pending))
         observed=self.observe_active(first)
         for row in observed['observations']['qualification']:
             row['scope_observations']['observation']['dependencies']=[dict(path=str(shared),status='read',target=self.changes._scoped_target(self.base,'AGENTS.md'))]
-        applied=self.changes._run_scoped(self.directory,observed,'resume'); self.assertEqual(applied['exit_code'],0,applied)
+        applied=self.run_with_d4_host(observed,'resume'); self.assertEqual(applied['exit_code'],0,applied)
+        self.assertTrue(applied['qualified'],applied)
         published=json.loads((self.base/PROJECT_FILE).read_text()); consumer=published['repositories'][1]
         facts=copy.deepcopy(observed['observations']['qualification'][1]['scope_observations'])
         facts['authority']=dict(path=str(self.base/PROJECT_FILE),target=self.changes._scoped_target(self.base,str(PROJECT_FILE)))
@@ -2739,7 +2853,7 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
         from runtime import evidence,state
         request,scope,context,task,shared=self.historical_shared_consumer()
         before=shared.read_bytes()
-        result=self.changes._run_scoped(self.directory,request,'apply')
+        result=self.run_with_d4_host(request,'apply')
         self.assertNotEqual(result['exit_code'],0,result)
         self.assertIn('stopped-writer',str(result));self.assertEqual(shared.read_bytes(),before)
         with evidence._context_database(context) as db:
@@ -2780,7 +2894,7 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
         effect=next(a for a in request['manifest']['actions'] if a['owner']['kind']=='project')['effects'][0]
         self.assertEqual(effect['before']['sha256'],effect['after']['sha256'])
         self.assertNotEqual(effect['before']['mode'],effect['after']['mode'])
-        result=self.changes._run_scoped(self.directory,request,'apply')
+        result=self.run_with_d4_host(request,'apply')
         self.assertNotEqual(result['exit_code'],0,result);self.assertIn('stopped-writer',str(result))
         self.assertEqual(self.changes._fingerprint(shared.parent,shared.name),effect['before'])
 
