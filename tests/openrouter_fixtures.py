@@ -32,4 +32,6 @@ def configure(repo, *, executable=None, auth=None, routes=('proposals', 'workers
     from runtime import openrouter_settings as settings
     report = settings.configure(repo, dict(expected_revision=0, routes=list(routes),
         opencode=str(executable) if executable else None, auth_data=str(auth) if auth else None))
-    return settings.enable(repo, dict(expected_revision=report['revision']))
+    request = dict(expected_revision=report['revision'])
+    if 'workers' in routes: request['consent_version'] = 2
+    return settings.enable(repo, request)

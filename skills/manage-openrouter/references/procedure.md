@@ -23,6 +23,7 @@ python3 -I -B <plugin-root>/scripts/openrouter.py <action> --cwd <selected-check
 For `status`, supply `{}`. It is offline and read-only: no storage creation,
 OpenCode execution, credential-content access, network request or model call.
 Report `configured`, `enabled`, `routes`, `revision`, `control_scope`,
+`consent_version`, `worker_capability`, `enablement_renewal_required`,
 `local_configuration` and the returned nonsecret runtime/work references.
 `connection` and `execution_qualification` remain `not_checked`: local file checks
 do not verify login, installed version, account allowance, model fitness or
@@ -48,7 +49,7 @@ intent; never silently overwrite another change.
 
 `configure` selects a nonempty subset of `proposals` and `workers`. Use workers
 for background OpenCode agents; add proposals only when that route is requested.
-It saves configuration while disabled:
+It saves configuration while disabled and unacknowledged:
 
 ```json
 {"expected_revision":0,"routes":["workers"],"opencode":"/absolute/pinned/opencode","auth_data":"/absolute/private/opencode-data"}
@@ -62,12 +63,35 @@ This skill does not install clients, initiate login, change providers or add a
 connection. If separate setup is needed, identify it without pretending local
 configuration verifies execution.
 
-For `enable`, send `{"expected_revision":<current-revision>}`. Enabling a configured
-route saves consent; it performs no inference or connection probe. Use status
-after the mutation to report the observed result. Reuse saved configuration when
-re-enabling. Reconfiguration requires disable first and another current revision.
+Enabling workers permits scoped worktree editing and registered check execution
+under the task's declared paths, checks and ownership. State that effect when
+enabling. This is the supported worker execution contract; do not add a mode
+selector. Reviewer and investigation assignments keep their task-appropriate
+read-only scope. Preserve the user's existing authorization without recurring
+per-task confirmation.
 
-Settings contain only consent, selected routes, nonsecret paths and physical
+For worker `enable`, send
+`{"expected_revision":<current-revision>,"consent_version":2}`. The exact integer
+acknowledgement is required for initial permission or renewal of an older record.
+A successful acknowledgement records version 2 and advances the revision even if
+saved `enabled` was already true. Never infer this permission from an account
+connection, a configured path or an old read-only approval. Status with
+`enablement_renewal_required:true` means worker admission is unavailable until
+explicitly renewed; it does not erase or rewrite the historical configuration.
+
+For proposal-only `enable`, retain `{"expected_revision":<current-revision>}`;
+the proposal route grants no file tools. Enabling saves consent without inference
+or a connection probe. Use status after the mutation to report the observed result.
+Reuse saved configuration when re-enabling. Once worktree permission has been
+acknowledged, ordinary disable/re-enable retains it; reconfiguration requires
+disable first, another current revision and acknowledgement of the new configuration.
+
+Saved permission and local references do not establish coding-dispatch readiness.
+Require the executor's qualified task/worktree binding, ownership, check bridge
+and independent verification before dispatch. This management operation cannot
+qualify those mechanisms or bypass an unavailable native execution prerequisite.
+
+Settings contain only versioned consent, selected routes, nonsecret paths and physical
 scope bindings. They use owner-only files and compare-and-swap publication.
 Benign enrollment updates and native database content changes preserve consent;
 replaced ownership or invalid enrollment blocks access rather than silently
@@ -75,6 +99,7 @@ resetting it. Do not edit settings JSON or move it to another scope.
 
 ## Disable and admission
 
+Disable is an offline local control and makes no account or provider calls.
 For `disable`, send `{"expected_revision":<current-revision>}`. With no saved
 configuration, revision 0 returns disabled without creating configuration. Disable
 retains settings, cache, task history and pending results for inspection and
