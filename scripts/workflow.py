@@ -18,11 +18,16 @@ def control_main():
 
     class Parser(argparse.ArgumentParser):
         def error(self, message):
-            raise StartupError("Invalid task, evidence, delegation, doctor or onboard command arguments")
+            raise StartupError("Invalid task, evidence, delegation, doctor, onboard or storage command arguments")
 
     try:
         parser = Parser(add_help=False)
         commands = parser.add_subparsers(dest="command", required=True)
+        storage = commands.add_parser("storage", add_help=False)
+        storage_actions = storage.add_subparsers(dest="action", required=True)
+        storage_actions.add_parser("status", add_help=False)
+        storage_actions.add_parser("prepare", add_help=False)
+        storage_actions.add_parser("owner", add_help=False).add_argument("--cwd", required=True)
         task = commands.add_parser("task", add_help=False)
         actions = task.add_subparsers(dest="action", required=True)
         for name in ("start", "update", "status", "retire"):
@@ -72,6 +77,19 @@ def control_main():
             if name == "inspect":
                 action.add_argument("--cwd", required=True)
         args = parser.parse_args()
+        if args.command == "storage":
+            from runtime import review_storage
+            if args.action == "prepare":
+                request = json_object(sys.stdin.buffer.read(MAX_INPUT + 1))
+                if set(request) != {"private_data_dir"} or not isinstance(request["private_data_dir"], str):
+                    raise StartupError("Expected an explicit private_data_dir")
+                report = review_storage.prepare_storage(Path(request["private_data_dir"]))
+            elif args.action == "owner":
+                report = review_storage.resolve_owner(Path(args.cwd))
+            else:
+                report = review_storage.storage_status()
+            print(json.dumps(report))
+            return 0 if report["ok"] else 1
         if args.command == "onboard":
             from runtime.onboarding import MAX_REQUEST, inspect_project, read_request, record_plan
             request = read_request(sys.stdin.buffer.read(MAX_REQUEST + 1))
@@ -163,7 +181,7 @@ def control_main():
 
 
 def main():
-    control = len(sys.argv) > 1 and sys.argv[1] in {"task", "doctor", "onboard", "evidence", "delegation"}
+    control = len(sys.argv) > 1 and sys.argv[1] in {"task", "doctor", "onboard", "evidence", "delegation", "storage"}
     if sys.version_info < (3, 11):
         print(json.dumps({"ok": False, "error": "Vibe Coding Workflow requires Python 3.11+"} if control else
                          {"systemMessage": "Vibe Coding Workflow requires Python 3.11+ on the hook PATH."}))

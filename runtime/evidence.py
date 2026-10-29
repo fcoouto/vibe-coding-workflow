@@ -154,6 +154,16 @@ class _BaselineOwner:
 
 
 @dataclass(frozen=True)
+class _TemporaryOwner:
+    context: EvidenceAuthorityContext
+    db: object
+    content: object
+    targets: object
+    created_at: int
+    creation: object = None
+
+
+@dataclass(frozen=True)
 class _RecoveryOwner:
     project_id: str
     source: object
@@ -1820,6 +1830,10 @@ def _retire_closed_task(context, task_ref):
 
 
 def _registered_owner(scope, context, owner, db):
+    if isinstance(owner, _TemporaryOwner):
+        from runtime.review_storage import _check_producer
+        _require(scope is None, 'Temporary storage cannot replace a Project authority')
+        return _check_producer(context, db, owner), None
     if isinstance(owner,_SourceMandateOwner):
         birth=owner.birth
         _require(_SOURCE_BIRTH.get() is birth and birth['issuer'] is _SOURCE_BIRTH_ISSUER and
@@ -2239,7 +2253,7 @@ def _content_dependencies(dependencies,authority):
 
 
 def _owner_dependencies(value,owner,task_ref=None):
-    if isinstance(owner,_SourceMandateOwner):dependencies=[]
+    if isinstance(owner,(_SourceMandateOwner,_TemporaryOwner)):dependencies=[]
     elif isinstance(owner,_ForeignIntentOwner):
         dependencies=[dict(kind='artifact',reference=dict(authority=_canonical_plain(owner.source['authority']),artifact=_canonical_plain(owner.source['reference']))),
             dict(kind='artifact',reference=_canonical_plain(owner.content)['mandate'])]
@@ -2480,6 +2494,9 @@ def _artifact_registered(scope, value, context, owner, db):
         _require(value == _canonical_plain(owner.content), 'Artifact differs from owner-derived content')
     if isinstance(owner,_SourceMandateOwner):_require(value==_mandate_content(owner.birth),'Mandate differs from actual publication birth')
     if isinstance(owner,_ForeignIntentOwner):_require(value==_canonical_plain(owner.content),'Intent differs from actual owner-derived content')
+    temporary = isinstance(owner, _TemporaryOwner)
+    if temporary:
+        _require(value == _canonical_plain(owner.content), 'Temporary artifact differs from its actual producer')
     dependencies = _owner_dependencies(value,owner,task_ref)
     _admit_content_dependencies(context,db,dependencies,owner=owner)
     folder = context.directory / 'evidence'
@@ -2511,6 +2528,8 @@ def _artifact_registered(scope, value, context, owner, db):
     baseline = isinstance(owner, _BaselineOwner)
     created = owner.birth['metadata']['created_at'] if isinstance(owner,_SourceMandateOwner) else owner.creation.created_at if baseline else owner.created_at if recovery or isinstance(owner,(_ClosureOwner,_PreparationOwner,_ForeignIntentOwner)) else state._owner_time()
     content_class = 'compact' if baseline or recovery or isinstance(owner,(_ClosureOwner,_PreparationOwner,_SourceMandateOwner,_ForeignIntentOwner)) else 'detail'
+    if temporary:
+        created, content_class = owner.created_at, 'compact'
     if baseline:
         expected = dict(version=1, kind='authority-source-baseline', source_contract=2,
             authority=_canonical_plain(owner.creation.authority), project_id=owner.project_id,
@@ -2518,10 +2537,12 @@ def _artifact_registered(scope, value, context, owner, db):
         _require(value == expected and not dependencies, 'Baseline content differs from fresh owner provenance')
         state._check_creation(context.database, owner.creation, db)
     data = dict(version=2, owner=metadata_owner, created_at=created, **{'class': content_class}, bytes=len(raw),
-        status='live', closed_at=None, dependencies=dependencies, targets=[], export=None,
+        status='live', closed_at=None, dependencies=dependencies,
+        targets=_canonical_plain(owner.targets) if temporary else [], export=None,
         managed=dict(path=str(path), binding=dict(device=info.st_dev, inode=info.st_ino), parents=parents,
             sha256=digest, mode=stat.S_IMODE(info.st_mode), bytes=info.st_size))
-    row = (path.name, digest, 'project:' + metadata_owner['project_id'], content_class, created, None, 'live', len(raw), _raw(data).decode())
+    owner_key = ('temporary:' + metadata_owner['id'] if temporary else 'project:' + metadata_owner['project_id'])
+    row = (path.name, digest, owner_key, content_class, created, None, 'live', len(raw), _raw(data).decode())
     state._metadata_record(row)
     _check_context(context, db)
     _require(all(_binding(Path(parent)) == binding for parent, binding in parents.items())
