@@ -189,6 +189,125 @@ print(json.dumps({{'type':'step_finish','part':{{'reason':'stop','cost':0,'token
         p.chmod(0o700)
         return p
 
+    def sized_brief(self, count=17):
+        spec = importlib.util.spec_from_file_location('fixture_catalog', SCRIPT.with_name('openrouter_proposals.py'))
+        catalog = importlib.util.module_from_spec(spec); spec.loader.exec_module(catalog)
+        store = Path(self.settings['proposal_store'])
+        metadata = dict(models=[dict(id='vendor/model', context_length=64000, max_output_tokens=16000,
+            supported_reasoning_efforts=['low'])], endpoints=[dict(model='vendor/model', provider='provider',
+            context_length=64000, max_output_tokens=16000, modalities=['text'],
+            supported_parameters=['tools', 'reasoning'])], benchmarks=[], task_usage=[], coverage={'source':'fixture'})
+        token = catalog.run('claim', store, {'force':True})['refresh_token']
+        status = catalog.run('publish', store, dict(refresh_token=token, metadata=metadata))
+        files = [f'input-{n}.txt' for n in range(count)]
+        for name in files: (self.source / name).write_text('evidence\n')
+        sizing = dict(profile=dict(family='analysis', language='python', framework=None,
+            difficulty='small', scope='files', verification='native inspection'),
+            snapshot_digest=status['snapshot_digest'], requirements=dict(context_tokens=1000,
+            output_tokens=8192, modalities=['text'], parameters=['tools']), max_files=32, max_input_bytes=4096)
+        return dict(self.brief, files=files, sizing=sizing), catalog, store
+
+    def test_sized_preparation_and_child_receive_larger_finite_budget(self):
+        brief, _, _ = self.sized_brief()
+        exe = self.fixture("import os\nconfig=json.loads(os.environ['OPENCODE_CONFIG_CONTENT'])\n"
+            "assert config['provider']['openrouter']['models']['vendor/model']['options']['maxOutputTokens']==8192\n"
+            "assert config['permission']['*']=='deny'\n"
+            "print(json.dumps({'type':'text','part':{'text':'sized'}}))\n"
+            "print(json.dumps({'type':'step_finish','part':{'reason':'stop','cost':0,'tokens':{}}}))\n")
+        try: run = self.api.prepare(self.runs, brief)
+        except ValueError as error: self.fail(f'Compatible sized preparation rejected: {error}')
+        self.assertEqual(len(list((run/'workspace').glob('input-*.txt'))), 17)
+        self.assertEqual(self.api.execute(run, exe, self.root/'auth')['state'], 'awaiting_verification')
+
+    def test_sizing_rejects_incompatible_or_unbounded_inputs_before_run(self):
+        import copy
+        brief, _, _ = self.sized_brief()
+        for key, value in [('max_files', True), ('max_input_bytes', 2**60),
+                           ('max_input_bytes', 1), ('snapshot_digest', 'wrong')]:
+            request=copy.deepcopy(brief);request['sizing'][key]=value
+            with self.subTest(key=key,value=value), self.assertRaises(ValueError): self.api.prepare(self.runs,request)
+            self.assertFalse((self.runs/'pilot-1').exists())
+        brief['sizing']['requirements']['output_tokens']=64000
+        with self.assertRaises(ValueError): self.api.prepare(self.runs,brief)
+        self.assertFalse((self.runs/'pilot-1').exists())
+
+    def test_sized_launch_rejects_tampering_and_stale_catalog(self):
+        for mode in ('tamper','stale'):
+            brief,catalog,store=self.sized_brief(1);brief['task_id']=mode
+            run=self.api.prepare(self.runs,brief)
+            if mode=='tamper':
+                data=json.loads((run/'brief.json').read_text());data['sizing']['requirements']['output_tokens']=12000
+                (run/'brief.json').write_text(json.dumps(data))
+            else:
+                token=catalog.run('claim',store,{'force':True})['refresh_token']
+                catalog.run('publish',store,dict(refresh_token=token,failure='fixture unavailable'))
+            result=self.api.execute(run,self.root/'worker',self.root/'auth')
+            self.assertEqual(result['state'],'failed')
+            self.assertIs(result['native_fallback_ready'],True)
+
+    def test_sized_input_manifest_and_growth_are_bounded(self):
+        brief,_,_=self.sized_brief(1)
+        brief['files'] *= 2
+        with self.assertRaises(ValueError): self.api.prepare(self.runs,brief)
+        brief['files'] = ['input-0.txt']
+        (self.source/'input-0.txt').write_text('')
+        brief['sizing']['max_input_bytes']=1
+        with self.assertRaises(ValueError): self.api.prepare(self.runs,brief)
+        brief['sizing']['max_input_bytes']=4096
+        read=self.api.onboarding._read_file
+        def growing(path,*args,**kwargs):
+            if Path(path)==self.source/'input-0.txt': Path(path).write_bytes(b'x'*(128*1024+1))
+            return read(path,*args,**kwargs)
+        with patch.object(self.api.onboarding,'_read_file',side_effect=growing):
+            with self.assertRaises(ValueError): self.api.prepare(self.runs,brief)
+        self.assertFalse((self.runs/'pilot-1').exists())
+
+    def test_sizing_requires_text_before_preparation_and_launch(self):
+        for absent in (True, False):
+            brief,catalog,store=self.sized_brief(1)
+            brief['task_id']='missing-text' if absent else 'empty-text'
+            metadata=catalog.run('status',store,{'include_metadata':True})['metadata']
+            if absent: metadata['endpoints'][0].pop('modalities')
+            else: metadata['endpoints'][0]['modalities']=[]
+            token=catalog.run('claim',store,{'force':True})['refresh_token']
+            snapshot=catalog.run('publish',store,dict(refresh_token=token,metadata=metadata))
+            brief['sizing']['snapshot_digest']=snapshot['snapshot_digest']
+            brief['sizing']['requirements']['modalities']=[]
+            with self.subTest(absent=absent), self.assertRaises(ValueError): self.api.prepare(self.runs,brief)
+            self.assertFalse((self.runs/brief['task_id']).exists())
+        brief,_,_=self.sized_brief(1)
+        run=self.api.prepare(self.runs,brief)
+        data=json.loads((run/'brief.json').read_text())
+        data['sizing']['requirements']['modalities']=[]
+        data['sizing_digest']=self.api.sizing_digest(data)
+        (run/'brief.json').write_text(json.dumps(data))
+        marker=self.root/'launched'
+        exe=self.fixture(f'from pathlib import Path\nPath({str(marker)!r}).touch()\n')
+        result=self.api.execute(run,exe,self.root/'auth')
+        self.assertEqual(result['state'],'failed')
+        self.assertIs(result['native_fallback_ready'],True)
+        self.assertFalse(marker.exists())
+
+    def test_sized_preparation_has_a_deadline(self):
+        brief,_,_=self.sized_brief(1);brief['timeout_seconds']=1
+        read=self.api.onboarding._read_file
+        def slow(path,*args,**kwargs):
+            if Path(path)==self.source/'input-0.txt': time.sleep(1.1)
+            return read(path,*args,**kwargs)
+        with patch.object(self.api.onboarding,'_read_file',side_effect=slow):
+            with self.assertRaises(TimeoutError): self.api.prepare(self.runs,brief)
+        self.assertFalse((self.runs/'pilot-1').exists())
+
+    def test_legacy_limits_and_cli_input_bound_remain(self):
+        import subprocess
+        self.assertEqual(self.api.configuration(self.brief)['provider']['openrouter']['models']['vendor/model']['options']['maxOutputTokens'],2048)
+        with self.assertRaises(ValueError): self.api.prepare(self.runs,dict(self.brief,files=['input.txt']*17))
+        result=subprocess.run([sys.executable,'-I','-B',str(SCRIPT),'status','--root',str(self.runs)],
+            input=' '*(1024*1024+1),text=True,capture_output=True,timeout=10)
+        self.assertNotEqual(result.returncode,0)
+        self.assertFalse((self.runs/'pilot-1').exists())
+
+
     def test_real_subprocess_records_tools_usage_and_requires_native_verification(self):
         exe = self.fixture('''sys.stdin.read()
 for event in [
