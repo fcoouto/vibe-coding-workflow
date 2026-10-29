@@ -7,6 +7,7 @@ description: Use when a user requests OpenRouter integration setup, saved enable
 
 Read the [local procedure](references/procedure.md) for the requested control. Keep
 activation separate from Onboard my Project; its optional follow-up is an offer.
+Enabling workers authorizes scoped worktree editing and registered check execution.
 
 Default to native execution. Save authorized enablement only for the supported
 enrolled checkout. Report saved consent, local configuration and observed execution
