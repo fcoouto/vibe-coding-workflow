@@ -64,8 +64,8 @@ def reference(value):
 
 
 def validate_routes(routes):
-    require(isinstance(routes, list) and 1 <= len(routes) <= 2
-            and all(type(route) is str and route in ('proposals', 'workers') for route in routes)
+    require(isinstance(routes, list) and 1 <= len(routes) <= 3
+            and all(type(route) is str and route in ('proposals', 'workers', 'council') for route in routes)
             and len(set(routes)) == len(routes), 'invalid_openrouter_routes')
 
 
@@ -121,7 +121,7 @@ class Store:
                 and type(record['enabled']) is bool and record['binding'] == self.binding,
                 'invalid_or_changed_openrouter_configuration')
         validate_routes(record['routes'])
-        if 'workers' in record['routes']:
+        if set(record['routes']) & {'workers', 'council'}:
             require(reference(record['opencode']) and reference(record['auth_data']), 'invalid_openrouter_configuration')
         else:
             require(record['opencode'] is None and record['auth_data'] is None, 'invalid_openrouter_configuration')
@@ -155,7 +155,8 @@ class Store:
         if record:
             try:
                 state._private(self.data, True)
-                if 'workers' in record['routes']: runtime_references(record['opencode'], record['auth_data'])
+                if set(record['routes']) & {'workers', 'council'}:
+                    runtime_references(record['opencode'], record['auth_data'])
                 readiness = 'ready'
             except (SettingsError, startup.StartupError, OSError, RuntimeError):
                 readiness = 'unavailable'
@@ -165,7 +166,8 @@ class Store:
             checkout=str(self.scope.repository_root), local_configuration=readiness,
             connection='not_checked', execution_qualification='not_checked',
             opencode=record['opencode'] if record else None, auth_data=record['auth_data'] if record else None,
-            proposal_store=str(self.data / 'discovery.json'), worker_root=str(self.data / 'runs'))
+            proposal_store=str(self.data / 'discovery.json'), worker_root=str(self.data / 'runs'),
+            council_root=str(self.data / 'council'))
 
 
 @contextmanager
@@ -223,7 +225,7 @@ def operate(cwd, action, request):
             require(current is None or not current['enabled'], 'disable_before_openrouter_reconfiguration')
             validate_routes(request['routes'])
             opencode, auth = request['opencode'], request['auth_data']
-            if 'workers' in request['routes']:
+            if set(request['routes']) & {'workers', 'council'}:
                 require(reference(opencode) and reference(auth), 'invalid_openrouter_runtime_references')
                 opencode, auth = str(Path(opencode).resolve(strict=True)), str(Path(auth).resolve(strict=True))
                 runtime_references(opencode, auth)
@@ -237,7 +239,7 @@ def operate(cwd, action, request):
         else:
             if action == 'disable' and current is None: return owner.report()
             require(current is not None, 'openrouter_not_configured')
-            if action == 'enable' and 'workers' in current['routes']:
+            if action == 'enable' and set(current['routes']) & {'workers', 'council'}:
                 runtime_references(current['opencode'], current['auth_data'])
             wanted = action == 'enable'
             if current['enabled'] == wanted: return owner.report()
@@ -262,7 +264,8 @@ def admission(cwd, route, *, store=None, root=None, opencode=None, auth_data=Non
         require(revision is None or type(revision) is int and revision == record['revision'],
                 'openrouter_preparation_stale')
         require(scope_id is None or scope_id == report['scope_id'], 'openrouter_scope_changed')
-        for actual, expected in ((store, report['proposal_store']), (root, report['worker_root']),
+        expected_root = report['council_root'] if route == 'council' else report['worker_root']
+        for actual, expected in ((store, report['proposal_store']), (root, expected_root),
                                  (opencode, record['opencode']), (auth_data, record['auth_data'])):
             if actual is not None:
                 require(expected is not None and Path(actual).resolve() == Path(expected),

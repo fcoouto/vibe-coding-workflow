@@ -1,7 +1,7 @@
 # Manage OpenRouter Integration
 
-Use these controls when requested. They save checkout consent for the existing
-proposal and OpenCode worker routes. Ordinary tasks use their executor procedures;
+Use these controls when requested. They save checkout consent for proposal,
+OpenCode worker and Council routes. Ordinary tasks use their executor procedures;
 they do not load this management procedure or enable a route automatically.
 
 ## Select scope and inspect status
@@ -46,8 +46,10 @@ Read `status`, then use its exact `revision` as `expected_revision` for each
 mutation. A conflict requires rereading current state and reconciling the user's
 intent; never silently overwrite another change.
 
-`configure` selects a nonempty subset of `proposals` and `workers`. Use workers
-for background OpenCode agents; add proposals only when that route is requested.
+`configure` selects a nonempty subset of `proposals`, `workers` and `council`. Use
+workers for background OpenCode agents; select Council only for an explicit
+Council activation request. Existing worker or proposal consent does not authorize
+Council. Add proposals only when that route is requested.
 It saves configuration while disabled:
 
 ```json
@@ -58,6 +60,10 @@ Use the existing pinned OpenCode 1.19.5 executable and its existing owner-only
 authentication directory. Obtain nonsecret paths from approved local setup when
 available; do not read or copy the key. A proposals-only configuration uses
 `"opencode":null,"auth_data":null` and the current client's existing MCP connection.
+Council requires these OpenCode references even when workers are not selected:
+configure with `"routes":["council"]` and the existing pinned paths, then explicitly
+enable the resulting configuration. Status returns a separate `council_root` for
+Council artifacts; do not substitute `worker_root` or another checkout's path.
 This skill does not install clients, initiate login, change providers or add a
 connection. If separate setup is needed, identify it without pretending local
 configuration verifies execution.
@@ -87,6 +93,8 @@ the runner checks consent again at process creation, including the prepared
 revision and configured executable/auth directory. Disable after preparation
 blocks launch; re-enable does not revive stale preparation. Already-launched
 workers finish under their existing deadline and can be verified after disable.
+Council admission checks its own selected route, configured root, runtime
+references and preparation revision under the same saved-consent guard.
 Concurrent mutation/admission may report busy; it does not justify another worker
 or a different store. Retain native execution until the requested state is known.
 
