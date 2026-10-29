@@ -2798,24 +2798,48 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
         from runtime import evidence,state
         from runtime.startup import ProjectScope,RuntimeSettings
         from tests.test_state import canonical_scope
-        request,fixture,first=self.scoped_recovery_request()
-        self.assertEqual(self.changes._run_scoped(self.directory,request,'apply')['exit_code'],0)
-        _,second=self.recovery_authority(); contexts=(first,second)
+        prior,contexts=self.d4_bookkeeping_request(umbrella=True);first,second=contexts
+        result=self.run_with_d4_host(prior,'apply')
+        self.assertEqual(result['exit_code'],0,result)
+        prior_journal=self.changes._load_journal(self.directory)
+        prior_identity=dict(plan_dir=str(self.directory),transaction_id=prior_journal['transaction_id'],
+            manifest_digest=prior_journal['manifest_digest'])
+        _,sources=self.changes._recovery_sources(first)
+        reference,body=next((reference,body) for reference,body in sources if body['identity']==prior_identity)
+        with evidence._context_database(first) as db:
+            history=evidence._recovery_source_history(first,db,reference,prior_identity)
+        self.assertGreaterEqual(len(history),2)
+        self.assertTrue(all(evidence._canonical_plain(second.authority_set[0]) in body['authorities'] for _,body in history))
+        source=self.source.read_bytes()
+        temporary=tempfile.TemporaryDirectory(prefix='vcw-prior-authority-');self.addCleanup(temporary.cleanup)
+        self.directory=Path(temporary.name).resolve()/'plan';self.directory.mkdir(mode=0o700)
+        self.source=self.directory/'catalog.md';self.source.write_bytes(source);self.source.chmod(0o600)
+        self.record['toolkit']['files'][0]['local_path']=str(self.source)
+        onboarding.inspect_project(self.base,self.directory,self.project_record(self.base,[self.repo],'umbrella',['AGENTS.md']))
+        request=self.scoped_request(existing=True)
+        manifest=request['manifest'];affected={tuple(member[k] for k in ('repository_id','checkout_id','client'))
+            for member in manifest['enrollment']['affected']}
+        _,previous=self.changes._scoped_prior(self.plan())
+        initial=self.changes._scoped_runtime_locations([previous,manifest['enrollment']['record']],affected)
+        self.assertEqual(len(affected),1)
+        self.assertEqual(set(initial),{first.directory})
+        self.assertNotIn(second.directory,initial)
+        self.assertNotIn(str(self.d4_bookkeeping_scopes[1].repository_root),
+            [entry['owner']['root'] for entry in manifest['owners']])
+        result=self.run_with_d4_host(request,'apply')
+        self.assertEqual(result['exit_code'],0,result)
         journal=self.changes._load_journal(self.directory)
-        with self.changes._authority_guards([c.directory for c in contexts]):
-            source=self.changes._observe_recovery_source(self.directory,journal,contexts,())
-            for context in contexts:
-                with evidence._context_database(context,write=True) as db:
-                    evidence._register_recovery_source(None,db,source,context=context)
+        self.assertEqual(journal['manifest'],manifest)
         checked=[]; original_check=self.changes._scoped_writers
         def check(locations,*args,**kwargs):
             checked.append(set(locations))
             return original_check(locations,*args,**kwargs)
         with patch.object(self.changes,'_scoped_writers',side_effect=check):
-            self.assertEqual(self.changes._run_scoped(self.directory,request,'resume')['exit_code'],0)
+            result=self.run_with_d4_host(request,'resume')
+            self.assertEqual(result['exit_code'],0,result)
         self.assertGreaterEqual(len(checked),4)
         self.assertTrue(all({first.directory,second.directory}<=directories for directories in checked))
-        legacy=ProjectScope('project',self.repo,self.repo/'.git',policy_digest(onboarding.PACKAGE),
+        legacy=ProjectScope(manifest['enrollment']['record']['project_id'],self.repo,self.repo/'.git',policy_digest(onboarding.PACKAGE),
             RuntimeSettings(2,second.directory.with_name(second.directory.name.removesuffix('-canonical'))))
         scope=canonical_scope(legacy,repository_id='affected-prior-repository',checkout_id='affected-prior-checkout')
         self.assertEqual(scope.runtime.state_dir,second.directory)
@@ -2824,11 +2848,20 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
         locations=self.changes._authority_locations([c.directory for c in contexts])
         for location in locations:
             self.changes._atomic(location.parent,location.name+'.json',json.dumps(owner,sort_keys=True).encode())
-        before=(self.repo/'AGENTS.md').read_bytes()
-        result=self.changes._run_scoped(self.directory,request,'resume')
+        before={Path(action['owner']['root'])/effect['path']:(Path(action['owner']['root'])/effect['path']).read_bytes()
+            for action in manifest['actions'] for effect in action['effects'] if effect['path']=='AGENTS.md'}
+        self.assertIn(self.repo/'AGENTS.md',before)
+        result=self.run_with_d4_host(request,'resume')
         self.assertNotEqual(result['exit_code'],0,result)
         self.assertIn('stopped-writer',str(result))
-        self.assertEqual((self.repo/'AGENTS.md').read_bytes(),before)
+        retained=self.changes._load_journal(self.directory)
+        for key in ('schema_version','transaction_id','manifest_digest','manifest','approval','plan','receipts'):
+            self.assertEqual(retained[key],journal[key],key)
+        enrollment=copy.deepcopy(journal['enrollment'])
+        for member in enrollment['members']:
+            member.update(status='blocked',blocked='transaction_incomplete')
+        self.assertEqual(retained['enrollment'],enrollment)
+        self.assertTrue(all(path.read_bytes()==content for path,content in before.items()))
         self.assertTrue(all(self.changes._authority_owner(location)==owner for location in locations))
 
     def test_recovery_registration_and_inspection_hold_no_cross_store_sqlite_transaction(self):
