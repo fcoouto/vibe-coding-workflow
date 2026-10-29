@@ -23,6 +23,23 @@ Prefer existing authoritative server checks and qualified repository review. A c
 
 D5's native receipts and coordinator assessments are local evidence. Accept their transfer only through a qualified issuer that verifies native provenance, review coverage, findings, candidate binding and freshness. Uploading, hashing or signing caller-supplied JSON does not establish those facts. If neither qualified repository review nor an approved transfer path can satisfy required coverage, dependent enforcement remains blocked; pure verifier/fixture work may continue.
 
+### Production source bindings
+
+Before source integration, accept owner-issued interfaces for canonical/server target acquisition and D5/D6 evidence acquisition. Bind the qualified local scope to independently observed immutable server repository/owner IDs, target, and per-target adoption/merge authorization. Caller JSON, projected scope and artifact hashes cannot establish that authority.
+
+| Evidence | Preserve these plan bindings |
+| --- | --- |
+| D5 candidate/check/review | Applicable D5 plan, including a native review's separate `body.review.d5_plan` link. |
+| Native worker/reviewer assignment | Original D6 `body.plan` reference, ledger `plan_digest`, and lifecycle `d6_plan_digest`; retain D5 context separately where applicable. |
+| Coordinator operation | Each applicable original `body.d5_plan`/`body.d6_plan` and corresponding proof digest. Do not manufacture D5 context for a task-only operation. |
+| D7 verifier/adoption | Separate accepted protected D7 definition; no uniform equality with D5/D6 plan digests. |
+
+Validate original owner, assignment, dispatch, candidate, pins and reconciliation links. Settled historical writers retain their original plans/revisions; never rewrite them to current plans or count their old candidate as current passing D5 evidence. Mapping acceptance must use distinct D5/D6/D7 digests, an admitted native reviewer and a settled earlier writer.
+
+The selected source must qualify native provenance, applicable check/review evidence and actual stopped-writer/descendant observations. Qualify an owner-controlled admission boundary over participating authorities through the selected publication/merge operation; bind and revalidate revisions, generations, pins and committed head/base/tree. Changed, expired or revoked inputs invalidate acquisition. Settled completion artifacts do not provide that boundary. Keep database transactions short across network calls.
+
+These are production integration prerequisites, not changes to existing fixture envelopes or proof of available owner APIs. Protected verifier/publisher custody, credential isolation and server target/base race handling remain separately unqualified. A local admission boundary cannot freeze GitHub state. No merge-controller interaction, permission change or operational probe is authorized by this mapping.
+
 **Exit evidence:** read-only capability report and one selected trust design, including its unsupported paths. This is a real prerequisite, not a reason to weaken required review.
 
 ## 2. Verify current repository evidence
