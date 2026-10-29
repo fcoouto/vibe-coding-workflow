@@ -1934,12 +1934,20 @@ def _assignment_certificate_shape(value, task):
 
 
 def _assignment_certificate(context,db,task,record):
+    from runtime import evidence
+    d3._require(record['data']['status']=='settled' and record['data'].get('lifecycle'),'Recovery assignment lacks dated reconciled stop proof')
+    rec=evidence._read(None,record['data']['reconciliation'],context=context,db=db)
+    if rec.get('kind')=='synchronous-verification':task_state._ready_stop(context,db,task)
+    return _assignment_certificate_fields(context,db,task,record,rec)
+
+
+def _assignment_certificate_fields(context,db,task,record,rec):
+    """Shared local role checks; complete stop obligations belong to the caller."""
     from runtime import evidence,delegation
     data,body,owner=record['data'],record['body'],record['owner']
     d3._require(data['status']=='settled' and data.get('lifecycle'),'Recovery assignment lacks dated reconciled stop proof')
     read=lambda ref:evidence._read(None,ref,context=context,db=db)
-    rec=read(data['reconciliation'])
-    if rec.get('kind')=='synchronous-verification':return _barrier_certificate(context,db,task,record,rec)
+    if rec.get('kind')=='synchronous-verification':return _barrier_certificate_fields(context,db,task,record,rec)
     d3._require(type(rec.get('version')) is int and rec['version']==2,'Recovery assignment requires version2 role proof')
     role=data['role']
     task_state._fields(rec,('version','proof','source_digest','request_digest','current_candidate',*(() if role=='check' else ('assessment','revision','reservation_snapshot_digest'))))
@@ -1974,7 +1982,7 @@ def _assignment_certificate(context,db,task,record):
     elif role=='check':
         bindings=dict(d5_plan=body['d5_plan'],execution=data['observation'])
     else:
-        history=delegation._worker_history(None,data['observation'],context=context)
+        history=delegation._worker_history(None,data['observation'],context=context,db=db)
         observation=history[0][1] if history else None;receipt=observation['receipt'] if observation else {}
         if observation is not None:
             d3._require(isinstance(receipt,dict) and all(receipt.get(k)==v for k,v in data['binding'].items()) and
@@ -2089,6 +2097,92 @@ def _stopped_certificate(context,db,item):
     result['assignments']=[_assignment_certificate(context,db,task,r) for r in records if all(r['owner'][k]==ref[k] for k in ('scope_id','client','session_id','task_id'))]
     result['assignments'].sort(key=d3._digest)
     return _stopped_certificate_shape(result)
+
+
+def _stopped_certificate_inputs(context,db,item):
+    """Actual local comparison inputs only; pending jobs never establish complete validation."""
+    from runtime import evidence,delegation
+    evidence._check_context(context,db)
+    ref=item['reference'];task_state._task_reference(ref)
+    d3._require(ref['authority']==_canonical_plain(context.authority_set[0]),'Stopped certificate authority differs')
+    task=task_state._task(db,ref['scope_id'],ref['client'],ref['session_id'],ref['task_id'])
+    d3._require(task is not None and task.get('lifecycle') and task['pins']==item['pins'],'Recovery original stopped owner/age/pins changed')
+    stop=task.get('writer_stop');local=None;linked=None;retirement=None
+    if stop:
+        task_state._writer_stop_shape(stop)
+        linked=evidence._read(None,stop['linked'],context=context,db=db) if 'linked' in stop else None
+        if linked is None or task['lifecycle']['safe_closed_at'] is None:
+            local=task_state._ready_stop_local(context,db,task)
+            proof=local['proof']
+        else:
+            # The existing complete linked validator owns retained-branch interpretation.
+            proof=evidence._read(None,stop['proof'],context=context,db=db)
+        if task['state']=='cancelled':retirement=evidence._read(None,task['retirement']['proof'],context=context,db=db)
+    else:
+        d3._require(task['state']=='cancelled' and task.get('retirement'),'Recovery release requires exact cancelled or independently stopped ready owner')
+        proof=evidence._read(None,task['retirement']['proof'],context=context,db=db)
+        unresolved=[a['id'] for a in task.get('evidence',{}).get('attempts',[]) if a['status'] in {'reserved','running','uncertain'}]
+        d3._require(proof.get('attempt_ids')==unresolved,'Recovery stopped attempt ownership differs')
+    records=delegation._ledger(None,db,context=context)
+    assignments=[]
+    for record in records:
+        if not all(record['owner'][k]==ref[k] for k in ('scope_id','client','session_id','task_id')):continue
+        d3._require(record['data']['status']=='settled' and record['data'].get('lifecycle'),'Recovery assignment lacks dated reconciled stop proof')
+        rec=evidence._read(None,record['data']['reconciliation'],context=context,db=db)
+        assignments.append(_assignment_certificate_fields(context,db,task,record,rec))
+    assignments.sort(key=d3._digest)
+    inputs=dict(item=item,task=task,proof=proof,linked=linked,retirement_proof=retirement,
+        assignments=assignments,local_stop=local)
+    _stopped_certificate_from_inputs(inputs)
+    evidence._check_context(context,db)
+    return _canonical_freeze(inputs)
+
+
+def _stopped_certificate_from_inputs(inputs):
+    task=inputs['task'];ref=inputs['item']['reference']
+    result=dict(reference=ref,created_at=task['lifecycle']['created_at'],
+        **{k:task[k] for k in ('revision','pins','accepted_identity','scope_ref','turn_id')},proof=inputs['proof'],assignments=inputs['assignments'])
+    if task.get('writer_stop'):
+        result.update(version=2,state=task['state'],writer_stop=task['writer_stop'])
+        if inputs['linked'] is not None:result['linked']=inputs['linked']
+        if task['state']=='cancelled':result.update(retirement=task['retirement'],retirement_proof=inputs['retirement_proof'])
+    else:result['retirement']=task['retirement']
+    return _stopped_certificate_shape(result)
+
+
+def _stopped_certificate_assembly(inputs):
+    """Pure matched obligations; comparison results confer no publication or stop authority."""
+    inputs=_canonical_plain(inputs);result=_stopped_certificate_from_inputs(inputs)
+    task=inputs['task'];ref=inputs['item']['reference']
+    job=None
+    if inputs['linked'] is not None:
+        job=dict(kind='linked-certificate',reference=ref,item=inputs['item'],expected=result)
+    elif task.get('writer_stop'):
+        job=dict(kind='ready-candidate',reference=ref,task=task,candidate=inputs['local_stop']['candidate'])
+    if job is not None:
+        response=yield job
+        d3._require(isinstance(response,dict) and set(response)=={'job','result'} and response['job']==job,
+            'Stopped certificate validation job is unresolved or mismatched')
+        d3._require(isinstance(response['result'],dict),'Stopped certificate job requires actual result facts')
+        if job['kind']=='linked-certificate':
+            d3._require(response['result']==result,'Complete linked certificate differs from original local inputs')
+        else:
+            task_state._writer_stop_shape(dict(task['writer_stop'],inputs=response['result']))
+    return result
+
+
+def _resolve_stopped_certificate_job(context,job):
+    """Normal full validators; the serial owner calls this only after closing its local reader."""
+    from runtime import evidence
+    d3._require(job['reference']['authority']==_canonical_plain(context.authority_set[0]),'Stopped job authority differs')
+    if job['kind']=='ready-candidate':
+        result=evidence._ready_stop_candidate(context,job['task'],job['candidate'])
+    else:
+        d3._require(job['kind']=='linked-certificate','Unknown stopped certificate validation job')
+        with evidence._context_database(context) as db:
+            result=_stopped_certificate(context,db,job['item'])
+            _check_stopped_certificate(context,db,result)
+    return dict(job=job,result=result)
 
 
 def _stopped_assignment_certificate(value,reference):
