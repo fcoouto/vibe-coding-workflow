@@ -2,6 +2,7 @@
 
 from contextlib import contextmanager
 import importlib
+import sqlite3
 import unittest
 from unittest.mock import patch
 import uuid
@@ -58,6 +59,97 @@ def _assert_unchanged(test_case, scenario, contexts, before, *, additions=None):
 
 
 class LinkedWriterVisibilityTests(unittest.TestCase):
+    def test_denied_release_commit_reports_only_committed_replacements(self):
+        from runtime import changes, evidence, state
+
+        class ReleaseObserved(Exception):
+            pass
+
+        for failed_index in (0, 1):
+            with self.subTest(failed_writer=failed_index):
+                scenario = _scenario(self)
+                contexts = _contexts(scenario)
+                captured = {}
+                registered = []
+                release = changes._register_recovery_release
+                guards = changes._recovery_release_guards
+                register = evidence._register_recovery_source
+
+                @contextmanager
+                def ordered_guards(authorities, identity):
+                    with guards(authorities, identity) as (path, journal, guarded):
+                        by_database = {str(context.database): context for context in guarded}
+                        yield path, journal, tuple(by_database[str(context.database)] for context in contexts)
+
+                def deny_commit(action, operation, unused, database, trigger):
+                    if action == sqlite3.SQLITE_TRANSACTION and operation == "COMMIT":
+                        captured["commit_denied"] = True
+                        return sqlite3.SQLITE_DENY
+                    return sqlite3.SQLITE_OK
+
+                def register_then_deny(scope, db, source, *, context=None):
+                    reference = register(scope, db, source, context=context)
+                    if getattr(source, "release", None) is not None:
+                        registered.append(dict(authority=evidence._canonical_plain(context.authority_set[0]),
+                                               artifact=evidence._canonical_plain(reference)))
+                        if context.database == contexts[failed_index].database:
+                            captured.update(orphan=reference, orphan_context=context)
+                            self.assertIsNotNone(state._metadata(db, reference["name"]))
+                            db.set_authorizer(deny_commit)
+                    return reference
+
+                def capture_release(observation):
+                    captured["before"] = _before(scenario, contexts)
+                    captured["baselines"] = []
+                    for context in contexts:
+                        with evidence._context_database(context) as db:
+                            captured["baselines"].append(evidence._canonical_plain(
+                                state._source_baseline(None, db, context=context)))
+                    captured["observation"] = observation
+                    with patch.object(changes, "_recovery_release_guards", ordered_guards), \
+                            patch.object(evidence, "_register_recovery_source", side_effect=register_then_deny):
+                        captured["result"] = release(observation)
+                    raise ReleaseObserved
+
+                with patch.object(changes, "_register_recovery_release", side_effect=capture_release):
+                    with self.assertRaises(ReleaseObserved):
+                        getattr(scenario, _METHOD)()
+
+                result = evidence._canonical_plain(captured["result"])
+                self.assertTrue(captured.get("commit_denied"), "deny the actual COMMIT after registration")
+                self.assertFalse(result["complete"], result)
+                self.assertIn("registration unavailable or locked", " ".join(result["blockers"]))
+                before = captured["before"]
+                self.assertEqual([scenario.task(member) for member in scenario.members], before["tasks"])
+                d4 = scenario.recovery_fixtures[0][0]
+                for index, context in enumerate(contexts):
+                    with evidence._context_database(context) as db:
+                        baseline = evidence._canonical_plain(state._source_baseline(None, db, context=context))
+                        if index < failed_index:
+                            self.assertNotEqual(baseline, captured["baselines"][index])
+                            self.assertIsNotNone(state._metadata(db, registered[index]["artifact"]["name"]))
+                        else:
+                            self.assertEqual(baseline, captured["baselines"][index])
+                    if index < failed_index:
+                        head = next(edge["reference"]["artifact"] for edge in baseline["dependencies"]
+                                    if edge["reference"]["identity"] == captured["observation"].content["identity"])
+                        self.assertEqual(head, registered[index]["artifact"])
+                    else:
+                        self.assertEqual(scenario.recovery_head(d4, context), before["heads"][index])
+                        self.assertEqual(_metadata(context, evidence), before["metadata"][index])
+                orphan_path = captured["orphan_context"].directory / "evidence" / captured["orphan"]["name"]
+                expected_files = dict(before["files"][failed_index])
+                expected_files[orphan_path.name] = orphan_path.read_bytes()
+                self.assertEqual(_files(contexts[failed_index]), expected_files)
+                self.assertNotIn(orphan_path.name, {row[0] for row in _metadata(contexts[failed_index], evidence)})
+                certificate = next(row for row in captured["observation"].content["stopped"] if row.get("linked"))
+                basis = evidence._canonical_plain(certificate["linked"])
+                pointer = evidence._linked_basis_root(basis)
+                with self.assertRaisesRegex(state.StateError, "Unaccounted evidence content protects preparation"):
+                    with evidence._linked_stop_guards(pointer, basis["authorities"]) as guarded:
+                        evidence._linked_preparation_facts(pointer, guarded)
+                self.assertEqual(result["replacements"], registered[:failed_index])
+
     def test_original_lifecycle_succeeds_with_a_then_b_as_actual_writers(self):
         scenario = _scenario(self)
         from runtime import changes, evidence

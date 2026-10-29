@@ -2922,7 +2922,7 @@ def _register_recovery_release(observation):
                     with evidence._context_database(context,write=True,durable=True,
                             before_commit=lambda db,context=context:evidence._check_recovery_registration(context,db,observation)) as db:
                         reference=evidence._register_recovery_source(None,db,observation,context=context)
-                        replacements.append(dict(authority=_canonical_plain(context.authority_set[0]),artifact=_canonical_plain(reference)))
+                    replacements.append(dict(authority=_canonical_plain(context.authority_set[0]),artifact=_canonical_plain(reference)))
                 _check_recovery_source_global(observation)
                 for context in contexts:
                     with evidence._context_database(context) as db:evidence._check_recovery_registration(context,db,observation)
