@@ -580,6 +580,46 @@ def _writer_stop_shape(value):
             raise StateError('Ready input physical observation is corrupt')
 
 
+def _ready_stop_local_inputs(context,db,task):
+    from runtime import evidence
+    evidence._check_context(context,db)
+    stop=task.get('writer_stop');_writer_stop_shape(stop)
+    proof=evidence._read(None,stop['proof'],context=context,db=db)
+    bindings=_ready_stop_bindings(context,db,task)
+    candidate=evidence._read(None,stop['candidate'],context=context,db=db)
+    linked=evidence._read(None,stop['linked'],context=context,db=db) if 'linked' in stop else None
+    verification_ref=evidence._stop_verification(context,db,task,allow_absent=linked is not None and linked['version']==2)
+    if linked is not None:evidence._linked_stop_shape(linked)
+    return dict(proof=proof,bindings=bindings,candidate=candidate,linked=linked,verification_ref=verification_ref)
+
+
+def _check_ready_stop_local_inputs(context,db,task,inputs):
+    from runtime import evidence
+    stop=task['writer_stop'];proof=inputs['proof'];bindings=inputs['bindings'];candidate=inputs['candidate']
+    linked=inputs['linked'];verification_ref=inputs['verification_ref']
+    evidence._ready_stop_proof(task,proof,bindings,candidate,verification_ref,linked)
+    if (stop['task_revision']!=task['revision'] or stop['generation']!=bindings['generation'] or
+        stop['verification']!=verification_ref or
+        any(proof[k]!=stop[k] for k in ('observation_ref','coordinator_ref'))):
+        raise StateError('Retained ready stop envelope changed')
+    evidence._candidate_projection(candidate,task)
+    if linked is None or task['lifecycle']['safe_closed_at'] is None:evidence._check_ready_inputs(stop['inputs'],directory_identity=True)
+    verification=evidence._read(None,stop['verification'],context=context,db=db) if stop['verification'] is not None else None
+    if task['state']=='ready' and (verification is None or verification['candidate_digest']!=proof['candidate_digest']):raise StateError('Retained ready verification changed')
+    return proof
+
+
+def _ready_stop_local(context,db,task):
+    """Validate raw local stop inputs; a returned linked job still needs complete validation."""
+    from runtime import evidence
+    inputs=_ready_stop_local_inputs(context,db,task)
+    proof=_check_ready_stop_local_inputs(context,db,task,inputs)
+    linked=inputs['linked']
+    job=None if linked is None else dict(reference=evidence._linked_basis_root(linked),
+        authorities=linked['authorities'],expected=linked)
+    return dict(proof=proof,bindings=inputs['bindings'],candidate=inputs['candidate'],linked=job)
+
+
 def _ready_stop(context,db,task,*,observe=False):
     from runtime import evidence
     stop=task.get('writer_stop');_writer_stop_shape(stop)
@@ -592,24 +632,12 @@ def _ready_stop(context,db,task,*,observe=False):
                 m['reference']['scope_id']==evidence._task_scope_id(task) and all(m['reference'][key]==task[key] for key in ('client','session_id','task_id')))
             if own['task']!=task or own['preparation']['content']['stopped']['writer_stop']!=stop:raise StateError('Historical linked stop owner changed')
             return own['preparation']['content']['stopped']['proof']
-    proof=evidence._read(None,stop['proof'],context=context,db=db)
-    bindings=_ready_stop_bindings(context,db,task)
-    candidate=evidence._read(None,stop['candidate'],context=context,db=db)
-    linked=evidence._read(None,stop['linked'],context=context,db=db) if 'linked' in stop else None
-    verification_ref=evidence._stop_verification(context,db,task,allow_absent=linked is not None and linked['version']==2)
+    inputs=_ready_stop_local_inputs(context,db,task)
+    linked=inputs['linked']
     if linked is not None:
-        evidence._linked_stop_shape(linked)
         if evidence._linked_stopped_basis(evidence._linked_basis_root(linked),linked['authorities'],writer=(context,db))!=linked:raise StateError('Linked complete-stop basis changed')
-    evidence._ready_stop_proof(task,proof,bindings,candidate,verification_ref,linked)
-    if (stop['task_revision']!=task['revision'] or stop['generation']!=bindings['generation'] or
-        stop['verification']!=verification_ref or
-        any(proof[k]!=stop[k] for k in ('observation_ref','coordinator_ref'))):
-        raise StateError('Retained ready stop envelope changed')
-    evidence._candidate_projection(candidate,task)
-    if linked is None or task['lifecycle']['safe_closed_at'] is None:evidence._check_ready_inputs(stop['inputs'],directory_identity=True)
-    verification=evidence._read(None,stop['verification'],context=context,db=db) if stop['verification'] is not None else None
-    if task['state']=='ready' and (verification is None or verification['candidate_digest']!=proof['candidate_digest']):raise StateError('Retained ready verification changed')
-    if observe and linked is None:evidence._ready_stop_candidate(context,task,candidate)
+    proof=_check_ready_stop_local_inputs(context,db,task,inputs)
+    if observe and linked is None:evidence._ready_stop_candidate(context,task,inputs['candidate'])
     return proof
 
 
