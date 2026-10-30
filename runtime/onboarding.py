@@ -868,7 +868,15 @@ def _observed_targets(assessment):
     return list(dict.fromkeys([*(name for name in prior if not name.startswith("cwd:/")),
                               *_file_targets(assessment.get("actions", []))]))
 
-def _project_file_boundary(root, name, repositories):
+def _project_file_boundary(root, name, repositories, *, budget=None):
+    def check():
+        if budget is not None:
+            _require(type(budget["paths"]) is int and 0 <= budget["paths"] <= MAX_PATHS,
+                     "Project aggregate path limit exceeded; inventory remains incomplete")
+            _require(type(budget["bytes"]) is int and 0 <= budget["bytes"] <= MAX_TOTAL,
+                     "Project aggregate byte limit exceeded; inventory remains incomplete")
+            _check_observation_deadline(budget)
+    check()
     target = root / name
     _no_links(target)
     protected = [Path(r[k]) for r in repositories for k in ("root", "primary_root", "git_dir", "git_common_dir") if r[k]]
@@ -879,14 +887,27 @@ def _project_file_boundary(root, name, repositories):
             break
         _require(not os.path.lexists(parent / ".git"), "Project file enters an unbound software tree")
     existing = next(parent for parent in (target.parent, *target.parent.parents) if parent.is_dir())
-    code, _ = _git(existing, "-c", "safe.bareRepository=all", "rev-parse", "--absolute-git-dir")
+    if budget is None:
+        code, _ = _git(existing, "-c", "safe.bareRepository=all", "rev-parse", "--absolute-git-dir")
+    else:
+        check()
+        _require(budget["bytes"] < MAX_TOTAL, "Project aggregate byte limit exceeded; inventory remains incomplete")
+        try:
+            code, raw = _git(existing, "-c", "safe.bareRepository=all", "rev-parse", "--absolute-git-dir",
+                             limit=MAX_TOTAL - budget["bytes"], deadline=budget.get("deadline"))
+        except (StartupError, OSError, subprocess.SubprocessError):
+            budget["bytes"] = max(budget["bytes"], MAX_TOTAL + 1)
+            raise
+        budget["bytes"] += len(raw)
+        check()
     _require(code != 0, "Project file enters an unbound Git tree or metadata")
+    check()
 
 def _project_files(root, names, repositories, budget, gap):
     fingerprints = {}
     for name in names:
         try:
-            _project_file_boundary(root, name, repositories)
+            _project_file_boundary(root, name, repositories, budget=budget)
             fingerprints[name] = _inspection_fingerprint(root, name, budget)
             _require(fingerprints[name]["status"] in ("read", "absent"), "Project file cannot be inspected safely")
         except (StartupError, OSError, subprocess.SubprocessError) as error:
@@ -924,6 +945,13 @@ def _physical_target(root, location, fingerprint, budget, *, directory=False):
     return {"path": str(location), "binding": physical, "parents": parents, "fingerprint": fingerprint}
 
 def _target_observations(assessment, fingerprints, repositories=(), *, budget):
+    def check():
+        _require(type(budget["paths"]) is int and 0 <= budget["paths"] <= MAX_PATHS,
+                 "Project aggregate path limit exceeded; inventory remains incomplete")
+        _require(type(budget["bytes"]) is int and 0 <= budget["bytes"] <= MAX_TOTAL,
+                 "Project aggregate byte limit exceeded; inventory remains incomplete")
+        _check_observation_deadline(budget)
+    check()
     owner = assessment["owner"]
     root = Path(owner["root"])
     targets = {}
@@ -931,6 +959,7 @@ def _target_observations(assessment, fingerprints, repositories=(), *, budget):
     cwds = [action.get("cwd") for action in assessment["actions"] if action.get("kind") == "command"]
     cwds += [name[4:] for name in assessment["identity"].get("targets", {}) if name.startswith("cwd:/")]
     for name in [*names, *("cwd:" + _text(cwd) for cwd in dict.fromkeys(cwds))]:
+        check()
         directory = name.startswith("cwd:/")
         location = Path(name[4:]) if directory else root / name
         _require(location.is_absolute() and location.is_relative_to(root)
@@ -939,14 +968,25 @@ def _target_observations(assessment, fingerprints, repositories=(), *, budget):
         _no_links(location)
         if owner["kind"] == "project":
             if location != root:
-                _project_file_boundary(root, str(location.relative_to(root)), repositories)
+                _project_file_boundary(root, str(location.relative_to(root)), repositories, budget=budget)
         else:
             parent = location if directory else location.parent
             existing = next(p for p in (parent, *parent.parents) if p.is_dir())
-            _require(checkout(existing) == (root, Path(owner["git_common_dir"])),
+            check()
+            _require(budget["paths"] < MAX_PATHS, "Project aggregate path limit exceeded; inventory remains incomplete")
+            _require(budget["bytes"] < MAX_TOTAL, "Project aggregate byte limit exceeded; inventory remains incomplete")
+            try:
+                identity = checkout(existing, limit=min(MAX_FILE, MAX_TOTAL - budget["bytes"]),
+                                    deadline=budget.get("deadline"), budget=budget)
+            except (StartupError, OSError, subprocess.SubprocessError):
+                budget["bytes"] = max(budget["bytes"], MAX_TOTAL + 1)
+                raise
+            check()
+            _require(identity == (root, Path(owner["git_common_dir"])),
                      "Action target/cwd enters another checkout or Git tree")
         targets[name] = _physical_target(root, location, None if directory else
             fingerprints.get(name, {"status": "blocked"}), budget, directory=directory)
+    check()
     return targets
 
 def _new_assessment(owner, identity):

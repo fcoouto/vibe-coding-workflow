@@ -449,6 +449,142 @@ class OnboardingTests(unittest.TestCase):
                         with self.assertRaisesRegex(StartupError,message):
                             module._snapshot(self.repo,budget=used_budget)
 
+    def target_budget_assessment(self, *, project=False, command=False):
+        from runtime import startup
+        root = self.base if project else self.repo
+        owner = dict(kind="project" if project else "repository", root=str(root))
+        if not project: owner["git_common_dir"] = str(startup.checkout(root)[1])
+        action = dict(kind="command", cwd=str(root)) if command else dict(kind="write", target="named.txt")
+        return dict(owner=owner, identity={}, actions=[action])
+
+    def test_target_expired_budget_launches_no_repository_or_project_probe(self):
+        from runtime import startup
+        import time
+        module=self.module()
+        for project in (False,True):
+            assessment=self.target_budget_assessment(project=project)
+            budget=dict(paths=0,bytes=0,deadline=time.monotonic()-1)
+            with self.subTest(project=project), patch.object(startup,"read_git",side_effect=AssertionError("expired target probe")):
+                with self.assertRaises(StartupError):module._target_observations(assessment,{},budget=budget)
+
+    def test_target_checkout_uses_owner_remainder_and_charges_once(self):
+        from runtime import startup
+        import time
+        module=self.module();actual=startup.read_git
+        assessment=self.target_budget_assessment()
+        budget=dict(paths=3,bytes=17,deadline=time.monotonic()+30);calls=[]
+        def observe(*args,**kwargs):
+            result=actual(*args,**kwargs);calls.append((kwargs,result));return result
+        with patch.object(startup,"read_git",side_effect=observe):
+            targets=module._target_observations(assessment,{"named.txt":{"status":"absent"}},budget=budget)
+        self.assertIn("named.txt",targets)
+        self.assertEqual(len(calls),1)
+        self.assertEqual(calls[0][0]["deadline"],budget["deadline"])
+        self.assertEqual(calls[0][0]["limit"],min(module.MAX_FILE,module.MAX_TOTAL-17))
+        self.assertEqual(budget["bytes"],17+len(calls[0][1][1]))
+        self.assertEqual(budget["paths"],5)
+        budget=dict(paths=3,bytes=17)
+        with patch.object(module,"MAX_TOTAL",80),patch.object(startup,"read_git",wraps=actual) as reader:
+            with self.assertRaises(StartupError):module._target_observations(assessment,{},budget=budget)
+        self.assertEqual(reader.call_args.kwargs["limit"],63)
+        self.assertGreater(budget["bytes"],80)
+
+    def test_target_unknown_partial_probes_are_terminal_in_both_owner_paths(self):
+        from runtime import startup
+        module=self.module()
+        assessment=self.target_budget_assessment()
+        for project in (False,True):
+            budget=dict(paths=0,bytes=0)
+            with self.subTest(project=project),patch.object(startup,"read_git",side_effect=StartupError("unknown partial Git output")):
+                with self.assertRaises(StartupError):
+                    if project:module._project_file_boundary(self.base,"shared.txt",[],budget=budget)
+                    else:module._target_observations(assessment,{},budget=budget)
+            self.assertGreater(budget["bytes"],module.MAX_TOTAL)
+
+    def test_project_probe_charges_rejected_bare_git_output(self):
+        from runtime import startup
+        import time
+        module=self.module();actual=startup.read_git
+        bare=self.base/"bare-target";self.git("init","--bare","--template=","-q",str(bare))
+        budget=dict(paths=0,bytes=11,deadline=time.monotonic()+30);calls=[]
+        def observe(*args,**kwargs):
+            result=actual(*args,**kwargs);calls.append((kwargs,result));return result
+        with patch.object(startup,"read_git",side_effect=observe):
+            with self.assertRaisesRegex(StartupError,"unbound Git"):
+                module._project_file_boundary(self.base,"bare-target/new.txt",[],budget=budget)
+        self.assertEqual(calls[0][1][0],0)
+        self.assertEqual(budget["bytes"],11+len(calls[0][1][1]))
+        self.assertEqual(calls[0][0]["deadline"],budget["deadline"])
+
+    def test_target_late_probe_and_constructed_target_cannot_return_complete(self):
+        from runtime import startup
+        module=self.module();actual=startup.read_git;physical=module._physical_target
+        for late_at in ("repository", "project", "target"):
+            assessment=self.target_budget_assessment(project=late_at=="project")
+            clock=[100.0];budget=dict(paths=0,bytes=0,deadline=101.0)
+            def observe(*args,**kwargs):
+                result=actual(*args,**kwargs)
+                if late_at!="target":clock[0]=102.0
+                return result
+            def finished(*args,**kwargs):
+                result=physical(*args,**kwargs);clock[0]=102.0;return result
+            with self.subTest(late_at=late_at),patch.object(startup.time,"monotonic",side_effect=lambda:clock[0]),patch.object(startup,"read_git",side_effect=observe),patch.object(module,"_physical_target",side_effect=finished):
+                with self.assertRaises(StartupError):module._target_observations(assessment,{},budget=budget)
+
+    def test_project_boundary_default_and_budgeted_probes_preserve_query_contract(self):
+        from runtime import startup
+        import time
+        module=self.module();actual=startup.read_git
+        with patch.object(startup,"read_git",wraps=actual) as default:
+            module._project_file_boundary(self.base,"docs/shared.md",[])
+        budget=dict(paths=0,bytes=17,deadline=time.monotonic()+30)
+        with patch.object(startup,"read_git",wraps=actual) as bounded:
+            module._project_file_boundary(self.base,"docs/shared.md",[],budget=budget)
+        self.assertEqual(default.call_args.args,bounded.call_args.args)
+        self.assertIsNone(default.call_args.kwargs["deadline"])
+        self.assertEqual(default.call_args.kwargs["limit"],module.MAX_FILE)
+        self.assertEqual(bounded.call_args.kwargs["deadline"],budget["deadline"])
+        self.assertEqual(budget["bytes"],17)
+        expired=dict(paths=0,bytes=0,deadline=time.monotonic()-1);gaps=[]
+        with patch.object(startup,"read_git",side_effect=AssertionError("expired Project-file probe")):
+            result=module._project_files(self.base,["shared.md"],[],expired,lambda *row:gaps.append(row))
+        self.assertEqual(result,{"shared.md":{"status":"blocked"}})
+        self.assertEqual(len(gaps),1)
+
+    def test_target_owner_exact_caps_and_multiple_targets_share_remainder(self):
+        from runtime import startup
+        module=self.module();assessment=self.target_budget_assessment();actual=startup.read_git
+        _,raw=actual(self.repo,"rev-parse","--path-format=absolute","--show-toplevel","--git-common-dir")
+        budget=dict(paths=0,bytes=0)
+        with patch.object(module,"MAX_TOTAL",len(raw)),patch.object(module,"MAX_PATHS",2):
+            self.assertIn("named.txt",module._target_observations(assessment,{},budget=budget))
+        self.assertEqual((budget["paths"],budget["bytes"]),(2,len(raw)))
+        assessment["actions"].append(dict(kind="write",target="second.txt"))
+        maximum=2*len(raw)-1;budget=dict(paths=0,bytes=0)
+        with patch.object(module,"MAX_TOTAL",maximum),patch.object(startup,"read_git",wraps=actual) as reader:
+            with self.assertRaises(StartupError):module._target_observations(assessment,{},budget=budget)
+        self.assertEqual(reader.call_count,2)
+        self.assertEqual(reader.call_args.kwargs["limit"],len(raw)-1)
+        self.assertGreater(budget["bytes"],maximum)
+
+    def test_target_inherited_hard_checkout_cap_and_exact_project_probe_cap(self):
+        from runtime import startup
+        module=self.module();assessment=self.target_budget_assessment();actual=startup.read_git
+        _,raw=actual(self.repo,"rev-parse","--path-format=absolute","--show-toplevel","--git-common-dir")
+        maximum=8*1024*1024;budget=dict(paths=0,bytes=maximum-len(raw))
+        with patch.object(startup,"read_git",wraps=actual) as reader:
+            with self.assertRaises(StartupError):module._target_observations(assessment,{},budget=budget)
+        self.assertEqual(reader.call_count,1)
+        self.assertEqual(reader.call_args.kwargs["limit"],len(raw))
+        self.assertGreater(budget["bytes"],maximum)
+        bare=self.base/"exact-bare";self.git("init","--bare","--template=","-q",str(bare))
+        _,raw=actual(bare,"-c","safe.bareRepository=all","rev-parse","--absolute-git-dir")
+        maximum=17+len(raw);budget=dict(paths=0,bytes=17)
+        with patch.object(module,"MAX_TOTAL",maximum):
+            with self.assertRaisesRegex(StartupError,"unbound Git"):
+                module._project_file_boundary(self.base,"exact-bare/named.txt",[],budget=budget)
+        self.assertEqual(budget["bytes"],maximum)
+
     def test_checkout_observer_accepts_paths_only_and_preserves_used_budget_and_deadline(self):
         from runtime import startup
         import time
