@@ -3011,31 +3011,91 @@ def _d4_permission_facts(journal,source):
         sources=sources,current_permissions=current_permissions,project_permissions=[project_permissions[key] for key in sorted(project_permissions)])
 
 
-def _check_d4_publication(source,context,db):
-    from runtime import evidence
+def _d4_publication_lifetime(source):
     lifetime=getattr(_authority_context,'publication',None)
     d3._require(lifetime is not None and lifetime['active'] and lifetime['source'] is source,
         'Recovery publication requires its actual active owner lifetime')
+    d3._require(lifetime.get('failure') is None,'Recovery publication sequence already failed')
     d3._require(all(observation['active'] and any(observation is held for held in getattr(_authority_context,'held',()))
         for observation in lifetime['guards']) and _held_authority_guards(c.directory for c in source.contexts),
         'Recovery publication guards expired or changed')
-    # Peer preparation reads must see this transaction's uncommitted metadata.
-    writer=(context,db)
-    _check_recovery_source(source,context,db,writer=writer)
-    for other in source.contexts:
-        if other.database!=context.database:
-            with evidence._context_database(other) as reader:_check_recovery_source(source,other,reader,writer=writer)
     if lifetime['kind']=='operation':
         _check_d4_grant(lifetime['grant'])
         approved=_canonical_plain(lifetime['grant'].facts)
-        d3._require(approved['registration_projections']==lifetime['registration_projections'],
-            'Recovery registration projection differs from actual approved acquisition')
+        d3._require(approved['permissions']==lifetime['permissions'] and
+            {item['authority']['database']:item['baseline'] for item in approved['baselines']}==lifetime['baselines'],
+            'Recovery original permissions or baselines differ from actual approved acquisition')
+        d3._require(approved['registration_projections']==lifetime['registration_projections'] and
+            approved['local_chain_inputs']==lifetime['local_chain_inputs'],
+            'Recovery registration inputs differ from actual approved acquisition')
         d3._require(approved['source']==_canonical_plain(source.content) and approved['generations']==_canonical_plain(source.generations)
             and approved['created_at']==source.created_at,'D4 source content differs from actual approved acquisition')
+    return lifetime
+
+
+def _taskless_chain_content(content):
+    return content['version']==1 and all(content[key]==[] for key in ('tasks','assignments','artifacts')) and not any(
+        key in content for key in ('stopped','supersedes','use_contract'))
+
+
+def _taskless_publication(source,lifetime):
+    """Select only the acquired complete local-chain family; this is not permission."""
+    from runtime import evidence
+    if lifetime['kind']!='operation' or source.release is not None or not _taskless_chain_content(_canonical_plain(source.content)):return False
+    acquired=lifetime['local_chain_inputs']
+    if acquired is None:return False
+    if set(acquired)!={str(c.database) for c in source.contexts}:return False
+    for context in source.contexts:
+        key=str(context.database);baseline=lifetime['baselines'][key];rows=acquired[key]
+        authority=_canonical_plain(context.authority_set[0])
+        if len(rows)!=len(baseline['dependencies']):return False
+        for edge,inputs in zip(baseline['dependencies'],rows):
+            if (inputs['authority']!=authority or inputs['baseline']!=baseline or inputs['identity']!=edge['reference']['identity'] or
+                    inputs['reference']!=edge['reference']['artifact'] or inputs['jobs'] or inputs['metadata'] or inputs['local_sources']):return False
+            if not inputs['history'] or inputs['history'][0]['reference']!=inputs['reference']:return False
+            for item in inputs['history']:
+                body=item['content'];dependencies=item['metadata']['dependencies']
+                if not _taskless_chain_content(body) or dependencies!=evidence._recovery_source_dependencies(body,authority):return False
+                if any(d['kind']!='recovery' or d['reference']['authority']!=authority for d in dependencies):return False
+        projection=lifetime['registration_projections'][key]
+        if (not _taskless_chain_content(projection['content']) or projection['inputs']['jobs'] or
+                projection['inputs']['local_sources'] or projection['inputs']['metadata']):return False
+    return True
+
+
+def _check_local_chain_inputs(source,context,db,lifetime):
+    from runtime import evidence
+    evidence._check_context(context,db)
+    key=str(context.database);registration=lifetime['registrations'].get(key)
+    projection=lifetime['registration_projections'][key]
+    expected=deepcopy(projection['inputs']['baseline'])
+    d3._require(expected==lifetime['baselines'][key],'Recovery original baseline differs from its approved projection')
+    if registration is not None:
+        reference=registration['reference']
+        if reference is not None and reference!=projection['reference']:
+            identity=projection['content']['identity']
+            edges=[edge for edge in expected['dependencies'] if edge['reference']['identity']!=identity]
+            edges.append(dict(kind='recovery',reference=dict(identity=identity,artifact=reference)))
+            expected['dependencies']=sorted(edges,key=evidence._raw)
+        d3._require(registration['expected']==expected,'Recovery registration comparison differs from its exact owned overlay')
+    d3._require(_canonical_plain(task_state._source_baseline(None,db,context=context))==expected,
+        'Recovery original baseline changed after authenticated acquisition' if registration is None else
+        'Recovery local chain baseline differs from its exact owned overlay')
+    for inputs in lifetime['local_chain_inputs'][key]:
+        for item in inputs['history']:
+            metadata,raw=evidence._managed_artifact(None,item['reference'],context=context,db=db)
+            d3._require(metadata==item['metadata'] and json.loads(raw)==item['content'],
+                'Recovery acquired local chain metadata or content changed')
+
+
+def _check_d4_current_facts(source,lifetime):
+    d3._require(_d4_publication_lifetime(source) is lifetime,'Recovery publication lifetime changed')
+    if lifetime['kind']=='operation':
         d3._require(_d4_permission_facts(lifetime['journal'],source)==lifetime['permissions'],
             'Current D4 subject, source or owned enrollment transition changed')
         for location in lifetime['markers']:
             d3._require(_authority_owner(location)==lifetime['owner'],'D4 protective operation marker changed')
+        _check_operation_files(Path(source.content['identity']['plan_dir']),lifetime['journal'])
     else:
         d3._require(source.provenance is _RECOVERY_RELEASE_ISSUER and source.release is not None,
             'Recovery release requires its distinct actual factory')
@@ -3051,7 +3111,41 @@ def _check_d4_publication(source,context,db):
                 binding=file['before_binding'] if current['state']=='rolled_back' else file['result_binding']
                 d3._require(_fingerprint(root,effect['path'])==expected and target['binding']==binding,
                     'Recovery release effect changed before commit')
+
+
+def _check_d4_publication(source,context,db):
+    from runtime import evidence
+    lifetime=_d4_publication_lifetime(source)
+    writer=(context,db)
+    if _taskless_publication(source,lifetime):
+        held=lifetime.get('writer')
+        d3._require(held is not None and held[0] is context and held[1] is db,
+            'Recovery publication requires its actual supplied writer')
+        _check_recovery_source(source,context,db,writer=writer)
+        _check_local_chain_inputs(source,context,db,lifetime)
+    else:
+        # Unmigrated families retain their complete original semantic path.
+        _check_recovery_source(source,context,db,writer=writer)
+        for other in source.contexts:
+            if other.database!=context.database:
+                with evidence._context_database(other) as reader:_check_recovery_source(source,other,reader,writer=writer)
+    _check_d4_current_facts(source,lifetime)
     return lifetime
+
+
+def _check_taskless_publication_serial(source):
+    from runtime import evidence
+    lifetime=_d4_publication_lifetime(source)
+    d3._require(_taskless_publication(source,lifetime) and lifetime.get('writer') is None,
+        'Serial recovery validation requires closed local writers and its acquired family')
+    _check_recovery_source_global(source)
+    for context in source.contexts:
+        with evidence._context_database(context) as db:
+            _check_local_chain_inputs(source,context,db,lifetime)
+            evidence._check_recovery_projection(context,db,source,lifetime)
+            if str(context.database) in lifetime['registrations']:
+                evidence._verify_recovery_registration(context,db,source,lifetime)
+    _check_d4_current_facts(source,lifetime)
 
 
 @contextmanager
@@ -3064,7 +3158,7 @@ def _d4_publication_batch(path,journal,contexts,request,host,owner,markers):
     if not isinstance(host,_D4HostCapability):raise Pending('Actual trusted D4 host authority is unavailable; bookkeeping remains pending')
     source=_observe_recovery_source(path,journal,contexts,())
     permissions=_d4_permission_facts(journal,source)
-    baselines=[];projections={}
+    baselines=[];projections={};local_chains={};chain_rows=0
     for context in contexts:
         with evidence._context_database(context) as db:
             baseline=task_state._source_baseline(None,db,context=context)
@@ -3074,6 +3168,15 @@ def _d4_publication_batch(path,journal,contexts,request,host,owner,markers):
                 subject['project_id']==project for subject in permissions['subjects']),'D4 Project owner lacks exact current subject coverage')
             baselines.append(dict(authority=_canonical_plain(context.authority_set[0]),baseline=_canonical_plain(baseline)))
             content=_canonical_plain(source.content)
+            if _taskless_chain_content(content) and local_chains is not None:
+                rows=[]
+                for edge in _canonical_plain(baseline)['dependencies']:
+                    observed=evidence._recovery_use_inputs(context,db,edge['reference']['artifact'],edge['reference']['identity'])
+                    rows.append(observed);chain_rows+=len(observed['history'])
+                    if chain_rows>4096:
+                        local_chains=None
+                        break
+                if local_chains is not None:local_chains[str(context.database)]=rows
             heads=[edge['reference']['artifact'] for edge in baseline['dependencies'] if _canonical_plain(edge['reference']['identity'])==content['identity']]
             d3._require(len(heads)<=1,'Recovery original baseline head is ambiguous')
             inputs=evidence._recovery_use_inputs(context,db,_canonical_plain(heads[0]) if heads else None,content['identity'],content=content)
@@ -3081,13 +3184,14 @@ def _d4_publication_batch(path,journal,contexts,request,host,owner,markers):
     facts=dict(operation='protective-recovery-bookkeeping',request=request,plan=journal['plan'],identity=_canonical_plain(source.content)['identity'],
         journal=_canonical_plain(source.content)['journal'],permissions=permissions,baselines=baselines,
         source=_canonical_plain(source.content),generations=_canonical_plain(source.generations),created_at=source.created_at,
-        registration_projections=projections)
+        registration_projections=projections,local_chain_inputs=local_chains)
     with _acquire_d4_grant(host,facts) as grant:
         for location in markers:_atomic(location.parent,location.name+'.json',json.dumps(owner,sort_keys=True).encode())
         lifetime=dict(active=True,kind='operation',source=source,grant=grant,permissions=permissions,journal=deepcopy(journal),
             guards=tuple(getattr(_authority_context,'held',())),markers=tuple(markers),owner=owner,registrations={},
             baselines={str(context.database):item['baseline'] for context,item in zip(contexts,baselines)},
-            registration_projections=_canonical_plain(grant.facts)['registration_projections'])
+            registration_projections=_canonical_plain(grant.facts)['registration_projections'],
+            local_chain_inputs=_canonical_plain(grant.facts)['local_chain_inputs'],writer=None)
         previous=getattr(_authority_context,'publication',None);_authority_context.publication=lifetime
         try:yield lifetime
         finally:lifetime['active']=False;_authority_context.publication=previous
@@ -3101,6 +3205,23 @@ def _scoped_register_sources(path,journal,contexts):
     d3._require(lifetime is not None and lifetime['kind']=='operation','D4 source publication requires actual host acquisition')
     source=lifetime['source']
     d3._require(tuple(contexts)==source.contexts,'D4 registration omitted an acquired authority')
+    if _taskless_publication(source,_d4_publication_lifetime(source)):
+        try:
+            for context in contexts:
+                _check_taskless_publication_serial(source)
+                try:
+                    with evidence._context_database(context,write=True,durable=True,
+                            before_commit=lambda db,context=context:evidence._check_recovery_registration(context,db,source)) as db:
+                        lifetime['writer']=(context,db)
+                        evidence._register_recovery_source(None,db,source,context=context)
+                finally:lifetime['writer']=None
+                _check_taskless_publication_serial(source)
+            d3._require(set(lifetime['registrations'])=={str(c.database) for c in contexts},'D4 all-peer registrations are incomplete')
+            _check_taskless_publication_serial(source)
+            return
+        except BaseException:
+            lifetime['failure']='serial-publication-failed'
+            raise
     for context in contexts:
         _check_recovery_source_global(source)
         with evidence._context_database(context,write=True,durable=True,before_commit=lambda db,context=context:evidence._check_recovery_registration(context,db,source)) as db:
@@ -3510,6 +3631,60 @@ def _scoped_recovery_files(path, journal):
     if journal["enrollment"] and journal["enrollment"]["backup"]:
         raw = d3._read_file(path / journal["enrollment"]["backup"],128*1024,private=True)
         d3._require(hashlib.sha256(raw).hexdigest() == journal["manifest"]["enrollment"]["before"]["raw_sha256"], "Canonical backup integrity failed")
+
+
+
+def _check_operation_files(path, journal):
+    """Refresh physical recovery facts without advancing any receipt phase."""
+    _scoped_recovery_files(path, journal)
+    originals, _, _ = _scoped_originals(journal['plan'])
+    record = journal['manifest']['enrollment']['record']
+    for action in journal['manifest']['actions']:
+        original = originals[action['id']]
+        if original['target'] == str(PROJECT_FILE):
+            d3._require(original['kind'] == 'write' and original['owner'] == action['owner']
+                and action['owner']['root'] == record['project_root']
+                and len(action['effects']) == 1 and action['effects'][0]['path'] == str(PROJECT_FILE)
+                and d3.read_request(original['text'].encode()) == record,
+                'Recovery canonical action differs from its actual enrollment proposal')
+            # Canonical writes use enrollment phase receipts instead of action file receipts.
+            d3._require(_scoped_owned_authority(journal), 'Recovery canonical enrollment physical ownership changed')
+            continue
+        root = Path(action['owner']['root'])
+        receipt = journal['receipts'].get(action['id'])
+        assessment = next(a for a in d3._assessments(journal['plan']['assessments']) if a['owner'] == action['owner'])
+        for index, effect in enumerate(action['effects']):
+            file = receipt['files'][index] if receipt else None
+            target = file['target'] if file else effect.get('target') or assessment['identity'].get('targets', {}).get(effect['path'])
+            d3._require(target is not None, 'Recovery operation lacks its original target')
+            _scoped_parent_guard(target, journal)
+            actual = _scoped_target(root, effect['path'])
+            for name, binding in actual['parents'].items():
+                owned = journal['directories'].get(name, {})
+                d3._require(binding == target['parents'].get(name) or
+                    owned.get('status') in ('owned', 'retained') and binding == {k:owned[k] for k in ('device','inode')},
+                    'Recovery operation target parent changed')
+            fingerprint = _fingerprint(root, effect['path'])
+            if file is None:
+                valid = fingerprint == effect['before'] and actual['binding'] == target['binding']
+            else:
+                restore = file.get('restore')
+                before, after = (effect['after'], effect['before']) if restore else (effect['before'], effect['after'])
+                phase = restore or file
+                original = fingerprint == before and actual['binding'] == phase['before_binding']
+                binding = phase['result_binding'] or phase['prepared_binding']
+                if binding is None and before == after:
+                    binding = phase['before_binding']
+                replaced = fingerprint == after and (actual['binding'] == binding if after is not None else
+                    before is None or phase.get('delete_intent') is True)
+                if receipt['status'] == 'rolled_back':
+                    valid = replaced if restore else original
+                elif receipt['status'] == 'completed' and restore is None:
+                    valid = replaced
+                else:
+                    # Prepared forward and restore receipts can straddle the durable rename.
+                    valid = original or replaced
+            d3._require(valid, 'Recovery operation effect bytes or physical ownership changed')
 
 
 def _scoped_fresh(plan, journal):
