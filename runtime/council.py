@@ -323,10 +323,21 @@ def _execution_summary(phase, observed, members=MEMBERS):
     return summary
 
 
+def _retain_session(item, observed):
+    session = observed.get('session_id')
+    if _text(session):
+        sessions = item.setdefault('session_ids', [])
+        if session not in sessions: sessions.append(session)
+
+
 def _freeze(run, value, phase, observed):
     names = {}
     for number, member in enumerate(_members(value), 1):
         item = observed.get(member, {})
+        if value.get('version') == 2 and _external(value, member) and _text(item.get('session_id')):
+            owner = value['members'].setdefault(_key(phase, member),
+                dict(kind='external', worker_run=str(_worker_path(value, phase, member))))
+            _retain_session(owner, item)
         if item.get('state') == 'accepted':
             name = ('initial' if phase == 'investigate' else 'critique') + '-' + str(number) + '.md'
             raw = _report(item.get('report', item.get('response')))
@@ -647,6 +658,9 @@ def verify_external(run: Path, phase: str, member: str, disposition: str, checks
             for other_phase in PHASES:
                 for other_member in _members(value, other_phase):
                     if not _external(value, other_member) or (other_phase, other_member) == (phase, member): continue
+                    owner = value['members'].get(_key(other_phase, other_member), {})
+                    _require(session not in owner.get('session_ids', [])
+                             and owner.get('verification', {}).get('session_id') != session, 'fresh_external_session_required')
                     other = _worker_path(value, other_phase, other_member) / 'result.json'
                     try: observed = onboarding.read_request(_read(other, workers.LIMIT + REPORT_LIMIT), workers.LIMIT + REPORT_LIMIT)
                     except FileNotFoundError: continue
@@ -654,6 +668,7 @@ def verify_external(run: Path, phase: str, member: str, disposition: str, checks
         result.update(state=disposition, native_checks=checks, native_fallback_ready=False)
         workers.save(path / 'result.json', result)
         item = value['members'].setdefault(_key(phase, member), dict(kind='external', worker_run=str(path)))
+        _retain_session(item, result)
         item['verification'] = dict(sha256=_digest(_read(path / 'result.json', workers.LIMIT + REPORT_LIMIT)),
                                     session_id=result.get('session_id'))
         if phase == 'synthesis':

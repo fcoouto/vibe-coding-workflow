@@ -972,6 +972,8 @@ class CouncilFlowTests(CouncilCase):
         with self.assertRaisesRegex(ValueError, 'fresh_external_session_required'):
             council.verify_external(self.run, 'investigate', 'member-three', 'accepted', ['Host verified'])
         council.verify_external(self.run, 'investigate', 'member-three', 'rejected', ['No session observed'])
+        manifest = json.loads((self.run / 'manifest.json').read_text())
+        self.assertNotIn('session_ids', manifest['members']['investigate:member-three'])
         with self.assertRaisesRegex(ValueError, 'grouped_council_verification_required'):
             council.workers.verify(Path(missing['worker_run']), 'accepted', ['Manual bypass'])
         path = Path(packet['worker_run']) / 'result.json'
@@ -1226,3 +1228,57 @@ class CouncilFlowTests(CouncilCase):
         self.assertEqual(report['outcome'], 'complete')
         self.assertEqual(report['external_total_usd'], 0)
         self.assertTrue(report['fresh_synthesis_available'])
+
+    def test_grouped_retained_sessions_block_reuse_after_closed_results_change_or_disappear(self):
+        base = copy.deepcopy(self.grouped_request())
+        for state in ('accepted', 'rejected', 'failed'):
+            for change in ('mutated', 'deleted'):
+                with self.subTest(state=state, change=change):
+                    self.request = copy.deepcopy(base)
+                    self.request['run_id'] = 'retained-' + state + '-' + change
+                    self.prepare()
+                    prior = self.grouped_external('investigate', 'member-one',
+                        disposition=state if state != 'failed' else 'accepted', verify=state != 'failed')
+                    path = Path(prior['worker_run']) / 'result.json'
+                    if state == 'failed':
+                        result = json.loads(path.read_text())
+                        result.update(state='failed', reported_cost_usd=None,
+                            known_cost_subtotal_usd=.03, accounting_complete=False)
+                        council.workers.save(path, result)
+                    self.grouped_external('investigate', 'member-two')
+                    self.grouped_external('investigate', 'member-three')
+                    council.packet(self.run, 'critique', 'member-two')  # Close and retain original observations.
+                    original_session = 'investigate-member-one'
+                    if change == 'deleted': path.unlink()
+                    else:
+                        result = json.loads(path.read_text()); result['session_id'] = 'changed-prior-session'
+                        council.workers.save(path, result)
+                    later = self.grouped_external('critique', 'member-one', session=original_session, verify=False)
+                    with self.assertRaisesRegex(ValueError, 'fresh_external_session_required'):
+                        council.verify_external(self.run, 'critique', 'member-one', 'accepted', ['Host verified'])
+                    manifest = json.loads((self.run / 'manifest.json').read_text())
+                    self.assertIn(original_session, manifest['members']['investigate:member-one']['session_ids'])
+                    # Rejection still settles the original current owner without inventing a session.
+                    result = council.verify_external(self.run, 'critique', 'member-one', 'rejected', ['Reused session rejected'])
+                    self.assertEqual(result['session_id'], original_session)
+                    self.assertTrue(result['local_execution_stopped'])
+                    self.assertEqual(result['reported_cost_usd'], 0)
+
+    def test_grouped_phase_closure_keeps_verification_session_and_new_current_observation(self):
+        self.grouped_request(); self.prepare()
+        prior = self.grouped_external('investigate', 'member-one')
+        path = Path(prior['worker_run']) / 'result.json'
+        result = json.loads(path.read_text()); result.update(state='failed', session_id='second-observed-session')
+        council.workers.save(path, result)
+        self.grouped_external('investigate', 'member-two'); self.grouped_external('investigate', 'member-three')
+        council.packet(self.run, 'critique', 'member-two')
+        path.unlink()
+        manifest = json.loads((self.run / 'manifest.json').read_text())
+        self.assertEqual(manifest['members']['investigate:member-one']['session_ids'],
+                         ['investigate-member-one', 'second-observed-session'])
+        for session in ('investigate-member-one', 'second-observed-session'):
+            packet = self.grouped_external('critique', 'member-one' if session.startswith('investigate') else 'member-three',
+                session=session, verify=False)
+            member = 'member-one' if session.startswith('investigate') else 'member-three'
+            with self.assertRaisesRegex(ValueError, 'fresh_external_session_required'):
+                council.verify_external(self.run, 'critique', member, 'accepted', ['Host verified'])
