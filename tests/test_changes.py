@@ -3100,6 +3100,7 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
         applied=self.run_with_d4_host(observed,'resume'); self.assertEqual(applied['exit_code'],0,applied)
         self.assertTrue(applied['qualified'],applied)
         published=json.loads((self.base/PROJECT_FILE).read_text()); consumer=published['repositories'][1]
+        self.historical_accepted_scopes=[]
         for observed_scope in observed['observations']['qualification']:
             actual=copy.deepcopy(observed_scope['scope_observations'])
             actual['authority']=dict(path=str(self.base/PROJECT_FILE),target=self.changes._scoped_target(self.base,str(PROJECT_FILE)))
@@ -3107,6 +3108,7 @@ class ScopedChangesTests(d3_tests.OnboardingTests):
             self.assertEqual(accepted.status,'active')
             with state._database(accepted.scope,write=True,initialize=True) as db:
                 state._checkout_row(db,accepted.scope,initialize=True)
+            self.historical_accepted_scopes.append(accepted.scope)
         facts=copy.deepcopy(observed['observations']['qualification'][1]['scope_observations'])
         facts['authority']=dict(path=str(self.base/PROJECT_FILE),target=self.changes._scoped_target(self.base,str(PROJECT_FILE)))
         resolved=startup.resolve_canonical_scope(startup.decode_project_record(published),**facts)
