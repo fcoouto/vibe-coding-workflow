@@ -1439,19 +1439,129 @@ def _run(plan_dir, request, operation):
         return _report(journal, 1, "D4 input, filesystem or runtime state is unavailable or unsafe; preserve recovery files")
 
 
-def apply_plan(plan_dir, request):
+def apply_plan(plan_dir, request, *, host=None):
     """Prepare/apply currently approved effects; enrollment activation is mandatory and last."""
-    return _run(plan_dir, request, "apply")
+    return _public_operation(plan_dir, request, "apply", host)
 
 
-def resume_plan(plan_dir, request):
+def resume_plan(plan_dir, request, *, host=None):
     """Reconcile durable receipts against the frozen manifest before continuing."""
-    return _run(plan_dir, request, "resume")
+    return _public_operation(plan_dir, request, "resume", host)
 
 
-def rollback_plan(plan_dir, request):
+def rollback_plan(plan_dir, request, *, host=None):
     """Deactivate owned enrollment, restore effects backwards, then restore compatible prior enrollment."""
-    return _run(plan_dir, request, "rollback")
+    return _public_operation(plan_dir, request, "rollback", host)
+
+
+def _public_host(host):
+    if not (isinstance(host, _D4HostCapability) and host.issuer is _D4_HOST_ISSUER
+            and host.state.get('active') and host.state.get('capability') is host
+            and callable(getattr(host.owner, 'authorize_d4_operation', None))):
+        raise Pending('Actual trusted coordinator operation authority is unavailable')
+
+
+def _public_plan_directory(value):
+    """Observe an existing review directory without creating it for admission."""
+    from runtime import review_storage
+    path = d3._plan_path(value, create=False)
+    return path, dict(path=str(path), binding=d3._filesystem_binding(path), parents=review_storage._parents(path))
+
+
+@contextmanager
+def _public_plan_lock(path):
+    """Use the existing D3 lock without directory or lock creation."""
+    directory = d3._open_path(path, os.O_RDONLY | os.O_DIRECTORY)
+    descriptor = None
+    try:
+        d3._private(os.fstat(directory), directory=True)
+        descriptor = os.open('.lock', os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        d3._private(os.fstat(descriptor))
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise Pending('Onboarding plan busy; retry the same approved operation') from None
+        yield path, directory
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(directory)
+
+
+def _public_entry(host, path, plan, request, operation, *, authorities=None):
+    _public_host(host)
+    _, directory = _public_plan_directory(path)
+    facts = dict(operation=operation, plan_directory=directory, plan=plan, request=request)
+    if authorities is not None:
+        facts['authorities'] = authorities
+    host.owner.authorize_d4_operation(_canonical_freeze(deepcopy(facts)))
+    _public_host(host)
+    if _public_plan_directory(path)[1] != directory or d3._load(path) != plan:
+        raise Pending('The approved plan or private directory changed during admission')
+
+
+def _public_operation(plan_dir, request, operation, host):
+    try:
+        path, _ = _public_plan_directory(plan_dir)
+        plan = d3._load(path)
+        d3._require(plan is not None, 'Inspect and record a plan before applying')
+        if plan['schema_version'] == 1:
+            return _run(plan_dir, request, operation)
+        _public_host(host)
+        request = deepcopy(request)
+        _public_entry(host, path, plan, request, operation)
+        d3._require(request.get('schema_version') == 2, 'Request schema differs from canonical plan')
+        _validate_scoped(request, plan)
+        def authorize(selected_path, selected_plan, selected_request, selected_operation, *, authorities=None):
+            _public_entry(host, selected_path, selected_plan, selected_request, selected_operation, authorities=authorities)
+        result = _run_scoped(path, request, operation, host=host, entry_authorizer=authorize)
+        if operation != 'rollback' and result['exit_code'] == 0 and not result.get('qualified'):
+            result = dict(result, exit_code=2, next_step='Collect current mandatory qualification and resume the same approved transaction')
+            result['blocked'] = [*result['blocked'], dict(id='qualification', reason='Configuration is applied; mandatory qualification remains unobserved')]
+        return result
+    except (StartupError, OSError, ValueError, TypeError, KeyError, sqlite3.Error) as error:
+        return dict(state='blocked', exit_code=2 if isinstance(error, Pending) else 1,
+                    blocked=[dict(id='transaction', reason=str(error) if isinstance(error, StartupError) else 'Canonical input or authority is unavailable')],
+                    activation_status='configured', qualified=False)
+
+
+@contextmanager
+def _public_source_guards(locations, owner, manifest):
+    with ExitStack() as guards:
+        try:
+            acquired = guards.enter_context(_scoped_source_guards(locations, owner, manifest))
+        except (StartupError, OSError, ValueError, TypeError, KeyError, sqlite3.Error):
+            raise Pending('Complete existing canonical runtime authorities are required before mutation') from None
+        yield acquired
+
+
+def _public_existing_authorities(locations, contexts, plan, manifest):
+    """Require every selected store and every discovered original baseline."""
+    from runtime import evidence
+    _, prior = _scoped_prior(plan)
+    if not prior or prior.get('schema_version') != 2 or not locations:
+        raise Pending('Canonical runtime preparation is required before mutation')
+    observed = {context.directory: context for context in contexts}
+    if not set(locations) <= set(observed) or any(version != 3 for _, version in locations.values()):
+        raise Pending('Complete existing canonical runtime authorities are required before mutation')
+    previous = _scoped_entries(prior)
+    for member in manifest['enrollment']['affected']:
+        key = tuple(member[name] for name in ('repository_id', 'checkout_id', 'client'))
+        entry = previous.get(key)
+        config = entry[2]['configuration'] if entry else None
+        if not config or not config['runtime'] or config['runtime']['schema_version'] != 3:
+            raise Pending('Canonical runtime preparation is required for an affected subject')
+    authorities = []
+    for context in contexts:
+        with evidence._context_database(context) as db:
+            baseline = task_state._source_baseline(None, db, context=context)
+        if baseline is None or baseline['content']['source_contract'] != 2:
+            raise Pending('An original source-contract-2 baseline is required before mutation')
+        project_id = baseline['content']['project_id']
+        if context.directory in locations and project_id != manifest['enrollment']['record']['project_id']:
+            raise Pending('Selected canonical authority belongs to another Project')
+        authorities.append(dict(authority=_canonical_plain(context.authority_set[0]), project_id=project_id))
+    return authorities
 
 
 # Internal schema-2 path; public startup/transaction activation remains gated.
@@ -3977,15 +4087,19 @@ def _scoped_failure_guard(path, ownership, operation):
         raise
 
 
-def _run_scoped(plan_dir, request, operation, *, host=None):
+def _run_scoped(plan_dir, request, operation, *, host=None, entry_authorizer=None):
     """Internal scoped transaction seam; public _run retains its schema-2 gate."""
     journal = None
     ownership={"journal":None}
     try:
         request=deepcopy(request)
         d3._require(operation in ("apply", "resume", "rollback"), "Unknown scoped operation")
-        path = d3._plan_path(plan_dir)
-        with d3._locked(path): plan = d3._load(path)
+        path = _public_plan_directory(plan_dir)[0] if entry_authorizer is not None else d3._plan_path(plan_dir)
+        plan_lock = _public_plan_lock if entry_authorizer is not None else d3._locked
+        with plan_lock(path):
+            plan = d3._load(path)
+            if entry_authorizer is not None:
+                entry_authorizer(path, plan, request, operation)
         d3._require(plan is not None, "Scoped D3 proposal is required")
         originals, dependencies, affected, suspend = _validate_scoped(request, plan)
         m = request["manifest"]; root = Path(m["enrollment"]["record"]["project_root"])
@@ -4014,17 +4128,25 @@ def _run_scoped(plan_dir, request, operation, *, host=None):
                 git_dirs.update(a["owner"]["git_common_dir"] for a in m["owners"] if a["owner"]["kind"] == "repository")
             descriptors = {git_dir: locks.enter_context(_worktree_lock(git_dir)) for git_dir in sorted(git_dirs)}
             owner = dict(schema_version=1, plan_dir=str(path), transaction_id=m["transaction_id"], manifest_digest=d3._digest(m))
-            locks.enter_context(_scoped_failure_guard(path,ownership,operation))
+            if entry_authorizer is None:
+                locks.enter_context(_scoped_failure_guard(path,ownership,operation))
             journal = _load_journal(path)
             if journal is not None:
                 d3._require(journal["schema_version"] == 2 and journal["manifest"] == m and journal["approval"] == request["approval"] and journal["plan"] == plan, "Scoped journal binding changed")
-                ownership["journal"]=journal
+                if entry_authorizer is None:
+                    ownership["journal"]=journal
             else:
                 d3._require(operation == "apply" and _scoped_target(root, str(PROJECT_FILE)) == m["enrollment"]["before"]["target"], "Scoped authority preimage changed or no journal to recover")
                 if prior:
                     raw = d3._read_file(root / PROJECT_FILE, 128 * 1024)
                     d3._require(hashlib.sha256(raw).hexdigest() == m["enrollment"]["before"]["raw_sha256"] and d3.read_request(raw) == prior, "Canonical approved bytes changed")
-            with _scoped_source_guards(locations, owner, m) as (authority_locations,source_contexts):
+            source_guards = _public_source_guards if entry_authorizer is not None else _scoped_source_guards
+            with source_guards(locations, owner, m) as (authority_locations,source_contexts):
+                if entry_authorizer is not None:
+                    authorities = _public_existing_authorities(locations, source_contexts, plan, m)
+                    entry_authorizer(path, plan, request, operation, authorities=authorities)
+                    locks.enter_context(_scoped_failure_guard(path, ownership, operation))
+                    ownership['journal'] = journal
                 writer_locations=_scoped_writer_locations(locations,source_contexts)
                 _scoped_writers(writer_locations, affected_roots, affected_git, changed_paths=changed_paths)
                 for git_dir in git_dirs:
