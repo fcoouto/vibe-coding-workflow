@@ -461,3 +461,40 @@ The implementation plan is complete. Source and proof are retained on the Counci
 branch; no live endpoint qualification or comparative evaluation was added. The
 known unrelated broad-suite baseline was not repaired; an unnecessary discovery
 run was stopped and is not represented as a passing suite.
+
+## Live recovery-pilot normal path, 30 October 2026
+
+The user authorized a live test after pilot implementation. A fresh Free version-3
+run on `bac3029` reused the enrolled disposable checkout and approved harmless
+392-byte evidence. Current bounded discovery selected Inkling Small/max and
+Inkling/max on `thinkingmachines/nvfp4`, plus Nemotron 3.5 Super VL on `nvidia`
+with its documented reasoning-on default preserved and maximum mapping unverified.
+Nemotron Ultra/high was an eligible predeclared unused fallback. These are runtime
+observations for this test, not fixed future selections or comparative results.
+
+Outcome: **complete**, with **3/3 accepted investigations, 3/3 accepted critiques
+and 1/1 accepted fresh external synthesis**, seven distinct real OpenCode sessions.
+The accepted verdict and all local participant/supervisor stop observations were
+recorded at **513.650 seconds** including preparation and coordination. Concurrent
+status captured all three external critics running. Two already-prepared phase
+assignments resumed their exact owned identity without duplicate dispatch.
+All source/frozen hashes verified; all seven native supervisors and participant
+processes were observed stopped, with no remaining stop requests. Client-reported
+external accounting was complete at **0 USD**; native coordination usage is separate,
+and no upstream cancellation or serving-model/effort attestation is inferred.
+
+No failure occurred: **zero workaround attempts and zero model replacements**.
+This qualifies the actual normal parallel deliberation/fresh-synthesis path, not
+live bounded research, correction effectiveness or fallback success. Those recovery
+paths retain local proof; no failure was manufactured or extra inference bought to
+exercise them. The original 1200-second total and 600/360/240 phase reserves applied;
+per-attempt configuration was 32,768 input, 16,384 output and 32 steps. The latter
+is a configured prompt threshold, not a claimed hard tool-call cap.
+
+One accepted critique had a nondecisive timing error about initial peer availability.
+The main coordinator recorded it as unsupported; the chair did not propagate it.
+Grounded substantive conclusions passed despite advisory presentation excess.
+Private original results, briefs, frozen packets, sessions, status, scope hashes,
+parallel observation and audit inventory are retained under this plan's
+`live/` evidence workspace. No credentials/private repository content were supplied,
+no permission was broadened, and comparative evaluation remains deferred.
