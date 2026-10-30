@@ -45,8 +45,10 @@ class RecoveryUseInputsTests(unittest.TestCase):
             recovery_uses.build([], [], rows)
         restricted = deepcopy(history[0])
         restricted["content"]["use_contract"] = dict(version=1, roots=[], edges=[], legacy_routes=[])
-        with self.assertRaisesRegex(recovery_uses.UseContractError, "Restricted inventory"):
-            evidence._recovery_admission_projection(dict(inputs, history=[restricted]))
+        restricted_projection = evidence._recovery_admission_projection(dict(inputs, history=[restricted]))
+        self.assertEqual(restricted_projection['legacy_routes'], [])
+        self.assertEqual(restricted_projection['restricted_routes'][0]['use_contract'], restricted['content']['use_contract'])
+        self.assertEqual(restricted_projection['restricted_routes'][0]['origin']['artifact'], restricted['reference'])
         mixed = deepcopy(history[0])
         other = self.comparison_authority(1)
         mixed["content"]["authorities"] = [other, authority, authority]
@@ -172,7 +174,13 @@ class RecoveryUseInputsTests(unittest.TestCase):
                 case = self.fixture()
                 request, contexts = case.d4_bookkeeping_request()
                 changes = case.changes
-                called = []
+                called = []; grants = []
+                before_effects = {(action['owner']['root'], effect['path']):changes._fingerprint(Path(action['owner']['root']), effect['path'])
+                    for action in request['manifest']['actions'] for effect in action['effects']}
+                before_baselines = []
+                for context in contexts:
+                    with evidence._context_database(context) as db:
+                        before_baselines.append(evidence._canonical_plain(state._source_baseline(None, db, context=context)))
                 register = evidence._register_recovery_source
                 def corrupt(*args, **kwargs):
                     lifetime = changes._authority_context.publication
@@ -185,13 +193,27 @@ class RecoveryUseInputsTests(unittest.TestCase):
                     called.append(True)
                     return register(*args, **kwargs)
                 class Host:
-                    def acquire_d4_bookkeeping(self, acquired, issue):return issue(acquired)
+                    def acquire_d4_bookkeeping(self, acquired, issue):
+                        grant = issue(acquired); grants.append(grant); return grant
                 with changes._bootstrap_d4_host(Host(), issuer=changes._D4_HOST_BOOTSTRAP_ISSUER) as host:
                     with patch.object(evidence, "_register_recovery_source", side_effect=corrupt):
                         result = changes._run_scoped(case.directory, request, "apply", host=host)
                 self.assertTrue(called, result)
                 self.assertNotEqual(result["exit_code"], 0, result)
-                self.assertIn("projection", str(result))
+                self.assertEqual(result['state'], 'blocked')
+                self.assertEqual(result['blocked'], [dict(id='transaction', reason='Recovery registration inputs differ from actual approved acquisition')])
+                journal = changes._load_journal(case.directory)
+                self.assertEqual(journal['plan']['revision'], request['manifest']['plan']['revision'])
+                self.assertEqual(journal['manifest_digest'], request['approval']['manifest_digest'])
+                self.assertEqual(journal['receipts'], {})
+                self.assertIsNone(journal['enrollment'])
+                self.assertEqual(len(grants), 1)
+                with self.assertRaises(changes.StartupError): changes._check_d4_grant(grants[0])
+                for context, baseline in zip(contexts, before_baselines):
+                    with evidence._context_database(context) as db:
+                        self.assertEqual(evidence._canonical_plain(state._source_baseline(None, db, context=context)), baseline)
+                for (root, path), fingerprint in before_effects.items():
+                    self.assertEqual(changes._fingerprint(Path(root), path), fingerprint)
 
     def test_shape_and_historical_permission_gates_remain_closed(self):
         case = self.fixture()
@@ -278,3 +300,31 @@ class RecoveryUseInputsTests(unittest.TestCase):
         self.assertIn("baseline", str(result).lower())
         for action in request["manifest"]["actions"]:
             self.assertEqual(changes._fingerprint(Path(action["owner"]["root"]), action["effects"][0]["path"]), effects[action["id"]])
+
+    def test_restricted_comparison_preserves_exact_independent_legacy_origins(self):
+        authority = self.comparison_authority()
+        destination = self.comparison_authority(1)
+        old = self.comparison_source(1, [authority, destination])
+        origin = dict(authority=authority, artifact=old['reference'], identity=old['content']['identity'],
+            journal_sha256=old['content']['journal']['sha256'])
+        legacy = recovery_uses.legacy_projection(origin, old['content'])
+        restricted = self.comparison_source(2, [authority, destination, self.comparison_authority(2)])
+        restricted['content']['use_contract'] = recovery_uses.build([], [], [legacy])
+        for history in ([old, restricted], [restricted, old], [restricted]):
+            result = evidence._recovery_admission_projection(dict(authority=authority, history=history, jobs=[]))
+            self.assertEqual(result['legacy_routes'], [legacy])
+            self.assertEqual(len(result['restricted_routes']), 1)
+            self.assertNotIn(self.comparison_authority(2), result['legacy_routes'][0]['destinations'])
+        changed = deepcopy(restricted)
+        changed['content']['use_contract']['legacy_routes'][0]['destinations'] = [authority]
+        with self.assertRaisesRegex(recovery_uses.UseContractError, 'Conflicting legacy'):
+            evidence._recovery_admission_projection(dict(authority=authority, history=[old, changed], jobs=[]))
+
+    def test_comparison_rejects_one_origin_as_both_legacy_and_restricted(self):
+        authority = self.comparison_authority()
+        old = self.comparison_source(1, [authority])
+        restricted = deepcopy(old)
+        restricted['content']['use_contract'] = recovery_uses.build([], [])
+        for history in ([old, restricted], [restricted, old]):
+            with self.assertRaisesRegex(recovery_uses.UseContractError, 'origin.*legacy.*restricted'):
+                evidence._recovery_admission_projection(dict(authority=authority, history=history, jobs=[]))

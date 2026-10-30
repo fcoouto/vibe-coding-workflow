@@ -277,25 +277,38 @@ def _recovery_use_inputs(context,db,reference,identity,*,content=None):
 
 
 def _recovery_admission_projection(inputs):
-    """Pure legacy relationship comparisons, never an admitted-use result or permission."""
+    """Compare legacy origins and restricted uses separately; neither result grants permission."""
     from runtime import recovery_uses
-    routes={}
+    routes={};restricted={}
+    def legacy(row):
+        name=recovery_uses.key(row['origin'])
+        recovery_uses._require(name not in restricted,'Recovery use origin cannot be both legacy and restricted')
+        recovery_uses._require(name not in routes or routes[name]==row,'Conflicting legacy route origin')
+        routes[name]=deepcopy(row)
+        recovery_uses._require(len(routes)<=recovery_uses.MAX_ROWS,'Recovery legacy origin bound exceeded')
     for item in inputs['history']:
         body=item['content']
-        recovery_uses._require('use_contract' not in body,'Restricted inventory cannot create legacy permission')
         origin=dict(authority=inputs['authority'],artifact=item['reference'],identity=body['identity'],journal_sha256=body['journal']['sha256'])
         recovery_uses._authority(origin['authority']);recovery_uses._artifact(origin['artifact'])
         recovery_uses._identity(origin['identity']);recovery_uses._hash(origin['journal_sha256'])
+        if 'use_contract' in body:
+            contract=recovery_uses.validate(body['use_contract'])
+            row=dict(origin=origin,use_contract=deepcopy(contract))
+            name=recovery_uses.key(origin)
+            recovery_uses._require(name not in routes,'Recovery use origin cannot be both legacy and restricted')
+            recovery_uses._require(name not in restricted or restricted[name]==row,'Conflicting restricted use origin')
+            restricted[name]=row
+            recovery_uses._require(len(restricted)<=recovery_uses.MAX_ROWS,'Recovery restricted origin bound exceeded')
+            for preserved in contract['legacy_routes']:legacy(preserved)
+            continue
         destinations={}
         for authority in body['authorities']:
             recovery_uses._authority(authority);destinations[recovery_uses.key(authority)]=authority
         recovery_uses._require(len(destinations)<=recovery_uses.MAX_ROWS,'Recovery legacy destination bound exceeded')
-        row=dict(origin=origin,destinations=[destinations[key] for key in sorted(destinations)])
-        key=recovery_uses.key(origin)
-        recovery_uses._require(key not in routes or routes[key]==row,'Conflicting legacy route origin')
-        routes[key]=deepcopy(row)
-        recovery_uses._require(len(routes)<=recovery_uses.MAX_ROWS,'Recovery legacy origin bound exceeded')
-    return dict(legacy_routes=sorted(routes.values(),key=recovery_uses.key),jobs=deepcopy(inputs['jobs']))
+        legacy(dict(origin=origin,destinations=[destinations[key] for key in sorted(destinations)]))
+    result=dict(legacy_routes=sorted(routes.values(),key=recovery_uses.key),jobs=deepcopy(inputs['jobs']))
+    if restricted:result['restricted_routes']=sorted(restricted.values(),key=recovery_uses.key)
+    return result
 
 
 def _recovery_registration_projection(content,created_at,inputs):
@@ -3312,6 +3325,8 @@ def _artifact(scope, value, *, context=None, owner=None, db=None):
 
 
 def _artifact_registered(scope, value, context, owner, db):
+    if isinstance(value,dict) and value.get('kind')=='d4-recovery-source' and 'use_contract' in value:
+        _require(isinstance(owner,_RecoveryOwner),'Purpose-bearing recovery body requires its actual recovery owner')
     metadata_owner, task_ref = _registered_owner(scope, context, owner, db)
     raw = _raw(value)
     _require(len(raw) <= MAX_ARTIFACT, 'Evidence artifact size limit exceeded')
