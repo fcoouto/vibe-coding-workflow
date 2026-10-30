@@ -44,7 +44,82 @@ class SettingsTests(unittest.TestCase):
 
     def enabled(self):
         result = self.configured()
-        return self.settings.enable(self.repo, dict(expected_revision=result['revision']))
+        return self.settings.enable(self.repo, dict(expected_revision=result['revision'], consent_version=2))
+
+    def legacy_worker_consent(self):
+        self.configured()
+        record = json.loads(self.path.read_text())
+        record.update(version=1, revision=2, enabled=True)
+        self.path.write_text(json.dumps(record))
+
+    def test_legacy_worker_consent_is_readable_but_cannot_admit(self):
+        self.legacy_worker_consent()
+        before = self.snapshot()
+        with self.assertRaises(self.settings.SettingsError):
+            with self.settings.admission(self.repo, 'workers'): self.fail('legacy consent admitted')
+        report = self.settings.status(self.repo)
+        self.assertTrue(report['enabled'])
+        self.assertTrue(report.get('enablement_renewal_required'))
+        self.assertEqual(report.get('worker_capability'), 'renewal_required')
+        self.assertEqual(report['execution_qualification'], 'not_checked')
+        with self.settings.admission(self.repo, 'proposals'):
+            pass
+        self.assertEqual(self.snapshot(), before)
+
+    def test_enable_requires_explicit_worker_consent(self):
+        report = self.configured()
+        before = self.path.read_bytes()
+        with self.assertRaises(self.settings.SettingsError):
+            self.settings.enable(self.repo, {'expected_revision': report['revision']})
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_enable_explicitly_renews_legacy_consent_once(self):
+        self.legacy_worker_consent()
+        sentinel = Path(self.settings.status(self.repo)['proposal_store'])
+        sentinel.write_text('existing task history')
+        try:
+            report = self.settings.enable(self.repo, dict(expected_revision=2, consent_version=2))
+        except self.settings.SettingsError as error:
+            self.fail(f'Explicit renewal must be accepted: {error}')
+        self.assertEqual(report['revision'], 3)
+        self.assertEqual(report.get('consent_version'), 2)
+        self.assertEqual(report.get('worker_capability'), 'worktree_edit_and_test')
+        self.assertFalse(report.get('enablement_renewal_required'))
+        self.assertEqual(sentinel.read_text(), 'existing task history')
+        self.assertEqual(report['opencode'], str(self.exe))
+        self.assertEqual(report['auth_data'], str(self.auth))
+        self.assertEqual(self.settings.enable(self.repo, dict(expected_revision=3, consent_version=2)), report)
+        with self.assertRaises(self.settings.SettingsError):
+            with self.settings.admission(self.repo, 'workers', revision=2): self.fail('stale preparation admitted')
+        with self.settings.admission(self.repo, 'workers', revision=3) as admitted:
+            self.assertEqual(admitted['consent_version'], 2)
+        self.assertFalse(self.settings.disable(self.repo, dict(expected_revision=3))['enabled'])
+
+    def test_worker_consent_version_rejects_wrong_types_without_mutation(self):
+        self.legacy_worker_consent()
+        before = self.path.read_bytes()
+        for value in (True, '2', 2.0, 1, None):
+            with self.subTest(value=value), self.assertRaises(self.settings.SettingsError):
+                self.settings.enable(self.repo, dict(expected_revision=2, consent_version=value))
+            self.assertEqual(self.path.read_bytes(), before)
+
+    def test_legacy_proposal_only_enable_remains_independent(self):
+        self.settings.configure(self.repo, dict(expected_revision=0, routes=['proposals'], opencode=None, auth_data=None))
+        record = json.loads(self.path.read_text())
+        record['version'] = 1
+        self.path.write_text(json.dumps(record))
+        report = self.settings.enable(self.repo, dict(expected_revision=1))
+        self.assertTrue(report['enabled'])
+        with self.settings.admission(self.repo, 'proposals'):
+            pass
+        self.assertFalse(report.get('enablement_renewal_required'))
+
+    def test_unknown_control_cannot_disable_saved_consent(self):
+        self.legacy_worker_consent()
+        before = self.path.read_bytes()
+        with self.assertRaises(self.settings.SettingsError):
+            self.settings.operate(self.repo, 'unknown', dict(expected_revision=2))
+        self.assertEqual(self.path.read_bytes(), before)
 
     def test_default_status_is_off_without_writes_or_client_execution(self):
         before = self.snapshot()
@@ -191,7 +266,7 @@ class SettingsTests(unittest.TestCase):
         self.assertTrue(script.exists(), 'management CLI must exist')
         configured = self.configured()
         result = subprocess.run([sys.executable, '-I', '-B', str(script), 'enable', '--cwd', str(self.repo)],
-            input=json.dumps({'expected_revision': configured['revision']}), text=True, capture_output=True, timeout=10)
+            input=json.dumps({'expected_revision': configured['revision'], 'consent_version': 2}), text=True, capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(json.loads(result.stdout)['enabled'])
         result = subprocess.run([sys.executable, '-I', '-B', str(script), 'status', '--cwd', str(self.repo)],

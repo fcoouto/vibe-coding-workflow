@@ -43,6 +43,10 @@ def _applicability(value):
     _require(_hex(value["capability_fingerprint"]), "Invalid guidance capability fingerprint")
 
 
+def _compatible_applicability(left, right):
+    return left["capability_fingerprint"] == right["capability_fingerprint"]
+
+
 def _common(request, required=(), optional=()):
     evidence._bounded(request, MAX_GUIDANCE)
     state._fields(request, ("client_surface", "applicability", *required), optional)
@@ -73,9 +77,9 @@ def _guidance(value, request):
     state._fields(value, ("schema_version", "client_surface", "checked_at", "applicability", "sources", "recommendations"))
     _require(type(value["schema_version"]) is int and value["schema_version"] == GUIDANCE_VERSION,
              "Unsupported guidance schema")
-    _require(value["client_surface"] == request["client_surface"] and
-             value["applicability"] == request["applicability"], "Guidance applicability changed")
     _applicability(value["applicability"])
+    _require(value["client_surface"] == request["client_surface"] and
+             _compatible_applicability(value["applicability"], request["applicability"]), "Guidance applicability changed")
     _checked(value["checked_at"])
     sources = value["sources"]
     _require(isinstance(sources, list) and 1 <= len(sources) <= 16, "Invalid guidance sources")
@@ -255,25 +259,152 @@ def _snapshot(scope, folder, request, *, context=None, db=None):
         return None, None, prior
 
 
-def _closure_guidance(context,db,records):
-    """Read original native guidance plus its current cache; never acquire cache locks."""
+def _closure_guidance_cache_inputs(context,db,surfaces):
+    """Read only actual local cache files and their managed snapshot on this connection."""
+    folder=context.directory/'model-guidance';files={};references=[]
+    if folder.exists():
+        state._private(folder,True);entries=list(folder.iterdir());_require(len(entries)<=4096,'Guidance cache source bound exceeded')
+        surfaces.update(path.name[:-5] for path in entries if path.name.endswith('.json') and not path.name.endswith('.control.json'))
+    if not surfaces:return dict(references=[],files={},folder=None)
+    state._private(folder,True);folder_binding=evidence._binding(folder)
+    for surface in sorted(surfaces):
+        _require(re.fullmatch(r'[a-z][a-z0-9-]{0,63}',surface),'Invalid original guidance surface')
+        paths=[folder/(surface+suffix) for suffix in ('.json','.control.json')]
+        _require(all(os.path.lexists(path) for path in paths),'Current guidance cache/control is missing')
+        before={str(path):evidence._closure_file_stat(path) for path in paths}
+        raw={str(path):_read_bytes(path) for path in paths}
+        control=_control(folder,surface)
+        _require(control['claim'] is None and control['last_attempt'] is not None,'Guidance refresh remains incomplete')
+        current,reference,_=_snapshot(None,folder,dict(client_surface=surface),context=context,db=db)
+        _require(current is not None and reference is not None,'Current guidance cache is missing or corrupt')
+        _require(control['generation']>0,'Current guidance control generation is unavailable')
+        # Failed refresh keys bind attempted applicability, not the preserved historical snapshot.
+        if control['last_attempt']['outcome']=='verified':
+            _require(control['last_attempt']['key'] in _keys(dict(applicability=current['applicability']),
+                hashlib.sha256(raw[str(paths[0])]).hexdigest(),True),'Current guidance control/source correspondence changed')
+        _require(all(evidence._closure_file_stat(path)==before[str(path)] and _read_bytes(path)==raw[str(path)] for path in paths)
+            and evidence._binding(folder)==folder_binding,'Guidance cache changed during owner observation')
+        references.append(reference)
+        for path in paths:
+            files[str(path)]=dict(stat=before[str(path)],digest=hashlib.sha256(raw[str(path)]).hexdigest())
+    return dict(references=references,files=files,folder=dict(path=str(folder),binding=folder_binding))
+
+
+def _closure_guidance_inputs(context,db,records):
+    """Local comparison facts only; linked and stopped obligations remain for assembly."""
+    evidence._check_context(context,db)
+    authority=evidence._canonical_plain(context.authority_set[0]);bodies={};metadata={};markers={};assignments={};surfaces=set()
+    def fetch(reference):
+        key=evidence._raw(reference).decode()
+        if key not in bodies:
+            bodies[key]=evidence._read(None,reference,context=context,db=db)
+            metadata[reference['name']]=state._metadata(db,reference['name'])
+        return bodies[key]
+    def native(body,discovery=True):
+        observed=fetch(body['discovery']) if discovery else body['discovery']['content']
+        guidance=fetch(body['guidance']['snapshot_ref']);surface=body['binding']['client_surface'];surfaces.add(surface)
+        _guidance(guidance,dict(client_surface=surface,applicability=dict(client_version=observed['native_version'],
+            capability_fingerprint=observed['capability_digest'])))
+    records=evidence._canonical_plain(records)
+    for record in records:
+        if record['data']['role'] in NATIVE_ROLES:
+            _require(fetch(record['data']['assignment'])==record['body'],'Native guidance assignment body changed')
+            native(record['body'])
+    rows=db.execute("select name,digest,owner_key,class,created_at,closed_at,status,bytes,data from evidence_metadata where class='compact' and status='live' order by name limit 4097").fetchall()
+    _require(len(rows)<=4096,'Retained guidance ownership support exceeds bound')
+    owned=[];successors=set()
+    for row in rows:
+        actual=state._metadata_record(row);owner=actual['owner'].get('task')
+        if owner is None:continue
+        _require(owner['authority']==authority,'Foreign retained guidance owner remains protected')
+        reference=dict(name=row[0],digest=row[1]);compact=fetch(reference);key=evidence._raw(owner).decode()
+        markers[key]=state._retired(db,'task',{field:owner[field] for field in ('scope_id','client','session_id','task_id')})
+        owned.append((owner,compact))
+        if compact.get('kind')=='retained-task-closure':successors.add(key)
+    for owner,compact in owned:
+        if markers[evidence._raw(owner).decode()] is None:continue
+        kind=compact.get('kind')
+        if kind=='task-closure' and evidence._raw(owner).decode() not in successors:
+            for certificate in compact.get('stopped',{}).get('assignments',[]):
+                ref=certificate['reference'];assignments[ref['id']]=state._retired_assignment(db,ref['id'])
+                if certificate['role'] in NATIVE_ROLES:native(fetch(ref['assignment']))
+            for original in compact.get('scope_guidance',[]):
+                guidance=fetch(original['reference'])
+                _guidance(guidance,dict(client_surface=guidance.get('client_surface'),applicability=guidance.get('applicability')))
+        elif kind=='retained-task-closure':
+            for receipt in [compact['original'],*compact['release']]:
+                name=receipt['reference']['name'];metadata[name]=state._metadata(db,name)
+            for original in compact['native_sources']:native(original,discovery=False)
+            for original in compact['scope_guidance']:
+                guidance=fetch(original['reference'])
+                _guidance(guidance,dict(client_surface=guidance.get('client_surface'),applicability=guidance.get('applicability')))
+    cache=_closure_guidance_cache_inputs(context,db,surfaces)
+    for reference in cache['references']:fetch(reference)
+    return dict(authority=authority,directory=str(context.directory),records=records,rows=rows,
+        bodies=bodies,metadata=metadata,markers=markers,assignment_markers=assignments,cache=cache)
+
+
+def _closure_guidance_job(job):
+    """An unanswered or mismatched obligation never produces completed guidance."""
+    response=yield job
+    _require(isinstance(response,dict) and set(response)=={'job','result'} and response['job']==job,
+        'Unresolved guidance validation job')
+    return response['result']
+
+
+def _resolve_closure_guidance_job(context,db,job,*,read_context=None,read_roster=None):
+    """Normal wrapper's full validators; this is not the authority-local input seam."""
     from runtime import changes
-    references={};surfaces=set();files={};folder=context.directory/'model-guidance';retained=[];native=[]
+    if read_context is not None:evidence._check_linked_read_context(read_context,evidence._canonical_plain(read_context.pointer),writer=(context,db))
+    if read_roster is not None:evidence._check_linked_read_roster(read_roster,evidence._canonical_plain(read_roster.pointer))
+    kind=job['kind']
+    if kind=='bookkeeping':result=evidence._bookkeeping_record(context,db,job['reference'],job['body'])
+    elif kind=='retained-owner':result=evidence._retained_for_owner(context,db,job['owner'])
+    elif kind=='linked-component':
+        basis=job['basis']
+        selected=evidence._matching_linked_read_context(read_context,basis)
+        read_roster=evidence._matching_linked_read_roster(read_roster,basis)
+        result=evidence._linked_retained_component(evidence._linked_basis_root(basis),evidence._linked_read_authorities(selected,basis,writer=(context,db),read_roster=read_roster),writer=(context,db))
+    elif kind=='stopped-certificate':result=changes._check_stopped_certificate(context,db,job['certificate'],read_context=read_context,read_roster=read_roster)
+    else:raise state.StateError('Unknown guidance validation job')
+    return evidence._finish_linked_read_context(dict(job=job,result=result),read_context,read_roster=read_roster)
+
+
+def _closure_guidance(context,db,records,*,read_context=None,read_roster=None):
+    """Preserve full normal validation; pending local inputs never authorize a closure."""
+    inputs=_closure_guidance_inputs(context,db,records)
+    assembly=_closure_guidance_assembly(inputs)
+    try:
+        job=next(assembly)
+        while True:
+            response=(_resolve_closure_guidance_job(context,db,job) if read_context is None and read_roster is None else
+                _resolve_closure_guidance_job(context,db,job,read_context=read_context,read_roster=read_roster))
+            job=assembly.send(response)
+    except StopIteration as completed:
+        _require(_closure_guidance_inputs(context,db,records)==inputs,
+            'Guidance local inputs changed during complete validation')
+        return evidence._finish_linked_read_context(completed.value,read_context,read_roster=read_roster)
+
+
+def _closure_guidance_assembly(inputs):
+    """Pure guidance projection; every yielded obligation remains pending until resolved."""
+    records=inputs['records'];authority=inputs['authority']
+    references={};surfaces=set();retained=[];native=[]
     def source(reference):
-        value=evidence._read(None,reference,context=context,db=db)
-        _guidance(value,dict(client_surface=value.get('client_surface'),applicability=value.get('applicability')))
-        metadata=state._metadata(db,reference['name'])
+        value=inputs['bodies'][evidence._raw(reference).decode()]
+        metadata=inputs['metadata'].get(reference['name'])
         _require(metadata is not None and metadata['class']=='detail' and metadata['owner']['task'] is None,
             'Guidance requires original registered scope ownership')
         result=dict(reference=reference,created_at=metadata['created_at'],owner=metadata['owner'],guidance=value)
         references[evidence._raw(reference)]=result
         return result
-    def assignment(body,reference,created_at,request_digest):
-        discovery=evidence._read(None,body['discovery'],context=context,db=db)
+    def assignment(body,reference,created_at,request_digest,discovery=None):
+        if discovery is None:discovery=inputs['bodies'][evidence._raw(body['discovery']).decode()]
         guidance=body['guidance'];state._fields(guidance,('snapshot_ref','snapshot_digest','checked_at','freshness'))
         surface=body['binding']['client_surface'];original=source(guidance['snapshot_ref']);surfaces.add(surface)
-        _guidance(original['guidance'],dict(client_surface=surface,applicability=dict(client_version=discovery['native_version'],
-            capability_fingerprint=discovery['capability_digest'])))
+        _require(original['guidance']['client_surface']==surface and _compatible_applicability(original['guidance']['applicability'],
+            dict(client_version=discovery['native_version'],capability_fingerprint=discovery['capability_digest'])),
+            'Guidance applicability changed')
         _require(guidance['snapshot_digest']==guidance['snapshot_ref']['digest'] and guidance['checked_at']==original['guidance']['checked_at'],
             'Original native guidance correspondence changed')
         return dict(reference=reference,created_at=created_at,request_digest=request_digest,guidance=guidance,
@@ -282,48 +413,66 @@ def _closure_guidance(context,db,records):
             source_created_at=original['created_at'])
     for record in records:
         if record['data']['role'] not in NATIVE_ROLES:continue
-        reference=dict(authority=evidence._canonical_plain(context.authority_set[0]),id=record['id'],owner=record['owner'],assignment=record['data']['assignment'])
+        reference=dict(authority=authority,id=record['id'],owner=record['owner'],assignment=record['data']['assignment'])
         native.append(assignment(record['body'],reference,record['data']['lifecycle']['created_at'],record['data']['request_digest']))
-    rows=db.execute("select name,digest,owner_key,class,created_at,closed_at,status,bytes,data from evidence_metadata where class='compact' and status='live' order by name limit 4097").fetchall()
-    _require(len(rows)<=4096,'Retained guidance ownership support exceeds bound')
+    rows=inputs['rows']
     owners=set()
     for row in rows:
         metadata=state._metadata_record(row);owner=metadata['owner'].get('task')
         if owner is None:continue
-        _require(owner['authority']==evidence._canonical_plain(context.authority_set[0]),'Foreign retained guidance owner remains protected')
-        compact=evidence._read(None,dict(name=row[0],digest=row[1]),context=context,db=db)
-        if evidence._bookkeeping_record(context,db,dict(name=row[0],digest=row[1]),compact):continue
-        marker=state._retired(db,'task',{key:owner[key] for key in ('scope_id','client','session_id','task_id')})
+        _require(owner['authority']==authority,'Foreign retained guidance owner remains protected')
+        compact=inputs['bodies'][evidence._raw(dict(name=row[0],digest=row[1])).decode()]
+        if (yield from _closure_guidance_job(dict(kind='bookkeeping',reference=dict(name=row[0],digest=row[1]),body=compact))):continue
+        marker=inputs['markers'][evidence._raw(owner).decode()]
         if marker is None:continue
+        retained_support=(yield from _closure_guidance_job(dict(kind='retained-owner',owner=owner)))
+        if retained_support is not None:
+            if retained_support['reference']!=dict(name=row[0],digest=row[1]):continue
+            compact=retained_support['content']
+            certificates=[item for item in compact['stopped'].get('assignments',[]) if item['role'] in NATIVE_ROLES]
+            _require(len(compact['native_sources'])==len(compact['native_guidance'])==len(certificates),
+                'Retained native source coverage differs from issued certificates')
+            for certificate in certificates:
+                matches=[item for item in compact['native_sources'] if item['assignment']==certificate['reference']]
+                _require(len(matches)==1,'Retained native source is unavailable or ambiguous')
+                original=matches[0]
+                actual=assignment(original,certificate['reference'],certificate['created_at'],certificate['request_digest'],
+                    discovery=original['discovery']['content'])
+                _require(actual in compact['native_guidance'],'Retained native correspondence differs from original qualified projection')
+            for original in compact['scope_guidance']:
+                _require(source(original['reference'])==original,'Retained scope guidance changed')
+            retained.append(dict(reference=retained_support['reference'],identity=owner,marker=marker,
+                assignments=[[item['id'],item['marker']] for item in compact['assignment_markers']]))
+            continue
         linked=None
         if compact.get('kind')=='linked-closure-preparation':
-            support=evidence._linked_retained_component(evidence._linked_basis_root(compact['stopped']['linked']),compact['stopped']['linked']['authorities'],writer=(context,db))
+            support=(yield from _closure_guidance_job(dict(kind='linked-component',owner=owner,receipt=dict(name=row[0],digest=row[1]),basis=compact['stopped']['linked'])))
             _require(not support.get('discovered_authorities'),'Retained guidance source guards are incomplete')
             member=next(m for m in support['members'] if m['reference']==owner)
             _require(member['preparation']['reference']==dict(name=row[0],digest=row[1]),'Retained guidance preparation is not its actual owner')
             continue
         owner_key=evidence._raw(owner);_require(owner_key not in owners,'Retained guidance owner has ambiguous compact receipts');owners.add(owner_key)
         if compact.get('stopped',{}).get('linked'):
-            support=evidence._linked_retained_component(evidence._linked_basis_root(compact['stopped']['linked']),compact['stopped']['linked']['authorities'],writer=(context,db))
+            support=(yield from _closure_guidance_job(dict(kind='linked-component',owner=owner,receipt=dict(name=row[0],digest=row[1]),basis=compact['stopped']['linked'])))
             _require(not support.get('discovered_authorities'),'Retained guidance component source guards are incomplete')
             linked=next(m for m in support['members'] if m['reference']==owner)
             _require(linked['closure']['reference']==dict(name=row[0],digest=row[1]),'Retained guidance closure is not its actual owner')
         _require(compact.get('kind')=='task-closure' and compact['identity']==owner and not marker['evidence_expired']
             and marker['pins_digest']==state._digest(compact['pins']) and marker['created_at']==compact['created_at']==metadata['created_at'],
             'Retained scope-guidance receipt differs from original task identity/age')
-        changes._check_stopped_certificate(context,db,compact['stopped'])
+        yield from _closure_guidance_job(dict(kind='stopped-certificate',owner=owner,receipt=dict(name=row[0],digest=row[1]),certificate=compact['stopped']))
         _require(len(compact.get('native_guidance',[]))==sum(item['role'] in NATIVE_ROLES for item in compact['stopped'].get('assignments',[])),
             'Retained native guidance coverage differs from complete issued assignments')
         markers=[]
         for certificate in compact['stopped'].get('assignments',[]):
-            ref=certificate['reference'];assignment_marker=state._retired_assignment(db,ref['id']);markers.append([ref['id'],assignment_marker])
+            ref=certificate['reference'];assignment_marker=inputs['assignment_markers'][ref['id']];markers.append([ref['id'],assignment_marker])
             if certificate['role'] not in NATIVE_ROLES:continue
-            body=evidence._read(None,ref['assignment'],context=context,db=db)
+            body=inputs['bodies'][evidence._raw(ref['assignment']).decode()]
             _require(body['owner']==ref['owner'] and body['role']==certificate['role'] and body['pins']==compact['pins'] and body['accepted_identity']==compact['accepted_identity']
                 and body['lifecycle']['created_at']==certificate['created_at'] and evidence._digest(body['request'])==certificate['request_digest'],
                 'Retained native assignment differs from issued owner/pins/request/age')
             for original in (ref['assignment'],body['discovery'],body['guidance']['snapshot_ref']):
-                source_metadata=state._metadata(db,original['name'])
+                source_metadata=inputs['metadata'].get(original['name'])
                 _require(source_metadata is not None,'Retained native guidance source metadata is unavailable')
                 projected=dict(reference=original,created_at=source_metadata['created_at'],owner=source_metadata['owner'],
                     bytes=source_metadata['bytes'],unit='bytes')
@@ -343,34 +492,13 @@ def _closure_guidance(context,db,records):
         receipt=dict(reference=dict(name=row[0],digest=row[1]),identity=owner,marker=marker,assignments=markers)
         if linked is not None:receipt['linked_component']=support
         retained.append(receipt)
-    if folder.exists():
-        state._private(folder,True);entries=list(folder.iterdir());_require(len(entries)<=4096,'Guidance cache source bound exceeded')
-        surfaces.update(path.name[:-5] for path in entries if path.name.endswith('.json') and not path.name.endswith('.control.json'))
-    if not surfaces:return dict(references=[],sources=[],native=native,retained=retained,files={},folder=None)
-    state._private(folder,True);folder_binding=evidence._binding(folder)
-    for surface in sorted(surfaces):
-        _require(re.fullmatch(r'[a-z][a-z0-9-]{0,63}',surface),'Invalid original guidance surface')
-        paths=[folder/(surface+suffix) for suffix in ('.json','.control.json')]
-        _require(all(os.path.lexists(path) for path in paths),'Current guidance cache/control is missing')
-        before={str(path):evidence._closure_file_stat(path) for path in paths}
-        raw={str(path):_read_bytes(path) for path in paths}
-        control=_control(folder,surface)
-        _require(control['claim'] is None and control['last_attempt'] is not None,'Guidance refresh remains incomplete')
-        current,reference,_=_snapshot(None,folder,dict(client_surface=surface),context=context,db=db)
-        _require(current is not None and reference is not None,'Current guidance cache is missing or corrupt')
-        _require(control['generation']>0,'Current guidance control generation is unavailable')
-        # Failed refresh keys bind attempted applicability, not the preserved historical snapshot.
-        if control['last_attempt']['outcome']=='verified':
-            _require(control['last_attempt']['key']==_key(dict(applicability=current['applicability']),
-                hashlib.sha256(raw[str(paths[0])]).hexdigest(),True),'Current guidance control/source correspondence changed')
-        _require(all(evidence._closure_file_stat(path)==before[str(path)] and _read_bytes(path)==raw[str(path)] for path in paths)
-            and evidence._binding(folder)==folder_binding,'Guidance cache changed during owner observation')
-        source(reference)
-        for path in paths:
-            files[str(path)]=dict(stat=before[str(path)],digest=hashlib.sha256(raw[str(path)]).hexdigest())
+    if inputs['cache']['folder'] is None:
+        return dict(references=[],sources=[],native=native,retained=retained,files={},folder=None)
+    for reference in inputs['cache']['references']:source(reference)
+    files=inputs['cache']['files']
     sources=sorted(references.values(),key=evidence._raw)
     return dict(references=sorted([value['reference'] for value in sources],key=evidence._raw),sources=sources,native=native,
-        retained=retained,files=files,folder=dict(path=str(folder),binding=folder_binding))
+        retained=retained,files=files,folder=inputs['cache']['folder'])
 
 
 def _trigger(value):
@@ -380,7 +508,14 @@ def _trigger(value):
 
 
 def _key(request, prior, snapshot_valid):
-    return evidence._digest(dict(applicability=request["applicability"], prior=prior, snapshot_valid=snapshot_valid))
+    return evidence._digest(dict(applicability=dict(capability_fingerprint=request["applicability"]["capability_fingerprint"]),
+        prior=prior, snapshot_valid=snapshot_valid))
+
+
+def _keys(request, prior, snapshot_valid):
+    # Retain exact legacy control/source correspondence without rewriting stored history.
+    return {_key(request, prior, snapshot_valid), evidence._digest(dict(applicability=request["applicability"],
+        prior=prior, snapshot_valid=snapshot_valid))}
 
 
 def _status(scope, folder, control, request):
@@ -388,8 +523,11 @@ def _status(scope, folder, control, request):
     claim = control["claim"] if control else None
     active = claim is not None and claim["expires_at"] > _now()
     attempt = control["last_attempt"] if control else None
-    failed = attempt is not None and attempt["outcome"] == "failure" and attempt["key"] == _key(request, prior, guidance is not None)
-    compatible = guidance is not None and guidance["applicability"] == request["applicability"]
+    compatible = guidance is not None and _compatible_applicability(guidance["applicability"], request["applicability"])
+    keys = _keys(request, prior, guidance is not None)
+    if compatible:
+        keys.update(_keys(dict(applicability=guidance["applicability"]), prior, True))
+    failed = attempt is not None and attempt["outcome"] == "failure" and attempt["key"] in keys
     freshness = "unavailable" if guidance is None else "incompatible" if not compatible else "stale" if failed else "verified"
     profiles = request.get("profile_ids", [])
     result = dict(client_surface=request["client_surface"], applicability=request["applicability"], freshness=freshness,
@@ -398,7 +536,7 @@ def _status(scope, folder, control, request):
         snapshot_digest=reference["digest"] if reference else None,
         recommendations=[profile for profile in guidance["recommendations"] if profile["id"] in profiles]
                         if compatible else [], limitations=list(GUIDANCE_LIMITATIONS))
-    return result, prior
+    return result, prior, keys
 
 
 def guidance_status(scope, request):
@@ -417,12 +555,12 @@ def claim_guidance(scope, request):
     lease = request.get("lease_seconds", 120)
     _require(type(lease) is int and 1 <= lease <= 600, "Invalid guidance claim lease")
     with _locked(scope, request, create=True) as (folder, control):
-        result, prior = _status(scope, folder, control, request)
+        result, prior, keys = _status(scope, folder, control, request)
         if result["refresh_in_progress"]:
             return result | dict(claimed=False)
         expired = control["claim"] is not None
         attempt = control["last_attempt"]
-        same = attempt is not None and attempt["key"] == _key(request, prior, result["snapshot_ref"] is not None)
+        same = attempt is not None and attempt["key"] in keys
         trigger = request["trigger"]
         if not expired and ((trigger["kind"] == "routine" and not result["refresh_needed"]) or
                             (trigger["kind"] != "routine" and same and trigger == attempt["trigger"])):
@@ -445,12 +583,13 @@ def record_guidance(scope, request):
     state._integer(request["generation"], "guidance generation", 1)
     if "guidance" in request:
         _guidance(request["guidance"], request)
+        _require(request["guidance"]["applicability"] == request["applicability"], "Guidance publication applicability changed")
     else:
         state._text(request["failure"], "guidance failure", 1024)
     with _locked(scope, request) as (folder, control):
         _require(control is not None, "Guidance refresh claim is unavailable")
         claim = control["claim"]
-        result, prior = _status(scope, folder, control, request)
+        result, prior, _ = _status(scope, folder, control, request)
         _require(claim is not None and claim["token"] == request["token"] and
                  claim["generation"] == request["generation"] and claim["expires_at"] > _now() and
                  claim["applicability"] == request["applicability"] and claim["prior"] == prior,
@@ -474,6 +613,7 @@ def record_guidance(scope, request):
 
 # Admission coordinates participating owners; it cannot restrict native tools or external writers.
 ADMISSION_VERSION = 1
+VERSION_PROVENANCE_FIELDS = ('current_observer_version', 'parent_creation_version', 'worker_creation_version')
 MAX_ASSIGNMENTS = 4096
 MAX_CLAIMS = 64
 MAX_JOBS = 32
@@ -597,12 +737,16 @@ def _held_overlap(claims, held_claims):
 
 
 def _git_directory(scope):
+    return _git_directory_paths(scope.repository_root, scope.git_common_dir)
+
+
+def _git_directory_paths(repository_root, git_common_dir):
     from pathlib import Path
-    raw = evidence._git(scope.repository_root, 'rev-parse', '--path-format=absolute',
+    raw = evidence._git(repository_root, 'rev-parse', '--path-format=absolute',
                         '--show-toplevel', '--git-dir', '--git-common-dir')
     try:
         root, private, common = (Path(os.fsdecode(line)).resolve(strict=True) for line in raw.splitlines())
-        _require(root == scope.repository_root and common == scope.git_common_dir and private.is_dir(),
+        _require(root == repository_root and common == git_common_dir and private.is_dir(),
                  'Actual Git checkout metadata differs from the accepted scope')
         return str(private)
     except (OSError, ValueError):
@@ -610,9 +754,13 @@ def _git_directory(scope):
 
 
 def _git_routing(scope, git_directory):
+    return _git_routing_paths(scope.repository_root, Path(git_directory), scope.git_common_dir)
+
+
+def _git_routing_paths(repository_root, private, common):
     """Snapshot only bounded routing files and identities; no Git call or tree inventory."""
     from pathlib import Path
-    private, common = Path(git_directory), scope.git_common_dir
+    private, common = Path(private), Path(common)
     entries = {}
     def identity(info):
         return [info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode)]
@@ -653,16 +801,16 @@ def _git_routing(scope, git_directory):
         _require(value['kind'] == 'directory' and value['resolved'] == str(expected),
                  'Git routing target changed from the observed directory')
     try:
-        root, _ = node('checkout', scope.repository_root)
+        root, _ = node('checkout', repository_root)
         own, _ = node('private', private)
         shared, _ = node('common', common)
         _require(all(value['kind'] == 'directory' for value in (root, own, shared)), 'Git routing directory is unavailable')
-        marker, raw = node('marker', scope.repository_root / '.git')
+        marker, raw = node('marker', repository_root / '.git')
         if marker['kind'] == 'directory':
             _require(marker['resolved'] == str(private), 'Git routing marker no longer identifies the observed directory')
         else:
             _require(marker['kind'] == 'file' and raw.startswith(b'gitdir: '), 'Git routing marker is unsupported')
-            target('marker_target', scope.repository_root, raw[8:], private)
+            target('marker_target', repository_root, raw[8:], private)
         commondir, raw = node('commondir', private / 'commondir')
         if commondir['kind'] == 'missing':
             _require(private == common, 'Git common routing no longer identifies the observed directory')
@@ -1660,7 +1808,7 @@ def _assignment(scope, db, request, *, roles=('worker',)):
     return record
 
 
-def _closure_assignments(context,db,task_ref,task,certificate):
+def _closure_assignments(context,db,task_ref,task,certificate,*,read_context=None,read_roster=None):
     """Complete original membership, independently stopped and reconciled per role."""
     from runtime import changes
     records=[record for record in _ledger(None,db,context=context) if all(
@@ -1668,10 +1816,10 @@ def _closure_assignments(context,db,task_ref,task,certificate):
     issued=certificate.get('assignments',[])
     _require(len(issued)==len(records) and len({item['reference']['id'] for item in issued})==len(issued),
         'Stopped assignment certificate membership differs from complete original owners')
-    actual=[changes._assignment_certificate(context,db,task,record) for record in records]
+    actual=[changes._assignment_certificate(context,db,task,record,read_context=read_context,read_roster=read_roster) for record in records]
     _require(sorted(actual,key=evidence._raw)==sorted(issued,key=evidence._raw),
         'Stopped assignments differ from exact current immutable reconciliation support')
-    return records
+    return evidence._finish_linked_read_context(records,read_context,read_roster=read_roster)
 
 
 def retire_settled(db, task_ref, closure):
@@ -1716,22 +1864,156 @@ def _assignment_task(scope, db, request, *, revision=True):
     return task
 
 
-def _worker_history(scope, reference, *, context=None):
+def _worker_history(scope, reference, *, context=None, db=None):
     history, seen = [], set()
     while reference is not None:
         _reference(reference)
         _require(reference['digest'] not in seen and len(history) < MAX_OBSERVATIONS, 'Worker observation history bound reached')
         seen.add(reference['digest'])
-        value = evidence._read(None if context is not None else scope, reference, context=context)
+        value = evidence._read(None if context is not None else scope, reference, context=context, db=db)
         state._fields(value, ('version', 'receipt', 'result', 'report', 'error', 'previous', 'conflict', 'revision', 'status', 'request', 'incoming'))
         _reference(value['incoming'])
-        evidence._read(None if context is not None else scope, value['incoming'], context=context)
+        evidence._read(None if context is not None else scope, value['incoming'], context=context, db=db)
         _require(type(value['version']) is int and value['version'] == 1 and value['status'] in {'observed', 'uncertain'},
                  'Worker observation history is incompatible')
         state._integer(value['revision'], 'observation revision', 1)
         history.append((reference, value))
         reference = value['previous']
     return history
+
+
+def _execution_checkout(root, common):
+    """Observe affiliation and routing only; this grants no execution-root authority."""
+    try:
+        _require(root.is_absolute() and root.resolve(strict=True) == root and root.is_dir(),
+                 'Execution root must be an existing canonical directory')
+        private = Path(_git_directory_paths(root, common))
+        _require(private != common and private.resolve(strict=True) == private,
+                 'Execution requires a separate local worktree')
+        routing = _git_routing_paths(root, private, common)
+        marker = routing['marker']
+        _require(marker['kind'] == 'file' and marker['link'] is None and
+                 routing['marker_target']['path'] == routing['marker_target']['resolved'],
+                 'Execution Git routing contains an unsafe alias')
+        common_target = Path(routing['common_target']['path'])
+        _require(not any(path.is_symlink() for path in (common_target, *common_target.parents)),
+                 'Execution Git common target contains an unsafe alias')
+        _require(all(value['link'] is None and Path(value['path']).lstat().st_nlink == 1
+                     for value in routing.values() if value['kind'] == 'file'),
+                 'Execution Git routing contains a linked file')
+        backlink = routing['worktree_backlink']
+        raw = evidence._git(root, 'rev-parse', '--verify', 'HEAD').decode().strip()
+        _require(backlink['kind'] == 'file' and backlink['link'] is None and
+                 backlink['sha256'] in {hashlib.sha256(os.fsencode(root / '.git') + ending).hexdigest()
+                                       for ending in (b'', b'\n', b'\r\n')},
+                 'Execution worktree backlink differs from its checkout')
+        index = evidence._git(root, 'ls-files', '--stage', '-z')
+        _require(len(index) <= evidence.MAX_ARTIFACT, 'Execution index exceeds observation bound')
+        return dict(root=str(root), private_git=str(private), common_git=str(common), routing=routing,
+                    head=raw, index_digest=hashlib.sha256(index).hexdigest())
+    except (OSError, ValueError, RuntimeError):
+        raise state.StateError('Execution checkout is unavailable, unsafe or changed') from None
+
+
+def observe_execution_binding(scope, request):
+    """Preview an external worktree binding without enrolling, reserving or launching it."""
+    from runtime import openrouter_settings as settings
+    evidence._request(request, ('supervisor_attempt_id', 'execution_root', 'source_candidate_ref',
+                               'settings_scope_id', 'settings_revision', 'selection_ref'))
+    request = json_object(evidence._raw(request))
+    for field in ('supervisor_attempt_id', 'execution_root', 'settings_scope_id', 'selection_ref'):
+        state._text(request[field], field, 4096)
+    state._integer(request['settings_revision'], 'settings revision', 1)
+    _reference(request['source_candidate_ref'])
+    root = Path(request['execution_root'])
+    _require(str(root) == request['execution_root'] and root != scope.repository_root,
+             'Execution root must name a distinct canonical worktree')
+    assignment_request = dict(request, attempt_id=request['supervisor_attempt_id'])
+
+    def source():
+        with state._database(scope) as db:
+            record = _assignment(scope, db, assignment_request)
+            task = _assignment_task(scope, db, request)
+            data, body = record['data'], record['body']
+            _require(task['pins'] == body['pins'] and data['candidate'] == request['source_candidate_ref'] and
+                     task['delegation']['plan'] == body['plan'], 'Execution source assignment or candidate changed')
+            history = _worker_history(scope, data['observation'])
+            _require(data['status'] == 'observed' and history and history[0][1]['status'] == 'observed',
+                     'Execution binding requires an observed native supervisor')
+            observed = history[0][1]
+            _require(observed['error'] is None and observed['conflict'] is None and observed['receipt'] is not None,
+                     'Native supervisor observation remains uncertain')
+            receipt = _worker_receipt(scope, record, observed['request'],
+                                      dict(receipt=observed['receipt'], result=observed['result']))
+            _require(receipt['turn_status'] == 'inProgress', 'Native supervisor is not observed running')
+            plan = _task_plan(scope, task)
+            _require(plan['limits']['deadline'] > _now(), 'Original delegation deadline has elapsed')
+            job = next((job for job in plan['jobs'] if job['id'] == data['job_id']), None)
+            _require(job is not None and job['role'] == 'worker' and _claims(job['claims']) == data['claims'],
+                     'Original worker claims changed')
+            proof_plan = _assignment_plan(scope, record, task)
+            _require(task['evidence']['plan']['digest'] == evidence._digest(proof_plan),
+                     'Current evidence plan differs from original worker plan')
+        return record, task, plan, proof_plan, receipt, job
+
+    first = source()
+    record, task, plan, proof_plan, receipt, job = first
+    with settings.guard(scope.repository_root) as owner:
+        saved = owner.record
+        _require(owner.scope == scope, 'OpenRouter settings do not support this accepted source scope')
+        _require(saved is not None and saved['enabled'] and saved['version'] == 2 and
+                 'workers' in saved['routes'] and saved['revision'] == request['settings_revision'] and
+                 owner.binding['scope_id'] == request['settings_scope_id'], 'Current worker consent binding is unavailable')
+        _require(evidence._digest(evidence.capture_candidate(scope, proof_plan)) == record['data']['candidate']['digest'],
+                 'Source candidate differs from original assignment')
+        source_private = _git_directory(scope)
+        _require(source_private == plan['git_directory'] and _git_routing(scope, source_private) == record['body']['git_routing'],
+                 'Source Git routing changed from original assignment')
+        execution = _execution_checkout(root, scope.git_common_dir)
+        _require(execution['private_git'] != source_private, 'Execution cannot reuse the source private Git directory')
+        def mapped_claims():
+            mapped = []
+            for claim in record['data']['claims']:
+                raw = {key:claim[key] for key in ('kind', 'key', 'mode')}
+                if 'host' in claim: raw['host'] = claim['host']
+                if 'path' in claim:
+                    raw['key'] = claim['path']
+                    if Path(claim['path']).is_relative_to(scope.repository_root):
+                        target = root / Path(claim['path']).relative_to(scope.repository_root)
+                        _require(target.resolve() == target, 'Mapped execution claim contains an unsafe alias')
+                        for ancestor in (target, *target.parents):
+                            if ancestor == root: break
+                            _require(not os.path.lexists(ancestor / '.git'), 'Mapped execution claim enters another repository')
+                        if target.exists() and target.is_file():
+                            _require(target.stat().st_nlink == 1, 'Mapped execution claim contains a hard link')
+                        raw['key'] = str(target)
+                mapped.append(raw)
+            return _claims(mapped)
+        mapped = mapped_claims()
+        checks = record['body']['request']['brief']['checks']
+        _require(all(any(check['id'] == key for check in proof_plan['checks']) for key in checks),
+                 'Worker check identifiers differ from accepted evidence plan')
+        binding = dict(version=1, source_owner=record['owner'], source_candidate_ref=record['data']['candidate'],
+            source_pins=task['pins'], source_plan_ref=record['body']['plan'], evidence_plan_ref=task['evidence']['plan'],
+            supervisor_attempt_id=record['id'], supervisor_assignment_ref=record['data']['assignment'],
+            supervisor_observation_ref=record['data']['observation'], native_supervisor=record['data']['binding'],
+            execution=execution, mapped_claims=mapped, checks=checks, limits=plan['limits'], job=job,
+            supervisor_resource_units=record['data']['resource_units'],
+            settings=dict(scope_id=owner.binding['scope_id'], revision=saved['revision'], consent_version=2),
+            selection_ref=request['selection_ref'])
+        _require(_execution_checkout(root, scope.git_common_dir) == execution,
+                 'Execution checkout changed during binding observation')
+        _require(mapped_claims() == mapped, 'Mapped execution claims changed during binding observation')
+        _require(evidence._digest(evidence.capture_candidate(scope, proof_plan)) == record['data']['candidate']['digest'] and
+                 _git_routing(scope, source_private) == record['body']['git_routing'],
+                 'Source checkout changed during binding observation')
+        _require(source() == first, 'Source task or native supervisor changed during binding observation')
+        owner.check()
+        evidence._bounded(binding)
+    return dict(binding=binding, binding_digest=evidence._digest(binding), revision=task['revision'],
+        execution_id=None, launch_admitted=False, supported_for_dispatch=False,
+        blockers=['Execution candidate equivalence is unqualified', 'Effective execution claims are not reserved',
+                  'External worker/check capacity is not reserved', 'External host stop producer is unqualified'])
 
 
 def _observation_replay(scope, history, incoming):
@@ -1758,6 +2040,12 @@ def _worker_report(scope, record, result):
     return report
 
 
+def _validate_version_provenance(receipt):
+    for key in VERSION_PROVENANCE_FIELDS:
+        if key in receipt:
+            state._text(receipt[key], 'observed ' + key, 256)
+
+
 def _worker_receipt(scope, record, request, observed):
     state._fields(observed, ('receipt', 'result'))
     receipt = observed['receipt']
@@ -1766,8 +2054,9 @@ def _worker_receipt(scope, record, request, observed):
         'parent_turn_id', 'spawn_item_id', 'worker_id', 'worker_turn_id', 'turn_status', 'result_item_id', 'checkout',
         'assignment_digest', 'candidate_digest', 'requested_model', 'requested_effort', 'configured_model',
         'configured_effort', 'spawn_observed_model', 'spawn_observed_effort', 'execution_model', 'execution_effort',
-        'descendants_stopped', 'prompt_delivery', 'result_digest'))
+        'descendants_stopped', 'prompt_delivery', 'result_digest'), VERSION_PROVENANCE_FIELDS)
     binding, data = record['data']['binding'], record['data']
+    _validate_version_provenance(receipt)
     _require(type(receipt['version']) is int and receipt['version'] == 2 and receipt['mechanism'] == 'codex-native-agent-path' and
         all(receipt[key] == value for key, value in binding.items()) and
         all(receipt[key] == request[key] for key in ('parent_turn_id', 'spawn_item_id')) and

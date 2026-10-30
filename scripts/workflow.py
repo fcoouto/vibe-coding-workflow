@@ -13,7 +13,7 @@ PACKAGE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PACKAGE))
 
 
-def control_main():
+def control_main(*, d4_host=None):
     from runtime.startup import MAX_INPUT, StartupError, json_object, resolve_project
 
     class Parser(argparse.ArgumentParser):
@@ -122,7 +122,7 @@ def control_main():
             else:
                 from runtime.changes import apply_plan, resume_plan, rollback_plan
                 operation = {"apply": apply_plan, "resume": resume_plan, "rollback": rollback_plan}
-                report = operation[args.action](Path(args.plan_dir), request)
+                report = operation[args.action](Path(args.plan_dir), request, host=d4_host)
             print(json.dumps(report))
             return report["exit_code"]
         if args.command == "delegation":
@@ -205,14 +205,14 @@ def control_main():
     return 1
 
 
-def main():
+def main(*, d4_host=None):
     control = len(sys.argv) > 1 and sys.argv[1] in {"task", "doctor", "onboard", "evidence", "delegation", "storage"}
     if sys.version_info < (3, 11):
         print(json.dumps({"ok": False, "error": "Vibe Coding Workflow requires Python 3.11+"} if control else
                          {"systemMessage": "Vibe Coding Workflow requires Python 3.11+ on the hook PATH."}))
         return 1 if control else 0
     if control:
-        return control_main()
+        return control_main(d4_host=d4_host)
     requested_event = sys.argv[2] if len(sys.argv) == 3 else None
     from runtime.adapters import claude_code, codex, session_start
     from runtime.engine import HookResult, guarded_mutation

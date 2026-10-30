@@ -63,6 +63,8 @@ class EnrolledUmbrellaAccountingTests(unittest.TestCase):
             identity["configuration"]["policy_digest"], identity["configuration"]["runtime_digest"],
             RuntimeSettings(3, self.storage), identity, onboarding._digest(_canonical_plain(identity)),
             _canonical_freeze(dict(kind="trusted-coordinator", **request["approval"]["evidence"][0])))
+        with state._database(self.scope,write=True,initialize=True) as db:
+            state._checkout_row(db,self.scope,initialize=True)
         state.start_task(self.scope, dict(client="codex", session_id="umbrella", task_id="baseline",
             scope_ref="fixture:published-umbrella", mode="read-only", decision_ref="fixture:internal-scope"))
         context = evidence._evidence_context(self.scope)

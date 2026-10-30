@@ -157,6 +157,24 @@ for line in sys.stdin:
         methods = [json.loads(line)["method"] for line in (self.base / "requests.jsonl").read_text().splitlines()]
         self.assertEqual(methods, ["initialize", "initialized", "hooks/list"])
 
+    def test_cli_0165_discovery_remains_execution_unverified(self):
+        report = self.inspect(self.executable(version="0.165.0"))
+        self.assertEqual(report["native"], {"status": "passed", "version": "0.165.0", "version_evidence": "recorded"})
+        self.assertEqual(report["package"]["status"], "passed")
+        self.assertEqual(report["state"]["status"], "passed")
+        self.assertEqual(report["hooks"]["status"], "passed")
+        self.assertEqual(report["execution"]["status"], "unverified")
+        self.assertEqual(report["execution"]["desktop_loaded_definition"], "unknown")
+
+    def test_current_observer_binary_is_supported_without_claiming_native_execution(self):
+        report = self.inspect(self.executable(version="0.165.0"))
+        self.assertEqual(report["native"], dict(status="passed", version="0.165.0", version_evidence="recorded"))
+        self.assertEqual(report["execution"]["status"], "unverified")
+        self.assertEqual(report["exit_code"], 0)
+        report = self.inspect(self.executable(version="0.165.0-alpha.1.2"))
+        self.assertEqual(report["native"]["status"], "passed")
+        self.assertEqual(report["native"]["version_evidence"], "unrecorded")
+
     def test_disabled_untrusted_and_modified_candidates_fail_separately(self):
         for field, value, expected in (("enabled", False, "disabled"),
                 ("trustStatus", "untrusted", "untrusted"), ("trustStatus", "modified", "modified")):
@@ -201,10 +219,11 @@ for line in sys.stdin:
         self.assertEqual(report["exit_code"], 1)
         self.assertEqual(report["hooks"]["unexpected_count"], 1)
 
-    def test_unknown_version_never_claims_compatibility(self):
+    def test_unrecorded_version_uses_live_contract_checks_without_claiming_execution(self):
         report = self.inspect(self.executable(version="9.999.0"))
-        self.assertEqual(report["exit_code"], 2)
-        self.assertEqual(report["native"]["status"], "unknown_version")
+        self.assertEqual(report["exit_code"], 0)
+        self.assertEqual(report["native"]["status"], "passed")
+        self.assertEqual(report["native"]["version_evidence"], "unrecorded")
         self.assertEqual(report["execution"]["status"], "unverified")
 
     def test_desktop_compound_native_hash_is_preserved_as_opaque_identity(self):
@@ -323,7 +342,7 @@ for line in sys.stdin:
             report = doctor.inspect_runtime(None, self.executable())
         self.assertEqual(report["exit_code"], 1)
         self.assertEqual(report["enrollment"]["status"], "missing")
-        self.assertEqual(report["native"], {"status": "passed", "version": "0.163.0"})
+        self.assertEqual(report["native"], {"status": "observed", "version": "0.163.0", "version_evidence": "recorded"})
         self.assertEqual(report["hooks"]["status"], "requires_enrollment")
         self.assertFalse((self.base / "requests.jsonl").exists())
         self.assertFalse(self.scope.runtime.state_dir.exists())

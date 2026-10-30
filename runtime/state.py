@@ -14,7 +14,7 @@ from types import MappingProxyType
 
 from runtime.engine import HookResult, evaluate, guarded_mutation
 from runtime.startup import (StartupError, AcceptedScope, RuntimeSettings, PROJECT_FILE, json_object, _canonical_plain, _canonical_freeze,
-    _canonical_path, _canonical_binding, _canonical_ref, _canonical_hash)
+    _canonical_path, _canonical_binding, _canonical_ref, _canonical_hash, _budgeted_source_read)
 
 
 SCHEMA_VERSION = 2
@@ -63,11 +63,11 @@ def _runtime_sources():
     return sorted([*(PACKAGE / "runtime").glob("*.py"), *(PACKAGE / "runtime/adapters").glob("*.py"), PACKAGE / "scripts/workflow.py"])
 
 
-def runtime_fingerprint():
+def runtime_fingerprint(*, budget=None):
     """Pin installed runtime sources, dispatcher and adapter contents, by relative path."""
     digest = hashlib.sha256()
     for path in _runtime_sources():
-        digest.update(str(path.relative_to(PACKAGE)).encode() + b"\0" + path.read_bytes() + b"\0")
+        digest.update(str(path.relative_to(PACKAGE)).encode() + b"\0" + _budgeted_source_read(path, budget) + b"\0")
     return digest.hexdigest()
 
 
@@ -293,7 +293,7 @@ def _metadata_record(row):
     name = row[0]
     value = json_object(row[8])
     _fields(value, ("version", "owner", "created_at", "class", "bytes", "status", "closed_at",
-                    "dependencies", "targets", "export", "managed"), ("screening",))
+                    "dependencies", "targets", "export", "managed"), ("screening", "screening_result"))
     if type(value["version"]) is not int or value["version"] not in (1, 2):
         raise StateError("Unsupported evidence metadata")
     owner = value["owner"]
@@ -364,6 +364,29 @@ def _metadata_record(row):
                 or not value["targets"] or value["dependencies"] or value["export"] is not None
                 or value["created_at"] != owner["created_at"]):
             raise StateError("Screening accounting requires its live temporary owner anchor")
+    if "screening_result" in value:
+        pointer = _screening_result(value["screening_result"])
+        if ("screening" not in value or value["screening"]["revision"] != 2
+                or value["screening"]["last_receipt"]["ticket"] != pointer["ticket"]):
+            raise StateError("Screening result requires its exact terminal receipt")
+    return value
+
+
+def _screening_result(value):
+    _fields(value, ("version", "ticket", "plan_directory", "directory_binding", "plan_id", "projection_digest"))
+    if type(value["version"]) is not int or value["version"] != 1:
+        raise StateError("Unsupported screening result")
+    _screening_ticket(value["ticket"])
+    path = _canonical_path(value["plan_directory"])
+    binding = value["directory_binding"]
+    _fields(binding, ("directory", "parents"))
+    _canonical_binding(binding["directory"])
+    _metadata_parents(path, binding["parents"])
+    if set(binding["parents"]) != {str(p) for p in path.parents}:
+        raise StateError("Incomplete screening plan parent bindings")
+    if not isinstance(value["plan_id"], str) or not re.fullmatch(r"[0-9a-f]{32}", value["plan_id"]):
+        raise StateError("Invalid screening plan identity")
+    _canonical_hash(value["projection_digest"])
     return value
 
 
@@ -620,25 +643,30 @@ def _ready_stop_local(context,db,task):
     return dict(proof=proof,bindings=inputs['bindings'],candidate=inputs['candidate'],linked=job)
 
 
-def _ready_stop(context,db,task,*,observe=False):
+def _ready_stop(context,db,task,*,observe=False,read_context=None,read_roster=None):
     from runtime import evidence
+    member=(dict(authority=evidence._canonical_plain(context.authority_set[0]),scope_id=evidence._task_scope_id(task),
+        **{k:task[k] for k in ('client','session_id','task_id')}) if read_context is not None or read_roster is not None else None)
     stop=task.get('writer_stop');_writer_stop_shape(stop)
+    if read_roster is not None:
+        linked=evidence._read(None,stop['linked'],context=context,db=db) if stop.get('linked') else None
+        read_roster=evidence._matching_linked_read_roster(read_roster,linked)
     if stop.get('linked') and task['lifecycle']['safe_closed_at'] is not None:
         linked=evidence._read(None,stop['linked'],context=context,db=db)
         if evidence._linked_component_closed(evidence._linked_basis_root(linked),writer=(context,db)):
-            retained=evidence._linked_retained_component(evidence._linked_basis_root(linked),linked['authorities'],writer=(context,db))
+            retained=evidence._linked_retained_component(evidence._linked_basis_root(linked),evidence._linked_read_authorities(read_context,linked,member=member,writer=(context,db),read_roster=read_roster),writer=(context,db))
             if retained.get('discovered_authorities'):raise StateError('Retained linked stop requires complete source guards')
             own=next(m for m in retained['members'] if m['reference']['authority']==evidence._canonical_plain(context.authority_set[0]) and
                 m['reference']['scope_id']==evidence._task_scope_id(task) and all(m['reference'][key]==task[key] for key in ('client','session_id','task_id')))
             if own['task']!=task or own['preparation']['content']['stopped']['writer_stop']!=stop:raise StateError('Historical linked stop owner changed')
-            return own['preparation']['content']['stopped']['proof']
+            return evidence._finish_linked_read_context(own['preparation']['content']['stopped']['proof'],read_context,read_roster=read_roster)
     inputs=_ready_stop_local_inputs(context,db,task)
     linked=inputs['linked']
     if linked is not None:
-        if evidence._linked_stopped_basis(evidence._linked_basis_root(linked),linked['authorities'],writer=(context,db))!=linked:raise StateError('Linked complete-stop basis changed')
+        if evidence._linked_stopped_basis(evidence._linked_basis_root(linked),evidence._linked_read_authorities(read_context,linked,member=member,writer=(context,db),read_roster=read_roster),writer=(context,db))!=linked:raise StateError('Linked complete-stop basis changed')
     proof=_check_ready_stop_local_inputs(context,db,task,inputs)
-    if observe and linked is None:evidence._ready_stop_candidate(context,task,inputs['candidate'])
-    return proof
+    if observe and linked is None:evidence._ready_stop_candidate(context,task,inputs['candidate'],read_context=read_context,read_roster=read_roster)
+    return evidence._finish_linked_read_context(proof,read_context,read_roster=read_roster)
 
 
 def _retain_ready_stop(scope,request,*,linked_basis=None):
@@ -662,7 +690,7 @@ def _retain_ready_stop(scope,request,*,linked_basis=None):
                 if linked_basis is not None:
                     retained=evidence._read(None,task['writer_stop']['linked'],context=context,db=db)
                     if evidence._linked_basis_root(retained)!=pointer:raise StateError('Ready stop replay common basis changed')
-                _ready_stop(context,db,task,observe=True)
+                _ready_stop(context,db,task,observe=True,read_context=evidence._bind_linked_read_context(pointer,authorities,writer=(context,db),basis=evidence._read(None,task['writer_stop']['linked'],context=context,db=db)) if pointer is not None and task['writer_stop'].get('linked') else None)
                 if task['writer_stop']['request_digest']!=request_digest or task['writer_stop']['proof_digest']!=request['stop_proof']['sha256']:
                     raise StateError('Ready stop replay payload changed')
                 return dict(ok=True,task=task,replayed=True)
@@ -695,14 +723,15 @@ def _retain_ready_stop(scope,request,*,linked_basis=None):
             if linked is not None:
                 dependencies=[dict(kind='artifact',reference=dict(authority=pointer['authority'],artifact=pointer['reference']))]
                 dependencies += [dict(kind='task',reference=row['task']) for row in linked['members']]
-                retained_owner=evidence._LinkedOwner(owner,tuple(_canonical_freeze(d) for d in dependencies))
-                stop['linked']=evidence._artifact(scope,linked,owner=retained_owner,db=db)
+                with evidence._bound_stop_registration(scope,request,context,db,owner,linked,dependencies,
+                        proof,candidate,verification_ref,authorities) as retained_owner:
+                    stop['linked']=evidence._artifact(scope,linked,owner=retained_owner,db=db)
             task=dict(task,writer_stop=stop);_writer_stop_shape(stop)
             raw=json.dumps(task,separators=(',',':'))
             if len(raw.encode())>4*1024*1024:raise StateError('Ready stop exceeds the original task record bound')
             db.execute('update tasks set data=? where scope_id=? and client=? and session_id=? and task_id=?',
                 (raw,_scope_id(scope),task['client'],task['session_id'],task['task_id']))
-            _ready_stop(context,db,task)
+            _ready_stop(context,db,task,read_context=evidence._bind_linked_read_context(pointer,authorities,writer=(context,db),basis=evidence._read(None,task['writer_stop']['linked'],context=context,db=db)) if pointer is not None and task['writer_stop'].get('linked') else None)
             evidence._check_ready_inputs(files)
             if linked is not None and evidence._linked_stop_basis(pointer,authorities)!=linked:raise StateError('Linked stop source changed during registration')
             return dict(ok=True,task=task,replayed=False)
@@ -993,8 +1022,11 @@ def _prepare_directory(directory):
     _private(directory, True)
 
 
-def _initialize(path, *, version=SCHEMA_VERSION, expected_directory=None):
-    _prepare_directory(path.parent)
+def _initialize(path, *, version=SCHEMA_VERSION, expected_directory=None, initialize_metadata=None):
+    if initialize_metadata is None:
+        _prepare_directory(path.parent)
+    else:
+        _private(path.parent, True)
     if version == 3:
         parent_descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
@@ -1018,6 +1050,9 @@ def _initialize(path, *, version=SCHEMA_VERSION, expected_directory=None):
                 database_binding=dict(device=info.st_dev, inode=info.st_ino))
             creation = _AuthorityCreation(_canonical_freeze(authority), _owner_time(), descriptor, _CREATION_ISSUER)
             _check_creation(path, creation)
+            if initialize_metadata is not None:
+                from runtime.changes import _checkpoint
+                _checkpoint('birth-unreceipted')
         else:
             os.close(descriptor)
             descriptor = None
@@ -1032,6 +1067,14 @@ def _initialize(path, *, version=SCHEMA_VERSION, expected_directory=None):
             db.execute('pragma user_version=' + str(version))
             if creation is not None:
                 _check_creation(path, creation, db)
+            if initialize_metadata is not None:
+                initialize_metadata(db, creation)
+                _check_creation(path, creation, db)
+        if creation is not None:
+            os.fsync(creation.descriptor)
+            directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try: os.fsync(directory)
+            finally: os.close(directory)
         return creation
     except BaseException:
         if descriptor is not None:
@@ -1060,7 +1103,7 @@ def _source_baseline(scope, db, *, context=None):
         return None
     reference = dict(name=name, digest=metadata['managed']['sha256'])
     content = evidence._read(None if selected else scope, reference, context=selected, db=db)
-    _fields(content, ('version', 'kind', 'source_contract', 'authority', 'project_id', 'created_at', 'runtime_digest'))
+    _fields(content, ('version', 'kind', 'source_contract', 'authority', 'project_id', 'created_at', 'runtime_digest'), ('birth_expectation',))
     if (type(content['version']) is not int or content['version'] != 1 or content['kind'] != 'authority-source-baseline'
             or type(content['source_contract']) is not int or content['source_contract'] not in (1, 2)
             or content['authority'] != authority or metadata['class'] != 'compact'
@@ -1068,6 +1111,16 @@ def _source_baseline(scope, db, *, context=None):
             or metadata['created_at'] != content['created_at'] or metadata['closed_at'] is not None
             or metadata['targets'] or metadata['export'] is not None):
         raise StateError('Authority source baseline provenance is invalid')
+    if 'birth_expectation' in content:
+        expectation = content['birth_expectation']
+        _fields(expectation, ('version', 'identity', 'intent_digest'))
+        _fields(expectation['identity'], ('plan_dir', 'transaction_id', 'manifest_digest'))
+        if expectation['version'] != 1 or type(expectation['version']) is not int or content['source_contract'] != 2:
+            raise StateError('Unsupported original birth expectation')
+        _canonical_path(expectation['identity']['plan_dir'])
+        _text(expectation['identity']['transaction_id'], 'birth transaction')
+        _canonical_hash(expectation['identity']['manifest_digest'])
+        _canonical_hash(expectation['intent_digest'])
     _canonical_hash(content['runtime_digest'])
     _integer(content['created_at'], 'original authority creation time')
     for dependency in metadata['dependencies']:
@@ -1083,7 +1136,7 @@ def _source_baseline(scope, db, *, context=None):
 
 
 @contextmanager
-def _database(scope, write=False, initialize=False):
+def _database(scope, write=False, initialize=False, *, guard_existing=False):
     db = creation = None
     with ExitStack() as guards:
         try:
@@ -1100,6 +1153,15 @@ def _database(scope, write=False, initialize=False):
                 info = path.parent.lstat()
                 if dict(device=info.st_dev, inode=info.st_ino) != directory_binding:
                     raise StateError('Authority directory changed before bootstrap guard')
+            elif guard_existing and version == 3:
+                if not write:
+                    raise StateError('Existing canonical task guard requires its write transaction')
+                _private(path.parent, True)
+                authority = _authority_identity(path)
+                from runtime.changes import _authority_guards
+                guards.enter_context(_authority_guards([path.parent]))
+                if _authority_identity(path) != authority:
+                    raise StateError('Existing authority physical identity changed before task guard')
             if not os.path.lexists(path):
                 if initialize:
                     try:
@@ -1335,7 +1397,14 @@ def start_task(scope, request):
     if isinstance(scope, AcceptedScope) and request["client"] != scope.client:
         raise StateError("Task client differs from accepted scope")
     pins = _pins(scope)
-    with _database(scope, write=True, initialize=True) as db:
+    if isinstance(scope, AcceptedScope) and not _path(scope).exists():
+        raise StateError('Canonical authority birth requires the owned D4 operation')
+    with _database(scope, write=True, initialize=not isinstance(scope, AcceptedScope),
+                   guard_existing=isinstance(scope, AcceptedScope)) as db:
+        if db is None:
+            raise StateError('Canonical authority is unavailable')
+        if isinstance(scope, AcceptedScope) and _source_baseline(scope, db) is None:
+            raise StateError('Canonical authority original baseline is unavailable')
         scope_id = _scope_id(scope)
         if _retired(db, "task", dict(scope_id=scope_id, **{k:request[k] for k in ("client", "session_id", "task_id")})):
             raise StateError("Retired task identity cannot start again; evidence is unavailable or expired")

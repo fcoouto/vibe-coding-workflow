@@ -527,6 +527,43 @@ class RuntimeAdapterTests(unittest.TestCase):
 
 
 class OnboardingDispatcherTests(unittest.TestCase):
+    def test_same_process_onboarding_forwards_only_explicit_host_keyword(self):
+        import io
+        from scripts import workflow
+        # Identity sentinel checks dispatcher plumbing, not operation authority.
+        host = object()
+        for action in ('apply', 'resume', 'rollback'):
+            report = dict(exit_code=2, state='blocked', qualified=False)
+            with self.subTest(action=action), \
+                    patch.object(sys, 'argv', ['workflow.py', 'onboard', action, '--plan-dir', '/private-plan']), \
+                    patch.object(sys, 'stdin', io.TextIOWrapper(io.BytesIO(b'{}'))), \
+                    patch.object(sys, 'stdout', io.StringIO()) as output, \
+                    patch('runtime.changes.' + action + '_plan', return_value=report) as operation:
+                self.assertEqual(workflow.control_main(d4_host=host), 2)
+                operation.assert_called_once_with(Path('/private-plan'), {}, host=host)
+                self.assertEqual(json.loads(output.getvalue()), report)
+
+    def test_main_preserves_live_host_when_entering_control_dispatch(self):
+        from scripts import workflow
+        host = object()
+        with patch.object(sys, 'argv', ['workflow.py', 'onboard', 'apply']), \
+                patch.object(workflow, 'control_main', return_value=2) as control:
+            self.assertEqual(workflow.main(d4_host=host), 2)
+            control.assert_called_once_with(d4_host=host)
+
+    def test_proposal_json_and_environment_do_not_supply_dispatch_host(self):
+        import io
+        from scripts import workflow
+        request = dict(host='forged', verified_decision='forged', issuer='forged')
+        report = dict(exit_code=2, state='blocked', qualified=False)
+        with patch.object(sys, 'argv', ['workflow.py', 'onboard', 'apply', '--plan-dir', '/private-plan']), \
+                patch.object(sys, 'stdin', io.TextIOWrapper(io.BytesIO(json.dumps(request).encode()))), \
+                patch.object(sys, 'stdout', io.StringIO()), \
+                patch.dict(os.environ, VCW_D4_APPROVED='true', VCW_D4_HOST='forged'), \
+                patch('runtime.changes.apply_plan', return_value=report) as operation:
+            self.assertEqual(workflow.control_main(), 2)
+            operation.assert_called_once_with(Path('/private-plan'), request, host=None)
+
     def test_onboarding_routes_before_enrollment_and_returns_bounded_json_errors(self):
         for args, raw in ((["onboard", "inspect", "--cwd", "/", "--plan-dir", "/uncreated"], b"{}"),
                           (["onboard", "plan", "--plan-dir", "/uncreated"], b"{}"),

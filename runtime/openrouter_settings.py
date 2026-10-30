@@ -116,7 +116,7 @@ class Store:
         raw = onboarding._read_file(self.path, MAX_CONFIG, private=True, expected_binding=identity(before))
         require(signature(self.path.lstat()) == self.snapshot, 'openrouter_configuration_changed')
         record = startup.json_object(raw, limit=MAX_CONFIG)
-        require(set(record) == FIELDS and type(record['version']) is int and record['version'] == 1
+        require(set(record) == FIELDS and type(record['version']) is int and record['version'] in (1, 2)
                 and integer(record['revision']) and record['revision'] > 0
                 and type(record['enabled']) is bool and record['binding'] == self.binding,
                 'invalid_or_changed_openrouter_configuration')
@@ -151,6 +151,8 @@ class Store:
 
     def report(self):
         record = self.record
+        worker = record is not None and 'workers' in record['routes']
+        renewal = worker and record['version'] == 1
         readiness = 'not_configured'
         if record:
             try:
@@ -162,6 +164,9 @@ class Store:
         return dict(ok=True, control_scope='checkout', configured=record is not None,
             revision=record['revision'] if record else 0, enabled=record['enabled'] if record else False,
             routes=record['routes'] if record else [], scope_id=self.binding['scope_id'],
+            consent_version=record['version'] if record else None,
+            worker_capability=('renewal_required' if renewal else 'worktree_edit_and_test') if worker else 'not_applicable',
+            enablement_renewal_required=renewal,
             checkout=str(self.scope.repository_root), local_configuration=readiness,
             connection='not_checked', execution_qualification='not_checked',
             opencode=record['opencode'] if record else None, auth_data=record['auth_data'] if record else None,
@@ -212,9 +217,15 @@ def status(cwd):
 
 
 def operate(cwd, action, request):
+    require(action in ('configure', 'enable', 'disable'), 'invalid_openrouter_action')
     fields = {'expected_revision', 'routes', 'opencode', 'auth_data'} if action == 'configure' else {'expected_revision'}
-    require(isinstance(request, dict) and set(request) == fields and integer(request['expected_revision']),
+    optional = {'consent_version'} if action == 'enable' else set()
+    require(isinstance(request, dict) and fields <= set(request) <= fields | optional
+            and integer(request['expected_revision']),
             'invalid_openrouter_request')
+    if 'consent_version' in request:
+        require(type(request['consent_version']) is int and request['consent_version'] == 2,
+                'invalid_openrouter_consent_version')
     with guard(cwd, write=True, create=action == 'configure') as owner:
         current = owner.record
         revision = current['revision'] if current else 0
@@ -237,11 +248,13 @@ def operate(cwd, action, request):
         else:
             if action == 'disable' and current is None: return owner.report()
             require(current is not None, 'openrouter_not_configured')
+            renew = action == 'enable' and 'workers' in current['routes'] and current['version'] == 1
+            require(not renew or request.get('consent_version') == 2, 'openrouter_worker_consent_required')
             if action == 'enable' and 'workers' in current['routes']:
                 runtime_references(current['opencode'], current['auth_data'])
             wanted = action == 'enable'
-            if current['enabled'] == wanted: return owner.report()
-            updated = dict(current, revision=revision + 1, enabled=wanted)
+            if current['enabled'] == wanted and not renew: return owner.report()
+            updated = dict(current, version=2 if renew else current['version'], revision=revision + 1, enabled=wanted)
         owner.save(updated)
         return owner.report()
 
@@ -257,6 +270,7 @@ def admission(cwd, route, *, store=None, root=None, opencode=None, auth_data=Non
         record = owner.record
         require(record is not None and record['enabled'], 'openrouter_disabled')
         require(route in record['routes'], 'openrouter_route_disabled')
+        require(route != 'workers' or record['version'] == 2, 'openrouter_worker_consent_renewal_required')
         report = owner.report()
         require(report['local_configuration'] == 'ready', 'openrouter_configuration_unavailable')
         require(revision is None or type(revision) is int and revision == record['revision'],

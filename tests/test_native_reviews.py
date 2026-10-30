@@ -30,7 +30,8 @@ class NativeReviewTests(unittest.TestCase):
                            candidate_digest="b" * 64, coverage=["general"], findings=[], limitations=[])
         self.text = json.dumps(self.report)
         self.responses = {
-            "parent": dict(thread=dict(id="parent", cwd=str(self.root), cliVersion="0.163.0")),
+            "parent": dict(thread=dict(id="parent", cwd=str(self.root), cliVersion="0.163.0",
+                                       source="exec", originator="codex_exec")),
             "spawn": dict(data=[dict(turnId="parent-turn", item=dict(
                 id="spawn", type="subAgentActivity", kind="started", agentThreadId="child",
                 agentPath="/root/review_attempt", model="gpt-6-luna", reasoningEffort="medium"))]),
@@ -63,7 +64,7 @@ for line in sys.stdin:
     params = request["params"]
     if mode == "slow":
         time.sleep(30)
-    if method == "initialize": result = {{}}
+    if method == "initialize": result = responses.get("initialize", {{"codexHome": "/private/native", "platformFamily": "unix", "platformOs": "macos", "userAgent": "fixture"}})
     elif method == "thread/read": result = responses[params["threadId"]]
     elif method == "thread/items/read": result = responses["spawn"]
     elif method == "model/list": result = responses.get("catalog_second", responses["catalog"]) if params.get("cursor") else responses["catalog"]
@@ -116,7 +117,7 @@ for line in sys.stdin:
         self.assertEqual(set(methods), {"initialize", "initialized", "thread/read", "thread/items/read",
                                        "thread/turns/list", "thread/items/list"})
 
-    def test_thread_versions_must_match_selected_executable(self):
+    def test_thread_creation_versions_do_not_replace_current_reader_provenance(self):
         for version, other in (("0.163.0", "0.164.0-alpha.11.1"),
                                ("0.164.0-alpha.11.1", "0.163.0")):
             for identity in ("parent", "child"):
@@ -124,8 +125,12 @@ for line in sys.stdin:
                 for matched in ("parent", "child"):
                     responses[matched]["thread"]["cliVersion"] = version
                 responses[identity]["thread"]["cliVersion"] = other
-                with self.subTest(version=version, identity=identity), self.assertRaises(StartupError):
-                    self.collect(responses, version=version)
+                with self.subTest(version=version, identity=identity):
+                    receipt = self.collect(responses, version=version)["receipt"]
+                    self.assertIn("current_observer_version", receipt)
+                    self.assertEqual(receipt["current_observer_version"], version)
+                    self.assertEqual(receipt["parent_creation_version"], responses["parent"]["thread"]["cliVersion"])
+                    self.assertEqual(receipt["worker_creation_version"], responses["child"]["thread"]["cliVersion"])
 
     def test_invalid_native_chains_fail_closed(self):
         cases = []
@@ -156,14 +161,12 @@ for line in sys.stdin:
             with self.subTest(label=label), self.assertRaises(StartupError):
                 self.collect(responses)
 
-    def test_malformed_envelopes_and_unknown_versions_are_not_provenance(self):
+    def test_malformed_envelopes_are_not_provenance(self):
         for text in ("not JSON", '{"version":1,"version":1}', "{}", self.text.replace('"findings": []', '"findings": true')):
             responses = copy.deepcopy(self.responses)
             responses["items"]["data"][0]["item"]["text"] = text
             with self.subTest(text=text), self.assertRaises(StartupError):
                 self.collect(responses)
-        with self.assertRaises(StartupError):
-            self.collect(version="9.999.0")
 
     def test_candidate_rechecked_after_fetch_and_errors_are_sanitized(self):
         module = types.ModuleType("runtime.evidence")
@@ -371,7 +374,7 @@ for line in sys.stdin:
         responses, binding = self.worker_fixture()
         cases = []
         for field, value in (("task_name", "worker_other"), ("attempt_id", "other"),
-                             ("native_version", "other"), ("client_surface", "codex-desktop"),
+                             ("native_version", None), ("client_surface", "codex-desktop"),
                              ("assignment_digest", "bad"), ("candidate_digest", "bad")):
             other = dict(binding, **{field: value})
             cases.append((responses, other, None))
@@ -431,6 +434,25 @@ for line in sys.stdin:
         methods = {json.loads(line)["method"] for line in self.log.read_text().splitlines()}
         self.assertEqual(methods, {"initialize", "initialized", "thread/read", "model/list"})
 
+    def test_reader_update_keeps_capability_digest_but_catalog_or_controls_changes_do_not(self):
+        responses, controls = self.control_fixture()
+        original = self.discover_workers(responses, controls)
+        updated_controls = dict(controls, native_version="9.999.0")
+        updated = self.discover_workers(responses, updated_controls, version="9.999.0")
+        self.assertEqual(original["native_version"], "0.163.0")
+        self.assertEqual(updated["native_version"], "9.999.0")
+        self.assertEqual(updated["capability_digest"], original["capability_digest"])
+        changed = copy.deepcopy(responses)
+        changed["catalog"]["data"][0]["supportedReasoningEfforts"].append(dict(reasoningEffort="xhigh"))
+        self.assertNotEqual(self.discover_workers(changed, updated_controls, version="9.999.0")["capability_digest"],
+                            updated["capability_digest"])
+        changed_controls = copy.deepcopy(updated_controls)
+        changed_controls["dispatch_controls"]["explicit_effort"] = False
+        self.assertNotEqual(self.discover_workers(responses, changed_controls, version="9.999.0")["capability_digest"],
+                            updated["capability_digest"])
+        with self.assertRaises(StartupError):
+            self.discover_workers(responses, controls, version="9.999.0")
+
     def test_discovery_rejects_unqualified_surface_and_malformed_or_unbounded_catalog(self):
         for label in ("desktop", "version", "originator", "control type", "duplicate", "effort", "page loop"):
             responses, controls = self.control_fixture()
@@ -475,8 +497,93 @@ for line in sys.stdin:
             self.discover_workers(responses, controls, version="0.164.0-alpha.11.1")
         controls.update(client_surface="codex-desktop", native_version="0.163.0")
         responses["parent"]["thread"]["cliVersion"] = "0.163.0"
+        self.assertEqual(self.discover_workers(responses, controls, version="0.163.0")["client_surface"], "codex-desktop")
+
+    def current_desktop_fixture(self, fixture):
+        responses, binding = fixture()
+        binding.update(client_surface="codex-desktop", native_version="0.165.0")
+        for identity in ("parent", "child"):
+            responses[identity]["thread"]["cliVersion"] = "0.165.0-alpha.1.2"
+        responses["parent"]["thread"].update(source="vscode", originator="Codex Desktop")
+        return responses, binding
+
+    def test_current_desktop_discovery_distinguishes_observer_from_creation_version(self):
+        responses, controls = self.current_desktop_fixture(self.control_fixture)
+        try:
+            observed = self.discover_workers(responses, controls, version="0.165.0")
+        except StartupError:
+            self.fail("Proven observer/creation version pair was rejected")
+        self.assertEqual(observed["native_version"], "0.165.0")
+        self.assertEqual(observed["client_surface"], "codex-desktop")
+        self.assertEqual(observed["originator"], "Codex Desktop")
+        for field, value in (("cliVersion", None), ("cliVersion", ""),
+                             ("cliVersion", {}), ("source", "exec"),
+                             ("originator", "codex_exec"), ("originator", "Codex desktop"),
+                             ("cwd", "/other")):
+            changed = copy.deepcopy(responses)
+            changed["parent"]["thread"][field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(StartupError):
+                self.discover_workers(changed, controls, version="0.165.0")
+        for reader in ("0.163.0", "0.164.0-alpha.11.1", "0.165.0-alpha.1.2", "9.999.0"):
+            changed = dict(controls, native_version=reader)
+            with self.subTest(reader=reader):
+                self.assertEqual(self.discover_workers(responses, changed, version=reader)["native_version"], reader)
+        controls["client_surface"] = "codex-cli"
         with self.assertRaises(StartupError):
-            self.discover_workers(responses, controls, version="0.163.0")
+            self.discover_workers(responses, controls, version="0.165.0")
+
+    def test_current_desktop_native_chain_requires_exact_identity_with_independent_creation_versions(self):
+        responses, binding = self.current_desktop_fixture(self.worker_fixture)
+        try:
+            receipt = self.observe_worker(responses, binding, version="0.165.0")["receipt"]
+        except StartupError:
+            self.fail("Proven native chain observer/creation version pair was rejected")
+        self.assertEqual(receipt["native_version"], "0.165.0")
+        self.assertEqual(receipt["worker_id"], "child")
+        self.assertEqual(receipt["turn_status"], "completed")
+        for creation in ("0.165.0", "0.163.0", "9.999.0-alpha.42"):
+            changed = copy.deepcopy(responses)
+            changed["child"]["thread"]["cliVersion"] = creation
+            with self.subTest(creation=creation):
+                receipt = self.observe_worker(changed, binding, version="0.165.0")["receipt"]
+                self.assertEqual(receipt["worker_creation_version"], creation)
+        for field, value in (("cliVersion", None), ("cliVersion", ""),
+                             ("cliVersion", "line\nbreak"), ("cwd", "/other"),
+                             ("parentThreadId", "other")):
+            changed = copy.deepcopy(responses)
+            changed["child"]["thread"][field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(StartupError):
+                self.observe_worker(changed, binding, version="0.165.0")
+        changed = copy.deepcopy(responses)
+        changed["spawn"]["data"][0]["item"]["agentPath"] = "/root/worker_other"
+        with self.assertRaises(StartupError):
+            self.observe_worker(changed, binding, version="0.165.0")
+        changed = copy.deepcopy(responses)
+        changed["turns_second"] = dict(data=[dict(id="other", status="completed", error=None)])
+        with self.assertRaises(StartupError):
+            self.observe_worker(changed, binding, version="0.165.0")
+
+    def test_current_desktop_d5_review_uses_proven_creation_pair_and_exact_surface(self):
+        responses, _ = self.current_desktop_fixture(lambda: (copy.deepcopy(self.responses), {}))
+        try:
+            observed = self.collect(responses, version="0.165.0")
+        except StartupError:
+            self.fail("Proven D5 observer/creation version pair was rejected")
+        self.assertEqual(observed["report"], self.report)
+        self.assertEqual(observed["receipt"]["native_version"], "0.165.0")
+        for field, value in (("source", "exec"), ("originator", "codex_exec"), ("cliVersion", None)):
+            changed = copy.deepcopy(responses)
+            changed["parent"]["thread"][field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(StartupError):
+                self.collect(changed, version="0.165.0")
+
+    def test_d5_review_rejects_consistent_surface_switch_from_admitted_binding(self):
+        responses, _ = self.current_desktop_fixture(lambda: (copy.deepcopy(self.responses), {}))
+        binding = dict(self.binding, native_version="0.165.0", client_surface="codex-desktop")
+        self.assertEqual(self.collect(responses, binding=binding, version="9.999.0")["report"], self.report)
+        responses["parent"]["thread"].update(source="exec", originator="codex_exec")
+        with self.assertRaises(StartupError):
+            self.collect(responses, binding=binding, version="9.999.0")
 
     def test_cli_surface_requires_exact_observed_standalone_exec_tuple(self):
         responses, controls = self.control_fixture()
@@ -501,8 +608,36 @@ for line in sys.stdin:
         for version in ("0.164.0-alpha.11.1", "9.999.0"):
             controls["native_version"] = version
             responses["parent"]["thread"]["cliVersion"] = version
-            with self.subTest(version=version), self.assertRaises(StartupError):
-                self.discover_workers(responses, controls, version=version)
+            with self.subTest(version=version):
+                self.assertEqual(self.discover_workers(responses, controls, version=version)["native_version"], version)
+
+    def test_updated_reader_keeps_admitted_worker_and_review_versions_without_rebinding(self):
+        responses, binding = self.current_desktop_fixture(self.worker_fixture)
+        responses["child"]["thread"]["cliVersion"] = "0.166.0-alpha.1"
+        try:
+            receipt = self.observe_worker(responses, binding, version="9.999.0")["receipt"]
+        except StartupError:
+            self.fail("Reader update rejected the unchanged admitted assignment")
+        self.assertEqual(receipt["native_version"], "0.165.0")
+        self.assertEqual(receipt["current_observer_version"], "9.999.0")
+        self.assertEqual(receipt["parent_creation_version"], "0.165.0-alpha.1.2")
+        self.assertEqual(receipt["worker_creation_version"], "0.166.0-alpha.1")
+        self.assertEqual(receipt["assignment_digest"], binding["assignment_digest"])
+        self.assertEqual(receipt["worker_id"], "child")
+        responses, _ = self.current_desktop_fixture(lambda: (copy.deepcopy(self.responses), {}))
+        binding = dict(self.binding, native_version="0.165.0")
+        receipt = self.collect(responses, binding=binding, version="9.999.0")["receipt"]
+        self.assertEqual(receipt["native_version"], "0.165.0")
+        self.assertEqual(receipt["current_observer_version"], "9.999.0")
+
+    def test_live_initialization_contract_rejects_missing_malformed_or_changed_shapes(self):
+        for initialized in ({}, {"codexHome": "/private/native"},
+                dict(codexHome=True, platformFamily="unix", platformOs="macos", userAgent="fixture"),
+                dict(codexHome="/private/native", platformFamily="unix", platformOs="macos", userAgent="")):
+            responses, binding = self.worker_fixture()
+            responses["initialize"] = initialized
+            with self.subTest(initialized=initialized), self.assertRaises(StartupError):
+                self.observe_worker(responses, binding)
 
     def test_provider_metadata_preserves_unknown_and_differing_native_values(self):
         discovered = self.discover_workers()
