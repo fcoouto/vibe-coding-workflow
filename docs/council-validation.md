@@ -445,3 +445,19 @@ that a source-supported correction will work, or that free routes will deliver a
 complete verdict before the original deadline. No endpoint inference, paid canary,
 account/auth change, dependency upgrade, release archive or comparative evaluation
 was performed. Existing historical operational results above remain unchanged.
+
+Final pilot verification passed **32 recovery tests** after independent review fixes.
+An earlier compatibility run passed 148 Council/worker tests; after the first
+review fixes, all 29 then-existing recovery cases plus six selected compatibility
+cases passed together. These overlapping runs must not be added. The coordinator
+independently passed package validation and the actual synthetic CLI verdict and
+correction-limit cases. Independent task and whole-pilot reviews closed preparation
+contention, retained coherent-generation fallback and terminal correction-outcome
+learning findings; scoped re-reviews found no new material regression. Failed
+corrections now settle privately even after deadlines/cancellation, and native
+accepted/rejected corrected receipts use the same verified outcome path.
+
+The implementation plan is complete. Source and proof are retained on the Council
+branch; no live endpoint qualification or comparative evaluation was added. The
+known unrelated broad-suite baseline was not repaired; an unnecessary discovery
+run was stopped and is not represented as a passing suite.
