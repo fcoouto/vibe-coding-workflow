@@ -8,7 +8,7 @@ Implementation plan · 26 October 2026 · **Original scope approved for implemen
 
 **Basis:** [D3 plan](d3-onboarding-plan.md), [Project Onboarding policy](../policies/10-project-onboarding.md), [approved deliverable](onboard-my-project-plan.md#5-small-deliverables), [source coverage](policy-sources.md), and OpenAI's installed `skill-creator` standard. Keep the entry skill concise and load apply/recovery details only when needed. Runtime uses Python 3.11+ and the standard library.
 
-Current D4 explicitly rejects schema-2 private Project plans immediately after loading, before transaction validation, worktree locks or journal creation. This protects the existing schema-1 transaction path; it does not deliver Project adoption or schema-2 enrollment.
+Current D4 admits schema-2 private Project plans only through a live same-process coordinator host carrying an independently verified, exact decision. This bounded slice supports update/recovery with complete existing schema-3 authorities and original source-contract-2 baselines. Fresh state birth and normal task-entry integration remain unfinished. Bare CLI, absent/copied/expired hosts and incomplete authority coverage cannot start a transaction. Configured but unobserved apply/resume remains pending; schema-1 behavior is preserved.
 
 ## Scope and reuse
 

@@ -124,7 +124,7 @@ def _git(root, *args, limit=None, deadline=None):
     return read_git(root, *args, limit=MAX_FILE if limit is None else min(MAX_FILE, limit), deadline=deadline)
 
 
-def _plan_path(value):
+def _plan_path(value, *, create=True):
     _require(os.name == "posix", "Onboarding requires a qualified POSIX filesystem")
     path = Path(value)
     _require(path.is_absolute() and str(path.resolve()) == str(path),
@@ -140,6 +140,7 @@ def _plan_path(value):
     code, _ = _git(existing, "-c", "safe.bareRepository=all", "rev-parse", "--absolute-git-dir")
     _require(code != 0, "Plan directory must be outside repositories")
     if not path.exists():
+        _require(create, "An existing private reviewed plan is required")
         _require(path.parent.is_dir(), "Plan directory parent must exist")
         path.mkdir(mode=0o700)
     _private(path.stat(), directory=True)
