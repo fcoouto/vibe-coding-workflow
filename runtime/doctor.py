@@ -17,7 +17,14 @@ PACKAGE = Path(__file__).resolve().parents[1]
 RPC_TIMEOUT = 5
 TOTAL_TIMEOUT = 15
 MAX_OUTPUT = 512 * 1024
-KNOWN_VERSIONS = {"0.163.0", "0.164.0-alpha.11.1", "0.165.0"}
+# Historical observations only; live protocol checks determine support for any version.
+# Observer binary, recorded thread creation version, client surface, source, originator.
+NATIVE_COMPATIBILITY = {
+    ("0.163.0", "0.163.0", "codex-cli", "exec", "codex_exec"),
+    ("0.164.0-alpha.11.1", "0.164.0-alpha.11.1", "codex-desktop", "vscode", "Codex Desktop"),
+    ("0.165.0", "0.165.0-alpha.1.2", "codex-desktop", "vscode", "Codex Desktop"),
+}
+KNOWN_VERSIONS = {pair[0] for pair in NATIVE_COMPATIBILITY}
 HASH = re.compile(r"sha256:[0-9a-f]{64}(?:/sha256:[0-9a-f]{64})?\Z")
 SOURCES = {"system", "user", "project", "mdm", "sessionFlags", "plugin", "cloudRequirements",
            "cloudManagedConfig", "legacyManagedConfigFile", "legacyManagedConfigMdm", "unknown"}
@@ -132,15 +139,21 @@ def version(executable, deadline):
         child.close()
 
 
+def validate_initialize(response):
+    for field in ("codexHome", "platformFamily", "platformOs", "userAgent"):
+        value = response.get(field)
+        if (not isinstance(value, str) or not value.strip() or len(value) > 4096
+                or any(not char.isprintable() for char in value)):
+            raise ObservationError("malformed_response")
+
+
 def discover(executable, cwd, deadline):
     child = NativeProcess([str(executable), "app-server", "--listen", "stdio://"], deadline)
     try:
         initialized = child.request(1, "initialize", {
             "clientInfo": {"name": "vibe-workflow-doctor", "version": "1"},
             "capabilities": {"experimentalApi": True}})
-        if any(not isinstance(initialized.get(field), str) for field in
-               ("codexHome", "platformFamily", "platformOs", "userAgent")):
-            raise ObservationError("malformed_response")
+        validate_initialize(initialized)
         child.send({"method": "initialized"})
         return child.request(2, "hooks/list", {"cwds": [str(cwd)]})
     finally:
@@ -267,10 +280,11 @@ def inspect_runtime(scope, executable):
             failed = True
     try:
         observed = version(executable, deadline)
-        report["native"] = {"status": "passed" if observed in KNOWN_VERSIONS else "unknown_version", "version": observed}
-        incomplete |= observed not in KNOWN_VERSIONS
+        report["native"] = {"status": "observed", "version": observed,
+                            "version_evidence": "recorded" if observed in KNOWN_VERSIONS else "unrecorded"}
         if scope is not None:
             response = discover(executable, scope.repository_root, deadline)
+            report["native"]["status"] = "passed"
             if definitions is not None:
                 report["hooks"] = inspect_hooks(response, scope, definitions)
                 failed |= report["hooks"]["status"] == "failed"

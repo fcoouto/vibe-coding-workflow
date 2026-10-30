@@ -43,6 +43,10 @@ def _applicability(value):
     _require(_hex(value["capability_fingerprint"]), "Invalid guidance capability fingerprint")
 
 
+def _compatible_applicability(left, right):
+    return left["capability_fingerprint"] == right["capability_fingerprint"]
+
+
 def _common(request, required=(), optional=()):
     evidence._bounded(request, MAX_GUIDANCE)
     state._fields(request, ("client_surface", "applicability", *required), optional)
@@ -73,9 +77,9 @@ def _guidance(value, request):
     state._fields(value, ("schema_version", "client_surface", "checked_at", "applicability", "sources", "recommendations"))
     _require(type(value["schema_version"]) is int and value["schema_version"] == GUIDANCE_VERSION,
              "Unsupported guidance schema")
-    _require(value["client_surface"] == request["client_surface"] and
-             value["applicability"] == request["applicability"], "Guidance applicability changed")
     _applicability(value["applicability"])
+    _require(value["client_surface"] == request["client_surface"] and
+             _compatible_applicability(value["applicability"], request["applicability"]), "Guidance applicability changed")
     _checked(value["checked_at"])
     sources = value["sources"]
     _require(isinstance(sources, list) and 1 <= len(sources) <= 16, "Invalid guidance sources")
@@ -276,7 +280,7 @@ def _closure_guidance_cache_inputs(context,db,surfaces):
         _require(control['generation']>0,'Current guidance control generation is unavailable')
         # Failed refresh keys bind attempted applicability, not the preserved historical snapshot.
         if control['last_attempt']['outcome']=='verified':
-            _require(control['last_attempt']['key']==_key(dict(applicability=current['applicability']),
+            _require(control['last_attempt']['key'] in _keys(dict(applicability=current['applicability']),
                 hashlib.sha256(raw[str(paths[0])]).hexdigest(),True),'Current guidance control/source correspondence changed')
         _require(all(evidence._closure_file_stat(path)==before[str(path)] and _read_bytes(path)==raw[str(path)] for path in paths)
             and evidence._binding(folder)==folder_binding,'Guidance cache changed during owner observation')
@@ -391,8 +395,8 @@ def _closure_guidance_assembly(inputs):
         if discovery is None:discovery=inputs['bodies'][evidence._raw(body['discovery']).decode()]
         guidance=body['guidance'];state._fields(guidance,('snapshot_ref','snapshot_digest','checked_at','freshness'))
         surface=body['binding']['client_surface'];original=source(guidance['snapshot_ref']);surfaces.add(surface)
-        _require(original['guidance']['client_surface']==surface and original['guidance']['applicability']==
-            dict(client_version=discovery['native_version'],capability_fingerprint=discovery['capability_digest']),
+        _require(original['guidance']['client_surface']==surface and _compatible_applicability(original['guidance']['applicability'],
+            dict(client_version=discovery['native_version'],capability_fingerprint=discovery['capability_digest'])),
             'Guidance applicability changed')
         _require(guidance['snapshot_digest']==guidance['snapshot_ref']['digest'] and guidance['checked_at']==original['guidance']['checked_at'],
             'Original native guidance correspondence changed')
@@ -497,7 +501,14 @@ def _trigger(value):
 
 
 def _key(request, prior, snapshot_valid):
-    return evidence._digest(dict(applicability=request["applicability"], prior=prior, snapshot_valid=snapshot_valid))
+    return evidence._digest(dict(applicability=dict(capability_fingerprint=request["applicability"]["capability_fingerprint"]),
+        prior=prior, snapshot_valid=snapshot_valid))
+
+
+def _keys(request, prior, snapshot_valid):
+    # Retain exact legacy control/source correspondence without rewriting stored history.
+    return {_key(request, prior, snapshot_valid), evidence._digest(dict(applicability=request["applicability"],
+        prior=prior, snapshot_valid=snapshot_valid))}
 
 
 def _status(scope, folder, control, request):
@@ -505,8 +516,11 @@ def _status(scope, folder, control, request):
     claim = control["claim"] if control else None
     active = claim is not None and claim["expires_at"] > _now()
     attempt = control["last_attempt"] if control else None
-    failed = attempt is not None and attempt["outcome"] == "failure" and attempt["key"] == _key(request, prior, guidance is not None)
-    compatible = guidance is not None and guidance["applicability"] == request["applicability"]
+    compatible = guidance is not None and _compatible_applicability(guidance["applicability"], request["applicability"])
+    keys = _keys(request, prior, guidance is not None)
+    if compatible:
+        keys.update(_keys(dict(applicability=guidance["applicability"]), prior, True))
+    failed = attempt is not None and attempt["outcome"] == "failure" and attempt["key"] in keys
     freshness = "unavailable" if guidance is None else "incompatible" if not compatible else "stale" if failed else "verified"
     profiles = request.get("profile_ids", [])
     result = dict(client_surface=request["client_surface"], applicability=request["applicability"], freshness=freshness,
@@ -515,7 +529,7 @@ def _status(scope, folder, control, request):
         snapshot_digest=reference["digest"] if reference else None,
         recommendations=[profile for profile in guidance["recommendations"] if profile["id"] in profiles]
                         if compatible else [], limitations=list(GUIDANCE_LIMITATIONS))
-    return result, prior
+    return result, prior, keys
 
 
 def guidance_status(scope, request):
@@ -534,12 +548,12 @@ def claim_guidance(scope, request):
     lease = request.get("lease_seconds", 120)
     _require(type(lease) is int and 1 <= lease <= 600, "Invalid guidance claim lease")
     with _locked(scope, request, create=True) as (folder, control):
-        result, prior = _status(scope, folder, control, request)
+        result, prior, keys = _status(scope, folder, control, request)
         if result["refresh_in_progress"]:
             return result | dict(claimed=False)
         expired = control["claim"] is not None
         attempt = control["last_attempt"]
-        same = attempt is not None and attempt["key"] == _key(request, prior, result["snapshot_ref"] is not None)
+        same = attempt is not None and attempt["key"] in keys
         trigger = request["trigger"]
         if not expired and ((trigger["kind"] == "routine" and not result["refresh_needed"]) or
                             (trigger["kind"] != "routine" and same and trigger == attempt["trigger"])):
@@ -562,12 +576,13 @@ def record_guidance(scope, request):
     state._integer(request["generation"], "guidance generation", 1)
     if "guidance" in request:
         _guidance(request["guidance"], request)
+        _require(request["guidance"]["applicability"] == request["applicability"], "Guidance publication applicability changed")
     else:
         state._text(request["failure"], "guidance failure", 1024)
     with _locked(scope, request) as (folder, control):
         _require(control is not None, "Guidance refresh claim is unavailable")
         claim = control["claim"]
-        result, prior = _status(scope, folder, control, request)
+        result, prior, _ = _status(scope, folder, control, request)
         _require(claim is not None and claim["token"] == request["token"] and
                  claim["generation"] == request["generation"] and claim["expires_at"] > _now() and
                  claim["applicability"] == request["applicability"] and claim["prior"] == prior,
@@ -591,6 +606,7 @@ def record_guidance(scope, request):
 
 # Admission coordinates participating owners; it cannot restrict native tools or external writers.
 ADMISSION_VERSION = 1
+VERSION_PROVENANCE_FIELDS = ('current_observer_version', 'parent_creation_version', 'worker_creation_version')
 MAX_ASSIGNMENTS = 4096
 MAX_CLAIMS = 64
 MAX_JOBS = 32
@@ -2017,6 +2033,12 @@ def _worker_report(scope, record, result):
     return report
 
 
+def _validate_version_provenance(receipt):
+    for key in VERSION_PROVENANCE_FIELDS:
+        if key in receipt:
+            state._text(receipt[key], 'observed ' + key, 256)
+
+
 def _worker_receipt(scope, record, request, observed):
     state._fields(observed, ('receipt', 'result'))
     receipt = observed['receipt']
@@ -2025,8 +2047,9 @@ def _worker_receipt(scope, record, request, observed):
         'parent_turn_id', 'spawn_item_id', 'worker_id', 'worker_turn_id', 'turn_status', 'result_item_id', 'checkout',
         'assignment_digest', 'candidate_digest', 'requested_model', 'requested_effort', 'configured_model',
         'configured_effort', 'spawn_observed_model', 'spawn_observed_effort', 'execution_model', 'execution_effort',
-        'descendants_stopped', 'prompt_delivery', 'result_digest'))
+        'descendants_stopped', 'prompt_delivery', 'result_digest'), VERSION_PROVENANCE_FIELDS)
     binding, data = record['data']['binding'], record['data']
+    _validate_version_provenance(receipt)
     _require(type(receipt['version']) is int and receipt['version'] == 2 and receipt['mechanism'] == 'codex-native-agent-path' and
         all(receipt[key] == value for key, value in binding.items()) and
         all(receipt[key] == request[key] for key in ('parent_turn_id', 'spawn_item_id')) and

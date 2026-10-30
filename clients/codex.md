@@ -20,6 +20,8 @@ Codex 0.163.0 and desktop-bundled 0.164.0-alpha.11.1 discover these hooks only w
 
 Package validation and fixture tests establish package behavior only. They do not establish native execution or qualification.
 
+Native observation follows [capability-based compatibility](../policies/11-tool-integrations.md#qualify-the-actual-workflow). The adapter validates initialization, required responses, client surface and execution lineage on each operation. Unknown release numbers and different thread creation versions do not establish incompatibility. `doctor` reports historical version evidence separately from live discovery and leaves actual execution unverified.
+
 For client qualification, install the reviewed package into a disposable Codex environment, inspect its exact definition with `/hooks` or `hooks/list`, trust that definition, and observe startup in an enrolled fixture and an unrelated repository. Verify changed/untrusted definitions remain skipped. Record the executable version, surface, package digest and observed output. CLI or app-server evidence does not establish desktop UI behavior or an agent's policy compliance.
 
 The [official hook contract](https://learn.chatgpt.com/docs/hooks) defines payloads and trust; [plugin packaging](https://developers.openai.com/plugins/build/plugins#hooks) defines registration and `PLUGIN_ROOT`. Installing the plugin does not grant hook trust.
