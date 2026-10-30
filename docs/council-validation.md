@@ -498,3 +498,53 @@ Private original results, briefs, frozen packets, sessions, status, scope hashes
 parallel observation and audit inventory are retained under this plan's
 `live/` evidence workspace. No credentials/private repository content were supplied,
 no permission was broadened, and comparative evaluation remains deferred.
+
+## Live controlled workaround and fallback, 30 October 2026
+
+The user requested live recovery validation after the successful normal-path test.
+A new Free version-3 run on `e410645` reused the same enrolled disposable scope,
+392-byte approved source, qualified binary/profile, pinned routes, maximum/default
+reasoning and original 1200-second ceiling. No product code or account settings
+changed. The three seat supervisors worked independently.
+
+The exercise deliberately sent SIGINT to exact owned CLI processes after real
+model-issued tool completions. **Three controlled interruptions** occurred; no
+provider response, result state or missing-model failure was fabricated.
+
+- **Workaround passed:** Inkling Small stopped after the initial interruption;
+  its source-backed fresh-connection correction produced an independently accepted
+  report in a distinct real session with the same model/provider/settings.
+- **Fallback passed:** Inkling's original and corrected workflows were deliberately
+  interrupted. No second distinct remedy was justified. The guarded approved free
+  Nemotron Ultra replacement completed both investigation and critique.
+- **Parallel preservation passed:** the untouched Nemotron 3.5 Super VL seat was
+  accepted while the other two seats researched/recovered, and remained accepted.
+- **Full Council passed:** 3/3 investigations, 3/3 critiques and 1/1 fresh synthesis
+  accepted at **656.595 seconds**. All **10 distinct real external sessions**
+  remained recorded: seven accepted contributions and three unresolved interrupted
+  attempts. All participant processes and seven native supervisors were observed
+  stopped; no stop requests remained.
+
+Both bounded investigations read one applicable official streaming page, performed
+zero searches, and finished in **65.079/65.170 seconds**. Two guarded correction
+operations and one replacement consumed the original budget. Applicable guidance
+was checked by the coordinator; speculative extra fixes were not invented.
+A real pre-dispatch operation-busy condition also occurred during control-seat
+critique. The coordinator verified the original CLI had exited with no model owner
+reserved, prepared the first exact owner, and resumed it without duplicate inference.
+
+Known client-reported external subtotal was **0 USD**; total remained **unknown**
+because interrupted requests lacked complete accounting. Native host usage is
+separate; local stops do not prove upstream cancellation or billing cessation.
+Two provisional successful same-model correction outcomes (investigation/critique)
+were observed in the disposable scope's private history. Unresolved imposed
+interruptions were not mislabeled as verified natural-provider failure learning.
+
+This establishes live recovery and replacement mechanics with useful real model
+contributions under controlled interruption. It does **not** establish a remedy
+for a naturally occurring provider outage, TLS fault or schema mismatch. The second
+Inkling interruption intentionally prevented completion and does not show that
+the workaround naturally fails for that model. Comparative evaluation remains
+deferred. Original source/frozen hashes, injection audits, research/correction
+records, retained results, complete status and SHA256 inventory remain under this
+plan's private `live-recovery-exercise/` evidence directory.
