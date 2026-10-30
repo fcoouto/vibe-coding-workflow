@@ -24,6 +24,29 @@ and test representative decisions as well as package structure. The earlier paid
 qualification remains historical evidence; this amendment adds no live inference
 qualification, model replacement or comparative evaluation.
 
+The user-approved [Council runtime recovery design](superpowers/specs/2026-10-30-council-runtime-recovery-design.md)
+and its 120-second clarification amend newly prepared recovery-enabled runs only:
+
+| Approved recovery requirement | Local contract and proof |
+| --- | --- |
+| One investigation per candidate tenure; at most 120 seconds excluding application, 3 searches/5 page reads; two distinct source-supported corrections; three replacements per original seat across phases/restarts | Common procedure's version-3 recovery action/schema/limit contract; `council_recovery` guarded state and recovery behavior tests prove expiry, application after research closure, duplicate fixes, fourth replacement and durable counters |
+| Same selected group, canonical independence, maximum/default reasoning, pinned providers, approved transmission and original phase/seat/spending envelope | Common preparation/shortlist/selection contract; original eligibility validator reused for every predeclared replacement; atomic claim, Free/paid rejection, canonical alias, deadline and request-representation checks |
+| Isolated parallel native supervisors, capacity for participants, no substantive native Free fallback, coordinator verification, actual progress and cleanup | Codex isolated supervisor brief and common ownership procedure; actual two-process synthetic overlap plus CLI recovery-to-verdict fixture; normal host verification and exact supervisor stop/cancel tests |
+| Immutable attempt ownership, lost-response reconciliation, all-prior-owner phase barriers, cancellation/admission checks, nullable aggregate cost across every generation/attempt | Common supervisor/recovery/status contract; existing guards plus v3 history; lost packet, uncertain owner, before-spawn failure, replaced native receipt, reused sessions and all-attempt accounting checks |
+| Independent critic catch-up, batched immutable critique generations, superseded evidence excluded, coherent reduced panel at deadline and fresh synthesis-only chair replacement using original allowance | Common phase recovery contract; generation rebuild, deadline reduced-panel and synthesis role-transfer tests; separate role bindings and retained immutable generation hashes |
+| Bounded private source-backed learning with exact route/profile/configuration matching; provisional success, failure invalidation, no permissions from support text | Common learning/security contract; existing private-file locking/atomic helpers reused beside discovery; malicious correction rejection, expired sources and failed-correction reuse tests |
+| Preserve safe transport facts and original assistant text; final-step report separation; do not claim malformed final text was repaired or a uniform marker denial was established | Executor machine-code projection and v3 final-response fixture; common procedure explicitly discloses unchanged read/grep marker inconsistency. Pinned [grep permissions](https://github.com/anomalyco/opencode/blob/v1.19.5/packages/opencode/src/tool/grep.ts) apply to the pattern, so an ignore rule is not accepted as a security boundary. |
+
+Pinned [provider output-limit transformation](https://github.com/anomalyco/opencode/blob/v1.19.5/packages/opencode/src/provider/transform.ts)
+and [request preparation](https://github.com/anomalyco/opencode/blob/v1.19.5/packages/opencode/src/session/llm.ts)
+support the sole bounded `output_limit_only` representation. Local fixtures prove
+configuration preservation; no new endpoint wire or permission qualification is
+claimed. [Retry policy](https://github.com/anomalyco/opencode/blob/v1.19.5/packages/opencode/src/session/retry.ts)
+remains five internal retries per failing stream, distinct from Council corrections.
+Context7 was consulted for current tool/config context; pinned source governs this
+adapter. OpenAI skill-creator guided progressive disclosure and representative
+instruction-path review. Routine loading requires none of these authoring sources.
+
 The user-approved [Council groups design](superpowers/specs/2026-10-30-council-groups-design.md)
 extends selection and execution without a fixed roster or ranking engine:
 

@@ -51,15 +51,19 @@ def main():
             raise ValueError('invalid_council_arguments')
     try:
         parser = Parser(description=__doc__)
-        parser.add_argument('action', choices=('prepare', 'member', 'resume-member', 'record-native', 'verify-external', 'status', 'cancel'))
+        parser.add_argument('action', choices=('prepare', 'member', 'resume-member', 'record-native', 'verify-external', 'status', 'cancel',
+            'investigate-failure', 'record-investigation', 'correct-candidate', 'replace-candidate', 'publish-generation', 'record-supervisor'))
         parser.add_argument('--cwd', type=Path, required=True)
         args = parser.parse_args()
         request = onboarding.read_request(sys.stdin.buffer.read(council.REQUEST_LIMIT + 1), council.REQUEST_LIMIT)
         if args.action == 'prepare':
             result = council.prepare(args.cwd, request)
         else:
-            expected = {'run'} if args.action in ('status', 'cancel') else {'run', 'phase', 'member'}
+            expected = {'run'} if args.action in ('status', 'cancel', 'publish-generation') else {'run', 'phase', 'member'}
             if args.action == 'record-native': expected.add('receipt')
+            for action, field in (('record-investigation', 'evidence'), ('correct-candidate', 'correction'),
+                                  ('replace-candidate', 'seat'), ('record-supervisor', 'supervisor')):
+                if args.action == action: expected.add(field)
             if args.action == 'verify-external': expected |= {'disposition', 'checks'}
             council._require(expected <= set(request) and not set(request) - expected - ({'native_receipt'} if args.action == 'member' else set()), 'invalid_council_request')
             report = settings.status(args.cwd)
@@ -72,6 +76,14 @@ def main():
                           council.packet(run, request['phase'], request['member'], native_receipt=request.get('native_receipt')))
                 if result['kind'] == 'external':
                     result = _execute(run, request['phase'], result, report)
+            elif args.action == 'publish-generation':
+                result = council.publish_generation(run)
+            elif args.action == 'investigate-failure':
+                result = council.investigate_failure(run, request['phase'], request['member'])
+            elif args.action in ('record-investigation', 'correct-candidate', 'replace-candidate', 'record-supervisor'):
+                field = {'record-investigation': 'evidence', 'correct-candidate': 'correction',
+                         'replace-candidate': 'seat', 'record-supervisor': 'supervisor'}[args.action]
+                result = getattr(council, args.action.replace('-', '_'))(run, request['phase'], request['member'], request[field])
             elif args.action == 'verify-external':
                 result = council.verify_external(run, request['phase'], request['member'], request['disposition'], request['checks'])
             elif args.action == 'record-native':

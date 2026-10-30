@@ -38,7 +38,8 @@ PREREQUISITE_REASONS = BUSY_REASONS | {
     'malformed_event', 'unterminated_event'}
 ERROR_CLASSES = {'ContentFilterError': 'policy', 'ContextOverflowError': 'context'}
 TERMINAL_REASONS = {'length', 'content-filter', 'content_filter', 'stop', 'tool-calls', 'unknown', 'error'}
-FAILURE_CATEGORIES = {'context', 'policy', 'unknown', 'authentication', 'budget', 'permission',
+TRANSPORT_CODES = {'EPROTO', 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN'}
+FAILURE_CATEGORIES = {'transport', 'context', 'policy', 'unknown', 'authentication', 'budget', 'permission',
     'rate_limit', 'service', 'invalid_request', 'runtime', 'incomplete_output', 'deadline',
     'integration', 'runtime_or_output', 'interrupted'}
 
@@ -48,7 +49,7 @@ def safe_failure(value):
     if not isinstance(value, dict): return None
     category = value.get('category')
     result = {'category': category if isinstance(category, str) and category in FAILURE_CATEGORIES else 'unknown'}
-    allowed = {'error_class': set(ERROR_CLASSES), 'router_code': {'content_policy_violation', 'refusal'},
+    allowed = {'error_code': TRANSPORT_CODES, 'failure_layer': {'transport'}, 'error_class': set(ERROR_CLASSES), 'router_code': {'content_policy_violation', 'refusal'},
                'terminal_reason': TERMINAL_REASONS, 'launch_stage': {'before_spawn', 'spawn', 'launched'},
                'reason': PREREQUISITE_REASONS,
                'limit_source': {'openrouter_credits', 'openrouter_key_limit', 'openrouter_in_flight_budget',
@@ -151,6 +152,17 @@ def _council_contract(brief):
     council = brief['council']
     grouped = isinstance(council, dict) and 'group' in council
     fields = {'run_id', 'phase', 'member_id'} | ({'group', 'chair'} if grouped else set())
+    recovery = isinstance(council, dict) and 'recovery_version' in council
+    if recovery:
+        fields |= {'recovery_version', 'candidate_id', 'attempt_id', 'generation', 'catch_up', 'request_representation'}
+        if (not grouped or council['recovery_version'] != 3 or type(council['generation']) is not int
+                or not 1 <= council['generation'] <= 10 or type(council['catch_up']) is not bool
+                or council['catch_up'] and council['phase'] != 'critique'
+                or council['request_representation'] not in ('original', 'output_limit_only')):
+            raise ValueError('invalid_council_recovery_identity')
+        for key in ('candidate_id', 'attempt_id'):
+            try: uuid.UUID(council[key])
+            except (ValueError, TypeError, AttributeError): raise ValueError('invalid_council_recovery_identity') from None
     if (not isinstance(council, dict) or set(council) != fields
             or council['phase'] not in (('investigate', 'critique', 'synthesis') if grouped else ('investigate', 'critique'))
             or any(not isinstance(council[key], str) or not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,63}', council[key])
@@ -295,7 +307,7 @@ def configuration(brief, workspace=None):
             'investigate': 'This investigation has original source evidence only, with no peer reports.',
             'critique': 'Read supplied __council__/initial-*.md reports and __council__/research.md alongside source evidence.',
             'synthesis': 'Read supplied __council__/initial-*.md and __council__/critique-*.md reports, __council__/research.md and __council__/execution-observations.md alongside source evidence.',
-        }[brief['council']['phase']]
+        }['investigate' if brief['council'].get('catch_up') else brief['council']['phase']]
         config['agent']['pilot']['prompt'] += (
             ' Work only in the copied workspace, not the source checkout. Use glob to discover approved evidence paths, then read relevant approved source files. '
             + phase_inputs + ' ' + council_snapshot.MARKER
@@ -304,6 +316,7 @@ def configuration(brief, workspace=None):
         model.update(limit={'context': brief['capabilities']['context_length'],
                             'input': brief['input_tokens'], 'output': brief['output_tokens']}, tool_call=True)
         model['options']['maxOutputTokens'] = brief['output_tokens']
+        if brief['council'].get('request_representation') == 'output_limit_only': model['options'].pop('maxOutputTokens')
         if set(brief['capabilities']['reasoning']) & {'fixed', 'default_enabled'}: model['options'].pop('reasoning')
     return config
 
@@ -377,6 +390,11 @@ def terminal_failure(error):
                 result.update(category='budget', limit_source=source)
         except (ValueError, RecursionError):
             pass
+    message = data.get('message')
+    if isinstance(message, str) and len(message) <= 16384:
+        codes = re.findall(r'\b(?:EPROTO|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN)\b', message)
+        if codes and result['category'] == 'unknown':
+            result.update(category='transport', error_code=codes[0], failure_layer='transport')
     headers = data.get('responseHeaders')
     if isinstance(headers, dict):
         hints = {key.lower(): value for key, value in headers.items()
@@ -483,6 +501,9 @@ def _execute(run, brief, executable, auth_data, publish, *, launch_guard=None, d
         if publish: publish(phase)
     proc = None
     terminal = False
+    step_response = ''
+    recovery = brief.get('council', {}).get('recovery_version') == 3
+    if recovery: result['final_response'] = ''
     failed = False
     missing_cost = False
     finished_steps = 0
@@ -594,7 +615,10 @@ def _execute(run, brief, executable, auth_data, publish, *, launch_guard=None, d
                             failed = True
                             if result['failure'] is None: result['failure'] = terminal_failure(event.get('error'))
                             emit('OpenCode error: ' + result['failure']['category'])
-                        elif kind == 'step_start': terminal = False; emit('Generating')
+                        elif kind == 'step_start':
+                            terminal = False
+                            step_response = ''
+                            emit('Generating')
                         elif kind == 'tool_use':
                             tool = part['tool']
                             if tool not in ('read', 'glob', 'grep'): raise ValueError('unexpected_tool')
@@ -605,9 +629,11 @@ def _execute(run, brief, executable, auth_data, publish, *, launch_guard=None, d
                             if 'council' in brief and len(response.encode()) > 128 * 1024:
                                 raise ValueError('council_report_limit')
                             result['response'] = response
+                            if recovery: step_response += part['text'] + '\n'
                         elif kind == 'step_finish':
                             finished_steps += 1
                             terminal = part.get('reason') == 'stop'
+                            if recovery and terminal: result['final_response'] = step_response
                             reason = part.get('reason')
                             if isinstance(reason, str) and reason in ('length', 'content-filter', 'content_filter'):
                                 if result['failure'] is None:

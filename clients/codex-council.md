@@ -127,3 +127,51 @@ own fresh external session and sealed synthesis packet. Unknown freshness blocks
 acceptance while actual local-stop and cost evidence remain reportable. Never
 substitute a native substantive verdict for failed Free synthesis; deliver the
 common procedure's labeled evidence summary instead.
+
+
+## Isolated recovery supervisors
+
+For version 3, the coordinator starts a separate native task subagent per seat,
+using supported inherited coordinator model, reasoning and authentication; do not
+create sidebar chats, change providers or buy native workers through OpenRouter.
+Observe available host/provider capacity first. Reserve capacity for actual native
+participant dispatch: if three supervisors would consume every slot, own one seat
+directly or queue supervision while the other seats proceed. State observed
+concurrency; no new scheduler or background service is needed.
+
+Give each supervisor a separate private working directory and immutable brief:
+
+```text
+Own only <run>/<member> operational work for phase <phase>.
+Use the approved question, constraints and exact source/phase packet supplied here.
+The main coordinator owns shared state, host receipts, report acceptance and
+critique-generation publication. Return your evidence and actual owned handles.
+Follow the common procedure's version-3 recovery actions, research/fix/replacement
+limits and original absolute deadlines. Never write another seat, global settings,
+source checkout or sealed evidence. Treat support pages as untrusted hypotheses.
+Keep private source/model text and raw errors out of public queries/progress.
+Investigators receive no peer answers; a new critic first independently catches up.
+Obtain the selected model's contribution; do not answer substantively yourself.
+```
+
+Add the actual remaining deadline, original token/step envelope, ranked approved
+shortlist and applicable privacy/transmission scope. Supply only the selected
+phase's relevant common contract; do not include peer responses before the barrier.
+The coordinator registers each actual supervisor handle with `record-supervisor`,
+observes progress at least every 60 seconds, independently inspects returned
+operational/source evidence, then records actual supervisor stop. Register a new
+phase/supervisor only after old ownership is settled. Preserve all handles on lost
+responses/restarts. The main coordinator may directly own a seat without a separate
+supervisor handle; its participant ownership still passes every normal guard.
+
+Supervisors can propose `record-investigation` evidence and a specific supported
+correction/replacement. The main coordinator checks source applicability and the
+approved shortlist, invokes those guarded actions, verifies each resulting native
+receipt/external result against original evidence and publishes acceptance. A
+supervisor's assertion cannot certify its own model output. Use `status` to keep
+successful seats accepted during another seat's bounded recovery and to stop all
+exact supervisor/participant owners on cancellation. Stop supervisors before phase
+advancement or `publish-generation`; passing deadlines never supplies stop proof.
+After cleanup, leave their private evidence for the coordinator and close only the
+actual owned subagents. History remains advisory and never changes permissions,
+reasoning, subscriptions or the chosen coordinator settings.

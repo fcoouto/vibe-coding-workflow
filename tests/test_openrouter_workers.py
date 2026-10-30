@@ -401,6 +401,13 @@ for event in [
         with self.assertRaises(ValueError): self.api.verify(run, 'accepted', [])
         self.assertEqual(self.api.verify(run, 'accepted', ['Native line count: 3; matches response'])['state'], 'accepted')
 
+    def test_transport_machine_code_survives_without_secret_message(self):
+        result = self.api.terminal_failure({'name': 'UnknownError', 'data': {
+            'message': 'EPROTO: TLS handshake failed at https://SECRET/?token=SECRET'}})
+        self.assertEqual(result, {'category': 'transport', 'error_code': 'EPROTO', 'failure_layer': 'transport'})
+        self.assertNotIn('SECRET', json.dumps(result))
+        self.assertEqual(self.api.safe_failure(result), result)
+
     def test_error_even_with_zero_exit_never_becomes_success(self):
         exe = self.fixture("print(json.dumps({'type':'error','error':{'message':'SECRET'}}))\n")
         run = self.api.prepare(self.runs, self.brief, now=100)

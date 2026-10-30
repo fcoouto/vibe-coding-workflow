@@ -405,3 +405,43 @@ separate and deferred. It must compare a strong native baseline and Council from
 the same initial task/evidence under comparable recorded controls, with independent
 source-based judgments, observed costs and predefined limits. No quality or savings
 claim follows from this implementation or the controlled tool probe.
+
+
+## Runtime recovery pilot, 30 October 2026
+
+New grouped requests may opt into manifest version 3 with `recovery: true` and a
+ranked preapproved `fallbacks` shortlist. Versions 1/2 retain their acceptance,
+replay, accounting and topology rules. The integrated pilot uses existing packet,
+executor, host verification, status, cancellation and private atomic-file controls.
+Its recovery actions are documented in the common procedure; Codex supplies
+isolated native seat supervision and capacity/cleanup instructions.
+
+Local synthetic proof covers a failed candidate, a source-backed fresh-connection
+correction, continued failure, eligible replacement, unaffected successful seats,
+coherent critique and a fresh accepted synthesis through the actual Council CLI.
+Nine subprocess attempts remain individually accounted; failed-stream billing
+keeps the aggregate unknown. A separate overlapping two-process fixture checks
+that one seat can become accepted while another owned execution still runs.
+Other fixtures prove new-critic independent catch-up and generation rebuilding,
+coherent reduced-panel deadline fallback, synthesis-only chair role transfer,
+research/application timing, shared canonical claims, exhausted limits, cancellation,
+unknown owners, lost responses, rejected/reused identities, untrusted corrections,
+private failed-trial learning and unknown billing. Native replacement uses host
+receipt fixtures rather than a new live model dispatch.
+
+The executor now retains allowlisted transport codes without raw error text. In
+version 3, the original assistant text remains private while verified report
+freezing uses final-step text. Malformed final content still needs substantive
+rejection. The qualified permission profile is unchanged: internal marker reads
+are denied, but grep can expose that copied metadata. This limitation is disclosed;
+no ignore rule is presented as a universal tool boundary. The bounded
+`output_limit_only` request alternative is proven in constructed adapter
+configuration, preserving route, tools, reasoning and the output envelope; no new
+wire/endpoint qualification is claimed.
+
+Package validation and synthetic client execution are distinct evidence. This
+pilot does not establish that a live replacement model/provider will be available,
+that a source-supported correction will work, or that free routes will deliver a
+complete verdict before the original deadline. No endpoint inference, paid canary,
+account/auth change, dependency upgrade, release archive or comparative evaluation
+was performed. Existing historical operational results above remain unchanged.
