@@ -4296,9 +4296,10 @@ def _register_recovery_release(observation):
         d3._require(isinstance(observation,_RecoverySourceObservation) and observation.issuer is _RECOVERY_ISSUER and observation.provenance is _RECOVERY_RELEASE_ISSUER
             and observation.release is not None,'Recovery release requires owner-issued observation')
         content=_canonical_plain(observation.content)
-        with _recovery_release_guards(content['authorities'],content['identity']) as (_,journal,contexts):
-            d3._require(sorted([_canonical_plain(c.authority_set[0]) for c in contexts],key=d3._digest)==sorted([_canonical_plain(c.authority_set[0]) for c in observation.contexts],key=d3._digest),
+        with _recovery_release_guards(content['authorities'],content['identity']) as (_,journal,fresh_contexts):
+            d3._require(sorted([_canonical_plain(c.authority_set[0]) for c in fresh_contexts],key=d3._digest)==sorted([_canonical_plain(c.authority_set[0]) for c in observation.contexts],key=d3._digest),
                 'Recovery release complete authority set changed')
+            contexts=observation.contexts
             lifetime=dict(active=True,kind='release',source=observation,journal=deepcopy(journal),
                 guards=tuple(getattr(_authority_context,'held',())),registrations={},baselines={},registration_projections={})
             budget=recovery_uses.CaptureBudget() if 'use_contract' in content else None
