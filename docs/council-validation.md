@@ -20,7 +20,7 @@ records qualification; it does not authorize a Council run or activate a route.
 | Instruction paths | Six Task 5 author walkthroughs over explicit raw fixtures, described below | Static source review by the author; later native canary is separate and does not establish installed-skill loading |
 | Nonsecret host identity observation | In this task's existing delegated shell, `CODEX_THREAD_ID` identified a distinct child UUID while `CODEX_SESSION_ID` retained the parent session UUID | One host observation only; not a Council run, universally portable identity API or independent authentication |
 | Native functional canary | **Observed**, with synthetic external process reports; three fresh native children, one critique round and fresh synthesis; local runtime outcome `complete` | Configured native controls and completed host states verified; execution model/effort telemetry unknown; no forced cancellation, long-wait cadence or real three-provider concurrency qualification |
-| Actual cross-provider Council | **Not run** | Real external model/endpoint behavior, tool/model request counts, actual billing, upstream cancellation and full real-provider deliberation need separate observed qualification |
+| Actual cross-provider Council | **Observed incomplete**, four paid external assignments and three fresh native phases in 1,014.271 seconds; all local execution stopped | Opus investigation failed with a reported content filter; its critique exceeded the word bound and was rejected. Full-roster qualification, settled billing and upstream settings remain unverified |
 | Comparative quality/cost | **Deferred separate experiment** | Operation does not establish superiority, reliability rate, token savings or avoided spending |
 
 Task-local raw logs, source resolution and walkthrough inputs/reviews are retained
@@ -195,17 +195,80 @@ no Council run or member was created. The approved request excludes automatic
 enrollment and configuration changes, so preflight did not create a runtime or
 enable Council. Paid authorization is retained; it does not supply checkout setup.
 
-The request remains **not dispatchable**: an enrolled qualification checkout with
-saved Council consent/runtime readiness, current capacity and alias-to-canonical
-revalidation are still required. Real provider inference, endpoint behavior and billing remain
-unobserved. No external provider inference, comparative evaluation, credential
-read, account change, install or release was performed. Package, controlled-tool,
-native-canary and focused-test proof do not fill the missing real-provider,
-forced-cancellation, concurrency, sustained-progress or installed-skill observations.
+The user then separately authorized temporary enrollment and Council activation
+using the existing OpenRouter setup. The approved operational attempt below
+completed; the earlier readiness failure did not become an inference retry.
+
+## Authorized paid operational attempt
+
+At source `a4d95fc`, a new disposable Git fixture received temporary schema-1
+enrollment, runtime schema 2 and a production `task start` bound to the actual root
+session and user authority. Council alone was configured and enabled at revision 2
+using the unchanged existing OpenCode/authentication references. This is authorized
+temporary enrollment for client observation, not completed project onboarding,
+canonical schema-3 adoption or installed-skill enforcement. No key was read or
+copied by the coordinator; existing account and billing settings were preserved.
+
+The executable remained OpenCode 1.19.5 with the qualified v2 hash. Public metadata
+revalidated both approved aliases/canonical snapshots and exact provider tags.
+Requested controls remained Astra/ultra, Opus 5.5/max and Gemini 4 Argon/high, with
+the approved finite allowances and no provider fallback. Four original external
+assignments and three actual fresh native children ran, with one critique round
+and fresh synthesis. Final receipt was recorded after **1,014.271 seconds**, with
+**185.729 seconds** left in the 1200-second cumulative ceiling.
+
+| Seat | Investigation | Critique | Synthesis |
+| --- | --- | --- | --- |
+| Native | Accepted | Accepted | Accepted, fresh child |
+| Opus 5.5 | Failed; owned session reports `ContentFilterError` | Rejected: 809 visible words exceeded the approved 800-word bound | Not a synthesis seat |
+| Gemini 4 Argon | Accepted | Accepted, 785 visible words | Not a synthesis seat |
+
+Visible-word checks remove only Markdown structural list/heading/horizontal-rule
+markers. Reports were not truncated or rewritten. The failed investigation and
+rejected critique were excluded from frozen evidence. A pre-attempt admission
+returned busy before any first-seat worker directory or member marker existed;
+the identical control request then admitted that original seat. No inference was
+replayed, no member replaced, and all four approved assignments were used once.
+
+The runtime outcome is **`incomplete`**, not `complete`: native plus the same
+external member supplied accepted reports in both rounds and fresh synthesis.
+All local execution was observed stopped, with no outstanding stop requests.
+Source, copied workspaces and frozen report hashes verified unchanged. Actual
+Gemini session records independently show permitted read/glob/grep and denial of
+the harmless outside canary and unapproved snapshot-marker read. Denied-tool
+errors can expose local permission-rule paths; no outside file content returned.
+These application controls remain distinct from OS isolation.
+
+The four owned OpenCode sessions contain 12 assistant model steps, each assignment
+within its eight-step ceiling. This does not establish an HTTP request count or
+exclude internal retries. OpenCode's known reported external cost subtotal is
+**0.6935693 USD**; `external_total_usd` remains **null** and upstream cancellation
+unconfirmed. The source-stipulated 0.25 USD is unrelated to that actual-run subtotal.
+No independent provider billing receipt/generation ID was observed. Input planning
+and per-call output controls are not aggregate transport or monetary caps.
+
+Actual native child UUIDs and completed/idle turns were independently checked;
+each used `fork_turns: none` with no tool events. Execution model/effort telemetry
+remains unknown. Recorded intervals for the initial native turn and both external
+processes overlap locally; this does not establish upstream server concurrency or
+successful full-roster deliberation. Client session model/provider fields and configured maximum effort
+are not independent attestation of upstream serving provider or reasoning effort.
+Presence updates were recorded during the longer critique, but exact end-to-end
+UI update cadence and forced cancellation were not independently qualified.
+Native inline briefs preserved substantive frozen evidence with Markdown/whitespace
+formatting differences; canonical helper packets and exact source/report bytes
+remain retained. Provider/account retention settings were not independently
+inspected. No comparative arm or effectiveness/savings claim was made.
+
+Private `task-6-live-evidence/` retains allowlisted records, snapshots, original
+reports, receipts, filtered session observations and a SHA256 inventory. It contains
+no authentication directory, Git internals or private reasoning text. The temporary
+Council scope remains enabled for its explicitly selected checkout, with no running
+workers; source implementation and live-project enrollment were not changed.
 
 ## Next qualification
 
-A separately authorized operational run should retain real model/effort controls,
+Full three-member qualification remains open. A further authorized run should retain real model/effort controls,
 context and identity evidence, exact native admission/stop ownership when active,
 approved immutable bytes, observed progress, external permission qualification and
 actual nullable accounting through fresh synthesis. Check cancellation and degraded
