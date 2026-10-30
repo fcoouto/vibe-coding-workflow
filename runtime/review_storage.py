@@ -807,30 +807,43 @@ def _retained_birth_history(certificate):
         reobserve()
 
 
-def _enrolled_history(config, context, db, observed, budget, *, data=None):
-    owners = _owners(config, context, db, budget=budget)
-    targets = [dict(path=observed['root'], binding=observed['binding']['root'], git=observed)]
-    if data is not None:
-        targets.extend(_record_targets(data))
-    related = _related_owners(owners, targets, budget)
-    _require(data is not None)
+def _enrolled_history(config, context, observed, budget, *, data=None):
+    def canonical_observation():
+        _check_observation_deadline(budget)
+        acquired = _acquire_canonical_membership(Path(observed['root']), authority_path=None, budget=budget)
+        selected = _enrolled_selection(acquired, budget)
+        canonical = selected[3]
+        with evidence._context_database(canonical) as reader:
+            baseline = state._source_baseline(None, reader, context=canonical)
+            _require(baseline is not None)
+            handoff = evidence._read_birth_handoff(canonical, reader)
+        _check_observation_deadline(budget)
+        return acquired, selected, baseline, handoff
+
     # Resolve expected history even when deleting the final owner made current inventory empty.
-    _, _, _, canonical = _enrolled_selection(_acquire_canonical_membership(Path(observed['root']), authority_path=None, budget=budget), budget)
-    with evidence._context_database(canonical) as reader:
-        baseline = state._source_baseline(None,reader,context=canonical)
-        _require(baseline is not None)
-        handoff = evidence._read_birth_handoff(canonical,reader)
-    if baseline['content'].get('birth_expectation') is not None:
-        _require(handoff is not None)
-        expected = handoff['certificate']['intent']['history']
-        actual = _birth_history_snapshot(config,context,db,targets,budget)
-        _require(actual['machine']==expected['machine'] and actual['related']==expected['related'])
-        current = {evidence._raw(row['reference']):row for row in actual['inventory']}
-        previous = {evidence._raw(row['reference']):row for row in expected['inventory']}
-        _require(all(current.get(evidence._raw(ref))==previous[evidence._raw(ref)] for ref in expected['related'])
-            and actual['screening_sources']==expected['screening_sources'])
-    elif related:
-        raise _HistoryConflict(related)
+    original = canonical_observation()
+    baseline, handoff = original[2:]
+    with evidence._context_database(context) as db:
+        owners = _owners(config, context, db, budget=budget)
+        targets = [dict(path=observed['root'], binding=observed['binding']['root'], git=observed)]
+        if data is not None:
+            targets.extend(_record_targets(data))
+        related = _related_owners(owners, targets, budget)
+        _require(data is not None)
+        if baseline['content'].get('birth_expectation') is not None:
+            _require(handoff is not None)
+            expected = handoff['certificate']['intent']['history']
+            actual = _birth_history_snapshot(config,context,db,targets,budget)
+            _require(actual['machine']==expected['machine'] and actual['related']==expected['related'])
+            current = {evidence._raw(row['reference']):row for row in actual['inventory']}
+            previous = {evidence._raw(row['reference']):row for row in expected['inventory']}
+            _require(all(current.get(evidence._raw(ref))==previous[evidence._raw(ref)] for ref in expected['related'])
+                and actual['screening_sources']==expected['screening_sources'])
+        elif related:
+            raise _HistoryConflict(related)
+    # A serial gap cannot silently adopt a changed authority, baseline or handoff.
+    _require(canonical_observation() == original, 'Canonical birth history changed during temporary observation')
+    _check_observation_deadline(budget)
     return owners
 
 
@@ -916,8 +929,7 @@ def _enrolled_result(selected, acquisitions, budget, *, scope=None, control=None
         if config is not None:
             temporary_context = _ready_context(config, parents, deadline=budget['deadline'])
             _storage_outside(temporary_context, path, _record_targets(data))
-            with evidence._context_database(temporary_context) as db:
-                owners = _enrolled_history(config, temporary_context, db, observed, budget, data=data)
+            owners = _enrolled_history(config, temporary_context, observed, budget, data=data)
             retained = _related_owners(owners, _record_targets(data), budget)
             history = dict(complete=True, reason='authenticated_retained_history' if retained else 'authenticated_no_related_history')
             if scope is not None or retained or baseline['content'].get('birth_expectation') is not None:
@@ -933,8 +945,7 @@ def _enrolled_result(selected, acquisitions, budget, *, scope=None, control=None
             and (config is not None or not os.path.lexists(path)))
         if config is not None:
             _require(_ready_context(config, parents, deadline=budget['deadline']) == temporary_context)
-            with evidence._context_database(temporary_context) as db:
-                _require(_enrolled_history(config, temporary_context, db, observed, budget, data=data) == owners)
+            _require(_enrolled_history(config, temporary_context, observed, budget, data=data) == owners)
         _check_observation_deadline(budget)
         checkouts = [{key: entry[1][key] for key in
             ('root', 'primary_root', 'git_dir', 'git_common_dir', 'binding')} for entry in selections]
@@ -971,8 +982,7 @@ def _enrolled_result(selected, acquisitions, budget, *, scope=None, control=None
                 _require([_enrolled_selection(acquired, budget) for acquired in current] == selections)
                 _require(_enrolled_control_members(data, budget) == members)
                 _require(_enrolled_baseline(context, data['project_id'], budget) == baseline)
-                with evidence._context_database(temporary_context) as db:
-                    _require(_enrolled_history(config, temporary_context, db, observed, budget, data=data) == owners)
+                _require(_enrolled_history(config, temporary_context, observed, budget, data=data) == owners)
                 _check_parents(_canonical_plain(original_parents))
                 _require(_configuration_snapshot(path, descriptor) == snapshot)
                 _check_observation_deadline(budget)
