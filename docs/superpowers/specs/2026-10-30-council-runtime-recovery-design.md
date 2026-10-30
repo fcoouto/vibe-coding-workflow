@@ -1,6 +1,6 @@
 # Council runtime recovery and parallel seat supervision
 
-Status: proposed design for approval. The recovery limits and parallel seat
+Status: approved by the user on 30 October 2026, with a 120-second investigation allowance excluding fix application. The recovery limits and parallel seat
 supervision below are user decisions. Details labeled implementation decisions
 are proposals. This document does not enable recovery or authorize a new live run.
 
@@ -93,7 +93,7 @@ messages, credentials, source excerpts or private model text in progress or web
 queries. Preserve the existing privacy boundary while retaining enough private
 evidence to distinguish a model answer from client processing.
 
-Implementation decision: one investigation episode lasts at most 60 seconds and
+Implementation decision: one investigation episode lasts at most 120 seconds and
 uses at most three targeted public searches and five source-page reads. Its
 deadline is clipped by the current phase and session deadline. It may consult a
 matching local recovery record first and end early. Prefer official support and
@@ -183,7 +183,7 @@ accepted investigations and critiques. The replacement chair receives the same
 sealed synthesis packet in a genuinely fresh session and performs only synthesis.
 It does not inherit another candidate's earlier participation.
 
-Implementation decision requiring design approval: allow a synthesis-only chair
+Approved implementation decision: allow a synthesis-only chair
 replacement without replacing valid earlier contributions or rebuilding critique.
 For Free, first prefer another eligible already-successful external participant,
 then an eligible new free model. Paid groups retain a group-appropriate native
