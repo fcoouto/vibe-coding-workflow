@@ -206,17 +206,26 @@ class CanonicalScopeTests(unittest.TestCase):
                 self.assertIsNone(result.scope)
 
     def test_canonical_missing_or_changed_qualification_never_activates(self):
-        for field in (None, "version", "configuration_digest", "hook_owner", "receipt"):
+        for field in (None, "client", "surface", "configuration_digest", "hook_owner", "receipt"):
             record, args, _ = self.fixture()
             q = args["observation"]["qualification"]
             if field is None: args["observation"]["qualification"] = None
             elif field == "hook_owner": q["current"][field]["sha256"] = "0" * 64
             elif field == "receipt": q[field]["sha256"] = "0" * 64
-            else: q["current"][field] = "changed" if field == "version" else "0" * 64
+            else: q["current"][field] = "changed" if field in ("client", "surface") else "0" * 64
             with self.subTest(field=field):
                 result = self.resolve(record, args)
                 self.assertEqual(result.status, "configured" if field is None else "suspended")
                 self.assertIsNone(result.scope)
+
+    def test_version_only_update_keeps_current_trusted_qualification(self):
+        record, args, _ = self.fixture()
+        before = copy.deepcopy(record)
+        args['observation']['qualification']['current']['version'] = 'future-client'
+        result = self.resolve(record, args)
+        self.assertEqual(result.status, 'active')
+        self.assertIsNotNone(result.scope)
+        self.assertEqual(record, before)
 
     def test_canonical_runtime_location_unknown_or_unsafe_never_activates(self):
         for change, status in (("missing", "configured"), ("unknown", "configured"),
@@ -919,6 +928,18 @@ class CanonicalAcquisitionTests(unittest.TestCase):
         proof["current"]["surface"] = "changed-surface"
         self.assertEqual(self.acquire(qualifier=lambda record, facts: proof).resolution.reason, "qualification_changed")
         self.assertEqual(self.acquire(qualifier=proof).resolution.status, "conflict")
+
+    def test_acquired_version_only_update_requires_current_trusted_owner(self):
+        value, path = self.record()
+        proof = self.activate(value, path)
+        before = path.read_bytes()
+        proof['current']['version'] = 'future-client'
+        self.assertEqual(self.acquire().resolution.reason, 'qualification_unobserved')
+        result = self.acquire(qualifier=lambda record, facts: proof)
+        self.assertEqual(result.resolution.status, 'active')
+        self.assertEqual(path.read_bytes(), before)
+        proof['current']['configuration_digest'] = '0' * 64
+        self.assertEqual(self.acquire(qualifier=lambda record, facts: proof).resolution.reason, 'qualification_changed')
 
     def active_shared_dependency(self):
         import hashlib

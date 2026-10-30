@@ -24,6 +24,8 @@ Additional project fields remain available to later slices. Require the current 
 
 The current public schema-1 resolver applies optional `runtime` only to Codex. A dual-client record keeps Claude `SessionStart` orientation but does not enable Claude file guards or task controls. Internal read-only canonical acquisition now observes and compares project authority, checkout, physical bindings, dependencies, runtime location and qualification; public startup/task dispatch still uses schema-1 enrollment. Only independently observed qualification facts can yield an active canonical scope. See [Claude's prepared guard boundary](claude-code.md#prepared-file-guard).
 
+The internal trusted qualification owner must observe current required behavior under [capability-based compatibility](../policies/11-tool-integrations.md#qualify-the-actual-workflow). Current client, surface, configuration digest, hook ownership, receipt and accepted scope must still match. A changed release string alone does not suspend that qualification or rewrite its original binding; absent trusted observation remains unqualified.
+
 A copied checkout record, changed policy digest, malformed JSON, link or special-file record produces a diagnostic. Reconcile accepted scope/version through onboarding; never silently rewrite it during startup. Omitting `runtime` preserves startup-only behavior. This field does not enable Claude lifecycle controls.
 
 ## Runtime limits

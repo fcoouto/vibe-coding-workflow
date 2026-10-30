@@ -815,7 +815,7 @@ def _compare_canonical_scope(record, *, authority, observation, client, installe
     if qualification is not None and qualification["binding"] is not None:
         binding = qualification["binding"]
         if (binding != activation["qualification_binding"] or qualification["receipt"] != binding["receipt"]
-            or any(qualification["current"][k] != binding[k] for k in qualification["current"])
+            or any(qualification["current"][k] != binding[k] for k in qualification["current"] if k != "version")
             or binding["accepted_scope_digest"] != digest or binding["client"] != client):
             return result("suspended", "qualification_changed")
     if activation["status"] == "suspended":

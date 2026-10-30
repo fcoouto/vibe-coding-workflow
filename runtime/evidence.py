@@ -4329,14 +4329,17 @@ def prepared_native_review(scope, attempt_id):
         _require(binding['task_id'] == task['task_id'] and task['state'] != 'cancelled' and attempt['kind'] == 'review'
                  and attempt['status'] == 'reserved', 'Native review binding is no longer collectable')
         state._compatible(scope, task)
+        native_binding = {}
         if 'ledger_assignment_digest' in attempt:
             from runtime import delegation
-            delegation._linked_review(scope, state._scope_id(scope), task, attempt, delegation._ledger(scope, db))
+            record = delegation._linked_review(scope, state._scope_id(scope), task, attempt, delegation._ledger(scope, db))
+            native_binding = {key: record['data']['binding'][key] for key in ('native_version', 'client_surface')}
         plan = _read(scope, task['evidence']['plan'])
         assignment = _read(scope, attempt['assignment'])['prompt']
     _require(_digest(capture_candidate(scope, plan)) == attempt['candidate_digest'], 'Native review candidate is stale')
     return dict(parent_session_id=task['session_id'], assignment=assignment, assignment_digest=attempt['assignment_digest'],
-                candidate_digest=attempt['candidate_digest'], requested_coverage=attempt['coverage'], task_name=attempt['task_name'])
+                candidate_digest=attempt['candidate_digest'], requested_coverage=attempt['coverage'], task_name=attempt['task_name'],
+                **native_binding)
 
 
 def _report(value, attempt):
@@ -4410,7 +4413,8 @@ def collect_review(scope, request):
     receipt = observed['receipt']
     state._fields(receipt, ('version', 'mechanism', 'native_version', 'parent_session_id', 'parent_turn_id', 'spawn_item_id',
                            'reviewer_id', 'review_turn_id', 'report_item_id', 'assignment_digest', 'candidate_digest',
-                           'report_digest', 'requested_model', 'requested_effort'), ('task_name', 'agent_path'))
+                           'report_digest', 'requested_model', 'requested_effort'), ('task_name', 'agent_path', *delegation.VERSION_PROVENANCE_FIELDS))
+    delegation._validate_version_provenance(receipt)
     _require(type(receipt['version']) is int and receipt['version'] == VERSION and receipt['mechanism'] in {'codex-persisted-history', 'codex-native-agent-path'} and
              receipt['parent_session_id'] == request['session_id'] and receipt['parent_turn_id'] == request['parent_turn_id'] and
              receipt['spawn_item_id'] == request['spawn_item_id'] and receipt['reviewer_id'] != request['session_id'] and

@@ -94,6 +94,99 @@ class GuidanceTests(unittest.TestCase):
         self.assertFalse(self.claim("maintenance", "run-1")["claimed"])
         self.assertTrue(self.claim("maintenance", "run-2")["claimed"])
 
+    def test_version_only_update_reuses_original_guidance_without_publication(self):
+        original = self.publish()
+        before = {path: path.read_bytes() for path in self.cache_path().parent.iterdir()}
+        changed = self.request["applicability"] | dict(client_version="future-client")
+        result = self.status(applicability=changed, profile_ids=["small"])
+        self.assertTrue(result["usable"])
+        self.assertEqual(result["freshness"], "verified")
+        self.assertEqual(result["recommendations"], self.guidance["recommendations"])
+        for key in ("checked_at", "snapshot_ref", "snapshot_digest"):
+            self.assertEqual(result[key], original[key])
+        self.assertFalse(self.claim(applicability=changed)["claimed"])
+        self.assertEqual({path: path.read_bytes() for path in before}, before)
+
+    def test_failed_refresh_does_not_retry_for_version_only_update(self):
+        for published in (False, True):
+            with self.subTest(published=published):
+                self.scope = replace(self.scope, runtime=replace(self.scope.runtime,
+                    state_dir=self.base / ('private-' + str(published))))
+                if published:
+                    self.publish()
+                claim = self.claim("maintenance", "offline-" + str(published))
+                self.api().record_guidance(self.scope, self.request | dict(token=claim["token"],
+                    generation=claim["generation"], coordinator_ref="coordinator:offline", failure="Offline"))
+                changed = self.request["applicability"] | dict(client_version="future-client")
+                result = self.status(applicability=changed)
+                self.assertEqual(result["freshness"], "stale" if published else "unavailable")
+                self.assertEqual(result["usable"], published)
+                self.assertFalse(self.claim(applicability=changed)["claimed"])
+
+    def test_version_only_update_cannot_rebind_an_outstanding_refresh_claim(self):
+        claim = self.claim()
+        changed = self.request["applicability"] | dict(client_version="future-client")
+        with self.assertRaisesRegex(state.StateError, "claim expired, changed or superseded"):
+            self.api().record_guidance(self.scope, self.request | dict(applicability=changed,
+                token=claim["token"], generation=claim["generation"], coordinator_ref="coordinator:offline", failure="Offline"))
+        self.assertTrue(self.record(claim)["usable"])
+
+    def test_capability_change_requires_refresh_without_a_version_change(self):
+        self.publish()
+        changed = self.request["applicability"] | dict(capability_fingerprint="c" * 64)
+        result = self.status(applicability=changed)
+        self.assertFalse(result["usable"])
+        self.assertEqual(result["freshness"], "incompatible")
+        self.assertTrue(self.claim(applicability=changed)["claimed"])
+
+    def test_new_refresh_cannot_relabel_original_guidance_as_current(self):
+        self.publish()
+        changed = self.request["applicability"] | dict(client_version="future-client")
+        claim = self.claim("maintenance", "upgrade", applicability=changed)
+        with self.assertRaisesRegex(state.StateError, "publication applicability changed"):
+            self.api().record_guidance(self.scope, self.request | dict(applicability=changed,
+                token=claim["token"], generation=claim["generation"],
+                coordinator_ref="coordinator:verified", guidance=self.guidance))
+        updated = self.guidance | dict(applicability=changed)
+        self.assertTrue(self.record(claim, applicability=changed, guidance=updated)["usable"])
+
+    def test_legacy_failed_refresh_keeps_stale_guidance_and_trigger_suppression_after_update(self):
+        self.publish()
+        claim = self.claim('maintenance', 'legacy-offline')
+        self.api().record_guidance(self.scope, self.request | dict(token=claim['token'],
+            generation=claim['generation'], coordinator_ref='coordinator:offline', failure='Offline'))
+        path = self.cache_path().with_name('codex-desktop.control.json')
+        control = json.loads(path.read_bytes())
+        control['last_attempt']['key'] = hashlib.sha256(json.dumps(dict(applicability=self.request['applicability'],
+            prior=hashlib.sha256(self.cache_path().read_bytes()).hexdigest(), snapshot_valid=True),
+            sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        path.write_text(json.dumps(control))
+        before = path.read_bytes()
+        changed = self.request['applicability'] | dict(client_version='future-client')
+        self.assertEqual(self.status(applicability=changed)['freshness'], 'stale')
+        self.assertFalse(self.claim('maintenance', 'legacy-offline', applicability=changed)['claimed'])
+        self.assertFalse(self.claim(applicability=changed)['claimed'])
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_missing_legacy_snapshot_rechecks_unknown_applicability_once(self):
+        claim = self.claim()
+        self.api().record_guidance(self.scope, self.request | dict(token=claim['token'],
+            generation=claim['generation'], coordinator_ref='coordinator:offline', failure='Offline'))
+        path = self.cache_path().with_name('codex-desktop.control.json')
+        control = json.loads(path.read_bytes())
+        control['last_attempt']['key'] = hashlib.sha256(json.dumps(dict(applicability=self.request['applicability'],
+            prior='missing', snapshot_valid=False), sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        path.write_text(json.dumps(control))
+        changed = self.request['applicability'] | dict(client_version='future-client')
+        replacement = self.claim(applicability=changed)
+        self.assertTrue(replacement['claimed'])
+        self.api().record_guidance(self.scope, self.request | dict(applicability=changed, token=replacement['token'],
+            generation=replacement['generation'], coordinator_ref='coordinator:offline', failure='Offline'))
+        later = changed | dict(client_version='another-future-client')
+        self.assertFalse(self.claim(applicability=later)['claimed'])
+        changed_capability = later | dict(capability_fingerprint='c' * 64)
+        self.assertTrue(self.claim(applicability=changed_capability)['claimed'])
+
     def test_successful_manual_trigger_replay_does_not_admit_another_refresh(self):
         self.publish()
         claim = self.claim("manual", "retry-1")
@@ -417,7 +510,7 @@ class AdmissionTests(unittest.TestCase):
                 self_review='Inspect diff and callers', stop_conditions=['Stop for review after this assignment']),
             selection=dict(model='new-native-model', effort='high', rationale='Capable native model for exact scope',
                 profile_ids=['bounded'], mode='explicit'),
-            control_observation=dict(version=1, client_surface='codex-cli', native_version='0.163.0',
+            control_observation=dict(version=1, client_surface='codex-cli', native_version=self.catalog['native_version'],
                 parent_session_id=self.identity['session_id'], dispatch_controls=deepcopy(self.catalog['dispatch_controls'])),
             discovery_expectation={key: self.catalog[key] for key in
                 ('client_surface', 'native_version', 'capability_digest', 'parent_model_provider')} |
@@ -464,6 +557,25 @@ class AdmissionTests(unittest.TestCase):
             return request
         finally:
             self.identity, self.scope = prior, prior_scope
+
+    def test_native_receipt_keeps_admitted_version_when_observer_updates(self):
+        self.plan()
+        prepared = self.prepare()
+        self.observe_worker(prepared)
+        observed = self.lifecycle_observation(prepared, current_observer_version='0.165.0',
+            parent_creation_version='0.164.0-alpha.11.1', worker_creation_version='0.164.0-alpha.11.1')
+        self.assertEqual(self.observe_worker(prepared, observed)['status'], 'observed')
+        with state._database(self.scope) as db:
+            record = next(row for row in self.api._ledger(self.scope, db) if row['id'] == prepared['attempt_id'])
+        receipt = self.api._worker_history(self.scope, record['data']['observation'])[0][1]['receipt']
+        self.assertEqual(receipt['native_version'], '0.163.0')
+        self.assertEqual(receipt['current_observer_version'], '0.165.0')
+        self.assertEqual(record['data']['binding']['native_version'], '0.163.0')
+        request = self.request(attempt_id=prepared['attempt_id'], parent_turn_id='parent-turn', spawn_item_id='spawn-item')
+        for key in ('current_observer_version', 'parent_creation_version', 'worker_creation_version'):
+            bad = dict(observed, receipt=observed['receipt'] | {key: None})
+            with self.subTest(key=key), self.assertRaises(state.StateError):
+                self.api._worker_receipt(self.scope, record, request, bad)
 
     def test_plan_is_immutable_and_replay_returns_once_only_admission(self):
         self.plan()
@@ -2513,6 +2625,23 @@ class Stage4NativeReviewTests(unittest.TestCase):
             return evidence.collect_review(self.scope, self.request(attempt_id=prepared['attempt_id'],
                 parent_turn_id='parent-turn', spawn_item_id='spawn-item'))
 
+    def test_review_collection_keeps_admitted_version_across_observer_updates(self):
+        self.plan(self.review_plan())
+        prepared = self.prepared()
+        binding = evidence.prepared_native_review(self.scope, prepared['attempt_id'])
+        self.assertEqual(binding['native_version'], '0.163.0')
+        self.assertEqual(binding.get('client_surface'), 'codex-cli')
+        observed = self.observed(prepared, current_observer_version='0.165.0',
+            parent_creation_version='0.164.0-alpha.11.1', worker_creation_version='0.164.0-alpha.11.1')
+        self.assertEqual(self.observe(prepared, observed)['status'], 'observed')
+        collection = self.collection(prepared, observed)
+        collection['receipt'].update(current_observer_version='0.166.0', parent_creation_version='0.164.0-alpha.11.1',
+            worker_creation_version='0.164.0-alpha.11.1')
+        result = self.collect(prepared, collection)
+        receipt = evidence._read(self.scope, result['attempt']['collected'])['receipt']
+        self.assertEqual(receipt['native_version'], '0.163.0')
+        self.assertEqual(receipt['current_observer_version'], '0.166.0')
+
     def test_review_requires_explicit_native_job_and_atomic_pair(self):
         with self.assertRaises(state.StateError):
             evidence.prepare_review(self.scope, self.request(coverage=['general'], criteria=['works'], assignment='Unmanaged review'))
@@ -2898,6 +3027,36 @@ class CanonicalDelegationTests(unittest.TestCase):
 
 class AssignedClosureGuidanceTests(unittest.TestCase):
     setUp=CanonicalDelegationTests.setUp
+
+    def test_cross_version_guidance_preserves_original_sources_through_closure(self):
+        f = self.fixture
+        original = f.api.guidance_status(f.scope, f.cache_request)
+        f.catalog['native_version'] = 'future-client'
+        f.cache_request['applicability']['client_version'] = 'future-client'
+        task, context, ref, prepared = self.stopped_worker()
+        observed = evidence._observe_closure((context,), ref)
+        closed = evidence.close_task(f.scope, f.request(expected_pins=task['pins']), observed)['task']
+        compact = evidence._read(f.scope, closed['lifecycle']['compact'])
+        self.assertEqual(compact['native_guidance'][0]['guidance']['snapshot_ref'], original['snapshot_ref'])
+        source = next(item for item in compact['scope_guidance'] if item['reference'] == original['snapshot_ref'])
+        self.assertNotEqual(source['guidance']['applicability']['client_version'], 'future-client')
+
+    def test_legacy_guidance_control_key_preserves_original_closure_sources(self):
+        f = self.fixture
+        task, context, ref, _ = self.stopped_worker()
+        folder = context.directory / 'model-guidance'
+        snapshot = folder / (f.cache_request['client_surface'] + '.json')
+        path = folder / (f.cache_request['client_surface'] + '.control.json')
+        control = json.loads(path.read_bytes())
+        control['last_attempt']['key'] = hashlib.sha256(json.dumps(dict(
+            applicability=f.cache_request['applicability'], prior=hashlib.sha256(snapshot.read_bytes()).hexdigest(),
+            snapshot_valid=True), sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        path.write_text(json.dumps(control))
+        before = path.read_bytes()
+        observed = evidence._observe_closure((context,), ref)
+        closed = evidence.close_task(f.scope, f.request(expected_pins=task['pins']), observed)['task']
+        self.assertEqual(closed['state'], 'cancelled')
+        self.assertEqual(path.read_bytes(), before)
 
     def test_original_and_refreshed_current_guidance_are_both_observed(self):
         f=self.fixture;f.prepare();context=evidence._evidence_context(f.scope)
