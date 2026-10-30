@@ -153,7 +153,7 @@ is not full project adoption. Do not enroll or change a live project.
   original snapshot/frozen reports, accepted phase membership/freshness, all local
   owners and reported nullable costs. Retain sanitized original result/progress
   records and exact unknowns. Do not label an incomplete run complete.
-- [ ] **Step 4: Final review and report.** One strongest-native review of the
+- [x] **Step 4: Final review and report.** One strongest-native review of the
   integrated feature/proof, one consolidated fix wave if needed and scoped re-review.
   Record package checks separately from actual live observations, remaining limits
   and comparative deferral. Coordinator commits factual evidence; no push/merge,
@@ -176,5 +176,8 @@ its owners are stopped. One fresh changed-code Free run completed all seven
 external assignments in 254.020 seconds with distinct sessions and confirmed local
 stops. Its result is **partial**, with 3/3 accepted investigations, 1/3 critiques
 and no accepted synthesis. No inference retry, replacement or native Council
-fallback was used. Final integrated review remains pending; full Free
+fallback was used. Final integrated Astra/xhigh review found no blocking source finding. Its minor
+approved-path guidance recommendation was corrected at `9ae3c4b`, passed ten
+focused checks and received a clean scoped re-review. No further live inference
+was performed. Implementation and bounded test execution are complete; full Free
 qualification and comparative evaluation remain open.

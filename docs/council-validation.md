@@ -316,6 +316,16 @@ freshness-history issue and approved the narrow admission fixes. Package validat
 continues to report `client_execution: not_checked`; live observations below are
 separate.
 
+Final integrated Astra/xhigh review found no Critical or Important source finding.
+Its nonblocking discovery-guidance recommendation was corrected at `9ae3c4b` and
+approved in one scoped re-review. Council workers now receive bounded phase-aware
+directions to source, peer reports, research and anonymous observations in their
+copied workspace. The internal snapshot marker is explicitly denied and unnecessary.
+No full file inventory is appended, and ordinary worker prompts, objectives,
+permissions and execution limits remain unchanged. Ten focused checks passed,
+including three actual local synthetic phase executions. This wording correction
+received no further live inference and does not change the partial result below.
+
 The user selected Free for the live test. Runtime public metadata selected
 `thinkingmachines/inkling-small:free` and `thinkingmachines/inkling:free`, both
 requesting their observed maximum `max`, plus
