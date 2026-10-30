@@ -4671,19 +4671,32 @@ def _reference_context(authority):
 def _linked_source(reference, *, observed=None, db=None,consumer=None,require_admission=False):
     _authority_artifact(reference)
     context = _reference_context(reference['authority'])
+    def publish(value,metadata):
+        if observed is not None:
+            key=_raw(reference)
+            _require(key not in observed or observed[key][1]==metadata,'Linked source metadata observations disagree')
+            observed[key]=(deepcopy(reference),metadata)
+        return value
     def consume(connection):
         _check_context(context,connection)
         metadata=state._metadata(connection,reference['reference']['name'])
         value=_read(None,reference['reference'],context=context,db=connection)
         if require_admission:_check_content_consumption(reference,metadata,consumer)
         _require(state._metadata(connection,reference['reference']['name'])==metadata,'Linked source metadata changed during consumption')
-        if observed is not None:
-            key=_raw(reference)
-            _require(key not in observed or observed[key][1]==metadata,'Linked source metadata observations disagree')
-            observed[key]=(deepcopy(reference),metadata)
-        return value
+        return publish(value,metadata)
     if db is not None:return consume(db)
-    with _context_database(context) as connection:return consume(connection)
+    if not require_admission:
+        with _context_database(context) as connection:return consume(connection)
+    with _context_database(context) as connection:
+        metadata=state._metadata(connection,reference['reference']['name'])
+        value=_read(None,reference['reference'],context=context,db=connection)
+    _check_content_consumption(reference,metadata,consumer)
+    with _context_database(context) as connection:
+        _require(state._metadata(connection,reference['reference']['name'])==metadata,'Linked source metadata changed during consumption')
+        _require(_read(None,reference['reference'],context=context,db=connection)==value,'Linked source body changed during consumption')
+        _require(state._metadata(connection,reference['reference']['name'])==metadata,'Linked source metadata changed during consumption')
+    return publish(value,metadata)
+
 
 
 def _pinned_locator(task, context):
