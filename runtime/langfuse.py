@@ -186,10 +186,23 @@ def synthetic_probe(destination, project_id, *, before_ingest, credentials=None)
         if isinstance(rows, list) and len(rows) == 1 and isinstance(rows[0], dict):
             row = rows[0]
             expected = dict(id=observation_id, traceId=trace_id, projectId=project_id,
-                type="SPAN", name=PROBE_NAME,
-                metadata=metadata | {"resourceAttributes": {"service.name": SERVICE_NAME}})
-            if (all(row.get(key) == value for key, value in expected.items())
-                    and all(row.get(key) is None for key in ("input", "output", "userId", "sessionId"))):
+                type="SPAN", name=PROBE_NAME)
+            expected_metadata = {
+                "attributes.langfuse.observation.type": "span",
+                "resourceAttributes.service.name": SERVICE_NAME,
+                "scope.name": "vibe-coding-workflow.observability",
+                "vibe_synthetic": True,
+                "vibe_probe_id": observation_id,
+            }
+            actual_metadata = row.get("metadata")
+            if (all(type(row.get(key)) is type(value) and row[key] == value
+                    for key, value in expected.items())
+                    and type(actual_metadata) is dict and set(actual_metadata) == set(expected_metadata)
+                    and all(type(actual_metadata[key]) is type(value) and actual_metadata[key] == value
+                            for key, value in expected_metadata.items())
+                    and all(row.get(key) is None for key in ("input", "output"))
+                    and all(row.get(key) is None or type(row[key]) is str and row[key] == ""
+                            for key in ("userId", "sessionId"))):
                 return dict(result, verified=True, status="verified")
         if attempt < READ_ATTEMPTS - 1:
             remaining = connection.deadline - time.monotonic()
