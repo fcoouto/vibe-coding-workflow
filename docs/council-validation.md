@@ -189,9 +189,15 @@ assignment. Each assignment can issue multiple model/API requests for tool steps
 and internal transient retries; request/charge counts are variable. OpenRouter owns
 monetary enforcement; these resource bounds are not a hard money cap.
 
-The request remains **not dispatchable**: explicit bounded paid approval, saved
-route/runtime readiness, current capacity and alias-to-canonical revalidation are
-still required. Real provider inference, endpoint behavior and billing remain
+The user approved the exact bounded paid request on 30 October. Offline preflight
+in the Council development checkout returned `existing_enrolled_runtime_required`;
+no Council run or member was created. The approved request excludes automatic
+enrollment and configuration changes, so preflight did not create a runtime or
+enable Council. Paid authorization is retained; it does not supply checkout setup.
+
+The request remains **not dispatchable**: an enrolled qualification checkout with
+saved Council consent/runtime readiness, current capacity and alias-to-canonical
+revalidation are still required. Real provider inference, endpoint behavior and billing remain
 unobserved. No external provider inference, comparative evaluation, credential
 read, account change, install or release was performed. Package, controlled-tool,
 native-canary and focused-test proof do not fill the missing real-provider,
