@@ -2185,6 +2185,70 @@ def _resolve_stopped_certificate_job(context,job):
     return dict(job=job,result=result)
 
 
+def _linked_live_certificate_inputs(context,db,item,basis):
+    """Read factual-v2 open-member comparisons; other lifecycle branches keep their full path."""
+    from runtime import evidence
+    evidence._check_context(context,db);ref=item['reference']
+    d3._require(ref['authority']==_canonical_plain(context.authority_set[0]),'Stopped certificate authority differs')
+    task=task_state._task(db,ref['scope_id'],ref['client'],ref['session_id'],ref['task_id'])
+    d3._require(task is not None and task.get('lifecycle'),'Recovery original stopped owner/age/pins changed')
+    if task['lifecycle']['safe_closed_at'] is not None or not task.get('writer_stop',{}).get('linked'):return None
+    linked=evidence._read(None,task['writer_stop']['linked'],context=context,db=db)
+    if linked.get('version')!=2:return None
+    evidence._linked_stop_shape(linked)
+    d3._require(linked==basis,'Live linked member basis changed')
+    members=[member for member in linked['members'] if member['task']==ref]
+    d3._require(len(members)==1,'Live linked member is outside its actual basis')
+    inputs=_canonical_plain(_stopped_certificate_inputs(context,db,item));value=_stopped_certificate_from_inputs(inputs)
+    member=members[0]
+    d3._require(member['state']==task['state'] and member['revision']==task['revision'] and member['pins']==task['pins'] and
+        member['created_at']==task['lifecycle']['created_at'] and member['bindings']==inputs['local_stop']['bindings'],
+        'Live linked member original bindings changed')
+    identity=task_state._lifecycle_identity(db,'task',ref);_check_stopped_task_identity(identity,value)
+    d3._require(identity['status']=='live','Live linked member identity is no longer live')
+    d3._require([attempt['id'] for attempt in task.get('evidence',{}).get('attempts',[])]==value['proof']['attempt_ids'],
+        'Recovery live stopped attempts changed')
+    assignments=[]
+    for assignment in value['assignments']:
+        observed=task_state._lifecycle_identity(db,'assignment',assignment['reference'])
+        _check_stopped_assignment_identity(observed,value,assignment)
+        d3._require(observed['status']=='live','Live linked assignment identity is no longer live')
+        assignments.append(observed)
+    return _canonical_freeze(dict(certificate_inputs=inputs,identity=identity,assignment_identities=assignments))
+
+
+def _linked_live_certificate_assembly(inputs):
+    """Pure live certificate projection; an exact external basis result is still required."""
+    from runtime import evidence
+    inputs=_canonical_plain(inputs)['certificate_inputs'];basis=inputs['linked']
+    job=dict(kind='linked-basis',reference=inputs['item']['reference'],aggregate=evidence._linked_basis_root(basis),
+        authorities=basis['authorities'],expected=basis)
+    response=yield job
+    d3._require(isinstance(response,dict) and set(response)=={'job','result'} and response['job']==job,
+        'Live linked basis validation is unresolved or mismatched')
+    d3._require(isinstance(response['result'],dict) and response['result']==basis,'Live linked basis result changed')
+    return _stopped_certificate_from_inputs(inputs)
+
+
+def _resolve_linked_live_certificate_job(job):
+    """The acquisition owner closes its member reader before invoking the complete basis validator."""
+    from runtime import evidence
+    d3._require(job['kind']=='linked-basis','Unknown live linked certificate job')
+    return dict(job=job,result=evidence._linked_stopped_basis(job['aggregate'],job['authorities']))
+
+
+def _check_stopped_task_identity(identity,value):
+    ref=value['reference']
+    d3._require(identity['pins_digest']==task_state._digest(value['pins']) and identity['created_at']==value['created_at']
+        and identity['identity']=={k:ref[k] for k in ('scope_id','client','session_id','task_id')},'Recovery stopped identity support differs')
+
+
+def _check_stopped_assignment_identity(observed,value,assignment):
+    d3._require(observed['pins_digest']==task_state._digest(value['pins']) and observed['request_digest']==assignment['request_digest'] and
+        observed['created_at']==assignment['created_at'] and observed['identity']==dict(id=assignment['reference']['id'],owner=assignment['reference']['owner']),
+        'Recovery stopped assignment identity support differs')
+
+
 def _stopped_assignment_certificate(value,reference):
     """Resolve an exact issued pointer; retirement markers cannot authenticate that pointer."""
     _stopped_certificate_shape(value)
@@ -2209,8 +2273,7 @@ def _check_stopped_certificate(context,db,value,*,preparation_reader=None,writer
         d3._require(identity['status']!='expired','Expired linked identity cannot validate historical support')
         return identity
     identity=task_state._lifecycle_identity(db,'task',ref)
-    d3._require(identity['pins_digest']==task_state._digest(value['pins']) and identity['created_at']==value['created_at']
-        and identity['identity']=={k:ref[k] for k in ('scope_id','client','session_id','task_id')},'Recovery stopped identity support differs')
+    _check_stopped_task_identity(identity,value)
     if identity['status']=='live':
         task=task_state._task(db,ref['scope_id'],ref['client'],ref['session_id'],ref['task_id'])
         complete='writer_stop' in value
@@ -2221,9 +2284,7 @@ def _check_stopped_certificate(context,db,value,*,preparation_reader=None,writer
         d3._require(attempts==value['proof']['attempt_ids'],'Recovery live stopped attempts changed')
     for assignment in value.get('assignments',[]):
         observed=task_state._lifecycle_identity(db,'assignment',assignment['reference'])
-        d3._require(observed['pins_digest']==task_state._digest(value['pins']) and observed['request_digest']==assignment['request_digest'] and
-            observed['created_at']==assignment['created_at'] and observed['identity']==dict(id=assignment['reference']['id'],owner=assignment['reference']['owner']),
-            'Recovery stopped assignment identity support differs')
+        _check_stopped_assignment_identity(observed,value,assignment)
         if observed['status']=='live':
             from runtime import delegation
             row=db.execute('select id,scope_id,client,session_id,task_id,dispatch_id,data from assignments where id=?',(assignment['reference']['id'],)).fetchone()

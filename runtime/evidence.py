@@ -5469,7 +5469,50 @@ def _preparation_database(context,writer=None):
         with _context_database(context) as db:yield db
 
 
+def _observe_linked_live_certificate(context,item,basis):
+    """Read-only acquisition: close, finish the external job, then recollect exact local facts."""
+    from runtime import changes
+    with _context_database(context) as db:
+        inputs=changes._linked_live_certificate_inputs(context,db,item,basis)
+        if inputs is None:return changes._stopped_certificate(context,db,item)
+    assembly=changes._linked_live_certificate_assembly(inputs)
+    job=next(assembly)
+    response=changes._resolve_linked_live_certificate_job(job)
+    try:assembly.send(response)
+    except StopIteration as done:certificate=done.value
+    else:raise state.StateError('Live linked certificate has unresolved obligations')
+    with _context_database(context) as db:
+        _require(changes._linked_live_certificate_inputs(context,db,item,basis)==inputs,
+            'Live linked certificate local inputs changed during semantic validation')
+    return certificate
+
+
 def _linked_preparation_facts(pointer,authorities,*,writer=None):
+    """Keep the complete normal validators, including callers that own a supplied writer."""
+    from runtime import changes
+    steps=_linked_preparation_steps(pointer,authorities,writer=writer)
+    try:
+        job=next(steps)
+        while True:
+            context=_reference_context(job['item']['reference']['authority'])
+            with _preparation_database(context,writer) as db:certificate=changes._stopped_certificate(context,db,job['item'])
+            job=steps.send(dict(job=job,result=certificate))
+    except StopIteration as done:return done.value
+
+
+def _linked_preparation_read_facts(pointer,authorities):
+    """Only the read-only observation owner schedules member jobs outside its readers."""
+    steps=_linked_preparation_steps(pointer,authorities)
+    try:
+        job=next(steps)
+        while True:
+            context=_reference_context(job['item']['reference']['authority'])
+            certificate=_observe_linked_live_certificate(context,job['item'],job['basis'])
+            job=steps.send(dict(job=job,result=certificate))
+    except StopIteration as done:return done.value
+
+
+def _linked_preparation_steps(pointer,authorities,*,writer=None):
     """Complete semantic/source facts; recovery interpretation belongs to the outer acquisition."""
     from runtime import changes,delegation
     content=_linked_contract(pointer)
@@ -5490,7 +5533,15 @@ def _linked_preparation_facts(pointer,authorities,*,writer=None):
             _require(task is not None and task.get('writer_stop',{}).get('linked'),'Linked preparation needs every independent stop')
             own_basis=_read(None,task['writer_stop']['linked'],context=context,db=db)
             _require(own_basis==basis,'Linked independent member bases differ')
-            certificate=changes._stopped_certificate(context,db,dict(reference=ref,pins=task['pins']))
+        job=dict(kind='member-certificate',item=dict(reference=ref,pins=task['pins']),basis=basis)
+        response=yield job
+        _require(isinstance(response,dict) and set(response)=={'job','result'} and response['job']==job and
+            isinstance(response['result'],dict),'Preparation member certificate is unresolved or mismatched')
+        certificate=response['result']
+        with _preparation_database(context,writer) as db:
+            _require(state._task(db,ref['scope_id'],ref['client'],ref['session_id'],ref['task_id'])==task and
+                _read(None,task['writer_stop']['linked'],context=context,db=db)==basis,
+                'Linked preparation member changed during certificate validation')
             records=delegation._closure_assignments(context,db,ref,task,certificate)
             all_records=delegation._ledger(None,db,context=context);guidance=delegation._closure_guidance(context,db,all_records)
             projection=_closure_assignment_projection(context,db,task,records);ids={r['id'] for r in records}
@@ -5609,7 +5660,7 @@ def _observe_linked_preparation(pointer,authorities):
     pending=list(authorities)
     for _ in range(4096):
         with _linked_stop_guards(pointer,pending) as complete:
-            facts=_linked_preparation_facts(pointer,complete)
+            facts=_linked_preparation_read_facts(pointer,complete)
             if facts.get('discovered_authorities'):
                 pending=sorted({_raw(a):a for a in [*complete,*facts['discovered_authorities']]}.values(),key=_raw);continue
             refs=[m['reference'] for m in facts['members']]
