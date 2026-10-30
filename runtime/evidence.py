@@ -38,6 +38,7 @@ _CONTENT_ACQUISITION=ContextVar('content_acquisition',default=None)
 _BOUND_STOP_REGISTRATION=ContextVar('bound_stop_registration',default=None)
 _CONTENT_PERMISSION_TARGETS=ContextVar('content_permission_targets',default=())
 _DIAGNOSTIC_CLEANUP=ContextVar('diagnostic_cleanup',default=False)
+_CAP_INPUT_BUDGET=ContextVar('closed_detail_cap_input_budget',default=None)
 _SOURCE_BIRTH=ContextVar('source_publication_birth',default=None)
 _SOURCE_BIRTH_ISSUER=object()
 _FOREIGN_PLAN_ISSUER=object()
@@ -1816,9 +1817,20 @@ def close_task(scope, request, observations):
 
 
 def _evidence_inventory_rows(db):
-    rows=db.execute('select name,digest,owner_key,class,created_at,closed_at,status,bytes,data from evidence_metadata order by name limit 4097').fetchall()
-    _require(len(rows)<=4096,'Evidence inventory exceeds its observation bound')
-    return [dict(reference=dict(name=row[0],digest=row[1]),metadata=state._metadata_record(row)) for row in rows]
+    budget=_CAP_INPUT_BUDGET.get()
+    with _cap_input_work(budget):
+        if budget is not None:
+            _require(db.in_transaction,'Cap metadata observation requires its actual read transaction')
+            # Material is the UTF-8 SQL-column representation; row visits bound Python objects separately.
+            count,material=db.execute("select count(*),coalesce(sum(coalesce(length(cast(name as blob)),0)+length(cast(digest as blob))+"
+                "length(cast(owner_key as blob))+length(cast(class as blob))+length(cast(created_at as blob))+"
+                "coalesce(length(cast(closed_at as blob)),0)+length(cast(status as blob))+length(cast(bytes as blob))+"
+                "length(cast(data as blob))),0) from (select * from evidence_metadata order by name limit 4097)").fetchone()
+            _require(count<=4096,'Evidence inventory exceeds its observation bound')
+            _cap_input_charge(budget,paths=count,material=material)
+        rows=db.execute('select name,digest,owner_key,class,created_at,closed_at,status,bytes,data from evidence_metadata order by name limit 4097').fetchall()
+        _require(len(rows)<=4096,'Evidence inventory exceeds its observation bound')
+        return [dict(reference=dict(name=row[0],digest=row[1]),metadata=state._metadata_record(row)) for row in rows]
 
 
 def _diagnostic_proof(context, db, reference):
@@ -2650,7 +2662,243 @@ def _cleanup_closed_details(context):
     except errors as error:
         report['limitations'].append(str(error) if isinstance(error,StartupError) else 'Closed detail inventory is incomplete')
     finally:_DIAGNOSTIC_CLEANUP.reset(token)
+    if type(report['project'].get('excess_bytes')) is int and report['project']['excess_bytes']>0:
+        report['cap_inputs']=_closed_detail_cap_inputs(context)
     return report
+
+
+@contextmanager
+def _cap_input_work(budget):
+    from runtime.startup import _entry_budget_check
+    try:
+        if budget is not None:_entry_budget_check(budget)
+        yield
+        if budget is not None:_entry_budget_check(budget)
+    except (OSError,StartupError,sqlite3.Error,ValueError,TypeError,KeyError,IndexError,AttributeError,RecursionError,RuntimeError):
+        if budget is not None:budget['bytes']=max(budget['bytes'],8*1024*1024)
+        raise
+
+
+def _cap_input_charge(budget,*,paths=0,material=0):
+    from runtime.startup import _entry_budget_check
+    with _cap_input_work(budget):
+        _require(type(paths) is int and paths>=0 and type(material) is int and material>=0,
+            'Invalid cap-input observation charge')
+        _require(budget['paths']+paths<=4096 and budget['bytes']+material<8*1024*1024,
+            'Cap-input observation budget exhausted')
+        budget['paths']+=paths;budget['bytes']+=material
+        _entry_budget_check(budget)
+
+
+def _cap_input_file(path,budget):
+    """Actual no-follow file witness; the remaining allowance bounds allocation before I/O."""
+    from runtime import onboarding
+    with _cap_input_work(budget):
+        _cap_input_charge(budget,paths=len(path.parts)+2)
+        before=_closure_file_stat(path)
+        _require(stat.S_ISREG(before[2]) and before[5]+1<8*1024*1024-budget['bytes'],
+            'Cap-input file exceeds remaining observation budget')
+        descriptor=onboarding._open_path(path,os.O_RDONLY)
+        with os.fdopen(descriptor,'rb') as stream:
+            info=os.fstat(stream.fileno())
+            _require(stat.S_ISREG(info.st_mode)
+                and (info.st_dev,info.st_ino,info.st_size)==(before[0],before[1],before[5]),
+                'Cap-input opened file differs from its original observation')
+            _cap_input_charge(budget)
+            raw=stream.read(before[5]+1)
+        _cap_input_charge(budget,material=len(raw))
+        _require(_closure_file_stat(path)==before and len(raw)==before[5]
+            and (info.st_dev,info.st_ino,info.st_size)==(before[0],before[1],before[5]),
+            'Cap-input file changed during observation')
+        return dict(stat=before,sha256=hashlib.sha256(raw).hexdigest())
+
+
+def _cap_input_source(context,db,expected=None):
+    rows=_evidence_inventory_rows(db) if expected is None else [expected]
+    for row in sorted(rows,key=lambda row:(row['metadata']['closed_at'] is None,
+            row['metadata']['closed_at'] or 0,row['metadata']['created_at'],_raw(row['reference']))):
+        metadata=row['metadata'];reference=row['reference']
+        if metadata['status']!='live' or metadata['class']!='compact' or metadata['owner'].get('task') is None:continue
+        body=_read(None,reference,context=context,db=db)
+        if body.get('kind') not in {'task-closure','retained-task-closure'}:continue
+        _require(not body.get('stopped',{}).get('linked'),'Linked cap trigger semantics remain protected')
+        actual=_managed_metadata(None,reference,context=context,db=db)
+        _require(actual==metadata,'Cap triggering source metadata changed')
+        subject=_source_subject(context,db,actual)
+        _require(subject['closed_at']==metadata['closed_at'] and subject['identity']['project_id']==metadata['owner']['project_id'],
+            'Cap triggering source identity/age changed')
+        return dict(reference=reference,metadata=actual,subject=subject)
+    raise state.StateError('Cap inputs lack an authenticated managed closure source')
+
+
+def _cap_input_witnesses(project,config,contexts,budget):
+    from runtime import review_storage
+    from runtime.startup import PROJECT_FILE
+    machine=review_storage._MACHINE_ACQUISITION.get()
+    _require(machine is not None and machine['active'],'Cap inputs require their actual machine acquisition')
+    descriptor=os.fstat(machine['descriptor'])
+    _require(dict(device=descriptor.st_dev,inode=descriptor.st_ino)==machine['parents'][str(machine['path'].parent)],
+        'Cap machine descriptor binding changed')
+    files={str(path):_cap_input_file(path,budget) for path in (Path(project['project_root'])/PROJECT_FILE,machine['path'])}
+    parents=set(machine['parents'])|set(config['parents'])
+    parents.update(str(path) for path in (Path(project['project_root'])/PROJECT_FILE).parents)
+    bindings={}
+    for path in sorted(parents):
+        _cap_input_charge(budget,paths=1);value=Path(path).lstat()
+        _require(stat.S_ISDIR(value.st_mode),'Cap witness parent is not a physical directory')
+        bindings[path]=dict(device=value.st_dev,inode=value.st_ino)
+    inventories={};databases={}
+    for context in contexts:
+        _check_context(context)
+        _cap_input_charge(budget,paths=2)
+        database=dict(stat=_closure_file_stat(context.database),directory=_binding(context.directory),sidecars={})
+        for suffix in ('-journal','-wal','-shm'):
+            _cap_input_charge(budget,paths=1)
+            path=Path(str(context.database)+suffix)
+            database['sidecars'][suffix]=_closure_file_stat(path) if os.path.lexists(path) else None
+        databases[str(context.database)]=database
+        folder=context.directory/'evidence';_cap_input_charge(budget,paths=1)
+        inventory=dict(binding=_binding(folder),entries={})
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                _cap_input_charge(budget,paths=1)
+                info=entry.stat(follow_symlinks=False)
+                inventory['entries'][entry.name]=[info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_nlink,
+                    info.st_size,info.st_mtime_ns,info.st_ctime_ns]
+        inventories[str(folder)]=inventory
+    return dict(files=files,parents=bindings,databases=databases,inventories=inventories)
+
+
+def _cap_input_inventory(context,budget,project_id):
+    authority=_canonical_plain(context.authority_set[0]);entries=[];unattributed=[];physical_bytes=0
+    with _context_database(context) as db:
+        rows=_evidence_inventory_rows(db)
+        for row in rows:
+            metadata=row['metadata'];managed=metadata['managed'];path=context.directory/'evidence'/row['reference']['name']
+            _cap_input_charge(budget,paths=1+len(metadata['managed']['parents']))
+            _require(managed['path']==str(path) and managed['sha256']==row['reference']['digest'],
+                'Cap metadata path is outside its original physical authority')
+            for parent,binding in managed['parents'].items():
+                info=Path(parent).lstat()
+                _require(stat.S_ISDIR(info.st_mode) and dict(device=info.st_dev,inode=info.st_ino)==binding,
+                    'Cap original managed parent binding changed')
+            reasons=['Payload ownership, consumer semantics and release eligibility remain unproved']
+            if metadata['status']=='live':
+                _require(_managed_metadata(None,row['reference'],context=context,db=db)==metadata,
+                    'Cap metadata/binding observation changed')
+            else:reasons.append('Pending or expired content remains protected')
+            observed=None
+            if os.path.lexists(path):
+                info=path.lstat()
+                observed=[info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_nlink,info.st_size,info.st_mtime_ns,info.st_ctime_ns]
+                matched=(stat.S_ISREG(info.st_mode) and dict(device=info.st_dev,inode=info.st_ino)==managed['binding']
+                    and stat.S_IMODE(info.st_mode)==managed['mode'] and info.st_size==managed['bytes'])
+                if metadata['status']=='live':_require(matched,'Cap live file changed after metadata observation')
+                elif not matched:reasons.append('Nonlive replacement is not its authenticated original content')
+                if stat.S_ISREG(info.st_mode):physical_bytes+=info.st_size
+            elif metadata['status']!='live':reasons.append('Absent nonlive content does not authenticate expiry')
+            if metadata['owner']['kind']!='project' or metadata['owner']['project_id']!=project_id:
+                reasons.append('Unattributed or foreign ownership remains protected')
+            for edge in metadata['dependencies']:
+                if edge['reference'].get('authority',authority)!=authority:
+                    reasons.append('Unheld dependency authority remains protected')
+            entries.append(dict(reference=row['reference'],metadata=metadata,stat=observed,protected=sorted(set(reasons))))
+        names={row['reference']['name'] for row in rows}
+        with os.scandir(context.directory/'evidence') as paths:
+            for path in paths:
+                _cap_input_charge(budget,paths=1)
+                if path.name in names:continue
+                info=path.stat(follow_symlinks=False)
+                observed=[info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_nlink,info.st_size,info.st_mtime_ns,info.st_ctime_ns]
+                unattributed.append(dict(name=path.name,stat=observed,protected=['Unregistered physical content remains protected']))
+                if stat.S_ISREG(info.st_mode):physical_bytes+=info.st_size
+    candidates=sorted([dict(reference=entry['reference'],owner=entry['metadata']['owner'],
+        closed_at=entry['metadata']['closed_at'],created_at=entry['metadata']['created_at']) for entry in entries
+        if entry['metadata']['status']=='live' and entry['metadata']['closed_at'] is not None],
+        key=lambda item:(item['closed_at'],item['created_at'],_raw(item['reference'])))
+    return dict(authority=authority,entries=entries,unattributed=sorted(unattributed,key=lambda item:item['name']),
+        physical_bytes=physical_bytes,candidates=candidates)
+
+
+class _CapInputControl:
+    def __init__(self,context,trigger,budget):
+        self.context=context;self.trigger=trigger;self.budget=budget
+        self.observation=dict(complete=False,store_count=0,metadata_records=0,physical_files=0,physical_bytes=None,
+            unattributed_files=0,potential_candidates=0,protected=['Enrolled cap input acquisition remains unproved'])
+
+    def access(self,*,project,config,project_context,temporary_context,accounting,reobserve,budget):
+        try:
+            return self._collect(project=project,config=config,project_context=project_context,
+                temporary_context=temporary_context,accounting=accounting,reobserve=reobserve,budget=budget)
+        except (StartupError,OSError,sqlite3.Error,ValueError,TypeError,KeyError,IndexError,AttributeError,RecursionError,RuntimeError) as error:
+            reason=str(error) if isinstance(error,StartupError) else 'Cap callback observations changed or failed'
+            if reason not in self.observation['protected']:self.observation['protected'].append(reason)
+            raise
+
+    def _collect(self,*,project,config,project_context,temporary_context,accounting,reobserve,budget):
+        from runtime import changes
+        from runtime.startup import canonical_scope_projection,decode_project_record
+        _require(budget is self.budget and _CAP_INPUT_BUDGET.get() is budget,'Cap observation budget scope changed')
+        project=_canonical_plain(project);config=_canonical_plain(config);accounting=_canonical_plain(accounting)
+        _require(accounting['temporary_history']==dict(complete=True,reason='authenticated_no_related_history'),
+            'Cap inputs require authenticated absence of related temporary history')
+        for field in ('directory','database','directory_binding','database_binding','authority_set'):
+            _require(getattr(project_context,field)==getattr(self.context,field),'Cap acquisition redirected its Project authority')
+        identity=self.trigger['subject']['identity']
+        _require(all(accounting['checkout'][key]==identity[field] for key,field in
+            (('root','repository_root'),('primary_root','primary_root'),('git_dir','git_dir'),('git_common_dir','git_common_dir')))
+            and accounting['checkout']['binding']==identity['bindings'],
+            'Cap acquisition selected a different triggering Repository checkout')
+        current=canonical_scope_projection(decode_project_record(project),repository_id=identity['repository_id'],
+            checkout_id=identity['checkout_id'],client=identity['client'])
+        _require(current is not None,'Cap triggering Repository is no longer enrolled')
+        current=_canonical_plain(current)
+        _require(project['project_id']==identity['project_id'] and state._physical_identity(current)==state._physical_identity(identity)
+            and current['membership']['included'] and current['configuration']==identity['configuration'],
+            'Cap triggering Repository identity/configuration changed')
+        contexts=(project_context,temporary_context)
+        _require(project_context.database_binding!=temporary_context.database_binding,'Cap Project/temporary authority aliases')
+        with changes._authority_guards(sorted({context.directory for context in contexts})):
+            reobserve()
+            before=_cap_input_witnesses(project,config,contexts,budget)
+            with _context_database(project_context) as db:
+                _require(_cap_input_source(project_context,db,self.trigger)==self.trigger,'Cap triggering source changed')
+            store=_cap_input_inventory(project_context,budget,project['project_id'])
+            self.observation.update(store_count=1,metadata_records=len(store['entries']),
+                physical_files=sum(entry['stat'] is not None and stat.S_ISREG(entry['stat'][2]) for entry in store['entries'])
+                    +sum(stat.S_ISREG(entry['stat'][2]) for entry in store['unattributed']),
+                physical_bytes=store['physical_bytes'],unattributed_files=len(store['unattributed']))
+            self.observation['protected']=sorted({reason for entry in [*store['entries'],*store['unattributed']]
+                for reason in entry['protected']})
+            with _context_database(project_context) as db:
+                _require(_cap_input_source(project_context,db,self.trigger)==self.trigger,'Cap triggering source changed')
+            _require(_cap_input_inventory(project_context,budget,project['project_id'])==store,'Cap metadata/stat census changed')
+            _require(_cap_input_witnesses(project,config,contexts,budget)==before,'Cap filesystem witnesses changed')
+            reobserve()
+            self.observation['potential_candidates']=len(store['candidates'])
+        return self.observation
+
+
+def _closed_detail_cap_inputs(context):
+    from runtime import review_storage
+    observation=dict(complete=False,store_count=0,metadata_records=0,physical_files=0,physical_bytes=None,
+        unattributed_files=0,potential_candidates=0,protected=['Cap inputs remain unavailable'])
+    token=None;control=None
+    try:
+        budget=review_storage._budget();token=_CAP_INPUT_BUDGET.set(budget)
+        with _cap_input_work(budget):
+            with _context_database(context) as db:trigger=_cap_input_source(context,db)
+            control=_CapInputControl(context,trigger,budget)
+            result=review_storage._acquire_enrolled_accounting(Path(trigger['subject']['identity']['repository_root']),budget=budget,control=control)
+            if result is not control.observation:
+                control.observation['protected'].append('Enrolled acquisition did not complete the cap-input callback')
+            return control.observation
+    except (StartupError,OSError,sqlite3.Error,ValueError,TypeError,KeyError,IndexError,AttributeError,RecursionError,RuntimeError) as error:
+        observation=control.observation if control is not None else observation
+        observation['protected'].append(str(error) if isinstance(error,StartupError) else 'Cap input observation is incomplete')
+        return observation
+    finally:
+        if token is not None:_CAP_INPUT_BUDGET.reset(token)
 
 
 def _cleanup_diagnostics(context):
@@ -3861,23 +4109,34 @@ def _managed_artifact(scope, reference, *, context=None, db=None):
 
 def _managed_content(context, reference, metadata):
     """Validate exact managed bytes; the caller owns its separate lifecycle-status permission."""
-    _require(_raw(dict(authority=_canonical_plain(context.authority_set[0]),reference=reference)) not in _CONTENT_PERMISSION_TARGETS.get(),
-        'Permission traversal cannot acquire its protected prospective target')
-    managed = metadata['managed']
-    path = context.directory / 'evidence' / reference['name']
-    _require(managed['path'] == str(path) and managed['sha256'] == reference['digest'], 'Artifact metadata reference mismatch')
-    _require(all(_binding(Path(parent)) == binding for parent, binding in managed['parents'].items()),
-             'Artifact parent identity changed')
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(descriptor, 'rb') as stream:
-        info = os.fstat(stream.fileno())
-        raw = stream.read(MAX_ARTIFACT + 1)
-    _require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1
-        and info.st_mode & 0o377 == 0 and len(raw) <= MAX_ARTIFACT
-        and dict(device=info.st_dev, inode=info.st_ino) == managed['binding'] and stat.S_IMODE(info.st_mode) == managed['mode']
-        and info.st_size == managed['bytes'] == len(raw) and hashlib.sha256(raw).hexdigest() == managed['sha256'],
-        'Artifact physical ownership changed')
-    return raw
+    budget=_CAP_INPUT_BUDGET.get()
+    with _cap_input_work(budget):
+        _require(_raw(dict(authority=_canonical_plain(context.authority_set[0]),reference=reference)) not in _CONTENT_PERMISSION_TARGETS.get(),
+            'Permission traversal cannot acquire its protected prospective target')
+        managed = metadata['managed']
+        path = context.directory / 'evidence' / reference['name']
+        _require(managed['path'] == str(path) and managed['sha256'] == reference['digest'], 'Artifact metadata reference mismatch')
+        if budget is not None:
+            _cap_input_charge(budget,paths=len(path.parts)+len(managed['parents']))
+            _require(managed['bytes']+1<8*1024*1024-budget['bytes'],
+                'Managed cap input exceeds remaining observation budget')
+        _require(all(_binding(Path(parent)) == binding for parent, binding in managed['parents'].items()),
+                 'Artifact parent identity changed')
+        if budget is None:descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        else:
+            from runtime import onboarding
+            descriptor=onboarding._open_path(path,os.O_RDONLY)
+        with os.fdopen(descriptor, 'rb') as stream:
+            info = os.fstat(stream.fileno())
+            if budget is not None:_cap_input_charge(budget)
+            raw = stream.read(MAX_ARTIFACT + 1 if budget is None else min(MAX_ARTIFACT+1,8*1024*1024-budget['bytes']-1))
+        if budget is not None:_cap_input_charge(budget,material=len(raw))
+        _require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1
+            and info.st_mode & 0o377 == 0 and len(raw) <= MAX_ARTIFACT
+            and dict(device=info.st_dev, inode=info.st_ino) == managed['binding'] and stat.S_IMODE(info.st_mode) == managed['mode']
+            and info.st_size == managed['bytes'] == len(raw) and hashlib.sha256(raw).hexdigest() == managed['sha256'],
+            'Artifact physical ownership changed')
+        return raw
 
 
 def _read(scope, reference, *, context=None, db=None):

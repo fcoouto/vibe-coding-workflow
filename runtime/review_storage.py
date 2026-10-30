@@ -536,7 +536,8 @@ def _owners(config, context, db, *, budget=None):
                  and not metadata['dependencies'] and metadata['closed_at'] is None and metadata['export'] is None)
         if budget is not None:
             from runtime.onboarding import MAX_TOTAL
-            budget['bytes'] += metadata['bytes']
+            if evidence._CAP_INPUT_BUDGET.get() is not budget:
+                budget['bytes'] += metadata['bytes']
             _require(budget['bytes'] <= MAX_TOTAL)
         details = dict(target=targets[0], targets=targets, kind=content['kind'])
         if content['kind'] == 'temporary-project-owner':
