@@ -266,6 +266,36 @@ no authentication directory, Git internals or private reasoning text. The tempor
 Council scope remains enabled for its explicitly selected checkout, with no running
 workers; source implementation and live-project enrollment were not changed.
 
+## Reliability follow-up: local proof, 30 October
+
+The user-approved reliability amendment is implemented in `7f1c394`, with
+no-clobber publication corrected in `7a7a575` and ambiguous-spawn stop ownership
+corrected in `67799dd`. Known pre-launch contention can recover the original
+dispatch; critique construction resumes from verified frozen artifacts. Safe
+diagnostics, accepted participation and fresh-synthesis availability support
+useful reduced-panel delivery. Presentation preferences remain advisory unless
+explicitly hard. Original qualification results remain unchanged.
+
+Independent task review closed the artifact-publication race. Final Astra/xhigh
+whole-branch review found one further stop-proof integration issue; its scoped
+re-review confirmed the correction and found no new Critical/Important breakage.
+This is source review, not a new client qualification or a green full-suite gate.
+
+Local proof includes the 172-test affected regression, eight focused checks after
+the isolated router-metadata correction, and 78 Council tests after the publication
+fix. The final stop-ownership correction passed 114 affected worker/Council flow
+tests. These runs overlap; their counts must not be added. Raw RED/GREEN commands
+and review reports remain in the private plan workspace. Package and skill
+validation passed; the Council entry remains 107 words. Package output continues
+to report `client_execution: not_checked`.
+
+Unknown spawn/stop ownership intentionally blocks phase advancement and fallback
+until independently reconciled. Abrupt-kill temporary artifacts and a completion
+marker with incorrect sealing remain conservative recovery blockers; uncertain
+files are preserved. The historical 21 failures and six errors were not replayed
+or repaired. No new paid inference, full-roster qualification, model replacement
+or comparative evaluation was performed.
+
 ## Next qualification
 
 Full three-member qualification remains open. A further authorized run should retain real model/effort controls,
