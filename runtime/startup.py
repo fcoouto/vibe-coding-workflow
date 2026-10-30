@@ -74,17 +74,51 @@ def json_object(raw, *, limit=MAX_INPUT):
     return result
 
 
-def repository_root(cwd):
+def repository_root(cwd, *, budget=None):
     """Locate the nearest repository boundary without requiring working Git metadata."""
     cwd = cwd.resolve(strict=True)
     if not cwd.is_dir():
         raise StartupError("Startup cwd must be a directory")
-    return next((p for p in (cwd, *cwd.parents) if os.path.lexists(p / ".git")), None)
+    for candidate in (cwd, *cwd.parents):
+        if budget is not None:
+            _entry_budget_check(budget)
+            budget["paths"] += 1
+            _entry_budget_check(budget)
+        if os.path.lexists(candidate / ".git"):
+            return candidate
+    return None
 
 
 def _check_observation_deadline(budget):
     if budget.get("deadline") is not None and time.monotonic() >= budget["deadline"]:
         raise StartupError("Canonical acquisition deadline exceeded")
+
+
+def _entry_budget_check(budget):
+    _check_observation_deadline(budget)
+    if (type(budget.get("paths")) is not int or type(budget.get("bytes")) is not int
+            or not 0 <= budget["paths"] <= 4096 or not 0 <= budget["bytes"] < 8 * 1024 * 1024):
+        raise StartupError("Entry observation budget exhausted")
+
+
+def _budgeted_source_read(path, budget):
+    if budget is None:
+        return path.read_bytes()
+    try:
+        _entry_budget_check(budget)
+        budget["paths"] += 1
+        _entry_budget_check(budget)
+        limit = min(1024 * 1024, 8 * 1024 * 1024 - budget["bytes"])
+        with path.open("rb") as stream:
+            raw = stream.read(limit + 1)
+        budget["bytes"] += len(raw)
+        if len(raw) > limit:
+            raise StartupError("Installed source exceeds observation limit")
+        _entry_budget_check(budget)
+        return raw
+    except (OSError, StartupError):
+        budget["bytes"] = max(budget["bytes"], 8 * 1024 * 1024)
+        raise
 
 
 def read_git(root, *args, limit=1024 * 1024, discovery=False, timeout=5, with_stderr=False, deadline=None):
@@ -135,13 +169,25 @@ def read_git(root, *args, limit=1024 * 1024, discovery=False, timeout=5, with_st
             process.stderr.close()
 
 
-def checkout(cwd, *, limit=1024 * 1024, deadline=None):
+def checkout(cwd, *, limit=1024 * 1024, deadline=None, budget=None):
     """Resolve checkout identity; never inherit a Git selector from the caller."""
-    boundary = repository_root(cwd)
+    boundary = repository_root(cwd, budget=budget)
     if boundary is None:
         return None
-    code, raw = read_git(cwd, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir",
-                         limit=limit, timeout=2, deadline=deadline)
+    if budget is not None:
+        _entry_budget_check(budget)
+        deadline = min(deadline, budget["deadline"]) if deadline is not None and budget.get("deadline") is not None else budget.get("deadline", deadline)
+        limit = min(limit, 8 * 1024 * 1024 - budget["bytes"])
+    try:
+        code, raw = read_git(cwd, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir",
+                             limit=limit, timeout=2, deadline=deadline)
+    except (StartupError, subprocess.SubprocessError, OSError):
+        if budget is not None:
+            budget["bytes"] = max(budget["bytes"], 8 * 1024 * 1024)
+        raise
+    if budget is not None:
+        budget["bytes"] += len(raw)
+        _entry_budget_check(budget)
     lines = os.fsdecode(raw).splitlines()
     if code or len(lines) != 2:
         raise StartupError("Cannot resolve checkout identity")
@@ -151,11 +197,15 @@ def checkout(cwd, *, limit=1024 * 1024, deadline=None):
     return root, common
 
 
-def read_record(root):
+def _read_record_snapshot(root, *, budget=None):
     """Reject links and special files before reading the bounded enrollment record."""
+    if budget is not None:
+        _entry_budget_check(budget)
+        budget["paths"] += 1
+        _entry_budget_check(budget)
     directory = root / PROJECT_FILE.parent
     if not os.path.lexists(directory):
-        return None
+        return None, None, None
     if directory.is_symlink() or not directory.is_dir():
         raise StartupError("Enrollment directory must be a local directory")
     if os.name != "posix":
@@ -172,21 +222,34 @@ def read_record(root):
     with os.fdopen(descriptor, "rb") as stream:
         if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
             raise StartupError("Enrollment record must be a regular file")
-        return json_object(stream.read(MAX_INPUT + 1))
+        limit = min(MAX_INPUT, 8 * 1024 * 1024 - budget["bytes"]) if budget is not None else MAX_INPUT
+        raw = stream.read(limit + 1)
+        if budget is not None:
+            budget["bytes"] += len(raw)
+            if len(raw) > limit:
+                budget["bytes"] = max(budget["bytes"], 8 * 1024 * 1024)
+                raise StartupError("Enrollment exceeds observation limit")
+            _entry_budget_check(budget)
+        info = os.fstat(stream.fileno())
+        return json_object(raw), hashlib.sha256(raw).hexdigest(), (info.st_dev, info.st_ino)
 
 
-def policy_digest(package):
+def read_record(root, *, budget=None):
+    return _read_record_snapshot(root, budget=budget)[0]
+
+
+def policy_digest(package, *, budget=None):
     """Bind enrollment to the installed policy filenames and exact contents."""
     paths = sorted((package / "policies").glob("*.md"))
     if not paths or not (package / "policies/00-index.md").is_file():
         raise StartupError("Installed policy index is missing")
     digest = hashlib.sha256()
     for path in paths:
-        digest.update(path.name.encode("utf-8") + b"\0" + path.read_bytes() + b"\0")
+        digest.update(path.name.encode("utf-8") + b"\0" + _budgeted_source_read(path, budget) + b"\0")
     return digest.hexdigest()
 
 
-def runtime_settings(record, package, common):
+def runtime_settings(record, package, common, *, budget=None):
     """Validate opt-in location without creating or opening runtime state."""
     if "runtime" not in record:
         return None
@@ -202,6 +265,10 @@ def runtime_settings(record, package, common):
     if path.is_relative_to(package.resolve()) or path.is_relative_to(common):
         raise StartupError("Runtime state directory must be outside repositories and plugin caches")
     for ancestor in (path, *path.parents):
+        if budget is not None:
+            _entry_budget_check(budget)
+            budget["paths"] += 1
+            _entry_budget_check(budget)
         if os.path.lexists(ancestor) and not ancestor.is_dir():
             raise StartupError("Runtime state directory ancestors must be directories")
         if os.path.lexists(ancestor / ".git") or (
@@ -210,24 +277,37 @@ def runtime_settings(record, package, common):
             raise StartupError("Runtime state directory must be outside repositories and plugin caches")
     existing = next(ancestor for ancestor in (path, *path.parents) if ancestor.is_dir())
     # Bare repositories have no .git marker; discover from the nearest existing directory.
-    discovery = subprocess.run(
-        ["git", "-c", "safe.bareRepository=all", "-C", str(existing),
-         "rev-parse", "--absolute-git-dir"],
-        env={**{key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
-             "GIT_DISCOVERY_ACROSS_FILESYSTEM": "1"},
-        capture_output=True, text=True, timeout=2, check=False,
-    )
-    if discovery.returncode == 0:
+    if budget is None:
+        discovery = subprocess.run(
+            ["git", "-c", "safe.bareRepository=all", "-C", str(existing),
+             "rev-parse", "--absolute-git-dir"],
+            env={**{key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
+                 "GIT_DISCOVERY_ACROSS_FILESYSTEM": "1"},
+            capture_output=True, text=True, timeout=2, check=False,
+        )
+        code = discovery.returncode
+    else:
+        _entry_budget_check(budget)
+        try:
+            code, raw, diagnostic = read_git(existing, "-c", "safe.bareRepository=all", "rev-parse",
+                "--absolute-git-dir", discovery=True, with_stderr=True, timeout=2,
+                deadline=budget.get("deadline"), limit=min(1024 * 1024, 8 * 1024 * 1024 - budget["bytes"]))
+            budget["bytes"] += len(raw) + len(diagnostic)
+            _entry_budget_check(budget)
+        except (StartupError, subprocess.SubprocessError, OSError):
+            budget["bytes"] = max(budget["bytes"], 8 * 1024 * 1024)
+            raise
+    if code == 0:
         raise StartupError("Runtime state directory must be outside repositories and plugin caches")
     return RuntimeSettings(2, path)
 
 
-def resolve_project(event, package) -> ProjectScope | None:
+def resolve_project(event, package, *, budget=None) -> ProjectScope | None:
     """Resolve accepted checkout scope, preserving silence outside enrollment."""
-    root = repository_root(event.cwd)
+    root = repository_root(event.cwd, budget=budget)
     if root is None:
         return None
-    record = read_record(root)
+    record = read_record(root, budget=budget)
     if record is None:
         return None
     if type(record.get("schema_version")) is not int or record["schema_version"] != 1:
@@ -241,13 +321,13 @@ def resolve_project(event, package) -> ProjectScope | None:
         raise StartupError("Invalid enrolled clients")
     if event.client not in clients:
         return None
-    root, common = checkout(root)
+    root, common = checkout(root, budget=budget)
     if record.get("repository_root") != str(root) or record.get("git_common_dir") != str(common):
         raise StartupError("Enrollment does not cover this checkout")
-    runtime = runtime_settings(record, package, common) if event.client == "codex" else None
+    runtime = runtime_settings(record, package, common, budget=budget) if event.client == "codex" else None
     scope_error = RuntimeScopeError if runtime is not None else StartupError
     try:
-        installed_policy = policy_digest(package)
+        installed_policy = policy_digest(package, budget=budget)
     except (StartupError, OSError):
         raise scope_error("Installed policy sources are unavailable") from None
     if record.get("policy_digest") != installed_policy:
@@ -951,7 +1031,7 @@ def _acquire_canonical_membership(cwd: Path, *, authority_path: Path | None, bud
             _canonical_freeze(observation) if observation is not None else None)
     try:
         d3._no_links(cwd)
-        root = repository_root(cwd)
+        root = repository_root(cwd, budget=budget)
         _check_observation_deadline(budget)
         if root is None:
             missing_checkout = True
@@ -1015,7 +1095,7 @@ def _acquire_canonical_membership(cwd: Path, *, authority_path: Path | None, bud
         return result("conflict", "observation_unavailable")
 
 
-def acquire_canonical_project(event, package, *, authority_path=None, qualifier=None, deadline=None):
+def acquire_canonical_project(event, package, *, authority_path=None, qualifier=None, deadline=None, budget=None):
     """Read named canonical authority and current facts; leave public startup gated.
 
     qualifier is an internal trusted-owner, local read-only callback. Its verified
@@ -1026,14 +1106,20 @@ def acquire_canonical_project(event, package, *, authority_path=None, qualifier=
 
     pointer = None
     def result(status, reason):
+        if status == "conflict" and budget is not None:
+            budget["bytes"] = max(budget["bytes"], 8 * 1024 * 1024)
         return CanonicalAcquisition(ScopeResolution(status, None, reason), pointer)
     try:
         now = time.monotonic()
         if deadline is not None and (type(deadline) not in (int, float) or not math.isfinite(deadline)):
             raise StartupError("Invalid acquisition deadline")
         # Reserve one second of the native hook's five-second budget for adaptation.
-        budget = {"paths": 0, "bytes": 0, "deadline": min(deadline, now + 4) if deadline is not None else now + 4}
-        _check_observation_deadline(budget)
+        cap = min(deadline, now + 4) if deadline is not None else now + 4
+        if budget is None:
+            budget = {"paths": 0, "bytes": 0, "deadline": cap}
+        else:
+            budget["deadline"] = min(budget.get("deadline", cap), cap)
+        _entry_budget_check(budget)
         if qualifier is not None and not callable(qualifier):
             raise StartupError("Invalid internal qualification owner")
         if not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", event.client):
@@ -1067,7 +1153,7 @@ def acquire_canonical_project(event, package, *, authority_path=None, qualifier=
         if package != Path(__file__).resolve().parents[1]:
             return result("conflict", "installed_unavailable")
         _check_observation_deadline(budget)
-        installed = dict(policy_digest=policy_digest(package), runtime_digest=runtime_fingerprint(),
+        installed = dict(policy_digest=policy_digest(package, budget=budget), runtime_digest=runtime_fingerprint(budget=budget),
             clients=[event.client] if (package / "clients" / (event.client + ".md")).is_file() else [], package_root=str(package))
         facts = dict(authority=dict(path=str(pointer), target=_canonical_plain(acquired.authority_target)), observation=observation,
                      client=event.client, installed=installed)
@@ -1088,8 +1174,8 @@ def acquire_canonical_project(event, package, *, authority_path=None, qualifier=
                 fresh = _acquired_runtime_location(Path(config["runtime"]["state_dir"]), package, data, observation, budget)
                 if fresh != observation["runtime_location"]:
                     return result("conflict", "observation_unavailable")
-            if (policy_digest(package) != installed["policy_digest"]
-                    or runtime_fingerprint() != installed["runtime_digest"]
+            if (policy_digest(package, budget=budget) != installed["policy_digest"]
+                    or runtime_fingerprint(budget=budget) != installed["runtime_digest"]
                     or ([event.client] if (package / "clients" / (event.client + ".md")).is_file() else []) != installed["clients"]
                     or str(package.resolve(strict=True)) != installed["package_root"]):
                 return result("suspended", "configuration_changed")
@@ -1098,3 +1184,99 @@ def acquire_canonical_project(event, package, *, authority_path=None, qualifier=
         return CanonicalAcquisition(resolution, pointer)
     except (StartupError, OSError, TypeError, KeyError, RecursionError, subprocess.SubprocessError):
         return result("conflict", "observation_unavailable")
+
+
+def acquire_project_entry(event, package, *, qualifier=None, deadline=None, budget=None):
+    """Internal actual-IO selector; no public wiring or native qualification."""
+    from runtime import onboarding as d3
+
+    pointer = None
+    try:
+        cap = time.monotonic() + 4
+        if deadline is not None:
+            if type(deadline) not in (int, float) or not math.isfinite(deadline):
+                raise StartupError("Invalid entry deadline")
+            cap = min(cap, deadline)
+        if budget is None:
+            budget = dict(paths=0, bytes=0, deadline=cap)
+        else:
+            budget["deadline"] = min(budget.get("deadline", cap), cap)
+        _entry_budget_check(budget)
+        root = repository_root(event.cwd, budget=budget)
+        _entry_budget_check(budget)
+        if root is None:
+            return CanonicalAcquisition(ScopeResolution("outside", None, "not_enrolled"), None)
+
+        initial_root = _read_record_snapshot(root, budget=budget)
+        root_record = initial_root[0]
+
+        def record_candidates(locations, initial=False):
+            if len(locations) + budget["paths"] > d3.MAX_PATHS:
+                raise StartupError("Entry candidate limit exceeded")
+            snapshots = []
+            for candidate in sorted(locations):
+                record, digest, binding = initial_root if initial and candidate == root else _read_record_snapshot(candidate, budget=budget)
+                if record is not None:
+                    snapshots.append((candidate, record, digest, binding))
+            return snapshots
+
+        if (root_record is not None and type(root_record.get("schema_version")) is int
+                and root_record["schema_version"] == 1 and isinstance(root_record.get("clients"), list)
+                and event.client not in root_record["clients"]):
+            # Recheck without Git/runtime observation for a stable unselected client.
+            selected = event.cwd.resolve(strict=True)
+            locations = {selected, *selected.parents, root, *root.parents}
+            snapshots = record_candidates(locations, initial=True)
+            parent = root / PROJECT_FILE.parent
+            parent_binding = d3._filesystem_binding(parent)
+            unselected = resolve_project(event, package, budget=budget)
+            _entry_budget_check(budget)
+            if (unselected is not None or record_candidates(locations) != snapshots
+                    or d3._filesystem_binding(parent) != parent_binding
+                    or repository_root(event.cwd, budget=budget) != root):
+                raise StartupError("Unselected entry authority changed")
+            _entry_budget_check(budget)
+            return CanonicalAcquisition(ScopeResolution("outside", None, "not_enrolled"), None)
+
+        def candidates(initial=False):
+            observed, error = d3._checkout_observation(str(root), budget)
+            if error:
+                raise StartupError("Checkout observation unavailable")
+            selected = event.cwd.resolve(strict=True)
+            primary = Path(observed["primary_root"])
+            locations = {selected, *selected.parents, root, *root.parents, primary, *primary.parents}
+            return observed, record_candidates(locations, initial=initial)
+
+        observed, snapshots = candidates(initial=True)
+        canonical = [item for item in snapshots if type(item[1].get("schema_version")) is int and item[1]["schema_version"] == 2]
+        unknown = [item for item in snapshots if type(item[1].get("schema_version")) is not int or item[1]["schema_version"] not in (1, 2)]
+        legacy = next((item for item in snapshots if item[0] == root and item[1].get("schema_version") == 1), None)
+        if unknown or len(canonical) > 1 or canonical and legacy:
+            raise StartupError("Conflicting entry authority")
+        if canonical:
+            pointer = canonical[0][0] / PROJECT_FILE
+            physical = d3._authority_observation(pointer.parent.parent, budget, canonical_only=True)
+            if physical["error"]:
+                raise StartupError("Canonical authority unavailable")
+            result = acquire_canonical_project(event, package, authority_path=pointer, qualifier=qualifier, budget=budget)
+        elif legacy:
+            pointer = root / PROJECT_FILE
+            scope = resolve_project(event, package, budget=budget)
+            result = CanonicalAcquisition(ScopeResolution("active" if scope else "outside", scope,
+                "legacy_enrolled" if scope else "not_enrolled"), pointer)
+        else:
+            result = CanonicalAcquisition(ScopeResolution("outside", None, "not_enrolled"), None)
+        if candidates() != (observed, snapshots):
+            raise StartupError("Entry authority changed")
+        if canonical:
+            fresh = d3._authority_observation(pointer.parent.parent, budget, canonical_only=True)
+            if (fresh["error"] or fresh != physical or
+                    isinstance(result.resolution.scope, AcceptedScope) and
+                    fresh["target"] != _canonical_plain(result.resolution.scope.authority_target)):
+                raise StartupError("Canonical physical authority changed")
+        _entry_budget_check(budget)
+        return result
+    except (StartupError, OSError, ValueError, TypeError, KeyError, RecursionError, subprocess.SubprocessError):
+        if budget is not None:
+            budget["bytes"] = max(budget.get("bytes", 0), 8 * 1024 * 1024)
+        return CanonicalAcquisition(ScopeResolution("conflict", None, "observation_unavailable"), pointer)

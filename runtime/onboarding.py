@@ -642,10 +642,9 @@ def _checkout_observation(value, budget):
         _check_observation_deadline(budget)
         _require(str(root.resolve(strict=True)) == str(root), "Member boundary contains a link or noncanonical root")
         observed["binding"]["root"] = _filesystem_binding(root)
-        identity = checkout(root, limit=min(MAX_FILE, max(0, MAX_TOTAL - budget["bytes"])), deadline=budget.get("deadline"))
+        identity = checkout(root, limit=min(MAX_FILE, max(0, MAX_TOTAL - budget["bytes"])), deadline=budget.get("deadline"), budget=budget)
         _require(identity is not None and identity[0] == root, "Member must select an existing checkout root")
         common = identity[1]
-        budget["bytes"] += len(os.fsencode(str(root))) + len(os.fsencode(str(common))) + 2
         observed["git_common_dir"] = str(common)
         observed["binding"]["git_common_dir"] = _filesystem_binding(common)
         code, raw = git(root, "rev-parse", "--absolute-git-dir")
@@ -676,9 +675,7 @@ def _checkout_observation(value, budget):
                 _require(not any(f == b"bare" or f.startswith(b"prunable") for f in fields)
                          and sum(f.startswith(b"HEAD ") for f in fields) == 1,
                          "Unsupported primary or selected worktree metadata")
-        primary_identity = checkout(primary, limit=min(MAX_FILE, max(0, MAX_TOTAL - budget["bytes"])), deadline=budget.get("deadline"))
-        if primary_identity:
-            budget["bytes"] += sum(len(os.fsencode(str(p))) + 1 for p in primary_identity)
+        primary_identity = checkout(primary, limit=min(MAX_FILE, max(0, MAX_TOTAL - budget["bytes"])), deadline=budget.get("deadline"), budget=budget)
         _require(budget["bytes"] <= MAX_TOTAL, "Project aggregate byte limit exceeded")
         code, raw = git(primary, "rev-parse", "--absolute-git-dir")
         _require(primary_identity == (primary, common) and code == 0

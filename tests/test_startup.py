@@ -1261,3 +1261,302 @@ class CanonicalAcquisitionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EntrySelectorTests(unittest.TestCase):
+    """Real local IO and synthetic qualification comparison; no native provenance."""
+    setUp = StartupTests.setUp
+    git = StartupTests.git
+    record = CanonicalAcquisitionTests.record
+    activate = CanonicalAcquisitionTests.activate
+
+    def entry(self, client='codex', **kwargs):
+        from types import SimpleNamespace
+        from runtime.startup import acquire_project_entry
+        return acquire_project_entry(SimpleNamespace(client=client, cwd=self.repo), PACKAGE, **kwargs)
+
+    def legacy(self, **extra):
+        root, common = checkout(self.repo)
+        record = dict(schema_version=1, project_id='legacy', repository_root=str(root),
+                      git_common_dir=str(common), clients=['codex', 'claude-code'], policy_digest=policy_digest(PACKAGE))
+        record.update(extra)
+        path = self.repo / PROJECT_FILE
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps(record))
+        return path
+
+    def test_legacy_extra_fields_and_client_runtime_order(self):
+        from runtime import startup
+        self.legacy(extra={'kept': True}, runtime={'invalid': True})
+        with patch.object(startup, 'runtime_settings', side_effect=AssertionError('Claude runtime checked')):
+            self.assertIsNone(self.entry('claude-code').resolution.scope.runtime)
+            self.assertIsNone(self.entry('unselected').resolution.scope)
+        self.assertNotEqual(self.entry().resolution.status, 'active')
+        self.legacy(extra=True)
+        self.assertIsInstance(self.entry().resolution.scope, startup.ProjectScope)
+
+    def test_configured_and_active_use_actual_package_budget(self):
+        from runtime import state, startup
+        value, path = self.record()
+        budget = dict(paths=7, bytes=13)
+        self.assertEqual(self.entry(budget=budget).resolution.status, 'configured')
+        proof = self.activate(value, path)
+        proof['current']['version'] = 'compatible-upgrade'
+        initial = copy.deepcopy(proof['binding'])
+        budget = dict(paths=7, bytes=13)
+        result = self.entry(budget=budget, qualifier=lambda record, facts: proof)
+        self.assertEqual(result.resolution.status, 'active', result.resolution.reason)
+        self.assertEqual(proof['binding'], initial)
+        self.assertFalse(Path(value['repositories'][0]['checkouts'][0]['clients'][0]['configuration']['runtime']['state_dir']).exists())
+        source_bytes = sum(p.stat().st_size for p in state._runtime_sources())
+        source_bytes += sum(p.stat().st_size for p in (PACKAGE / 'policies').glob('*.md'))
+        self.assertGreaterEqual(budget['bytes'], 13 + 2 * source_bytes)
+        self.assertLess(budget['bytes'], 8 * 1024 * 1024)
+        self.assertEqual(state.runtime_fingerprint(), state.runtime_fingerprint(budget=dict(paths=0, bytes=0)))
+        self.assertEqual(startup.policy_digest(PACKAGE), startup.policy_digest(PACKAGE, budget=dict(paths=0, bytes=0)))
+
+    def test_shared_exhaustion_and_deadline(self):
+        import time
+        self.record()
+        for budget in (dict(paths=4096, bytes=0), dict(paths=0, bytes=8*1024*1024),
+                       dict(paths=3, bytes=4, deadline=time.monotonic()-1)):
+            before = budget.copy()
+            self.assertIsNone(self.entry(budget=budget).resolution.scope)
+            self.assertGreaterEqual(budget['paths'], before['paths'])
+            self.assertGreaterEqual(budget['bytes'], before['bytes'])
+
+    def test_changed_authority_during_callback_is_not_accepted(self):
+        value, path = self.record()
+        proof = self.activate(value, path)
+        def change(record, facts):
+            raw = path.read_bytes(); path.unlink(); path.write_bytes(raw)
+            return proof
+        self.assertIsNone(self.entry(qualifier=change).resolution.scope)
+
+    def test_conflict_unknown_and_oversized_do_not_select_legacy(self):
+        path = self.legacy()
+        for raw in ('{"schema_version":9}', '{bad', 'x' * (MAX_INPUT+1)):
+            path.write_text(raw)
+            self.assertIsNone(self.entry().resolution.scope)
+        value, path = self.record()
+        value['repositories'][0]['checkouts'][0]['clients'][0]['activation']['status'] = 'suspended'
+        path.write_text(json.dumps(value))
+        self.assertEqual(self.entry().resolution.status, 'suspended')
+
+    def test_legacy_budgeted_probe_counts_stdout_and_stderr(self):
+        from runtime import startup
+        budget = dict(paths=0, bytes=0)
+        with patch.object(startup, 'read_git', return_value=(1, b'out', b'err')) as probe:
+            startup.runtime_settings({'runtime': {'schema_version': 2, 'state_dir': str(self.base/'state')}},
+                                     PACKAGE, self.repo/'.git', budget=budget)
+        self.assertEqual(budget['bytes'], 6)
+        self.assertIs(probe.call_args.kwargs['deadline'], budget.get('deadline'))
+
+    def test_umbrella_and_linked_worktree_boundaries(self):
+        linked = self.base / 'linked'
+        self.git(self.repo, 'worktree', 'add', '-q', '-b', 'linked-entry', str(linked))
+        primary = self.repo
+        value, path = self.record(project=self.base, selected=linked)
+        self.repo = linked
+        result = self.entry()
+        self.assertEqual(result.resolution.status, 'configured', result.resolution.reason)
+        self.assertEqual(result.authority_path, path)
+        value['repositories'][0]['membership'] = 'removed'
+        path.write_text(json.dumps(value))
+        self.assertEqual(self.entry().resolution.status, 'outside')
+        self.repo = primary
+
+    def test_standalone_linked_member_pending_and_conflict(self):
+        primary = self.repo
+        value, path = self.record()
+        linked = self.base / 'linked'
+        self.git(primary, 'worktree', 'add', '-q', '-b', 'pending-entry', str(linked))
+        self.repo = linked
+        self.assertEqual(self.entry().resolution.status, 'pending')
+        self.legacy()
+        self.assertEqual(self.entry().resolution.status, 'conflict')
+        self.repo = primary
+
+    def test_unrelated_legacy_ancestor_does_not_enroll_or_check_runtime(self):
+        path = self.base / PROJECT_FILE
+        path.parent.mkdir()
+        path.write_text(json.dumps(dict(schema_version=1, extra=True, runtime={'invalid': True})))
+        self.assertEqual(self.entry().resolution.status, 'outside')
+        self.legacy(extra=True)
+        self.assertEqual(self.entry().resolution.status, 'active')
+
+    def test_canonical_alias_is_rejected_but_legacy_hardlink_is_preserved(self):
+        path = self.legacy(extra=True)
+        os.link(path, self.base/'legacy-copy')
+        self.assertEqual(self.entry().resolution.status, 'active')
+        path.unlink()
+        _, path = self.record()
+        os.link(path, self.base/'canonical-copy')
+        self.assertEqual(self.entry().resolution.status, 'conflict')
+
+    def test_changed_dependency_and_installed_source_comparison(self):
+        value, path = self.record()
+        proof = self.activate(value, path)
+        # Mutation of the authority remains real IO; callback evidence is synthetic.
+        def changed(record, facts):
+            value['revision'] += 1
+            path.write_text(json.dumps(value))
+            return proof
+        self.assertIsNone(self.entry(qualifier=changed).resolution.scope)
+
+    def test_expired_legacy_probe_launches_no_process(self):
+        import time
+        from runtime import startup
+        budget = dict(paths=0, bytes=9, deadline=time.monotonic()-1)
+        with patch.object(startup, 'read_git', side_effect=AssertionError('expired probe launched')):
+            with self.assertRaises(StartupError):
+                startup.runtime_settings({'runtime': {'schema_version': 2, 'state_dir': str(self.base/'state')}},
+                    PACKAGE, self.repo/'.git', budget=budget)
+
+    def test_source_overflow_and_partial_failure_exhaust_budget(self):
+        from runtime import startup
+        path = self.base/'large-source'
+        path.write_bytes(b'x'*(1024*1024+1))
+        budget = dict(paths=0, bytes=0)
+        with self.assertRaises(StartupError):
+            startup._budgeted_source_read(path, budget)
+        self.assertGreaterEqual(budget['bytes'], 8*1024*1024)
+        budget = dict(paths=0, bytes=0)
+        with patch.object(startup, 'read_git', side_effect=StartupError('partial output')):
+            with self.assertRaises(StartupError):
+                startup.checkout(self.repo, budget=budget)
+        self.assertGreaterEqual(budget['bytes'], 8*1024*1024)
+
+    def test_budgeted_fingerprint_observes_actual_source_change(self):
+        from runtime import state
+        value, path = self.record()
+        proof = self.activate(value, path)
+        # Use a disposable file in the real source list, preserving production files.
+        source = self.base/'observed-source.py'
+        source.write_text('original')
+        with patch.object(state, '_runtime_sources', return_value=[source]):
+            # Relative paths are part of the recipe; PACKAGE is this disposable root.
+            with patch.object(state, 'PACKAGE', self.base):
+                original = state.runtime_fingerprint()
+                budget = dict(paths=0, bytes=0)
+                self.assertEqual(state.runtime_fingerprint(budget=budget), original)
+                source.write_text('changed')
+                self.assertNotEqual(state.runtime_fingerprint(budget=budget), original)
+                self.assertEqual(budget['bytes'], len('originalchanged'))
+
+    def test_unselected_legacy_client_returns_before_checkout_observation(self):
+        from runtime import onboarding
+        self.legacy(runtime={'invalid': True})
+        with patch.object(onboarding, '_checkout_observation', side_effect=AssertionError('unselected Git checked')):
+            self.assertIsNone(self.entry('unselected').resolution.scope)
+
+    def late_canonical_mutation(self, mutate):
+        from runtime import startup
+        value, path = self.record()
+        proof = self.activate(value, path)
+        binding = copy.deepcopy(proof['binding'])
+        acquire = startup.acquire_canonical_project
+        calls = []
+        def observed(*args, **kwargs):
+            result = acquire(*args, **kwargs)
+            self.assertEqual(result.resolution.status, 'active', result.resolution.reason)
+            mutate(path)
+            return result
+        def qualify(record, facts):
+            calls.append(True)
+            return proof
+        with patch.object(startup, 'acquire_canonical_project', side_effect=observed):
+            result = self.entry(qualifier=qualify)
+        self.assertEqual(result.resolution.status, 'conflict')
+        self.assertIsNone(result.resolution.scope)
+        self.assertEqual(calls, [True])
+        self.assertEqual(proof['binding'], binding)
+
+    def test_late_canonical_hardlink_conflicts(self):
+        self.late_canonical_mutation(lambda path: os.link(path, self.base/'late-alias'))
+
+    def test_late_canonical_parent_replacement_conflicts(self):
+        def replace(path):
+            original = path.stat()
+            old = path.parent.with_name('retired-enrollment')
+            path.parent.rename(old)
+            path.parent.mkdir()
+            (old/path.name).rename(path)
+            self.assertEqual((path.stat().st_dev, path.stat().st_ino), (original.st_dev, original.st_ino))
+        self.late_canonical_mutation(replace)
+
+    def test_unselected_changed_to_selected_conflicts(self):
+        from runtime import startup
+        path = self.legacy(clients=['claude-code'])
+        resolve = startup.resolve_project
+        seen = []
+        def select(*args, **kwargs):
+            record = json.loads(path.read_text()); record['clients'].append('codex')
+            path.write_text(json.dumps(record))
+            result = resolve(*args, **kwargs)
+            self.assertIsInstance(result, startup.ProjectScope)
+            seen.append(result)
+            return result
+        with patch.object(startup, 'resolve_project', side_effect=select):
+            result = self.entry()
+        self.assertEqual(result.resolution.status, 'conflict')
+        self.assertIsNone(result.resolution.scope)
+        self.assertEqual(len(seen), 1)
+
+    def test_unselected_same_content_replacement_conflicts(self):
+        from runtime import startup
+        path = self.legacy(clients=['claude-code'])
+        resolve = startup.resolve_project
+        def replace(*args, **kwargs):
+            result = resolve(*args, **kwargs)
+            temporary = path.with_name('replacement.json')
+            temporary.write_bytes(path.read_bytes()); temporary.replace(path)
+            return result
+        with patch.object(startup, 'resolve_project', side_effect=replace):
+            self.assertEqual(self.entry().resolution.status, 'conflict')
+
+    def test_late_root_absence_cannot_succeed_after_deadline(self):
+        from runtime import startup
+        clock = [100.0]
+        budget = dict(paths=0, bytes=0, deadline=101.0)
+        def late(*args, **kwargs):
+            clock[0] = 102.0
+            return None
+        with patch.object(startup.time, 'monotonic', side_effect=lambda: clock[0]), \
+                patch.object(startup, 'repository_root', side_effect=late):
+            result = self.entry(budget=budget)
+        self.assertEqual(result.resolution.status, 'conflict')
+        self.assertIsNone(result.resolution.scope)
+        self.assertGreaterEqual(budget['bytes'], 8*1024*1024)
+        with patch.object(startup, 'repository_root', return_value=None):
+            self.assertEqual(self.entry().resolution.status, 'outside')
+
+    def test_unselected_validation_finishing_late_conflicts(self):
+        from runtime import startup
+        self.legacy(clients=['claude-code'])
+        clock = [100.0]
+        budget = dict(paths=0, bytes=0, deadline=101.0)
+        resolve = startup.resolve_project
+        def late(*args, **kwargs):
+            result = resolve(*args, **kwargs)
+            self.assertIsNone(result)
+            clock[0] = 102.0
+            return result
+        with patch.object(startup.time, 'monotonic', side_effect=lambda: clock[0]), \
+                patch.object(startup, 'resolve_project', side_effect=late):
+            result = self.entry(budget=budget)
+        self.assertEqual(result.resolution.status, 'conflict')
+        self.assertGreaterEqual(budget['bytes'], 8*1024*1024)
+
+    def test_unselected_new_ancestor_candidate_conflicts(self):
+        from runtime import startup
+        self.legacy(clients=['claude-code'])
+        resolve = startup.resolve_project
+        def add(*args, **kwargs):
+            result = resolve(*args, **kwargs)
+            candidate = self.base / PROJECT_FILE
+            candidate.parent.mkdir()
+            candidate.write_text(json.dumps({'schema_version': 1, 'extra': 'new candidate'}))
+            return result
+        with patch.object(startup, 'resolve_project', side_effect=add):
+            self.assertEqual(self.entry().resolution.status, 'conflict')

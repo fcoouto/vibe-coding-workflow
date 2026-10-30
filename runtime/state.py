@@ -14,7 +14,7 @@ from types import MappingProxyType
 
 from runtime.engine import HookResult, evaluate, guarded_mutation
 from runtime.startup import (StartupError, AcceptedScope, RuntimeSettings, PROJECT_FILE, json_object, _canonical_plain, _canonical_freeze,
-    _canonical_path, _canonical_binding, _canonical_ref, _canonical_hash)
+    _canonical_path, _canonical_binding, _canonical_ref, _canonical_hash, _budgeted_source_read)
 
 
 SCHEMA_VERSION = 2
@@ -63,11 +63,11 @@ def _runtime_sources():
     return sorted([*(PACKAGE / "runtime").glob("*.py"), *(PACKAGE / "runtime/adapters").glob("*.py"), PACKAGE / "scripts/workflow.py"])
 
 
-def runtime_fingerprint():
+def runtime_fingerprint(*, budget=None):
     """Pin installed runtime sources, dispatcher and adapter contents, by relative path."""
     digest = hashlib.sha256()
     for path in _runtime_sources():
-        digest.update(str(path.relative_to(PACKAGE)).encode() + b"\0" + path.read_bytes() + b"\0")
+        digest.update(str(path.relative_to(PACKAGE)).encode() + b"\0" + _budgeted_source_read(path, budget) + b"\0")
     return digest.hexdigest()
 
 

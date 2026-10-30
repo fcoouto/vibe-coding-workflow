@@ -262,10 +262,17 @@ class OnboardingTests(unittest.TestCase):
         self.assertGreater(empty["bytes"], 0)
         deadline = time.monotonic() + 60
         used = {"paths": 3, "bytes": 123, "deadline": deadline}
-        with patch.object(startup, "read_git", wraps=startup.read_git) as reader:
+        actual_bytes = []
+        original = startup.read_git
+        def observe(*args, **kwargs):
+            result = original(*args, **kwargs)
+            actual_bytes.append(sum(len(part) for part in result[1:]))
+            return result
+        with patch.object(startup, "read_git", side_effect=observe) as reader:
             _, error = module._checkout_observation(str(self.repo), used)
         self.assertIsNone(error)
         self.assertEqual(used["bytes"], empty["bytes"] + 123)
+        self.assertEqual(used["bytes"], 123 + sum(actual_bytes))
         self.assertEqual(used["paths"], empty["paths"] + 3)
         self.assertEqual(used["deadline"], deadline)
         self.assertTrue(all(call.kwargs["deadline"] == deadline for call in reader.call_args_list))
