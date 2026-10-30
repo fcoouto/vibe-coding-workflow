@@ -8,8 +8,12 @@ import os
 import signal
 import sys
 import time
+from contextlib import contextmanager
 from unittest.mock import patch
 from runtime import openrouter_settings as settings
+from runtime import council_snapshot
+from tests.council_fixtures import CouncilCase
+import hashlib
 from tests.openrouter_fixtures import enroll, configure
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'scripts/openrouter_workers.py'
@@ -51,7 +55,7 @@ class WorkerTests(unittest.TestCase):
         with self.assertRaisesRegex(settings.SettingsError, 'openrouter_disabled'):
             self.api.prepare(self.runs, dict(self.brief, task_id='blocked'))
         result = self.api.execute(run, self.root / 'worker', self.root / 'auth')
-        self.assertEqual(result['failure'], {'category': 'integration', 'reason': 'openrouter_disabled'})
+        self.assertEqual(result['failure'], {'category': 'integration', 'reason': 'openrouter_disabled', 'launch_stage': 'before_spawn'})
         self.assertIs(result['native_fallback_ready'], True)
         self.assertIs(result['local_execution_stopped'], True)
         with self.assertRaisesRegex(ValueError, 'already_started'):
@@ -63,6 +67,179 @@ class WorkerTests(unittest.TestCase):
         settings.enable(self.source, {'expected_revision': report['revision']})
         result = self.api.execute(run, self.root / 'worker', self.root / 'auth')
         self.assertEqual(result['failure']['reason'], 'openrouter_preparation_stale')
+
+    def test_busy_admission_retries_without_launch_and_resumes_original_deadline(self):
+        exe = self.fixture("print(json.dumps({'type':'text','part':{'text':'Finding'}}))\n"
+                           "print(json.dumps({'type':'step_finish','part':{'reason':'stop','cost':0,'tokens':{}}}))\n")
+        run = self.api.prepare(self.runs, self.brief)
+        real_admission = self.api.settings.admission
+        @contextmanager
+        def busy(*args, **kwargs):
+            raise settings.SettingsError('openrouter_operation_busy')
+            yield
+        with patch.object(self.api.settings, 'admission', busy), patch.object(self.api.time, 'sleep') as wait, patch.object(self.api.subprocess, 'Popen') as spawn:
+            result = self.api.execute(run, exe, self.root / 'auth')
+        self.assertEqual(result['state'], 'not_launched')
+        self.assertTrue(result['local_execution_stopped'])
+        self.assertFalse(result['native_fallback_ready'])
+        self.assertTrue(self.api.resumable(result))
+        self.assertEqual(wait.call_count, 2)
+        spawn.assert_not_called()
+        deadline = result['deadline_monotonic']
+        with patch.object(self.api.settings, 'admission', real_admission), patch.object(self.api.subprocess, 'Popen', wraps=self.api.subprocess.Popen) as spawn:
+            resumed = self.api.execute(run, exe, self.root / 'auth')
+        self.assertEqual(resumed['state'], 'awaiting_verification')
+        self.assertEqual(resumed['deadline_monotonic'], deadline)
+        self.assertEqual(len([call for call in spawn.call_args_list if call.args[0][0] == str(exe)]), 1)
+        with self.assertRaisesRegex(ValueError, 'already_started'):
+            self.api.execute(run, exe, self.root / 'auth')
+
+    def test_short_busy_releases_admission_before_backoff_and_launches_once(self):
+        run = self.api.prepare(self.runs, self.brief)
+        real_admission = self.api.settings.admission
+        held, calls = [], []
+        @contextmanager
+        def admission(*args, **kwargs):
+            with real_admission(*args, **kwargs) as report:
+                held.append(True)
+                try: yield report
+                finally: held.pop()
+        @contextmanager
+        def guard():
+            calls.append(True)
+            if len(calls) < 3:
+                from runtime.startup import StartupError
+                raise StartupError('Onboarding plan busy; retry the same expected revision')
+            yield
+        def wait(_): self.assertFalse(held)
+        with patch.object(self.api.settings, 'admission', admission), patch.object(self.api.time, 'sleep', side_effect=wait), patch.object(self.api.subprocess, 'Popen', wraps=self.api.subprocess.Popen) as spawn:
+            result = self.api.execute(run, self.root / 'worker', self.root / 'auth', launch_guard=guard)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(len([call for call in spawn.call_args_list if call.args[0][0] == str(self.root / 'worker')]), 1)
+        self.assertNotEqual(result['state'], 'not_launched')
+
+    def test_interrupted_backoff_and_ambiguous_spawn_cannot_resume(self):
+        for index, interrupted in enumerate((True, False)):
+            run = self.api.prepare(self.runs, dict(self.brief, task_id='interrupted-' + str(index)))
+            launch = self.api.subprocess.Popen
+            def ambiguous(command, **kwargs):
+                if command[0] == str(self.root / 'worker'): raise OSError('SECRET')
+                return launch(command, **kwargs)
+            with patch.object(self.api.settings, 'admission', side_effect=settings.SettingsError('openrouter_operation_busy')) if interrupted else patch.object(self.api.subprocess, 'Popen', side_effect=ambiguous), patch.object(self.api.time, 'sleep', side_effect=KeyboardInterrupt):
+                result = self.api.execute(run, self.root / 'worker', self.root / 'auth')
+            self.assertEqual(result['state'], 'unresolved')
+            with self.assertRaisesRegex(ValueError, 'already_started'):
+                self.api.execute(run, self.root / 'worker', self.root / 'auth')
+
+    def test_ambiguous_spawn_retains_unknown_stop_without_replay(self):
+        for error, category in ((TimeoutError, 'deadline'), (KeyboardInterrupt, 'interrupted')):
+            with self.subTest(error=error.__name__):
+                run = self.api.prepare(self.runs, dict(self.brief, task_id='spawn-' + category))
+                launch = self.api.subprocess.Popen
+                def interrupted(command, **kwargs):
+                    if command[0] == str(self.root / 'worker'): raise error()
+                    return launch(command, **kwargs)
+                with patch.object(self.api.subprocess, 'Popen', side_effect=interrupted):
+                    result = self.api.execute(run, self.root / 'worker', self.root / 'auth')
+                self.assertEqual(result['state'], 'unresolved')
+                self.assertEqual(result['failure'], dict(category=category, launch_stage='spawn'))
+                self.assertIsNone(result['session_id'])
+                self.assertEqual(json.loads((run / 'result.json').read_text()), result)
+                self.assertFalse(result['local_execution_stopped'])
+                self.assertFalse(result['native_fallback_ready'])
+                self.assertFalse(self.api.resumable(result))
+                with self.assertRaisesRegex(ValueError, 'already_started'):
+                    self.api.execute(run, self.root / 'worker', self.root / 'auth')
+
+    def test_allowlisted_policy_context_and_router_diagnostics(self):
+        for name, category in [('ContentFilterError', 'policy'), ('ContextOverflowError', 'context')]:
+            result = self.api.terminal_failure({'name': name, 'data': {'message': 'SECRET'}})
+            self.assertEqual(result, dict(category=category, error_class=name))
+        for code in ('content_policy_violation', 'refusal'):
+            result = self.api.terminal_failure({'data': {'responseBody': json.dumps({'error': {'code': code, 'message': 'SECRET'}})}})
+            self.assertEqual(result, dict(category='policy', router_code=code))
+        for error_type in ('content_policy_violation', 'refusal'):
+            result = self.api.terminal_failure({'name': 'APIError', 'data': {'statusCode': 403,
+                'responseBody': json.dumps({'error': {'code': 403, 'message': 'SECRET',
+                    'metadata': {'error_type': error_type, 'raw': 'SECRET', 'provider_name': 'SECRET'}}})}})
+            self.assertEqual(result, dict(category='policy', router_code=error_type, status_code=403))
+            self.assertNotIn('SECRET', json.dumps(result))
+
+    def test_terminal_finish_reasons_are_safe_and_do_not_accept_truncated_answers(self):
+        for index, reason in enumerate(('length', 'content-filter', 'SECRET')):
+            exe = self.fixture("print(json.dumps({'type':'text','part':{'text':'Partial finding'}}))\n"
+                + "print(json.dumps({'type':'step_finish','part':{'reason':%r,'cost':0,'tokens':{}}}))\n" % reason)
+            run = self.api.prepare(self.runs, dict(self.brief, task_id='finish-' + str(index)))
+            result = self.api.execute(run, exe, self.root / 'auth')
+            self.assertEqual(result['state'], 'unresolved')
+            self.assertEqual(result['failure'].get('terminal_reason'), reason if reason != 'SECRET' else None)
+            self.assertNotIn('SECRET', (run / 'result.json').read_text() + (run / 'progress.jsonl').read_text())
+
+    def test_resumption_never_renews_expired_deadline_or_accepts_unsafe_preparation(self):
+        for index, change in enumerate(('deadline', 'clock', 'symlink', 'permissions', 'unexpected_file')):
+            run = self.api.prepare(self.runs, dict(self.brief, task_id='resume-check-' + str(index)))
+            with patch.object(self.api.settings, 'admission', side_effect=settings.SettingsError('openrouter_operation_busy')), patch.object(self.api.time, 'sleep'):
+                before = self.api.execute(run, self.root / 'worker', self.root / 'auth')
+            self.assertEqual(before['state'], 'not_launched')
+            if change == 'symlink':
+                (run / 'cache').rmdir(); (run / 'cache').symlink_to(self.root / 'auth', target_is_directory=True)
+            elif change == 'permissions': (run / 'cache').chmod(0o755)
+            elif change == 'unexpected_file': (run / 'cache/stranger').write_text('preserve')
+            launch = self.api.subprocess.Popen
+            clock = patch.object(self.api.time, 'monotonic', return_value=before['deadline_monotonic'] + 1) if change == 'deadline' else patch.object(self.api.time, 'monotonic', wraps=time.monotonic)
+            wall = patch.object(self.api.time, 'time', return_value=time.time() + 100) if change == 'clock' else patch.object(self.api.time, 'time', wraps=time.time)
+            with clock, wall, patch.object(self.api.subprocess, 'Popen', wraps=launch) as spawn:
+                result = self.api.execute(run, self.root / 'worker', self.root / 'auth')
+            self.assertEqual(result['state'], 'unresolved')
+            self.assertEqual(result['deadline_monotonic'], before['deadline_monotonic'])
+            self.assertEqual([call for call in spawn.call_args_list if call.args[0][0] == str(self.root / 'worker')], [])
+            if change == 'unexpected_file': self.assertEqual((run / 'cache/stranger').read_text(), 'preserve')
+            if change in ('permissions', 'unexpected_file'):
+                self.assertEqual(result['failure'].get('reason'), 'unsafe_worker_preparation_directory')
+
+    def test_safe_projection_ignores_malformed_nested_and_unrecognized_local_errors(self):
+        for failure in ({'category': ['SECRET'], 'reason': {'SECRET': 'SECRET'}},
+                        {'category': 'policy', 'error_class': ['SECRET'], 'status_code': True, 'retry_after_seconds': float('nan')}):
+            projected = self.api.safe_failure(failure)
+            self.assertNotIn('SECRET', json.dumps(projected))
+        run = self.api.prepare(self.runs, self.brief)
+        with patch.object(self.api.settings, 'admission', side_effect=settings.SettingsError('SECRET')):
+            self.api.execute(run, self.root / 'worker', self.root / 'auth')
+        self.assertNotIn('SECRET', (run / 'result.json').read_text() + (run / 'progress.jsonl').read_text())
+
+    def test_admission_never_reacquires_after_five_second_control_budget(self):
+        run = self.api.prepare(self.runs, self.brief)
+        clock = [100.0]
+        def busy(*args, **kwargs):
+            clock[0] += 4
+            raise settings.SettingsError('openrouter_operation_busy')
+        with patch.object(self.api.time, 'monotonic', side_effect=lambda: clock[0]), patch.object(self.api.time, 'time', return_value=200), patch.object(self.api.time, 'sleep', side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)), patch.object(self.api.settings, 'admission', side_effect=busy) as admission:
+            result = self.api.execute(run, self.root / 'worker', self.root / 'auth')
+        self.assertEqual(result['state'], 'not_launched')
+        self.assertEqual(admission.call_count, 1)
+        self.assertEqual(clock[0], 105)
+
+    def test_not_launched_settles_existing_visibility_owner(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        run = self.api.prepare(self.runs, self.brief)
+        client = Mock()
+        module = SimpleNamespace(Client=lambda _: client, _event=lambda _, event, *args: event)
+        with patch.object(self.api.importlib, 'import_module', return_value=module):
+            publish = self.api.habblaud_publisher(self.root, run, 'fixture', 'fixture')
+            publish('not_launched')
+        self.assertIn('SubagentStop', [call.args[1] for call in client.event.call_args_list])
+
+    def test_output_limits_and_malformed_streams_retain_fixed_safe_reasons(self):
+        for index, reason in enumerate(('output_limit', 'malformed_event', 'unterminated_event')):
+            body = ("print('x' * 100)\n" if reason == 'output_limit' else
+                    "print('{SECRET')\n" if reason == 'malformed_event' else "sys.stdout.write('{SECRET')\n")
+            exe = self.fixture(body)
+            run = self.api.prepare(self.runs, dict(self.brief, task_id='output-reason-' + str(index)))
+            with patch.object(self.api, 'LIMIT', 64 if reason == 'output_limit' else 4 * 1024 * 1024):
+                result = self.api.execute(run, exe, self.root / 'auth')
+            self.assertEqual(result['failure'].get('reason'), reason)
+            self.assertNotIn('SECRET', (run / 'result.json').read_text() + (run / 'progress.jsonl').read_text())
 
     def test_worker_rejects_alternate_runtime_and_unmanaged_preparation(self):
         for index, change in enumerate(('executable', 'auth', 'stamp')):
@@ -155,6 +332,8 @@ print(json.dumps({{'type':'step_finish','part':{{'reason':'stop','cost':0,'token
 
     def test_permissions_deny_shell_writes_network_and_other_agents(self):
         config = self.api.configuration(self.brief)
+        self.assertNotIn('.council-snapshot.json', config['agent']['pilot']['prompt'])
+        self.assertNotIn('__council__/', config['agent']['pilot']['prompt'])
         permissions = config['permission']
         self.assertEqual(permissions['*'], 'deny')
         self.assertEqual(permissions['read']['*'], 'deny')
@@ -163,6 +342,20 @@ print(json.dumps({{'type':'step_finish','part':{{'reason':'stop','cost':0,'token
         for tool in ['bash', 'edit', 'task', 'webfetch', 'external_directory']:
             self.assertNotEqual(permissions.get(tool), 'allow')
         self.assertFalse(config['provider']['openrouter']['models']['vendor/model']['options']['provider']['allow_fallbacks'])
+
+    def test_shared_tool_output_exception_is_explicitly_denied_without_auth_changes(self):
+        expected = str(self.root / 'auth/opencode/tool-output/*')
+        executable = self.fixture('import os\n'
+            + 'config = json.loads(os.environ["OPENCODE_CONFIG_CONTENT"])\n'
+            + f'assert config["permission"]["external_directory"] == {{"*": "deny", {expected!r}: "deny"}}\n'
+            + f'assert os.environ["XDG_DATA_HOME"] == {str(self.root / 'auth')!r}\n'
+            + 'print(json.dumps({"type":"text","part":{"text":"Runtime configuration verified"}}))\n'
+            + 'print(json.dumps({"type":"step_finish","part":{"reason":"stop","cost":0,"tokens":{}}}))\n')
+        for index, auth in enumerate((self.root / 'auth', self.root / 'auth/../auth')):
+            with self.subTest(auth=auth):
+                run = self.api.prepare(self.runs, dict(self.brief, task_id=f'cache-boundary-{index}'))
+                result = self.api.execute(run, executable, auth)
+                self.assertEqual(result['state'], 'awaiting_verification')
 
     def test_worker_reuses_qualified_catalog_without_a_background_refresh(self):
         exe = self.fixture("import os\nassert os.environ.get('OPENCODE_DISABLE_MODELS_FETCH') == 'true'\n"
@@ -208,6 +401,13 @@ for event in [
         with self.assertRaises(ValueError): self.api.verify(run, 'accepted', [])
         self.assertEqual(self.api.verify(run, 'accepted', ['Native line count: 3; matches response'])['state'], 'accepted')
 
+    def test_transport_machine_code_survives_without_secret_message(self):
+        result = self.api.terminal_failure({'name': 'UnknownError', 'data': {
+            'message': 'EPROTO: TLS handshake failed at https://SECRET/?token=SECRET'}})
+        self.assertEqual(result, {'category': 'transport', 'error_code': 'EPROTO', 'failure_layer': 'transport'})
+        self.assertNotIn('SECRET', json.dumps(result))
+        self.assertEqual(self.api.safe_failure(result), result)
+
     def test_error_even_with_zero_exit_never_becomes_success(self):
         exe = self.fixture("print(json.dumps({'type':'error','error':{'message':'SECRET'}}))\n")
         run = self.api.prepare(self.runs, self.brief, now=100)
@@ -245,7 +445,7 @@ for event in [
             with self.subTest(error_type=type(error).__name__):
                 self.assertEqual(self.api.terminal_failure(error), {'category': 'unknown'})
         self.assertEqual(self.api.terminal_failure({'name': 'ContextOverflowError',
-                         'data': {'message': 'SECRET'}}), {'category': 'context'})
+                         'data': {'message': 'SECRET'}}), {'category': 'context', 'error_class': 'ContextOverflowError'})
         result = self.api.terminal_failure({'data': {'statusCode': 403,
             'responseBody': json.dumps({'error': {'metadata': {'limit_source': 'SECRET'}}})}})
         self.assertEqual(result, {'category': 'permission', 'status_code': 403})
@@ -270,7 +470,7 @@ for event in [
         run = self.api.prepare(self.runs, self.brief)
         result = self.api.execute(run, exe, self.root / 'auth')
         self.assertEqual(launches.read_text().splitlines(), ['launch'])
-        self.assertEqual(result.get('failure'), {'category': 'service', 'status_code': 503})
+        self.assertEqual(result.get('failure'), {'category': 'service', 'status_code': 503, 'launch_stage': 'launched'})
         self.assertIs(result.get('local_execution_stopped'), True)
         self.assertIs(result.get('native_fallback_ready'), True)
         self.assertEqual(result['state'], 'failed')
@@ -289,7 +489,7 @@ for event in [
 """)
         run = self.api.prepare(self.runs, self.brief)
         result = self.api.execute(run, exe, self.root / 'auth')
-        self.assertEqual(result.get('failure'), {'category': 'budget', 'status_code': 402})
+        self.assertEqual(result.get('failure'), {'category': 'budget', 'status_code': 402, 'launch_stage': 'launched'})
         self.assertEqual(result['known_cost_subtotal_usd'], 0.02)
         self.assertEqual(result['reported_tokens']['input'], 20)
         self.assertIsNone(result['reported_cost_usd'])
@@ -306,7 +506,7 @@ for event in [
         result = self.api.execute(run, exe, self.root / 'auth')
         self.assertLess(time.monotonic() - started, 5)
         self.assertEqual(launches.read_text().splitlines(), ['launch'])
-        self.assertEqual(result.get('failure'), {'category': 'deadline'})
+        self.assertEqual(result.get('failure'), {'category': 'deadline', 'launch_stage': 'launched'})
         self.assertEqual(result['state'], 'unresolved')
         self.assertIs(result.get('local_execution_stopped'), True)
         self.assertIs(result.get('native_fallback_ready'), True)
@@ -330,7 +530,7 @@ for event in [
         started = time.monotonic()
         result, processes = self.execute_with_backpressure(run, exe)
         self.assertLess(time.monotonic() - started, 2.5)
-        self.assertEqual(result.get('failure'), {'category': 'deadline'})
+        self.assertEqual(result.get('failure'), {'category': 'deadline', 'launch_stage': 'launched'})
         self.assertEqual(len(processes), 1)
         self.assertIsNotNone(processes[0].poll())
         self.assertIs(result.get('local_execution_stopped'), True)
@@ -388,7 +588,7 @@ for event in [
             return process
         with patch.object(self.api.subprocess, 'Popen', side_effect=delayed):
             result = self.api.execute(run, exe, self.root / 'auth')
-        self.assertEqual(result['failure'], {'category': 'deadline'})
+        self.assertEqual(result['failure'], {'category': 'deadline', 'launch_stage': 'launched'})
         self.assertEqual(len(processes), 1)
         self.assertIsNotNone(processes[0].poll())
         self.assertIs(result['local_execution_stopped'], True)
@@ -411,7 +611,7 @@ for event in [
         with patch.object(self.api.settings, 'admission', slow), patch.object(self.api.subprocess, 'Popen', observed):
             result = self.api.execute(run, self.root / 'worker', self.root / 'auth')
         self.assertEqual(processes, [])
-        self.assertEqual(result['failure'], {'category': 'deadline'})
+        self.assertEqual(result['failure'], {'category': 'deadline', 'launch_stage': 'before_spawn'})
         self.assertIs(result['local_execution_stopped'], True)
         self.assertIs(result['native_fallback_ready'], True)
 
@@ -429,7 +629,7 @@ for event in [
             except RecursionError:
                 self.fail('Malformed nested output must remain an unresolved recoverable result')
         self.assertEqual(result['state'], 'unresolved')
-        self.assertEqual(result.get('failure'), {'category': 'runtime_or_output'})
+        self.assertEqual(result.get('failure'), {'category': 'runtime_or_output', 'launch_stage': 'launched', 'reason': 'malformed_event'})
         self.assertIs(result.get('native_fallback_ready'), True)
 
     def test_cli_interruption_retires_the_worker_before_native_takeover(self):
@@ -459,7 +659,7 @@ for event in [
             self.assertEqual(process.returncode, 0, error)
             result = json.loads(output.splitlines()[-1])
             self.assertEqual(result['state'], 'unresolved')
-            self.assertEqual(result.get('failure'), {'category': 'interrupted'})
+            self.assertEqual(result.get('failure'), {'category': 'interrupted', 'launch_stage': 'launched'})
             self.assertIs(result.get('local_execution_stopped'), True)
             self.assertIs(result.get('native_fallback_ready'), True)
             self.assertEqual(result['known_cost_subtotal_usd'], 0.02)
@@ -526,6 +726,277 @@ else:
         finally:
             try: os.kill(pid, signal.SIGKILL)
             except ProcessLookupError: pass
+
+
+    def test_real_authority_contention_keeps_original_prelaunch_owner_and_deadline(self):
+        from runtime import changes, openrouter_settings
+        exe = self.fixture("print(json.dumps({'type':'text','part':{'text':'Synthetic finding'}}))\n"
+                           "print(json.dumps({'type':'step_finish','part':{'reason':'stop','cost':0,'tokens':{}}}))\n")
+        run = self.api.prepare(self.runs, self.brief)
+        scope = openrouter_settings.resolve(self.source)
+        with changes._authority_guards([scope.runtime.state_dir]), patch.object(self.api.time, 'sleep') as wait:
+            result = self.api.execute(run, exe, self.root / 'auth')
+        self.assertEqual(result['state'], 'not_launched')
+        self.assertEqual(result['failure']['reason'], 'openrouter_operation_busy')
+        self.assertEqual(result['failure']['launch_stage'], 'before_spawn')
+        self.assertEqual(wait.call_count, 2)
+        self.assertTrue(self.api.resumable(result))
+        self.assertTrue(result['local_execution_stopped'])
+        deadline = result['deadline_monotonic']
+        with patch.object(self.api.subprocess, 'Popen', wraps=self.api.subprocess.Popen) as spawn:
+            resumed = self.api.execute(run, exe, self.root / 'auth')
+        self.assertEqual(resumed['state'], 'awaiting_verification')
+        self.assertEqual(resumed['deadline_monotonic'], deadline)
+        self.assertEqual(len([call for call in spawn.call_args_list if call.args[0][0] == str(exe)]), 1)
+        with self.assertRaisesRegex(ValueError, 'already_started'):
+            self.api.execute(run, exe, self.root / 'auth')
+
+    def test_uncertain_authority_and_storage_errors_never_retry_or_resume(self):
+        from runtime import changes
+        for index, error in enumerate((changes.Pending('Shared state authority has an active or uncertain D4 operation; resume its bound journal'),
+                                       OSError('unrelated storage failure'))):
+            run = self.api.prepare(self.runs, dict(self.brief, task_id='blocked-authority-' + str(index)))
+            with patch.object(changes, '_authority_guards', side_effect=error), patch.object(self.api.time, 'sleep') as wait:
+                result = self.api.execute(run, self.root / 'worker', self.root / 'auth')
+            self.assertEqual(result['state'], 'failed')
+            self.assertEqual(result['failure']['reason'], 'openrouter_storage_or_scope_unavailable')
+            self.assertEqual(wait.call_count, 0)
+            self.assertTrue(result['local_execution_stopped'])
+            self.assertFalse(self.api.resumable(result))
+
+
+class CouncilWorkerTests(CouncilCase):
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location('council_workers', SCRIPT)
+        cls.api = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.api)
+
+    def setUp(self):
+        super().setUp()
+        (self.repo / 'evidence.txt').write_text('approved evidence')
+        self.snapshot = self.root / 'evidence'
+        self.manifest = council_snapshot.capture(self.repo, self.snapshot, self.approved(['evidence.txt']))
+        self.brief = dict(task_id='council-one', role='Investigator', specialty='Independent analysis',
+            coordinator_chat_id=str(uuid.uuid4()), model='vendor/model', model_display_name='Model',
+            provider='provider', objective='Analyze evidence.txt', source_root=str(self.repo),
+            files=['evidence.txt'], timeout_seconds=5, steps=4, approval_ref='approved', effort='high',
+            council=dict(run_id='round-one', phase='investigate', member_id='external-one'),
+            input_tokens=10000, output_tokens=4096,
+            capabilities=dict(model='vendor/model', provider='provider', context_length=20000,
+                max_output_tokens=8000, max_input_tokens=12000, tools=True,
+                reasoning={'efforts': ['low', 'high']}, observed_at='2026-10-29T00:00:00Z',
+                source='controlled endpoint fixture'),
+            permission_qualification=dict(opencode_sha256=hashlib.sha256(self.executable.read_bytes()).hexdigest(),
+                version='1.19.5', profile='council-readonly-v2', evidence='local controlled qualification'))
+
+    def prepare(self, **changes):
+        self.assertTrue(callable(getattr(self.api, 'prepare_council', None)), 'Council preparation is required')
+        return self.api.prepare_council(self.root, dict(self.brief, **changes), self.snapshot, self.manifest)
+
+    def test_two_isolated_council_runs_keep_endpoint_allowances_and_pin(self):
+        first = self.prepare()
+        second = self.prepare(task_id='council-two', output_tokens=6000,
+            capabilities=dict(self.brief['capabilities'], reasoning={'fixed': 'high'}))
+        for run, output, fixed in [(first, 4096, False), (second, 6000, True)]:
+            brief = json.loads((run / 'brief.json').read_text())
+            model = self.api.configuration(brief)['provider']['openrouter']['models']['vendor/model']
+            self.assertEqual(model['options']['maxOutputTokens'], output)
+            self.assertEqual(model['options']['provider'], {'only': ['provider'], 'allow_fallbacks': False})
+            self.assertEqual('reasoning' in model['options'], not fixed)
+            self.assertEqual(model['limit']['input'], 10000)
+            self.api._verify_council_copy(run / 'workspace', brief['evidence']['workspace_manifest'])
+            self.assertTrue((run / 'workspace/.git').is_dir())
+        self.assertNotEqual(first / 'workspace', second / 'workspace')
+        pilot = {k: v for k, v in self.brief.items() if k not in (
+            'council', 'capabilities', 'input_tokens', 'output_tokens', 'permission_qualification')}
+        self.assertEqual(self.api.configuration(pilot)['provider']['openrouter']['models']['vendor/model']['options']['maxOutputTokens'], 2048)
+
+    def test_council_rejects_unverified_limits_effort_and_markers(self):
+        cases = [dict(output_tokens=8001), dict(input_tokens=12001), dict(input_tokens=17000),
+            dict(effort='low'), dict(capabilities=dict(self.brief['capabilities'], tools=False)),
+            dict(capabilities=dict(self.brief['capabilities'], provider='other')),
+            dict(council=dict(self.brief['council'], phase='synthesis')),
+            dict(permission_qualification={}), dict(evidence={'route': 'council'})]
+        for changes in cases:
+            with self.subTest(changes=changes), self.assertRaises(ValueError): self.prepare(**changes)
+        self.assertFalse((self.root / self.brief['task_id']).exists())
+        with self.assertRaises(ValueError): self.api.prepare(self.root, self.brief)
+
+    def test_council_requires_manifest_files_and_immutable_source(self):
+        with self.assertRaises(ValueError): self.prepare(files=['not-approved'])
+        (self.snapshot / 'evidence.txt').chmod(0o600)
+        (self.snapshot / 'evidence.txt').write_text('tampered')
+        with self.assertRaises(ValueError): self.prepare()
+
+    def test_council_disable_before_spawn_and_replay(self):
+        run = self.prepare()
+        settings.disable(self.repo, {'expected_revision': self.settings['revision']})
+        with patch.object(self.api.subprocess, 'Popen', wraps=self.api.subprocess.Popen) as spawn:
+            result = self.api.execute(run, self.executable, self.auth)
+        self.assertEqual(sum(call.args[0][0] == str(self.executable) for call in spawn.call_args_list), 0)
+        self.assertEqual(result['failure']['reason'], 'openrouter_disabled')
+        with self.assertRaisesRegex(ValueError, 'already_started'): self.api.execute(run, self.executable, self.auth)
+
+    def test_council_preparation_checks_supplied_original_management_binding(self):
+        stamp = dict(scope_id=self.settings['scope_id'], revision=self.settings['revision'])
+        with self.assertRaisesRegex(settings.SettingsError, 'openrouter_scope_changed'):
+            self.api.prepare_council(self.root, self.brief, self.snapshot, self.manifest,
+                                     **dict(stamp, scope_id='another-checkout'))
+        disabled = settings.disable(self.repo, {'expected_revision': stamp['revision']})
+        settings.enable(self.repo, {'expected_revision': disabled['revision']})
+        with patch.object(self.api.subprocess, 'Popen', wraps=self.api.subprocess.Popen) as spawn:
+            with self.assertRaisesRegex(settings.SettingsError, 'openrouter_preparation_stale'):
+                self.api.prepare_council(self.root, self.brief, self.snapshot, self.manifest, **stamp)
+        self.assertFalse((self.root / self.brief['task_id']).exists())
+        self.assertEqual([call for call in spawn.call_args_list if call.args[0][0] == str(self.executable)], [])
+
+    def test_council_prepared_worker_cannot_launch_under_changed_auth(self):
+        run = self.prepare()
+        disabled = settings.disable(self.repo, {'expected_revision': self.settings['revision']})
+        auth = self.temporary / 'changed-auth'
+        auth.mkdir(mode=0o700)
+        configured = settings.configure(self.repo, dict(expected_revision=disabled['revision'],
+            routes=['council'], opencode=str(self.executable), auth_data=str(auth)))
+        settings.enable(self.repo, {'expected_revision': configured['revision']})
+        with patch.object(self.api.subprocess, 'Popen', wraps=self.api.subprocess.Popen) as spawn:
+            result = self.api.execute(run, self.executable, auth)
+        self.assertEqual(result['failure']['reason'], 'openrouter_preparation_stale')
+        self.assertEqual([call for call in spawn.call_args_list if call.args[0][0] == str(self.executable)], [])
+        self.assertTrue(result['local_execution_stopped'])
+
+    def test_council_real_fixture_single_spawn_and_qualified_binary_binding(self):
+        count = self.temporary / 'spawns'
+        self.executable.write_text('#!/usr/bin/env python3\nimport json\nfrom pathlib import Path\n'
+            + f'with Path({str(count)!r}).open("a") as f: f.write("spawn\\n")\n'
+            + 'print(json.dumps({"type":"text","part":{"text":"fixture result"}}))\n'
+            + 'print(json.dumps({"type":"step_finish","part":{"reason":"stop","cost":0,"tokens":{"input":1,"output":1}}}))\n')
+        self.brief['permission_qualification']['opencode_sha256'] = hashlib.sha256(self.executable.read_bytes()).hexdigest()
+        run = self.prepare()
+        result = self.api.execute(run, self.executable, self.auth)
+        self.assertEqual(result['state'], 'awaiting_verification')
+        self.assertTrue(result['local_execution_stopped'])
+        with self.assertRaisesRegex(ValueError, 'already_started'): self.api.execute(run, self.executable, self.auth)
+        self.assertEqual(count.read_text().splitlines(), ['spawn'])
+        other = self.prepare(task_id='second-run', output_tokens=1024)
+        self.assertEqual(self.api.execute(other, self.executable, self.auth)['state'], 'awaiting_verification')
+        self.assertNotEqual(run / 'workspace', other / 'workspace')
+        second = self.prepare(task_id='changed-runtime')
+        self.executable.write_text('#!/bin/sh\nexit 0\n')
+        result = self.api.execute(second, self.executable, self.auth)
+        self.assertEqual(result['state'], 'unresolved')
+        self.assertEqual(count.read_text().splitlines(), ['spawn', 'spawn'])
+
+    def test_council_changed_copy_and_forged_route_never_launch(self):
+        for index, change in enumerate(('copy', 'marker')):
+            run = self.prepare(task_id=f'invalid-{index}')
+            if change == 'copy':
+                (run / 'workspace/evidence.txt').chmod(0o600)
+                (run / 'workspace/evidence.txt').write_text('changed')
+            else:
+                brief = json.loads((run / 'brief.json').read_text())
+                del brief['council']
+                (run / 'brief.json').write_text(json.dumps(brief))
+            with patch.object(self.api.subprocess, 'Popen', wraps=self.api.subprocess.Popen) as spawn:
+                result = self.api.execute(run, self.executable, self.auth)
+            self.assertEqual(sum(call.args[0][0] == str(self.executable) for call in spawn.call_args_list), 0)
+            self.assertEqual(result['state'], 'unresolved')
+
+
+    def test_council_rejects_superseded_permission_qualification(self):
+        qualification = dict(self.brief['permission_qualification'], profile='council-readonly-v1')
+        with self.assertRaisesRegex(ValueError, 'council_permission_qualification_required'):
+            self.prepare(permission_qualification=qualification)
+
+    def test_council_honors_small_endpoint_and_larger_finite_step_budget(self):
+        run = self.prepare(input_tokens=2000, output_tokens=1024, steps=9, timeout_seconds=301,
+            capabilities=dict(self.brief['capabilities'], context_length=4096,
+                max_output_tokens=1024, max_input_tokens=2000))
+        model = self.api.configuration(json.loads((run / 'brief.json').read_text()))['provider']['openrouter']['models']['vendor/model']
+        self.assertEqual(model['options']['maxOutputTokens'], 1024)
+
+
+    def test_council_oversized_report_stops_without_persisting_excess(self):
+        self.executable.write_text('#!/usr/bin/env python3\nimport json\n'
+            + 'print(json.dumps({"type":"text","part":{"text":"x" * (128 * 1024)}}))\n')
+        self.brief['permission_qualification']['opencode_sha256'] = hashlib.sha256(self.executable.read_bytes()).hexdigest()
+        run = self.prepare()
+        result = self.api.execute(run, self.executable, self.auth)
+        self.assertEqual(result['state'], 'unresolved')
+        self.assertLessEqual(len(result['response'].encode()), 128 * 1024)
+        self.assertTrue(result['local_execution_stopped'])
+        self.assertEqual(result['failure'].get('reason'), 'council_report_limit')
+
+    def test_grouped_external_chair_contract_preserves_free_variant_and_prices(self):
+        brief = dict(self.brief, model='vendor/model:free', canonical_model='vendor/model',
+            pricing=dict(prompt_usd_per_million=0, completion_usd_per_million=0,
+                source='observed endpoint', observed_at='2026-10-30'),
+            council=dict(run_id='round-one', phase='synthesis', member_id='member-three', group='Free', chair='member-three'),
+            capabilities=dict(self.brief['capabilities'], model='vendor/model:free'))
+        self.api._validate_council_brief(brief)
+        model = self.api.configuration(brief)['provider']['openrouter']['models']['vendor/model:free']
+        self.assertFalse(model['options']['provider']['allow_fallbacks'])
+        for change in ('price', 'variant', 'canonical', 'chair'):
+            mutated = json.loads(json.dumps(brief))
+            if change == 'price': mutated['pricing']['completion_usd_per_million'] = .1
+            elif change == 'variant':
+                mutated['model'] = 'vendor/model'; mutated['capabilities']['model'] = mutated['model']
+            elif change == 'canonical': mutated['canonical_model'] = ''
+            else: mutated['council']['chair'] = 'member-one'
+            with self.subTest(change=change), self.assertRaises(ValueError): self.api._validate_council_brief(mutated)
+
+    def default_reasoning_brief(self):
+        return dict(self.brief, model='vendor/model:free', canonical_model='vendor/model', effort='default',
+            pricing=dict(prompt_usd_per_million=0, completion_usd_per_million=0,
+                source='observed endpoint', observed_at='2026-10-30'),
+            council=dict(run_id='round-one', phase='investigate', member_id='member-one', group='Free', chair='member-one'),
+            capabilities=dict(self.brief['capabilities'], model='vendor/model:free',
+                reasoning={'default_enabled': True}, source='Exact free route documentation: reasoning enabled by default'))
+
+    def test_free_documented_default_reasoning_omits_every_override(self):
+        brief = self.default_reasoning_brief()
+        for phase in ('investigate', 'critique', 'synthesis'):
+            with self.subTest(phase=phase):
+                brief['council']['phase'] = phase
+                self.api._validate_council_brief(brief)
+                config = self.api.configuration(brief)
+                model = config['provider']['openrouter']['models'][brief['model']]
+                self.assertEqual(set(model['options']), {'maxOutputTokens', 'provider'})
+                self.assertEqual(model['options']['maxOutputTokens'], brief['output_tokens'])
+                self.assertEqual(model['options']['provider'], {'only': ['provider'], 'allow_fallbacks': False})
+                self.assertTrue(model['tool_call'])
+                self.assertEqual(brief['effort'], 'default')
+
+    def test_documented_default_rejects_paid_legacy_and_malformed_declarations(self):
+        base = self.default_reasoning_brief()
+        cases = []
+        for group in ('Frontier', 'Balanced'):
+            cases.append(dict(base, council=dict(base['council'], group=group)))
+        legacy = {key: value for key, value in base.items() if key not in ('canonical_model', 'pricing')}
+        legacy['council'] = self.brief['council']; cases.append(legacy)
+        for reasoning in ({'default_enabled': False}, {'default_enabled': 1}, {'default_enabled': 'true'},
+                          {'default_enabled': True, 'efforts': ['high']}, {'fixed': 'default'}, {'efforts': ['default']}):
+            cases.append(dict(base, capabilities=dict(base['capabilities'], reasoning=reasoning)))
+        cases.append(dict(base, effort='high'))
+        for field in ('source', 'observed_at'):
+            cases.append(dict(base, capabilities=dict(base['capabilities'], **{field: ''})))
+        for brief in cases:
+            with self.subTest(brief=brief), self.assertRaises(ValueError): self.api._validate_council_brief(brief)
+        with self.assertRaisesRegex(ValueError, 'council_maximum_effort_required'):
+            self.api._validate_council_brief(dict(self.brief, effort='low'))
+
+    def test_council_guidance_is_bounded_without_truncating_approved_paths(self):
+        files = ['approved/' + 'source-' * 10 + str(number) + '.txt' for number in range(1000)]
+        for phase in ('investigate', 'critique', 'synthesis'):
+            brief = self.default_reasoning_brief()
+            brief['council']['phase'] = phase
+            original = self.api.configuration(brief)
+            expanded = self.api.configuration(dict(brief, files=files))
+            self.assertEqual(expanded['agent']['pilot']['prompt'], original['agent']['pilot']['prompt'])
+            self.assertLessEqual(len(expanded['agent']['pilot']['prompt']), 1500)
+            self.assertEqual(expanded['permission']['read'], dict({'*': 'deny'}, **{name: 'allow' for name in files}))
+            self.assertNotIn('.council-snapshot.json', expanded['permission']['read'])
+            self.assertEqual(expanded['agent']['pilot']['steps'], brief['steps'])
 
 
 if __name__ == '__main__': unittest.main()

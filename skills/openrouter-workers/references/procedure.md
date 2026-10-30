@@ -5,6 +5,13 @@ investigation over copied UTF-8 files. OpenCode owns the external tool loop; Cod
 owns original files, integration and acceptance. The original proposal route remains
 separate. Its successful tests do not qualify tool use or autonomous editing.
 
+An explicitly requested [Council](../../council/SKILL.md) uses its own saved route,
+snapshot limits, endpoint-aware allowances and three-phase procedure. Load that
+procedure instead of this ordinary pilot's prepare/run instructions; do not apply
+its one-supervisor, 16-file, 1–8-step, 300-second or 2048-output defaults to Council.
+Council reuses this executor's retry ownership and native verification mechanics;
+it does not enable or alter the ordinary pilot route.
+
 ## Prepare
 
 Read `scripts/openrouter.py status --cwd <selected-checkout>` with `{}` on stdin.
@@ -83,6 +90,14 @@ qualified. A run ID cannot be reused, even after failure. State must stay outsid
 repositories and plugin installations. Do not rerun under another ID to conceal an
 unresolved attempt. Background execution uses the host's normal process facility;
 the supervisor remains responsible for collecting its final result.
+
+## Shared tool-output boundary
+
+The shared executor also denies the exact canonical selected data directory's
+`opencode/tool-output/*` exception, preventing prior-run cached tool output from
+escaping the copied-input boundary. It denies rereading this run's truncated cache
+too; use narrower reads of approved files. This shared security correction changes
+no ordinary pilot resource defaults, credentials or authentication choice.
 
 ## Retry ownership and native recovery
 

@@ -68,6 +68,79 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(self.path.parent.stat().st_mode & 0o777, 0o700)
         self.assertEqual(database.read_bytes(), before)
 
+    def test_council_requires_its_own_enabled_route(self):
+        self.enabled()
+        with self.assertRaisesRegex(self.settings.SettingsError, 'openrouter_route_disabled'):
+            with self.settings.admission(self.repo, 'council'): self.fail('must not admit')
+        self.settings.disable(self.repo, dict(expected_revision=2))
+        configured = self.settings.configure(self.repo,
+            dict(self.request, expected_revision=3, routes=['council']))
+        self.assertFalse(configured['enabled'])
+        self.assertEqual(configured['routes'], ['council'])
+        self.assertEqual(Path(configured['council_root']), self.path.with_suffix('') / 'council')
+        self.assertNotEqual(configured['council_root'], configured['worker_root'])
+        with self.assertRaisesRegex(self.settings.SettingsError, 'openrouter_disabled'):
+            with self.settings.admission(self.repo, 'council'): self.fail('must not admit')
+        enabled = self.settings.enable(self.repo, dict(expected_revision=configured['revision']))
+        before = self.snapshot()
+        self.assertEqual(self.settings.status(self.repo), enabled)
+        self.assertEqual(self.snapshot(), before)
+        with self.settings.admission(self.repo, 'council', root=enabled['council_root'],
+                opencode=self.exe, auth_data=self.auth, revision=enabled['revision'],
+                scope_id=enabled['scope_id']) as admitted:
+            self.assertEqual(admitted, enabled)
+        for arguments, reason in ((dict(root=enabled['worker_root']), 'openrouter_configuration_mismatch'),
+                (dict(revision=configured['revision']), 'openrouter_preparation_stale'),
+                (dict(scope_id='other-checkout'), 'openrouter_scope_changed')):
+            with self.subTest(arguments=arguments), self.assertRaisesRegex(self.settings.SettingsError, reason):
+                with self.settings.admission(self.repo, 'council', **arguments): self.fail('must not admit')
+        with self.assertRaisesRegex(self.settings.SettingsError, 'openrouter_route_disabled'):
+            with self.settings.admission(self.repo, 'workers'): self.fail('must not admit')
+
+    def test_council_requires_runtime_without_workers(self):
+        with self.assertRaisesRegex(self.settings.SettingsError, 'invalid_openrouter_runtime_references'):
+            self.settings.configure(self.repo,
+                dict(expected_revision=0, routes=['council'], opencode=None, auth_data=None))
+        configured = self.settings.configure(self.repo, dict(self.request, routes=['council']))
+        previous = self.path.read_bytes()
+        self.exe.chmod(0o600)
+        self.assertEqual(self.settings.status(self.repo)['local_configuration'], 'unavailable')
+        with self.assertRaisesRegex(self.settings.SettingsError, 'openrouter_runtime_unavailable'):
+            self.settings.enable(self.repo, dict(expected_revision=configured['revision']))
+        self.assertEqual(self.path.read_bytes(), previous)
+        self.exe.chmod(0o700)
+        enabled = self.settings.enable(self.repo, dict(expected_revision=configured['revision']))
+        self.auth.rmdir()
+        self.assertEqual(self.settings.status(self.repo)['local_configuration'], 'unavailable')
+        with self.assertRaisesRegex(self.settings.SettingsError, 'openrouter_configuration_unavailable'):
+            with self.settings.admission(self.repo, 'council'): self.fail('must not admit')
+        self.auth.mkdir(mode=0o700)
+        self.settings.disable(self.repo, dict(expected_revision=enabled['revision']))
+        all_routes = self.settings.configure(self.repo,
+            dict(self.request, expected_revision=3, routes=['workers', 'council', 'proposals']))
+        self.assertEqual(all_routes['routes'], ['council', 'proposals', 'workers'])
+
+    def test_existing_settings_remain_valid(self):
+        for routes in (['proposals', 'workers'], ['workers'], ['proposals']):
+            with self.subTest(routes=routes):
+                revision = self.settings.status(self.repo)['revision']
+                configured = self.settings.configure(self.repo, dict(expected_revision=revision, routes=routes,
+                    opencode=str(self.exe) if 'workers' in routes else None,
+                    auth_data=str(self.auth) if 'workers' in routes else None))
+                enabled = self.settings.enable(self.repo, dict(expected_revision=configured['revision']))
+                previous_record_before_read = self.path.read_bytes()
+                report = self.settings.status(self.repo)
+                previous_record_after_read = self.path.read_bytes()
+                self.assertEqual(previous_record_after_read, previous_record_before_read)
+                self.assertEqual(report['routes'], routes)
+                self.assertTrue(report['enabled'])
+                self.assertEqual(report['local_configuration'], 'ready')
+                record = json.loads(previous_record_before_read)
+                self.assertEqual(record['version'], 1)
+                self.assertEqual(set(record),
+                    {'version', 'revision', 'binding', 'routes', 'opencode', 'auth_data', 'enabled'})
+                self.settings.disable(self.repo, dict(expected_revision=enabled['revision']))
+
     def test_saved_enable_disable_and_stale_revisions(self):
         self.enabled()
         self.assertTrue(self.settings.status(self.repo)['enabled'])
@@ -198,6 +271,32 @@ class SettingsTests(unittest.TestCase):
             input='', text=True, capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(json.loads(result.stdout)['enabled'])
+
+    def test_held_authority_lock_is_safe_control_contention(self):
+        self.enabled()
+        locations = changes._authority_locations([self.scope.runtime.state_dir])
+        with changes._authority_guards([self.scope.runtime.state_dir]):
+            with self.assertRaisesRegex(self.settings.SettingsError, '^openrouter_operation_busy$'):
+                with self.settings.admission(self.repo, 'workers'): self.fail('must not admit')
+        with self.settings.admission(self.repo, 'workers') as admitted:
+            self.assertEqual(admitted['revision'], 2)
+
+    def test_active_uncertain_authority_and_unrelated_storage_failure_stay_blocked(self):
+        self.enabled()
+        location = changes._authority_locations([self.scope.runtime.state_dir])[0]
+        plan = self.root / 'active-plan'; plan.mkdir(mode=0o700)
+        owner = Path(str(location) + '.json')
+        owner.write_text(json.dumps(dict(schema_version=1, plan_dir=str(plan),
+            transaction_id='fixture-active-operation', manifest_digest='0' * 64)))
+        owner.chmod(0o600)
+        with self.assertRaisesRegex(self.settings.SettingsError, '^openrouter_storage_or_scope_unavailable$'):
+            with self.settings.admission(self.repo, 'workers'): self.fail('must not admit')
+        owner.unlink()
+        for error in (OSError('private failure'), startup.StartupError('other busy storage failure'),
+                      changes.Pending('D4 transaction busy; retry the same bound request')):
+            with self.subTest(error=type(error).__name__), patch.object(changes, '_authority_guards', side_effect=error):
+                with self.assertRaisesRegex(self.settings.SettingsError, '^openrouter_storage_or_scope_unavailable$'):
+                    with self.settings.admission(self.repo, 'workers'): self.fail('must not admit')
 
 
 if __name__ == '__main__': unittest.main()

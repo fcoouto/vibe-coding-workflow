@@ -6,6 +6,123 @@ Vibe Coding Toolkit remains the workflow authority. The contracts express its ap
 
 ## Reviewed sources
 
+### Council instruction ownership
+
+The user approved a behavior-preserving reorganization on 30 October 2026, before
+considering the pending verification-feedback change. These are the authoritative
+runtime locations; the tables below retain the original requirements and proof.
+
+| Contract | Authoritative location |
+| --- | --- |
+| Readiness, transmission scope, original budgets, three phases, verification gates and delivery | [Procedure](../skills/council/references/procedure.md) |
+| Runtime groups, task fit, developer diversity, reasoning, tool qualification and preapproved replacements | [Selection](../skills/council/references/selection.md) |
+| Exact preparation/seat/verification schemas, legacy compatibility, anonymous observations, consent/cancellation and accounting | [Protocol](../skills/council/references/protocol.md) |
+| Interrupted work, recovery actions and limits, supported corrections, generation/chair replacement and bounded learning | [Recovery](../skills/council/references/recovery.md) |
+| Actual host identity, native member admission/dispatch/receipts and isolated supervisor ownership | [Codex controls](../clients/codex-council.md) |
+
+The entry point and procedure route required reads by stage. Shortlists, ownership
+and cancellation guards remain available before inference; native member details
+are conditional on paid-group membership. The duplicated client `resume-member`
+restriction now links to the existing common contract, including version 3's
+verified still-prepared lost-response case. This does not expand runtime admission.
+Before/after instruction coverage and representative loading decisions are recorded
+in [validation](council-validation.md#instruction-reorganization).
+
+### Council verification feedback
+
+The user approved the pending correction-handoff fix after the instruction
+reorganization on 30 October 2026. The [verification gate](../skills/council/references/procedure.md#4-verify-reports-and-phase-completion)
+separates consequential false claims from presentation warnings and requires source
+checks before acceptance. [Protocol](../skills/council/references/protocol.md#verification-findings)
+owns bounded anonymous findings, privacy review and immutable packet transport;
+[recovery](../skills/council/references/recovery.md#phase-specific-replacement) owns
+replacement-chair use, and Codex controls carry native feedback/receipts. The
+existing rounds, original budgets, correction/replacement limits and provider
+permissions remain unchanged. Local regression evidence belongs in Council
+validation; no automatic semantic truth or privacy classifier is claimed.
+
+### Council amendments
+
+The user-approved [Council reliability amendment](superpowers/specs/2026-10-29-council-design.md#reliability-amendment-30-october-2026)
+adds bounded local recovery and useful reduced-panel delivery. Its contract coverage
+is maintained here for authoring, outside routine loading paths:
+
+| Approved requirement | Local contract and proof |
+| --- | --- |
+| Three control-admission acquisitions within five seconds, locks released during waits; only proven pre-spawn busy may resume the same identity, consent and absolute deadline | Council recovery's lost-response section; shared executor and `resume-member`; focused worker/flow tests cover contention, cancellation, lost responses and unchanged guards |
+| Resume critique artifacts from frozen bytes; verify full inventories, hashes and permissions, preserve conflicts and never recapture source | Council recovery's lost-response section; runtime snapshot reconciliation; flow interruption/conflict tests |
+| Allowlisted diagnostic evidence without raw text or inferred upstream cause | Council protocol's execution-observations section; executor classifier/projection and status; sentinel-secret worker/flow tests |
+| Preserve completeness labels and nullable accounting; distinguish accepted participation and fresh synthesis, deliver supported answers or labeled evidence summaries with consequential gaps and evidence-based confidence | Council procedure's delivery section and Codex client routing; reduced-panel and failed-synthesis flow tests |
+| Advisory presentation preferences, explicit hard limits, retained originals; ordinary briefs exclude permission probes and historical qualification stays unchanged | Council procedure's verification gate and selection's tool-qualification section and Codex client routing; Task 7 representative instruction-path walkthroughs |
+
+OpenAI skill-creator guides this narrow procedure update: retain essential bounds,
+define shared rules once, route host-specific supervision to the common contract,
+and test representative decisions as well as package structure. The earlier paid
+qualification remains historical evidence; this amendment adds no live inference
+qualification, model replacement or comparative evaluation.
+
+The user-approved [Council runtime recovery design](superpowers/specs/2026-10-30-council-runtime-recovery-design.md)
+and its 120-second clarification amend newly prepared recovery-enabled runs only:
+
+| Approved recovery requirement | Local contract and proof |
+| --- | --- |
+| One investigation per candidate tenure; at most 120 seconds excluding application, 3 searches/5 page reads; two distinct source-supported corrections; three replacements per original seat across phases/restarts | Recovery action/schema/limit contract; `council_recovery` guarded state and recovery behavior tests prove expiry, application after research closure, duplicate fixes, fourth replacement and durable counters |
+| Same selected group, canonical independence, maximum/default reasoning, pinned providers, approved transmission and original phase/seat/spending envelope | Common preparation/shortlist/selection contract; original eligibility validator reused for every predeclared replacement; atomic claim, Free/paid rejection, canonical alias, deadline and request-representation checks |
+| Isolated parallel native supervisors, capacity for participants, no substantive native Free fallback, coordinator verification, actual progress and cleanup | Codex isolated supervisor brief and common ownership procedure; actual two-process synthetic overlap plus CLI recovery-to-verdict fixture; normal host verification and exact supervisor stop/cancel tests |
+| Immutable attempt ownership, lost-response reconciliation, all-prior-owner phase barriers, cancellation/admission checks, nullable aggregate cost across every generation/attempt | Common supervisor/recovery/status contract; existing guards plus v3 history; lost packet, uncertain owner, before-spawn failure, replaced native receipt, reused sessions and all-attempt accounting checks |
+| Independent critic catch-up, batched immutable critique generations, superseded evidence excluded, coherent reduced panel at deadline and fresh synthesis-only chair replacement using original allowance | Common phase recovery contract; generation rebuild, deadline reduced-panel and synthesis role-transfer tests; separate role bindings and retained immutable generation hashes |
+| Bounded private source-backed learning with exact route/profile/configuration matching; provisional success, failure invalidation, no permissions from support text | Common learning/security contract; existing private-file locking/atomic helpers reused beside discovery; malicious correction rejection, expired sources and failed-correction reuse tests |
+| Preserve safe transport facts and original assistant text; final-step report separation; do not claim malformed final text was repaired or a uniform marker denial was established | Executor machine-code projection and v3 final-response fixture; selection's tool-qualification section explicitly discloses unchanged read/grep marker inconsistency. Pinned [grep permissions](https://github.com/anomalyco/opencode/blob/v1.19.5/packages/opencode/src/tool/grep.ts) apply to the pattern, so an ignore rule is not accepted as a security boundary. |
+
+Pinned [provider output-limit transformation](https://github.com/anomalyco/opencode/blob/v1.19.5/packages/opencode/src/provider/transform.ts)
+and [request preparation](https://github.com/anomalyco/opencode/blob/v1.19.5/packages/opencode/src/session/llm.ts)
+support the sole bounded `output_limit_only` representation. Local fixtures prove
+configuration preservation; no new endpoint wire or permission qualification is
+claimed. [Retry policy](https://github.com/anomalyco/opencode/blob/v1.19.5/packages/opencode/src/session/retry.ts)
+remains five internal retries per failing stream, distinct from Council corrections.
+Context7 was consulted for current tool/config context; pinned source governs this
+adapter. OpenAI skill-creator guided progressive disclosure and representative
+instruction-path review. Routine loading requires none of these authoring sources.
+
+The user-approved [Council groups design](superpowers/specs/2026-10-30-council-groups-design.md)
+extends selection and execution without a fixed roster or ranking engine:
+
+| Approved group requirement | Local contract and proof |
+| --- | --- |
+| Ask the group first; resolve only its eligible runtime participants using current native guidance and bounded discovery/cache; reuse scope authorization | Council readiness/selection and scope sections; representative group loading walkthroughs retained in Task 1 authoring proof |
+| Explain task-specific capability priorities before inference; retain model-specific fit, evidence and gaps for initial choices and replacements without a combined score | User-approved task-aware selection refinement, 30 October 2026: selection's task-aware contract, existing `selection` records and Codex supervisor handoff; life-situation/Python application proof recorded in `docs/council-validation.md`. No new ranking engine or runtime schema. |
+| Seek three eligible model developers; permit developer reuse when bounded discovery cannot find three, record evidence/gaps, retain distinct canonical models; count native membership and apply to replacements; retain qualified same-developer backups within the existing shortlist capacity | Common model-vendor selection contract; focused fictional selection scenarios cover available third vendor, ineligible third vendor, incomplete discovery, replacement ranking and native/hosting distinctions. This is the user's subsequent clarification, not a claim that earlier live selection proved this policy. |
+| Group-specific native selection and native chair for Frontier/Balanced; three distinct zero-rate free variants and fresh external chair for Free, no native fallback | Common roster/selection contract and Codex host boundary; grouped topology, pricing, canonical identity and per-group native flow tests |
+| Version-2 neutral slots and pinned chair; keep legacy semantics | Common request/phases/delivery contract; legacy flow tests plus grouped complete/incomplete/partial and chair rejection checks |
+| Seal original evidence, six accepted reports, research and anonymous observations for synthesis; reserve capacity and preserve no-clobber recovery | Common snapshot/phase/recovery contract; grouped packet, headroom, frozen mutation and lost-response tests plus existing interruption/conflict tests |
+| Actual distinct external sessions and phase/owner/frozen/deadline host verification; no accepted-flag bypass; all seven attempts in progress/accounting/stop | Common grouped verification and supervision contract; `verify-external`, worker launch identity guard, real synthetic seven-attempt fixture, missing/reused-session, failed-chair, original-consent and exact-owner tests |
+
+The implementation-time user clarification prioritizes Intelligence, Coding and
+Agentic evidence with task fit; missing scores remain unknown. The approved group
+spec/plan admit Free-only `reasoning: {default_enabled: true}` and `effort: "default"`
+when exact-route documentation positively establishes enabled reasoning by default.
+Common selection/schema instructions preserve that default by omitting reasoning
+overrides and disclose maximum mapping as unverified; selectable/fixed checks and
+paid/legacy boundaries remain intact. Focused default-reasoning worker/grouped
+RED/GREEN tests cover admission, strict Booleans, malformed declarations, omitted
+configuration fields and retained identity/deadline/zero-rate guards. Authoring
+investigation additionally captured omission through the pinned built-in adapter
+with the actual request ID against localhost/fake auth; that is serializer proof,
+not an OpenRouter/NVIDIA call or observed upstream maximum.
+
+These are approved user extensions to the reviewed Toolkit basis above. Skill
+Creator guides the local procedure update; no upstream checkout or authoring
+history is loaded during routine Council. Package proof and synthetic local
+execution remain separate from the coordinator's authorized live group test.
+
+Official [OpenRouter error semantics](https://openrouter.ai/docs/api_reference/errors-and-debugging)
+(checked 30 October 2026) place stable Chat Completions policy/refusal types in
+`error.metadata.error_type` while `error.code` is numeric. The executor retains
+only allowlisted `content_policy_violation`/`refusal` values as normalized
+`router_code` diagnostics; numeric-code fixtures include secret raw metadata to
+prove it is discarded. This identifies observed machine evidence, not an upstream
+origin or explanation of the trigger.
+
 These contracts were checked against Toolkit revision `790a895304e0c08b70a5b215c9d334f1c86b816c`. This records the reviewed basis, not a claim that it is still the latest revision.
 
 On 26 October 2026, rechecked orchestration Parts B/C and the parallel execution rule against that revision, which still matched `main`. They preserve the coordinator, select workers from official client guidance, retain test-first implementation and review task changes between waves. They prescribe no cache location or refresh interval. The user's local-cache extension uses concise JSON guidance and maintenance/change-driven refresh; fixed daily expiry and hourly retries are not requirements.
@@ -23,6 +140,13 @@ On 28 October 2026, resolved Toolkit `main` again to the same revision and reche
 | [Harness evaluation guide][evaluation-guide] and [Prompt 14][evaluation] | Disposable behavioral cases, independent observations and repeatable verification |
 | [Harness improvement, Prompt 15][improvement] and [method guide][harness-method] | Native baseline/candidate comparison, bounded changes, recovery and separately authorized external labs |
 
+On 30 October 2026 (Europe/Amsterdam), resolved Toolkit `main` once to the same
+revision for Council authoring. Reviewed orchestration Parts B/C and parallel
+ownership/recovery, Prompt 13 and its security guide, the harness evaluation guide
+and Prompts 14/15 with the Harness2 guide. Council's original design is dated
+29 October; this source review and local instruction validation are dated 30 October.
+Source snapshots are private authoring evidence, not installed runtime inputs.
+
 ## Requirement coverage
 
 | Local contract section | Requirements carried locally | Basis |
@@ -32,6 +156,7 @@ On 28 October 2026, resolved Toolkit `main` again to the same revision and reche
 | [Agent Delegation: integration](../policies/03-agent-delegation.md#review-integration-and-recovery) | Fixed task targets, read-only independent review before the next wave, bounded rounds, verified findings, reassessed dependencies, escalation and stopped-worker recovery | Orchestration review/recovery guidance and [parallel execution rule][parallel] |
 | [OpenRouter proposals](../skills/openrouter-proposals/SKILL.md), [proposal procedure](../skills/openrouter-proposals/references/procedure.md) | Optional explicitly approved external proposals; cached discovery and benchmark/native references; soft task-specific history; OpenRouter-owned spending limits without mandatory credit lookups; native tools, verification and integration; advisory evidence and bounded fallback separate from native worker admission | User-approved OpenRouter pilot on 28 October 2026; [approved design](superpowers/specs/2026-10-28-openrouter-anchor-pilot-design.md); official OpenRouter MCP/model/benchmark documentation and live tool schemas inspected on that date. Updated by the user-approved [retry/recovery design](superpowers/specs/2026-10-29-opencode-retry-recovery-design.md) on 29 October 2026; credit inspection is optional and proposal replay remains separate from OpenCode. This is an extension, not a new Toolkit requirement. |
 | [OpenRouter workers](../skills/openrouter-workers/SKILL.md), [worker procedure](../skills/openrouter-workers/references/procedure.md) | Explicitly approved background read-only agents; genuine native supervisors; copied workspace permissions; separate credentials and OpenRouter-owned spending limits; real progress, Habblaud role/model display, native verification, OpenCode-owned request retries without outer replay, sanitized terminal failure evidence, confirmed local quiescence before native takeover, uncertain cancellation and accounting | User-approved background-worker pilot and feature ownership on 28 October 2026; [design](superpowers/specs/2026-10-28-openrouter-workers-design.md); OpenCode 1.19.5 [read permission source](https://github.com/anomalyco/opencode/blob/v1.19.5/packages/opencode/src/tool/read.ts), [CLI event source](https://github.com/anomalyco/opencode/blob/v1.19.5/packages/opencode/src/cli/cmd/run.ts), [provider documentation](https://opencode.ai/docs/providers/), [Codex native provider inheritance](https://learn.chatgpt.com/docs/agent-configuration/subagents); installed Local Model Delegation 0.3.16 visibility/transport contract. User-approved [retry/recovery design](superpowers/specs/2026-10-29-opencode-retry-recovery-design.md) on 29 October 2026; pinned [retry policy](https://github.com/anomalyco/opencode/blob/v1.19.5/packages/opencode/src/session/retry.ts), [processor lifecycle](https://github.com/anomalyco/opencode/blob/v1.19.5/packages/opencode/src/session/processor.ts) and [catalog fetch controls](https://github.com/anomalyco/opencode/blob/v1.19.5/packages/core/src/models-dev.ts). Optional extension, not a Toolkit requirement. |
+| [Council](../skills/council/SKILL.md), [common procedure](../skills/council/references/procedure.md), [Codex controls](../clients/codex-council.md) | Explicit-only invocation and separate saved consent bound to its original configuration through external preparation/launch; read-only immutable approved transmission; chosen Frontier/Balanced/Free runtime roster, group-specific eligible native selection for paid groups, free external chair, greatest supported selectable reasoning and documented-default Free handling with visible uncertainty; finite phase deadlines/allowances and executable brief preflight; independent initials, one anonymous critique and fresh synthesis; evidence-based premise/citation review and preserved dissent; native phase admission, exact stop ownership, launch guard, unknown controls/usage and incomplete outcomes | User-approved [Council design](superpowers/specs/2026-10-29-council-design.md), 29 October 2026: Council roster and deliberation phases are a user extension, not a Toolkit mandate. Toolkit orchestration Parts B/C supply bounded briefs, context, ownership, actual controls, verification and recovery; Prompt 13 supplies scope, untrusted data, secret review and source-supported findings; evaluation guide/Prompts 14/15 supply disposable evidence and honest unavailable observations. OpenAI skill-creator supplies concise entry/disclosure and explicit-only UI policy. [Validation](council-validation.md) distinguishes package proof, observed pinned tool boundary and three fresh native canary phases with synthetic external processes; an authorized paid operational run finished incomplete, full three-member qualification remains open and comparative quality remains deferred. |
 | [Manage OpenRouter Integration](../skills/manage-openrouter/SKILL.md), [local controls](../skills/manage-openrouter/references/procedure.md) | Disabled-by-default saved checkout consent; offline status; private revisioned configuration; both executor gates; preparation/launch separation; post-disable settlement; optional offer only after successful qualified onboarding; no account, spending-limit, credential or native-model changes | User-approved separate management layer and implementation request on 29 October 2026; [management design](superpowers/specs/2026-10-29-openrouter-management-design.md). Existing enrollment/runtime authority and private atomic/CAS conventions are implementation references; readonly accounting is not consent and this does not create canonical Project membership. Package tests, instruction checks and observed client execution remain separate. |
 | [D6 native implementation plan](d6-native-delegation-plan.md) | Slices 1–2: worker selection, bounded JSON guidance, refresh evidence, observations, ownership and budgets; slices 3–4: integration, review, recovery and safe state transitions; slice 5: exact task files/dependencies/resources, test-first checks with paused package writers, wave reviews, selective loading and separate native qualification | Agent Delegation and Context/Handoff contracts; accepted design, with package implementation and native qualification reported separately |
 | [Native delegation](../clients/delegation.md) | Selective native loading; compatible official guidance/cache and actual control evidence; exact jobs/claims/dependencies and budgets; checkout-bound new filesystem write admission with retained historical replay/recovery; once-only launch admission distinct from observation; requested/configured/spawn/per-turn settings; retained partial effects and uncertainty until independent exact stop/descendant reconciliation | Agent Delegation; accepted D6 implementation and the approved one-repository worker extension; package controls do not qualify native execution or filesystem isolation |
@@ -82,6 +207,7 @@ The local contract tables also retain their triggers, onboarding decisions, evid
 - Resource reservations, observed settings and trusted reviewer provenance supplement Toolkit guidance.
 - On 26 October 2026, the user simplified model authorization: native agents/models are automatically approved across all current and future platforms/providers; any non-native model or execution route requires explicit approval. This replaces the earlier subscription-only restriction and the local-only exception. Local models additionally require assessment. Existing account access, task constraints, budgets and supported dispatch still apply; this decision changes neither coordinator settings nor adapter support.
 - Broad non-native write execution and the local-model assessment workflow remain deferred. The user approved optional OpenRouter proposals and a separate bounded read-only OpenCode worker pilot on 28 October 2026, with cached discovery, native verification and spending limits managed in OpenRouter. Neither route grants native completion authority or changes local-model approvals.
+- On 29 October 2026, the user separately approved Council deliberation with its own saved `council` route. Its strongest/native and benchmark/frontier roster overrides lightest-capable selection only for explicit Council. It does not broaden ordinary worker defaults or invoke Council during routine tasks. The shared executor's qualified cache-deny correction closes OpenCode's automatic tool-output exception for both routes without changing authentication. Pinned official [agent permission handling](https://github.com/anomalyco/opencode/blob/v1.19.5/packages/opencode/src/agent/agent.ts), [truncation path](https://github.com/anomalyco/opencode/blob/v1.19.5/packages/opencode/src/tool/truncate.ts) and [external-directory checks](https://github.com/anomalyco/opencode/blob/v1.19.5/packages/opencode/src/tool/external-directory.ts) support that exact version-specific fix. Controlled pinned tool qualification and three actual fresh native canary phases with synthetic external processes are observed; the authorized paid operational run finished incomplete, full three-member qualification remains open and the separate comparative experiment remains deferred.
 - The user clarified on 26 October 2026 that only the coordinator's model/reasoning must remain their choice. Delegated workers use task-based model/effort selection from each platform's current official guidance. The earlier interpretation requiring defaults for every worker was incorrect. Store guidance locally and refresh it instead of fetching it for every task; preserve active assignment evidence. This applies to repository development as well as the plugin's planned workflow.
 - Security review runs after implementation, includes relevant delivery working-tree layers and blocks completion/merge for confirmed high/critical findings. Medium/low findings require resolution or authorized disposition. A repository baseline is performed when requested; no separate planning-time security gate is added.
 - General review before every merge and a trusted repository-controlled gate are plugin requirements. Ordinary Toolkit setup excludes branch/worktree requirements and commit/push protections; those controls are not inherited installation permissions.
