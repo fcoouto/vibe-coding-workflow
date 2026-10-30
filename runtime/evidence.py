@@ -408,6 +408,12 @@ def _register_recovery_source(scope, db, source, *, context=None):
 def _check_recovery_registration(context,db,source,owner=None):
     from runtime import changes
     lifetime=changes._check_d4_publication(source,context,db)
+    return _verify_recovery_registration(context,db,source,lifetime,owner)
+
+
+def _verify_recovery_registration(context,db,source,lifetime,owner=None):
+    """Read-only exact overlay verification; this cannot authorize owner registration."""
+    _check_context(context,db)
     registration=lifetime['registrations'].get(str(context.database))
     _require(registration is not None,'Recovery owner has no actual registration acquisition')
     baseline=registration['baseline'];projection=_check_recovery_projection(context,db,source,lifetime)
