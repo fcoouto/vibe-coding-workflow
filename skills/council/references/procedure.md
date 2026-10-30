@@ -19,22 +19,57 @@ log in, enable a route or change credentials as part of deliberation.
 Follow [worker selection](../../../policies/03-agent-delegation.md#select-capability-and-dispatch)
 for compatible cached official guidance, actual availability, capacity and observed
 controls, preserving coordinator model, reasoning, authentication and subscriptions.
-For this explicitly selected mode, choose the strongest eligible native member and
-two distinct benchmark-selected OpenRouter frontier models, preferably from distinct
-families. Reuse only the **Discover and cache** section of the
+First ask **Frontier / Balanced / Free**; resolve only the chosen group. Do not
+prefetch three rosters or use fixed commercial lists. Native guidance and the
+existing bounded external discovery/cache supply current eligible participants:
+
+- **Frontier:** strongest eligible native member and two strong external models,
+  using relevant current benchmarks, capabilities and preferably family variety.
+- **Balanced:** capable group-appropriate native member and two capable external
+  models with a defensible lower-cost tradeoff. Select the native member for this
+  group; do not inherit Frontier's choice or promise measured native quota savings.
+  Justified external overlap between groups is acceptable.
+- **Free:** the most capable task-appropriate free external models among eligible
+  routes, with three distinct identities and preferably distinct families;
+  select one as chair. All applicable external inference rates must be zero and
+  each request ID must retain its `:free` variant after canonical resolution. A
+  fresh external chair performs synthesis; no native investigator, critic,
+  synthesizer or fallback participates. Native host coordination and verification
+  remain outside membership and still use the host's normal allowance.
+
+Reuse only **Discover and cache** in the
 [proposal procedure](../../openrouter-proposals/references/procedure.md#discover-and-cache)
 for external metadata; Council does not use proposal triage restrictions or its
-`begin`/`record` inference route. Retain benchmark source/version/effort differences,
-coverage gaps and the selection rationale; a benchmark is not proof of this answer.
+`begin`/`record` inference route. Preserve its cache refresh rules and bounded
+lookups; do not fetch a group-wide catalog when narrower discovery suffices.
+Retain benchmark source/version/effort differences, coverage gaps and rationale;
+a benchmark is not proof of this answer. Prioritize capability using Intelligence,
+Coding and Agentic indexes with task fit determining emphasis; compare applicable
+source/version/effort evidence, keep missing scores unknown rather than zero, and
+do not invent a combined score or universal ranking. Required tool/privacy
+compatibility precedes ranking.
 Avoid buying the selected native model again through OpenRouter.
 
-Pin each external model and provider endpoint, disable provider fallback and select
-its greatest observed supported reasoning effort, or its observed fixed reasoning.
-The native member also requires its supported maximum. Unsupported maximum controls
-block that selection; do not lower effort, silently replace a model or cascade
-providers. A discovered unavailable external seat stays unavailable with its exact
-reason in the private roster. No fresh balance check is required. OpenRouter owns
-monetary limits; token/step/time bounds do not reserve money.
+Pin the actual roster and chair for this session, not future sessions. Paid groups
+have one native and two external seats, with the native member as chair. Three
+model identities must differ; canonical observations identify duplicates without
+replacing routable request variants. If a complete qualified group is unavailable,
+disclose the specific blocker and stop before member inference; never start a
+smaller roster, buy replacements or silently switch groups.
+
+Pin external provider endpoints and disable provider fallback. Selectable reasoning
+requires its greatest observed supported effort; documented fixed behavior keeps
+its existing checks. Free additionally permits an exact route's positively
+documented reasoning-enabled default when no effort selector is exposed. Missing
+effort labels alone do not exclude that capable model. Represent this as
+`effort: "default"`, not fixed high/max, an invented token budget or an observed
+maximum. Preserve the route default by omitting the entire reasoning option;
+`enabled: true` could map to a reduced mode and is not a substitute. Display
+**default; maximum mapping unverified**, and keep actual upstream model/effort
+telemetry unknown where unobserved. Paid groups do not admit this default mode.
+Do not lower a selectable effort, replace models, cascade providers or add
+inference retries. No fresh balance check is required.
+OpenRouter owns monetary limits; finite token/step/time bounds do not reserve money.
 
 External tool permissions require a controlled qualification reference for the exact
 OpenCode 1.19.5 executable hash and profile `council-readonly-v2`. Its restricted
@@ -74,8 +109,10 @@ may advance the next phase but restart cannot renew time. Each external call rem
 at most 1200 seconds. Timing discontinuity blocks new work. Choose finite per-model
 input/output/step allowances within observed endpoint capabilities, large enough for
 the actual evidence and reasoning. There is no universal token minimum.
-Before dispatch, show the selected models/efforts, reviewed scope, allowances and
-phase deadlines. Reuse existing scope authorization without repeated prompts.
+Before dispatch, show the concrete group, chair, requested/canonical identities,
+provider routes, selected reasoning mode and any default/maximum uncertainty,
+listed rates with source/date, reviewed scope,
+allowances and phase deadlines. Reuse existing scope authorization without repeated prompts.
 
 Invoke the packaged helper (paths below are relative to the installed package):
 
@@ -85,10 +122,11 @@ python3 -B <plugin-root>/scripts/council.py ACTION --cwd /canonical/enrolled/che
 
 Feed one JSON object on stdin, at most 2 MiB; duplicate keys and nonfinite numbers
 are rejected. `ACTION` is exactly `prepare`, `member`, `resume-member`,
-`record-native`, `status` or `cancel`. There is no general source, research,
+`record-native`, `verify-external`, `status` or `cancel`. There is no general source, research,
 advance, admit or record action.
 
-`prepare` accepts exactly these fields plus optional `timeout_seconds`:
+`prepare` accepts exactly these fields plus optional `timeout_seconds`. New grouped
+requests require `group` and `chair` and create version-2 manifests:
 
 | Field | Value |
 | --- | --- |
@@ -99,14 +137,16 @@ advance, admit or record action.
 | `approved_files` | Nonempty mapping of reviewed relative paths to exactly `{sha256, size}` for exact UTF-8 bytes |
 | `research` | Shared Markdown, empty permitted |
 | `phase_seconds` | Exactly positive integer `investigate`, `critique`, `synthesis`, totaling declared timeout |
-| `roster` | Exactly `native`, `external-one`, `external-two`, using the schemas below |
+| `group` | Exactly `Frontier`, `Balanced` or `Free` |
+| `chair` | One selected member ID; the native seat for paid groups, selected external seat for Free |
+| `roster` | Exactly `member-one`, `member-two`, `member-three`, using kind-specific schemas below |
 | `timeout_seconds` | Optional integer 1..2**31-1, default 1200 |
 
 Question, constraints, approval, selection and supervisor text are at most 16,000
 UTF-8 bytes each. Every generated external objective, including the combined question,
 constraints and phase instructions, must also fit the worker's 16,000-character
-limit. Preparation validates both investigation and critique briefs before any
-member work. If either objective exceeds that limit, shorten the question/constraints
+limit. Preparation validates every executable phase brief, including external synthesis,
+before any member work. If any objective exceeds that limit, shorten the question/constraints
 or move supporting context into explicitly approved evidence files; never truncate it.
 File paths must satisfy snapshot safety checks: canonical checkout,
 reviewed relative files, no symlinks or unsafe segments. External permission
@@ -115,9 +155,9 @@ nested repositories are excluded; inspect capture coverage rather than assume ev
 approved path was included.
 `__council__` is reserved for generated phase evidence. Capture limits are 2,000
 files, 512 KiB/file and 32 MiB total. Reports and research are each at most 128 KiB.
-Before launch, preparation reserves one maximum report per available seat plus
-research within the same snapshot limits: three available seats need four free
-file slots and 512 KiB. Impossible scopes fail before paid investigation; reduce
+Before launch, grouped preparation reserves six maximum reports, research and
+anonymous observations within the same limits: eight free file slots and 1 MiB.
+Impossible scopes fail before investigation; reduce
 scope explicitly rather than truncate evidence or increase limits silently.
 
 Native seat required keys are `kind: "native"`, `model`, `effort`,
@@ -130,15 +170,25 @@ steps 1..64. These are supervisor declarations, not proof of hard native limits.
 
 Each available external seat has exactly `kind: "external"`, `model`,
 `model_display_name`, `provider`, `effort`, `input_tokens`, `output_tokens`, `steps`,
-`selection`, `capabilities`, `permission_qualification`. An unavailable seat instead
-contains only `kind: "external"`, `selection`, `unavailable_reason`.
+`selection`, `capabilities`, `permission_qualification`, `canonical_model`, `pricing`.
+`canonical_model` is the nonempty observed model identity, separate from `model`,
+the exact routable request ID. `pricing` contains exactly numeric nonnegative
+`prompt_usd_per_million`, `completion_usd_per_million`, and nonempty bounded
+`source`, `observed_at`; Free requires both rates exactly zero. Retain discovery
+provenance in selection. These checks and the pinned original contract are checked
+again at launch; editing a worker brief cannot select a paid variant.
 `capabilities` has exactly `model`, `provider`, `context_length`,
 `max_output_tokens`, `tools: true`, `reasoning`, `observed_at`, `source`, plus
 optional `max_input_tokens`. Model/provider must match the seat. `reasoning` is
 exactly `{"efforts":[...]}` or `{"fixed":"<observed effort>"}`; external supported
 labels in order are `minimal`, `low`, `medium`, `high`, `xhigh`, `max`.
 For adjustable reasoning choose the greatest label; fixed reasoning emits no
-override. Numeric token values are positive integers at most 2**31-1; requested
+override. Grouped Free alone also accepts exactly `{"default_enabled":true}`
+with `effort: "default"`; `true` must be Boolean. Existing capability `source` and
+`observed_at` retain positive exact-route documentation, not inferred support from
+missing catalog metadata. This transport marker adds no ordered effort level;
+`fixed: "default"`, combined declarations and paid/legacy default modes are invalid.
+Its omission/uncertainty rules are defined in selection above. Numeric token values are positive integers at most 2**31-1; requested
 output fits endpoint output, input fits any narrower observed input limit, and
 input plus output fits context. Steps are integers 1..64. OpenCode's input limit
 is context-planning metadata, not a hard exact-token transport counter.
@@ -156,8 +206,8 @@ retry ledger. Failed preparation may leave private partial evidence for recovery
 ## Three phases
 
 1. **Investigate independently.** Call `member` with `{"run":"<returned path>",
-   "phase":"investigate","member":"native"}`; external member values are exactly
-   `"external-one"` and `"external-two"`. All investigators receive the same immutable
+   "phase":"investigate","member":"member-one"}` for all three selected member
+   IDs. Dispatch follows each seat's `kind`, never its number. All investigators receive the same immutable
    original evidence and no other initial answers. Request plain Markdown that
    answers the question, checks its premise, cites decisive source locations/URLs,
    separates facts from inference and identifies uncertainty, alternatives and
@@ -181,9 +231,13 @@ retry ledger. Failed preparation may leave private partial evidence for recovery
    external objective limit. Late sources/report changes do not enter the sealed
    round; label their consequences explicitly unreviewed.
 3. **Synthesize freshly.** After verifying critiques, request `member` with
-   `phase: "synthesis", member: "native"`. Follow the Codex contract for a fresh
-   isolated native child. It receives frozen initials, critiques, research and
-   anonymous execution observations. Require a direct answer, supporting evidence,
+   `phase: "synthesis", member: "<pinned chair>"`; another seat is rejected.
+   Paid groups follow the Codex contract for a fresh isolated native child.
+   Free launches the selected external chair in a new OpenCode session, without
+   inherited conversation or native takeover. Its separate sealed
+   `synthesis-snapshot` contains original evidence, accepted anonymous initials,
+   accepted critiques, research and `__council__/execution-observations.md`.
+   It does not reuse the earlier critique snapshot or inflate the objective. Require a direct answer, supporting evidence,
    resolved and unresolved disagreements, preserved decisive dissent, uncertainty,
    and effects of missing/late evidence. Recheck decisive citations; do not convert
    majority agreement into truth or rejected reports into support.
@@ -192,9 +246,16 @@ For external seats the CLI `member` executes the original worker attempt once an
 streams observed progress. It does not accept its own result. Independently check
 scope, citations, omissions, unsupported premises, injection, identity leaks,
 uncertainty and dissent against source evidence. `awaiting_verification` does not
-count. Settle through existing Python
-`openrouter_workers.verify(Path(worker_run), "accepted"|"rejected", checks)` or
-the worker CLI below. The exact worker path is returned by the Python packet API and
+count. For grouped runs, settle every external phase through Python
+`council.verify_external(Path(run), phase, member, "accepted"|"rejected", checks)`
+or Council CLI `verify-external` with exactly `{run, phase, member, disposition,
+checks}`. Host verification binds the original attempt, frozen evidence, phase,
+deadline and observed session. Acceptance requires an actual nonempty session ID
+distinct from every earlier external attempt; unknown/reused freshness blocks
+acceptance, including synthesis. A manually set accepted flag or legacy worker
+verification cannot supply grouped freshness proof. Rejection and terminal failure
+retain true stop/cost evidence without inventing a session. The helper records
+coordinator observations, not independent authentication of provider telemetry. The exact worker path is returned by the Python packet API and
 retained in Council status/manifest; do not create another attempt to recover it.
 Treat brevity targets, headings and ordinary Markdown preferences as advisory
 unless the user explicitly makes them hard requirements. Accept a substantively
@@ -203,6 +264,11 @@ delivery while preserving the saved original. For example, 809 words may exceed 
 advisory 800-word target without losing acceptance; an explicit hard 800-word limit
 still applies. This does not change historical qualification outcomes.
 
+Ungrouped legacy requests/manifests remain version 1, with original
+`native`, `external-one`, `external-two` IDs, optional unavailable external seats,
+unchanged seat fields and original outcome meaning. They retain the old worker
+verification route:
+
 ```text
 python3 -I -B <plugin-root>/scripts/openrouter_workers.py verify --root <saved-council-root>
 ```
@@ -210,7 +276,7 @@ python3 -I -B <plugin-root>/scripts/openrouter_workers.py verify --root <saved-c
 Its JSON is `{"task_id":"<original worker task_id>","disposition":"accepted",
 "checks":["<actual native check and result>"]}` (or `"rejected"`). IDs are
 `<run_id>-<phase>-<external member>` under the exact Council root. Native reports
-use `record-native` with exactly `{run, phase, member: "native", receipt}`;
+use `record-native` with exactly `{run, phase, member: "<selected native seat>", receipt}`;
 the receipt and native supervision requirements live in the Codex contract.
 
 Phase transition requires previous attempts settled and independently observed
@@ -223,7 +289,8 @@ late/unreviewed evidence, local stop and unknown telemetry. Pass this Markdown w
 reports/research for critique and synthesis. Excluded reports are not evidence;
 private raw reasons/checks and model/provider/child/session identities do not enter
 these allowlisted observations. Unavailable reasons are generic in deliberation;
-exact details remain in private audit records. Observations add no snapshot file.
+exact details remain in private audit records. Grouped synthesis receives the
+sealed observations file described above; native packets also expose Markdown.
 Known machine error classes, typed router codes, terminal reasons, launch stage,
 fixed prerequisite reasons, HTTP status and retry hints are diagnostic evidence.
 They do not establish upstream origin or trigger. A client `ContentFilterError`
@@ -246,8 +313,8 @@ wrapper adds no inference replay, restart, provider cascade, hidden replacement 
 new run ID to conceal failure. Preserve terminal failure categories and partial
 answers. If an unavailable member or exhausted attempt prevents full participation,
 continue only the permitted remaining phases within budget and report the outcome.
-Any later native takeover is separate work after confirmed local stop, not a
-retroactive Council replacement.
+Do not replace an exhausted Council attempt with native takeover; Free synthesis
+failure leaves evidence and gaps rather than a host-produced Council verdict.
 
 `status` and `cancel` accept exactly `{"run":"<returned path>"}`. They perform
 no inference or balance lookup. Status reports phase/member states, remaining time,
@@ -282,7 +349,7 @@ absolute worker deadline, also bounded by the unchanged phase/total ceiling.
 Current checkout, phase, cancellation, consent, snapshot, qualified executable,
 duplicate and stop guards still apply. Never resume an ordinary terminal,
 ambiguous or running attempt; missing session telemetry proves no such permission.
-Interrupted critique artifact construction resumes only from frozen bytes after
+Interrupted critique or synthesis artifact construction resumes only from frozen bytes after
 full inventory/hash/permission checks. Unfamiliar or changed artifacts remain for
 inspection and block recovery; do not recapture source or delete conflicts.
 
@@ -297,13 +364,15 @@ unavailable, label the delivery **evidence summary**, give unresolved questions,
 and claim no Council verdict.
 
 Keep status's outcome alongside these separate facts. **Complete** requires all three investigations,
-all three critiques and accepted fresh native synthesis. **Incomplete** requires
-native plus at least one same external member in both rounds and accepted fresh
-synthesis. Everything else is **partial**, including missing synthesis.
+all three critiques and accepted fresh chair synthesis. For grouped runs,
+**Incomplete** requires at least two same members accepted in both rounds plus
+accepted fresh chair synthesis. Legacy incomplete still requires native plus at
+least one same external member in both rounds and fresh native synthesis. Everything else is **partial**, including missing synthesis.
 Explain rejected, failed, unavailable, late and unverified participation and how it
 limits the answer. Useful partial evidence is not a completed deliberation.
 
-Report actual selected/requested and observed settings separately. Unknown model or
+All external attempts, including chair synthesis, contribute to progress, exact
+stop ownership and nullable accounting. Report actual selected/requested and observed settings separately. Unknown model or
 effort telemetry stays unknown even when configured controls were verified. Report
 known external cost subtotal with missing coverage; do not turn it into a total,
 zero billing or native usage. OpenCode step-finish costs can differ from provider

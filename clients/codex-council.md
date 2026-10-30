@@ -3,7 +3,9 @@
 Load after the [Council procedure](../skills/council/references/procedure.md) only
 for an explicit Council on its supported enrolled Codex POSIX surface. Shared
 selection, request schemas, evidence, phase gates and recovery live there; this
-contract supplies native host controls. It grants no additional permissions.
+contract supplies native host controls. Apply native member dispatch only to the
+selected native seat in Frontier/Balanced; Free uses external members and its
+external chair, with native host coordination and verification only. It grants no additional permissions.
 
 ## Native admission and identity
 
@@ -23,7 +25,7 @@ obtain real admission for this exact phase before requesting its native packet.
 Pass the additional `native_receipt` on `member` with exactly:
 
 ```json
-{"reference":"<actual host admission receipt>","run_id":"<this run_id>","phase":"investigate","member_id":"native"}
+{"reference":"<actual host admission receipt>","run_id":"<this run_id>","phase":"investigate","member_id":"<selected native member ID>"}
 ```
 
 Use the actual current phase; a reference cannot authorize multiple phases. No
@@ -70,7 +72,7 @@ actual stop is known; do not terminate unrelated host work.
 
 ## Record native observations
 
-`record-native` takes exactly `{run, phase, member: "native", receipt}`. The receipt
+`record-native` takes exactly `{run, phase, member: "<selected native member ID>", receipt}`. The receipt
 has these required fields, plus optional Boolean `controls_verified`:
 
 ```json
@@ -118,3 +120,10 @@ diagnostics into fresh contexts; use `accepted_participation` and
 `fresh_synthesis_available` to deliver a supported answer with reduced-panel counts,
 or a labeled evidence summary when synthesis failed. Apply the common advisory
 presentation checks while preserving original reports and explicit hard limits.
+
+For grouped external phases, use the common procedure's `verify-external` route
+with actual distinct OpenCode session observations. Free chair synthesis needs its
+own fresh external session and sealed synthesis packet. Unknown freshness blocks
+acceptance while actual local-stop and cost evidence remain reportable. Never
+substitute a native substantive verdict for failed Free synthesis; deliver the
+common procedure's labeled evidence summary instead.

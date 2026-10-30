@@ -77,14 +77,17 @@ def _validate_brief(brief, council=False):
     required = {'task_id', 'role', 'specialty', 'coordinator_chat_id', 'model',
                 'model_display_name', 'provider', 'objective', 'source_root', 'files',
                 'timeout_seconds', 'steps', 'approval_ref', 'effort'}
-    if council: required |= {'council', 'capabilities', 'input_tokens', 'output_tokens', 'permission_qualification'}
+    if council:
+        required |= {'council', 'capabilities', 'input_tokens', 'output_tokens', 'permission_qualification'}
+        if isinstance(brief.get('council'), dict) and 'group' in brief['council']:
+            required |= {'canonical_model', 'pricing'}
     if set(brief) != required: raise ValueError('invalid_brief_fields')
-    for key in required - {'files', 'timeout_seconds', 'steps', 'council', 'capabilities', 'input_tokens', 'output_tokens', 'permission_qualification'}:
+    for key in required - {'files', 'timeout_seconds', 'steps', 'council', 'capabilities', 'input_tokens', 'output_tokens', 'permission_qualification', 'pricing'}:
         if not isinstance(brief[key], str) or not brief[key].strip() or len(brief[key]) > 16000:
             raise ValueError('invalid_brief_value: ' + key + ' must be nonempty text within 16000 characters')
     if not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,63}', brief['task_id']): raise ValueError('invalid_task_id')
     if brief['role'] not in ROLES: raise ValueError('invalid_role')
-    if brief['effort'] not in (('minimal', 'low', 'medium', 'high', 'xhigh', 'max') if council else ('low', 'medium', 'high', 'max')): raise ValueError('invalid_effort')
+    if brief['effort'] not in (('minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'default') if council else ('low', 'medium', 'high', 'max')): raise ValueError('invalid_effort')
     uuid.UUID(brief['coordinator_chat_id'])
     if not re.fullmatch(r'[\w.-]+/[\w./:-]+', brief['model']): raise ValueError('invalid_model')
     if not re.fullmatch(r'[\w./:-]+', brief['provider']): raise ValueError('invalid_provider')
@@ -146,10 +149,29 @@ def _new_run(root, brief):
 
 def _council_contract(brief):
     council = brief['council']
-    if (not isinstance(council, dict) or set(council) != {'run_id', 'phase', 'member_id'}
-            or council['phase'] not in ('investigate', 'critique')
+    grouped = isinstance(council, dict) and 'group' in council
+    fields = {'run_id', 'phase', 'member_id'} | ({'group', 'chair'} if grouped else set())
+    if (not isinstance(council, dict) or set(council) != fields
+            or council['phase'] not in (('investigate', 'critique', 'synthesis') if grouped else ('investigate', 'critique'))
             or any(not isinstance(council[key], str) or not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,63}', council[key])
                    for key in ('run_id', 'member_id'))): raise ValueError('invalid_council_identity')
+    if grouped:
+        members = ('member-one', 'member-two', 'member-three')
+        if (council['group'] not in ('Frontier', 'Balanced', 'Free') or council['member_id'] not in members
+                or council['chair'] not in members
+                or council['phase'] == 'synthesis' and (council['group'] != 'Free' or council['member_id'] != council['chair'])):
+            raise ValueError('invalid_council_identity')
+        if not isinstance(brief.get('canonical_model'), str) or not brief['canonical_model'].strip() or len(brief['canonical_model']) > 16000:
+            raise ValueError('canonical_model_required')
+        pricing = brief.get('pricing')
+        rates = ('prompt_usd_per_million', 'completion_usd_per_million')
+        if (not isinstance(pricing, dict) or set(pricing) != {*rates, 'source', 'observed_at'}
+                or any(type(pricing[key]) not in (int, float) or not math.isfinite(pricing[key]) or pricing[key] < 0 for key in rates)
+                or any(not isinstance(pricing[key], str) or not pricing[key].strip() or len(pricing[key]) > 16000
+                       for key in ('source', 'observed_at'))):
+            raise ValueError('invalid_council_pricing')
+        if council['group'] == 'Free' and (not brief['model'].endswith(':free') or any(pricing[key] != 0 for key in rates)):
+            raise ValueError('free_council_zero_rate_variant_required')
     caps = brief['capabilities']
     required = {'model', 'provider', 'context_length', 'max_output_tokens', 'tools', 'reasoning', 'observed_at', 'source'}
     if (not isinstance(caps, dict) or not required <= set(caps) or set(caps) - required - {'max_input_tokens'}
@@ -168,12 +190,16 @@ def _council_contract(brief):
     order = ('minimal', 'low', 'medium', 'high', 'xhigh', 'max')
     if not isinstance(reasoning, dict): raise ValueError('invalid_council_reasoning')
     if set(reasoning) == {'fixed'}:
-        if reasoning['fixed'] != brief['effort']: raise ValueError('council_fixed_effort_mismatch')
+        if brief['effort'] == 'default' or reasoning['fixed'] != brief['effort']: raise ValueError('council_fixed_effort_mismatch')
     elif set(reasoning) == {'efforts'}:
         efforts = reasoning['efforts']
         if (not isinstance(efforts, list) or not efforts or any(e not in order for e in efforts)
                 or brief['effort'] != max(efforts, key=order.index)):
             raise ValueError('council_maximum_effort_required')
+    elif set(reasoning) == {'default_enabled'}:
+        if (not grouped or council['group'] != 'Free' or reasoning['default_enabled'] is not True
+                or brief['effort'] != 'default'):
+            raise ValueError('invalid_council_reasoning')
     else: raise ValueError('invalid_council_reasoning')
     qualification = brief['permission_qualification']
     if (not isinstance(qualification, dict)
@@ -245,7 +271,8 @@ def prepare_council(root: Path, brief: dict, snapshot: Path, manifest: dict, *, 
     council_snapshot.verify(snapshot, manifest)
     brief['evidence'] = dict(snapshot=str(snapshot), manifest=manifest, workspace_manifest=copied)
     save(run / 'brief.json', brief)
-    save(run / 'result.json', {'state': 'prepared', 'task_id': brief['task_id']})
+    save(run / 'result.json', dict(state='prepared', task_id=brief['task_id'],
+        **({'council_owner': brief['council']} if 'group' in brief['council'] else {})))
     return run
 
 
@@ -268,7 +295,7 @@ def configuration(brief, workspace=None):
         model.update(limit={'context': brief['capabilities']['context_length'],
                             'input': brief['input_tokens'], 'output': brief['output_tokens']}, tool_call=True)
         model['options']['maxOutputTokens'] = brief['output_tokens']
-        if 'fixed' in brief['capabilities']['reasoning']: model['options'].pop('reasoning')
+        if set(brief['capabilities']['reasoning']) & {'fixed', 'default_enabled'}: model['options'].pop('reasoning')
     return config
 
 
@@ -390,6 +417,15 @@ def execute(run, executable, auth_data, publish=None, *, launch_guard=None, dead
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         previous = json.loads((run / 'result.json').read_text())
         if previous['state'] != 'prepared' and not resumable(previous): raise ValueError('already_started')
+        if 'council_owner' in previous:
+            if brief.get('council') != previous['council_owner']:
+                raise ValueError('council_worker_identity_changed')
+            from runtime import council
+            marker = brief['council']
+            with council._locked(run.parent / ('council-' + marker['run_id'])) as value:
+                ceiling = value['started_monotonic'] + council._end(value, marker['phase'])
+            deadline_monotonic = ceiling if deadline_monotonic is None else min(deadline_monotonic, ceiling)
+            launch_guard = lambda: council.external_launch_guard(run, brief)
         deadline = previous.get('deadline_monotonic', time.monotonic() + brief['timeout_seconds'])
         wall_deadline = previous.get('deadline_wall', time.time() + deadline - time.monotonic())
         if deadline_monotonic is not None:
@@ -435,6 +471,7 @@ def _execute(run, brief, executable, auth_data, publish, *, launch_guard=None, d
               'known_cost_subtotal_usd': 0, 'accounting_complete': False,
               'accounting_source': 'opencode', 'response': '', 'upstream_cancellation_confirmed': False,
               'failure': None, 'local_execution_stopped': False, 'native_fallback_ready': False}
+    if 'group' in brief.get('council', {}): result['council_owner'] = brief['council']
     save(run / 'result.json', result)
     def emit(phase):
         progress(run, phase)
@@ -610,7 +647,8 @@ def _execute(run, brief, executable, auth_data, publish, *, launch_guard=None, d
         else:
             result['local_execution_stopped'] = launch_stage == 'before_spawn'
         if not result['local_execution_stopped']: result['state'] = 'unresolved'
-        result['native_fallback_ready'] = result['local_execution_stopped'] and result['state'] in ('failed', 'unresolved')
+        result['native_fallback_ready'] = (result['local_execution_stopped'] and result['state'] in ('failed', 'unresolved')
+                                           and 'group' not in brief.get('council', {}))
         result['accounting_complete'] = bool(finished_steps and not missing_cost and result['state'] == 'awaiting_verification')
         result['reported_cost_usd'] = result['known_cost_subtotal_usd'] if result['accounting_complete'] else None
         save(run / 'result.json', result)
@@ -621,6 +659,9 @@ def _execute(run, brief, executable, auth_data, publish, *, launch_guard=None, d
 def verify(run, disposition, checks):
     run = Path(run)
     result = json.loads((run / 'result.json').read_text())
+    brief = json.loads((run / 'brief.json').read_text())
+    if 'council_owner' in result or 'group' in brief.get('council', {}):
+        raise ValueError('grouped_council_verification_required')
     if result['state'] != 'awaiting_verification' or disposition not in ('accepted', 'rejected'):
         raise ValueError('not_verifiable')
     if not isinstance(checks, list) or not checks or any(not isinstance(x, str) or not x.strip() for x in checks):

@@ -882,5 +882,63 @@ class CouncilWorkerTests(CouncilCase):
         self.assertTrue(result['local_execution_stopped'])
         self.assertEqual(result['failure'].get('reason'), 'council_report_limit')
 
+    def test_grouped_external_chair_contract_preserves_free_variant_and_prices(self):
+        brief = dict(self.brief, model='vendor/model:free', canonical_model='vendor/model',
+            pricing=dict(prompt_usd_per_million=0, completion_usd_per_million=0,
+                source='observed endpoint', observed_at='2026-10-30'),
+            council=dict(run_id='round-one', phase='synthesis', member_id='member-three', group='Free', chair='member-three'),
+            capabilities=dict(self.brief['capabilities'], model='vendor/model:free'))
+        self.api._validate_council_brief(brief)
+        model = self.api.configuration(brief)['provider']['openrouter']['models']['vendor/model:free']
+        self.assertFalse(model['options']['provider']['allow_fallbacks'])
+        for change in ('price', 'variant', 'canonical', 'chair'):
+            mutated = json.loads(json.dumps(brief))
+            if change == 'price': mutated['pricing']['completion_usd_per_million'] = .1
+            elif change == 'variant':
+                mutated['model'] = 'vendor/model'; mutated['capabilities']['model'] = mutated['model']
+            elif change == 'canonical': mutated['canonical_model'] = ''
+            else: mutated['council']['chair'] = 'member-one'
+            with self.subTest(change=change), self.assertRaises(ValueError): self.api._validate_council_brief(mutated)
+
+    def default_reasoning_brief(self):
+        return dict(self.brief, model='vendor/model:free', canonical_model='vendor/model', effort='default',
+            pricing=dict(prompt_usd_per_million=0, completion_usd_per_million=0,
+                source='observed endpoint', observed_at='2026-10-30'),
+            council=dict(run_id='round-one', phase='investigate', member_id='member-one', group='Free', chair='member-one'),
+            capabilities=dict(self.brief['capabilities'], model='vendor/model:free',
+                reasoning={'default_enabled': True}, source='Exact free route documentation: reasoning enabled by default'))
+
+    def test_free_documented_default_reasoning_omits_every_override(self):
+        brief = self.default_reasoning_brief()
+        for phase in ('investigate', 'critique', 'synthesis'):
+            with self.subTest(phase=phase):
+                brief['council']['phase'] = phase
+                self.api._validate_council_brief(brief)
+                config = self.api.configuration(brief)
+                model = config['provider']['openrouter']['models'][brief['model']]
+                self.assertEqual(set(model['options']), {'maxOutputTokens', 'provider'})
+                self.assertEqual(model['options']['maxOutputTokens'], brief['output_tokens'])
+                self.assertEqual(model['options']['provider'], {'only': ['provider'], 'allow_fallbacks': False})
+                self.assertTrue(model['tool_call'])
+                self.assertEqual(brief['effort'], 'default')
+
+    def test_documented_default_rejects_paid_legacy_and_malformed_declarations(self):
+        base = self.default_reasoning_brief()
+        cases = []
+        for group in ('Frontier', 'Balanced'):
+            cases.append(dict(base, council=dict(base['council'], group=group)))
+        legacy = {key: value for key, value in base.items() if key not in ('canonical_model', 'pricing')}
+        legacy['council'] = self.brief['council']; cases.append(legacy)
+        for reasoning in ({'default_enabled': False}, {'default_enabled': 1}, {'default_enabled': 'true'},
+                          {'default_enabled': True, 'efforts': ['high']}, {'fixed': 'default'}, {'efforts': ['default']}):
+            cases.append(dict(base, capabilities=dict(base['capabilities'], reasoning=reasoning)))
+        cases.append(dict(base, effort='high'))
+        for field in ('source', 'observed_at'):
+            cases.append(dict(base, capabilities=dict(base['capabilities'], **{field: ''})))
+        for brief in cases:
+            with self.subTest(brief=brief), self.assertRaises(ValueError): self.api._validate_council_brief(brief)
+        with self.assertRaisesRegex(ValueError, 'council_maximum_effort_required'):
+            self.api._validate_council_brief(dict(self.brief, effort='low'))
+
 
 if __name__ == '__main__': unittest.main()
