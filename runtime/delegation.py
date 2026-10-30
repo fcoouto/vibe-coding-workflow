@@ -714,12 +714,16 @@ def _held_overlap(claims, held_claims):
 
 
 def _git_directory(scope):
+    return _git_directory_paths(scope.repository_root, scope.git_common_dir)
+
+
+def _git_directory_paths(repository_root, git_common_dir):
     from pathlib import Path
-    raw = evidence._git(scope.repository_root, 'rev-parse', '--path-format=absolute',
+    raw = evidence._git(repository_root, 'rev-parse', '--path-format=absolute',
                         '--show-toplevel', '--git-dir', '--git-common-dir')
     try:
         root, private, common = (Path(os.fsdecode(line)).resolve(strict=True) for line in raw.splitlines())
-        _require(root == scope.repository_root and common == scope.git_common_dir and private.is_dir(),
+        _require(root == repository_root and common == git_common_dir and private.is_dir(),
                  'Actual Git checkout metadata differs from the accepted scope')
         return str(private)
     except (OSError, ValueError):
@@ -727,9 +731,13 @@ def _git_directory(scope):
 
 
 def _git_routing(scope, git_directory):
+    return _git_routing_paths(scope.repository_root, Path(git_directory), scope.git_common_dir)
+
+
+def _git_routing_paths(repository_root, private, common):
     """Snapshot only bounded routing files and identities; no Git call or tree inventory."""
     from pathlib import Path
-    private, common = Path(git_directory), scope.git_common_dir
+    private, common = Path(private), Path(common)
     entries = {}
     def identity(info):
         return [info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode)]
@@ -770,16 +778,16 @@ def _git_routing(scope, git_directory):
         _require(value['kind'] == 'directory' and value['resolved'] == str(expected),
                  'Git routing target changed from the observed directory')
     try:
-        root, _ = node('checkout', scope.repository_root)
+        root, _ = node('checkout', repository_root)
         own, _ = node('private', private)
         shared, _ = node('common', common)
         _require(all(value['kind'] == 'directory' for value in (root, own, shared)), 'Git routing directory is unavailable')
-        marker, raw = node('marker', scope.repository_root / '.git')
+        marker, raw = node('marker', repository_root / '.git')
         if marker['kind'] == 'directory':
             _require(marker['resolved'] == str(private), 'Git routing marker no longer identifies the observed directory')
         else:
             _require(marker['kind'] == 'file' and raw.startswith(b'gitdir: '), 'Git routing marker is unsupported')
-            target('marker_target', scope.repository_root, raw[8:], private)
+            target('marker_target', repository_root, raw[8:], private)
         commondir, raw = node('commondir', private / 'commondir')
         if commondir['kind'] == 'missing':
             _require(private == common, 'Git common routing no longer identifies the observed directory')
@@ -1849,6 +1857,140 @@ def _worker_history(scope, reference, *, context=None, db=None):
         history.append((reference, value))
         reference = value['previous']
     return history
+
+
+def _execution_checkout(root, common):
+    """Observe affiliation and routing only; this grants no execution-root authority."""
+    try:
+        _require(root.is_absolute() and root.resolve(strict=True) == root and root.is_dir(),
+                 'Execution root must be an existing canonical directory')
+        private = Path(_git_directory_paths(root, common))
+        _require(private != common and private.resolve(strict=True) == private,
+                 'Execution requires a separate local worktree')
+        routing = _git_routing_paths(root, private, common)
+        marker = routing['marker']
+        _require(marker['kind'] == 'file' and marker['link'] is None and
+                 routing['marker_target']['path'] == routing['marker_target']['resolved'],
+                 'Execution Git routing contains an unsafe alias')
+        common_target = Path(routing['common_target']['path'])
+        _require(not any(path.is_symlink() for path in (common_target, *common_target.parents)),
+                 'Execution Git common target contains an unsafe alias')
+        _require(all(value['link'] is None and Path(value['path']).lstat().st_nlink == 1
+                     for value in routing.values() if value['kind'] == 'file'),
+                 'Execution Git routing contains a linked file')
+        backlink = routing['worktree_backlink']
+        raw = evidence._git(root, 'rev-parse', '--verify', 'HEAD').decode().strip()
+        _require(backlink['kind'] == 'file' and backlink['link'] is None and
+                 backlink['sha256'] in {hashlib.sha256(os.fsencode(root / '.git') + ending).hexdigest()
+                                       for ending in (b'', b'\n', b'\r\n')},
+                 'Execution worktree backlink differs from its checkout')
+        index = evidence._git(root, 'ls-files', '--stage', '-z')
+        _require(len(index) <= evidence.MAX_ARTIFACT, 'Execution index exceeds observation bound')
+        return dict(root=str(root), private_git=str(private), common_git=str(common), routing=routing,
+                    head=raw, index_digest=hashlib.sha256(index).hexdigest())
+    except (OSError, ValueError, RuntimeError):
+        raise state.StateError('Execution checkout is unavailable, unsafe or changed') from None
+
+
+def observe_execution_binding(scope, request):
+    """Preview an external worktree binding without enrolling, reserving or launching it."""
+    from runtime import openrouter_settings as settings
+    evidence._request(request, ('supervisor_attempt_id', 'execution_root', 'source_candidate_ref',
+                               'settings_scope_id', 'settings_revision', 'selection_ref'))
+    request = json_object(evidence._raw(request))
+    for field in ('supervisor_attempt_id', 'execution_root', 'settings_scope_id', 'selection_ref'):
+        state._text(request[field], field, 4096)
+    state._integer(request['settings_revision'], 'settings revision', 1)
+    _reference(request['source_candidate_ref'])
+    root = Path(request['execution_root'])
+    _require(str(root) == request['execution_root'] and root != scope.repository_root,
+             'Execution root must name a distinct canonical worktree')
+    assignment_request = dict(request, attempt_id=request['supervisor_attempt_id'])
+
+    def source():
+        with state._database(scope) as db:
+            record = _assignment(scope, db, assignment_request)
+            task = _assignment_task(scope, db, request)
+            data, body = record['data'], record['body']
+            _require(task['pins'] == body['pins'] and data['candidate'] == request['source_candidate_ref'] and
+                     task['delegation']['plan'] == body['plan'], 'Execution source assignment or candidate changed')
+            history = _worker_history(scope, data['observation'])
+            _require(data['status'] == 'observed' and history and history[0][1]['status'] == 'observed',
+                     'Execution binding requires an observed native supervisor')
+            observed = history[0][1]
+            _require(observed['error'] is None and observed['conflict'] is None and observed['receipt'] is not None,
+                     'Native supervisor observation remains uncertain')
+            receipt = _worker_receipt(scope, record, observed['request'],
+                                      dict(receipt=observed['receipt'], result=observed['result']))
+            _require(receipt['turn_status'] == 'inProgress', 'Native supervisor is not observed running')
+            plan = _task_plan(scope, task)
+            _require(plan['limits']['deadline'] > _now(), 'Original delegation deadline has elapsed')
+            job = next((job for job in plan['jobs'] if job['id'] == data['job_id']), None)
+            _require(job is not None and job['role'] == 'worker' and _claims(job['claims']) == data['claims'],
+                     'Original worker claims changed')
+            proof_plan = _assignment_plan(scope, record, task)
+            _require(task['evidence']['plan']['digest'] == evidence._digest(proof_plan),
+                     'Current evidence plan differs from original worker plan')
+        return record, task, plan, proof_plan, receipt, job
+
+    first = source()
+    record, task, plan, proof_plan, receipt, job = first
+    with settings.guard(scope.repository_root) as owner:
+        saved = owner.record
+        _require(owner.scope == scope, 'OpenRouter settings do not support this accepted source scope')
+        _require(saved is not None and saved['enabled'] and saved['version'] == 2 and
+                 'workers' in saved['routes'] and saved['revision'] == request['settings_revision'] and
+                 owner.binding['scope_id'] == request['settings_scope_id'], 'Current worker consent binding is unavailable')
+        _require(evidence._digest(evidence.capture_candidate(scope, proof_plan)) == record['data']['candidate']['digest'],
+                 'Source candidate differs from original assignment')
+        source_private = _git_directory(scope)
+        _require(source_private == plan['git_directory'] and _git_routing(scope, source_private) == record['body']['git_routing'],
+                 'Source Git routing changed from original assignment')
+        execution = _execution_checkout(root, scope.git_common_dir)
+        _require(execution['private_git'] != source_private, 'Execution cannot reuse the source private Git directory')
+        def mapped_claims():
+            mapped = []
+            for claim in record['data']['claims']:
+                raw = {key:claim[key] for key in ('kind', 'key', 'mode')}
+                if 'host' in claim: raw['host'] = claim['host']
+                if 'path' in claim:
+                    raw['key'] = claim['path']
+                    if Path(claim['path']).is_relative_to(scope.repository_root):
+                        target = root / Path(claim['path']).relative_to(scope.repository_root)
+                        _require(target.resolve() == target, 'Mapped execution claim contains an unsafe alias')
+                        for ancestor in (target, *target.parents):
+                            if ancestor == root: break
+                            _require(not os.path.lexists(ancestor / '.git'), 'Mapped execution claim enters another repository')
+                        if target.exists() and target.is_file():
+                            _require(target.stat().st_nlink == 1, 'Mapped execution claim contains a hard link')
+                        raw['key'] = str(target)
+                mapped.append(raw)
+            return _claims(mapped)
+        mapped = mapped_claims()
+        checks = record['body']['request']['brief']['checks']
+        _require(all(any(check['id'] == key for check in proof_plan['checks']) for key in checks),
+                 'Worker check identifiers differ from accepted evidence plan')
+        binding = dict(version=1, source_owner=record['owner'], source_candidate_ref=record['data']['candidate'],
+            source_pins=task['pins'], source_plan_ref=record['body']['plan'], evidence_plan_ref=task['evidence']['plan'],
+            supervisor_attempt_id=record['id'], supervisor_assignment_ref=record['data']['assignment'],
+            supervisor_observation_ref=record['data']['observation'], native_supervisor=record['data']['binding'],
+            execution=execution, mapped_claims=mapped, checks=checks, limits=plan['limits'], job=job,
+            supervisor_resource_units=record['data']['resource_units'],
+            settings=dict(scope_id=owner.binding['scope_id'], revision=saved['revision'], consent_version=2),
+            selection_ref=request['selection_ref'])
+        _require(_execution_checkout(root, scope.git_common_dir) == execution,
+                 'Execution checkout changed during binding observation')
+        _require(mapped_claims() == mapped, 'Mapped execution claims changed during binding observation')
+        _require(evidence._digest(evidence.capture_candidate(scope, proof_plan)) == record['data']['candidate']['digest'] and
+                 _git_routing(scope, source_private) == record['body']['git_routing'],
+                 'Source checkout changed during binding observation')
+        _require(source() == first, 'Source task or native supervisor changed during binding observation')
+        owner.check()
+        evidence._bounded(binding)
+    return dict(binding=binding, binding_digest=evidence._digest(binding), revision=task['revision'],
+        execution_id=None, launch_admitted=False, supported_for_dispatch=False,
+        blockers=['Execution candidate equivalence is unqualified', 'Effective execution claims are not reserved',
+                  'External worker/check capacity is not reserved', 'External host stop producer is unqualified'])
 
 
 def _observation_replay(scope, history, incoming):
