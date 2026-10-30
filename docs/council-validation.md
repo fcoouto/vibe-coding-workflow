@@ -13,11 +13,12 @@ records qualification; it does not authorize a Council run or activate a route.
 | Package validation | `python3 -B scripts/validate.py`: PASS; Council entry 107 words, within 150; skill-directory discovery includes Council | Reports `client_execution: not_checked`; does not prove installed-client visibility or loading |
 | Skill validation | OpenAI skill-creator `quick_validate.py skills/council`: valid; UI metadata names Council, default prompt includes `$council`, implicit invocation disabled | Frontmatter/scaffold validation is not behavioral qualification |
 | Local contract checks | Local Markdown targets/anchors, UI YAML and whitespace checked; request/receipt descriptions reviewed against implemented runtime and CLI | No authenticated model or host settings inferred from prose |
-| Runtime tests | Council snapshot/flow and worker tests exercise synthetic scopes, harmless processes, bounds, replay, phase gates, stop/launch ordering and unknown accounting | Fixture behavior is local contract proof; final integration test results must be reported separately |
+| Focused runtime tests | Frozen source `3f1bdcc`: Council 59 tests, OpenRouter 83 tests, both PASS; synthetic scopes, harmless processes, bounds, replay, phase gates, stop/launch ordering and unknown accounting | Full-suite integration result is recorded separately below; fixtures do not establish real endpoint behavior |
 | Controlled OpenCode tool qualification | Observed pinned OpenCode 1.19.5 read/glob/grep allow and deny behavior, including the v2 shared-output correction described below | Local SSE fixtures supplied tool calls; no real endpoint inference or actual model reasoning/token behavior observed |
-| Instruction paths | Six author walkthroughs over explicit raw fixtures, described below | Static source review by the author; no independent agent, native runtime loading or live generated critique/synthesis observed |
+| Instruction paths | Six Task 5 author walkthroughs over explicit raw fixtures, described below | Static source review by the author; later native canary is separate and does not establish installed-skill loading |
 | Nonsecret host identity observation | In this task's existing delegated shell, `CODEX_THREAD_ID` identified a distinct child UUID while `CODEX_SESSION_ID` retained the parent session UUID | One host observation only; not a Council run, universally portable identity API or independent authentication |
-| Actual cross-provider/native Council | **Not run** | Strongest-native availability/controls, external model/endpoint controls, native permission/context/stop behavior, capacity, progress, actual costs and a complete deliberation need separate observed qualification |
+| Native functional canary | **Observed**, with synthetic external process reports; three fresh native children, one critique round and fresh synthesis; local runtime outcome `complete` | Configured native controls and completed host states verified; execution model/effort telemetry unknown; no forced cancellation, long-wait cadence or real three-provider concurrency qualification |
+| Actual cross-provider Council | **Not run** | Real external model/endpoint behavior, tool/model request counts, actual billing, upstream cancellation and full real-provider deliberation need separate observed qualification |
 | Comparative quality/cost | **Deferred separate experiment** | Operation does not establish superiority, reliability rate, token savings or avoided spending |
 
 Task-local raw logs, source resolution and walkthrough inputs/reviews are retained
@@ -89,9 +90,85 @@ ran local validation. No Council `prepare`/`member`, account mutation, model cal
 new native child was performed for these cases. The ordinary-coding row states a
 prospective runtime loading decision, not an observed automatic skill-selection
 trace. These cases establish source coverage and usable instructions; actual model
-compliance and generated prose quality remain **not run**. Independent pressure
-cases and baseline/candidate behavioral comparisons were not performed under this
-task's no-subagent/no-inference constraints.
+compliance and generated prose quality were **not run in Task 5**. The later native
+functional canary is separate below. Independent pressure cases and baseline/candidate
+behavioral comparisons were not performed under Task 5's no-subagent/no-inference
+constraints.
+
+## Task 6 functional qualification
+
+At source `3f1bdccae93edaae2199a412cbe6a4044107238e`, final focused commands
+`python3 -B -m unittest discover -s tests -p 'test_council_*.py' -v` and
+`python3 -B -m unittest discover -s tests -p 'test_openrouter_*.py' -v`
+passed **59 tests in 26.775 seconds** and **83 tests in 43.444 seconds**,
+respectively. Package validation passed separately and retained
+`client_execution: not_checked`. SHA256-bound target files and raw logs are retained
+in the Task 6 private evidence. The coordinator owns the single full-suite run,
+which has failure markers and is still running; **full-suite validation has not
+passed**. One isolated reproduction of
+`tests.test_changes.ScopedChangesTests.test_historical_shared_consumer_retirement_proof_is_required_and_retained`
+failed (one test, 4.940 seconds) because its expected successful scoped publication
+omits the trusted host capability. That same case failed
+at pre-Council `517ef2546b46a6658551183602c907099c43f23e` with the same line and
+missing-host error (one test, 4.931 seconds). A further four-case candidate/baseline
+batch failed all four on each revision (3.959/3.980 seconds); full logs match after
+normalizing only worktree paths and timing. The named historical/recovery tests
+therefore all predate Council. One has a distinct cross-store SQLite nesting error;
+three more show direct scoped-operation success assertions without a host. Runtime
+changes/evidence and test source hashes match both revisions. The final suite result
+remains pending, and no production fix or full-suite pass is claimed.
+
+A disposable enrolled fixture uses real fresh native children and a fake local
+external executable, empty private auth directory and harmless immutable evidence.
+External model/provider/capability/profile objects are explicitly synthetic; the
+fixture neither uses credentials nor makes external inference requests. The
+controlled OpenCode v2 evidence above is retained unchanged, with its original
+RED/GREEN provenance, and is not inferred from this fake executable.
+
+All three native phases completed within the 1200-second cumulative budget, with
+about **807.6 seconds remaining** at final status. The coordinator verified three
+distinct actual child UUIDs through host activity and direct thread records, each
+completed/idle with zero commands and file changes. Investigation, one critique
+round and fresh synthesis used `gpt-6-astra`, `ultra`, `fork_turns: none` dispatch
+controls; actual execution model/effort telemetry remains null. Each accepted native
+receipt preserves that distinction and the coordinator's source/stop checks.
+
+The final packet supplied all six hash-verified frozen initial/critique reports and
+anonymous execution gaps. The generated synthesis preserved the shared-database
+objection, the conditional recommendation, unknown total versus stipulated source
+subtotal and local-stop billing caveat. It did not convert agreement into proof.
+An advisory caveat remains: the initial investigator's no-peer statement was correct
+for its initial phase; the later critic's current-snapshot distinction is not a
+decisive original-stage error. Reports remain verbatim; this observation is not a
+quality/effectiveness evaluation.
+
+Runtime status was `complete`, all local execution stopped, no outstanding stop
+requests, external total null, known subtotal zero and upstream cancellation
+unconfirmed. Those are synthetic execution records; the source's stipulated 0.25 USD
+subtotal is test data, not canary billing. The source remained unchanged. Explicit
+read-only/no-tool briefs and observed zero tool use do not disable tools or provide
+filesystem isolation. Resource allowances are supervised budgets, not asserted hard
+native transport limits. Forced native cancellation, long-running progress cadence,
+three simultaneous real roster members, real endpoint execution and costs remain
+**unobserved**.
+
+Private Task 6 evidence retains the exact requests, packets, briefs, reports, native
+controls/host checks/receipts, frozen manifests, synthetic worker results/progress,
+read-only assertions and SHA256 inventory. No auth directory, credentials, Git
+internals or real account configuration was copied into that retained evidence.
+
+The private `task-6-live-request.md` records the remaining real cross-provider run:
+same harmless source, 1200-second total including preparation/waits, 600/360/240
+phase reserves, three fresh native children and at most four external worker assignments. Each
+assignment can issue multiple model/API requests for tool steps and internal
+transient retries; request/charge counts are variable and OpenRouter owns monetary
+enforcement. These resource bounds are not a hard money cap.
+Exact benchmark-selected external models/endpoints, observed capabilities and
+bounded selected-roster paid authorization are still missing. This request remains
+**not dispatchable**; saved route consent alone does not fill those gaps. No
+external inference, comparative evaluation, credential read, account change, install
+or release was performed. Whole-branch/security review remains coordinator-owned
+and pending.
 
 ## Next qualification
 
