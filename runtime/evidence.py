@@ -276,6 +276,114 @@ def _recovery_use_inputs(context,db,reference,identity,*,content=None):
         metadata=metadata,local_sources=local_sources)
 
 
+
+def _recovery_history_inputs(context, db, reference, source, manifest, budget):
+    """Bounded local facts for a closed comparison mode; never authorize registration."""
+    from runtime import changes, recovery_uses
+    require = recovery_uses._require
+    require(isinstance(budget,recovery_uses.CaptureBudget),'History capture needs one shared acquisition budget')
+    require(isinstance(source,changes._RecoverySourceObservation) and source.issuer is changes._RECOVERY_ISSUER
+        and source.release is None and source.provenance is None,
+        'History capture requires the actual operation observation')
+    require(any(observed is context for observed in source.contexts),'History capture borrowed another context')
+    _check_context(context,db)
+    budget.take(edges=len(source.content.get('use_contract',{}).get('edges',())))
+    budget.retain(source.content)
+    template = _canonical_plain(source.content); identity = template['identity']
+    require(changes.d3._digest(manifest)==identity['manifest_digest'],'History capture manifest differs from observed source')
+    baseline = state._source_baseline(None,db,context=context)
+    require(baseline is not None and baseline['content']['source_contract']==2,'History capture baseline is unavailable')
+    heads = [row['reference']['artifact'] for row in baseline['dependencies'] if row['reference']['identity']==identity]
+    require(len(heads)<=1 and reference==(heads[0] if heads else None),'History capture is not its actual baseline head')
+    budget.retain(baseline); baseline = _canonical_plain(baseline)
+    reference = _canonical_plain(reference)
+    authority = _canonical_plain(context.authority_set[0])
+    records = {}; jobs = []; job_keys = set(); queued = set(); pending = []
+    def job(value):
+        name = recovery_uses.key(value)
+        if name in job_keys:return
+        budget.take(jobs=1); budget.retain(value)
+        job_keys.add(name); jobs.append(value)
+    def enqueue(pointer):
+        recovery_uses._pointer(pointer); name = recovery_uses.key(pointer)
+        if name in queued:return
+        budget.take(parents=1); queued.add(name)
+        if pointer['authority']!=authority:
+            job(dict(kind='managed-source',reference=pointer));return
+        pending.append(pointer)
+    if reference: enqueue(dict(authority=authority,artifact=reference))
+    for pointer in template['artifacts']: enqueue(pointer)
+    for assignment in template['assignments']:
+        job(dict(kind='assignment',reference=assignment))
+        enqueue(dict(authority=assignment['authority'],artifact=assignment['assignment']))
+    while pending:
+        pointer = pending.pop(); ref = pointer['artifact']
+        observed = state._metadata(db,ref['name'])
+        require(observed is not None and type(observed['bytes']) is int and observed['bytes']>=0,
+            'History parent metadata is unavailable')
+        # The existing managed reader checks exact size/digest/bindings; charge bytes before reading.
+        budget.take(bytes=observed['bytes']); budget.retain(observed)
+        metadata, raw = _managed_artifact(None,ref,context=context,db=db)
+        require(metadata==observed,'History managed metadata changed during observation')
+        budget.take(edges=len(metadata['dependencies']))
+        body = json.loads(raw); budget.retain(body)
+        dependencies = [recovery_uses.qualify_dependency(row,authority) for row in metadata['dependencies']]
+        budget.retain(dependencies)
+        records[recovery_uses.key(pointer)] = dict(reference=ref,metadata=metadata,content=body,dependencies=dependencies)
+        for edge in dependencies:
+            child = recovery_uses._history_pointer(edge)
+            if child is not None: enqueue(child)
+            if edge['kind'] in ('task','assignment'):job(dict(kind=edge['kind'],reference=edge['reference']))
+    history = []; seen = set(); current = reference
+    while current:
+        name = recovery_uses.key(dict(authority=authority,artifact=current))
+        require(name not in seen and name in records,'History source chain is cyclic or incomplete');seen.add(name)
+        row = records[name]; body = row['content']; metadata = row['metadata']
+        _recovery_source_shape(body,identity)
+        require(metadata['class']=='compact' and metadata['owner']==dict(kind='project',project_id=baseline['content']['project_id'],task=None)
+            and metadata['closed_at'] is None and not metadata['targets'] and metadata['export'] is None,
+            'History source owner differs from original baseline')
+        require(metadata['created_at']==source.created_at and metadata['dependencies']==_recovery_source_dependencies(body,authority),
+            'History original age or metadata differs')
+        history.append(dict(reference=current,metadata=metadata,content=body))
+        for certificate in body.get('stopped',[]):job(dict(kind='stopped-certificate',certificate=certificate,source=dict(authority=authority,artifact=current)))
+        current = body['previous']
+    history_metadata = {}; todo = [dict(authority=authority,artifact=reference)] if reference else []
+    while todo:
+        pointer = todo.pop(); name = recovery_uses.key(pointer)
+        if name in history_metadata:continue
+        if name not in records:continue  # Its exact external job remains unresolved, never an empty parent.
+        dependencies = records[name]['dependencies'];history_metadata[name]=dependencies
+        todo.extend(child for edge in dependencies if (child:=recovery_uses._history_pointer(edge)) is not None)
+    metadata = {}
+    for pointer in template['artifacts']:
+        name=recovery_uses.key(pointer)
+        if name in records:metadata[name]=records[name]['dependencies']
+    anchors = []
+    for root in template.get('use_contract',{}).get('roots',[]):
+        if root['purpose']!='historical-stop':continue
+        ref = root['task']
+        if ref['authority']!=authority:
+            job(dict(kind='historical-anchor',root=root));continue
+        task = state._task(db,ref['scope_id'],ref['client'],ref['session_id'],ref['task_id'])
+        if task is None or task.get('writer_stop',{}).get('linked'):
+            job(dict(kind='historical-anchor',root=root));continue
+        justified = changes._historical_recovery_roots(manifest,context,db,task,ref)
+        require(root in justified,'History anchor is not independently justified by its responsible owner')
+        anchors.append(dict(root=root,support=[root['reference'],dict(kind='artifact',reference=root['proof'])]))
+    result = dict(authority=authority,identity=identity,reference=reference,template=template,baseline=baseline,
+        history=history,history_metadata=history_metadata,metadata=metadata,anchors=anchors,jobs=jobs,
+        observations=list(records.values()))
+    budget.retain(result)
+    return deepcopy(result)
+
+
+def _recovery_history_projection(inputs, created_at, budget):
+    """Candidate comparison only; existing publication and parser gates remain closed."""
+    from runtime import recovery_uses
+    return recovery_uses.project_history(inputs,created_at,budget)
+
+
 def _recovery_admission_projection(inputs):
     """Compare legacy origins and restricted uses separately; neither result grants permission."""
     from runtime import recovery_uses
