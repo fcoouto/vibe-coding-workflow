@@ -548,3 +548,32 @@ the workaround naturally fails for that model. Comparative evaluation remains
 deferred. Original source/frozen hashes, injection audits, research/correction
 records, retained results, complete status and SHA256 inventory remain under this
 plan's private `live-recovery-exercise/` evidence directory.
+
+## Conditional vendor diversity clarification, 30 October 2026
+
+The user clarified that three different model developers are preferred and
+developer reuse is acceptable when three eligible developers are unavailable.
+The common selection contract now applies this conditional rule to initial
+rosters and replacements, counts the native model's developer, distinguishes
+model developers from hosting providers, and records eligibility evidence,
+coverage gaps and the reason for reuse. Three distinct canonical models and
+existing group/capability/reasoning/privacy requirements remain intact. Vendor
+availability is an existing coordinator discovery judgement; no new schema,
+vendor parser, deterministic availability attestation or hard rejection was added.
+
+A fresh native baseline application of the former instructions selected repeated
+vendors in three of five fictional scenarios despite eligible alternative
+developers. A separate fresh native application of the updated instructions
+passed all five: select an available third developer; allow reuse when the third
+fails required tools; perform an available narrow lookup for incomplete discovery;
+prefer an unused developer for replacement; and count a fixed native member
+without mistaking separate hosting companies for separate model developers.
+Independent instruction review found no material issue. Only the applicable
+selection contract and fictional inputs were loaded; unrelated execution and
+authoring history were unnecessary. Private baseline/updated input and reports
+are retained in `2026-10-30-council-vendor-policy/` under the authoring workspace.
+
+Package validation passed separately. No live endpoint call or current vendor
+availability claim was made for this clarification. Prior live rosters remain
+historical execution proof; their two-vendor composition alone does not establish
+that a third eligible developer was unavailable or prove this clarified policy.

@@ -24,18 +24,31 @@ prefetch three rosters or use fixed commercial lists. Native guidance and the
 existing bounded external discovery/cache supply current eligible participants:
 
 - **Frontier:** strongest eligible native member and two strong external models,
-  using relevant current benchmarks, capabilities and preferably family variety.
+  using relevant current benchmarks and capabilities.
 - **Balanced:** capable group-appropriate native member and two capable external
   models with a defensible lower-cost tradeoff. Select the native member for this
   group; do not inherit Frontier's choice or promise measured native quota savings.
   Justified external overlap between groups is acceptable.
 - **Free:** the most capable task-appropriate free external models among eligible
-  routes, with three distinct identities and preferably distinct families;
+  routes, with three distinct identities;
   select one as chair. All applicable external inference rates must be zero and
   each request ID must retain its `:free` variant after canonical resolution. A
   fresh external chair performs synthesis; no native investigator, critic,
   synthesizer or fallback participates. Native host coordination and verification
   remain outside membership and still use the host's normal allowance.
+
+### Model vendor diversity
+
+Select three different model developers when three eligible developers are
+available within bounded discovery; count the native member's developer too.
+Choose the strongest suitable eligible model from each. Different hosting
+providers do not make models from one developer independent vendors.
+If bounded discovery cannot find three eligible developers, reuse developers as
+needed while keeping three distinct canonical models and all group, capability,
+reasoning and privacy requirements. Record the eligibility evidence, coverage gaps
+and reason for reuse before inference; unchecked candidates are unknown, not
+proven unavailable. Apply this rule to replacements against the other active
+seats. Transferring the chair role among existing participants adds no new seat.
 
 Reuse only **Discover and cache** in the
 [proposal procedure](../../openrouter-proposals/references/procedure.md#discover-and-cache)
@@ -376,7 +389,8 @@ corrections per candidate tenure. `fallbacks` declares permitted requested/canon
 model and pinned provider routes, not extra spending authority. Supply refreshed
 capability, price and reasoning observations when selecting a listed replacement;
 unchanged route identity and original token/step envelope remain mandatory. Do not
-probe every fallback in advance. Successful actual investigation qualifies the
+probe every fallback in advance. Apply [model vendor diversity](#model-vendor-diversity)
+when ranking eligible replacements. Successful actual investigation qualifies the
 selected candidate. If metadata supplies no eligible fallback, retain that blocker.
 Every candidate, attempt, session, owner and nullable cost remains in the same run.
 
