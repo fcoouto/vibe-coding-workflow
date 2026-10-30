@@ -575,3 +575,97 @@ print(json.dumps({'type':'step_finish','part':{'reason':'stop','cost':0,'tokens'
         self.assertEqual(state['accepted_participation']['critique']['accepted'], 2)
         self.assertEqual(state['role_bindings']['investigate']['member-one']['canonical_model'], 'vendor/model-1')
         self.assertEqual(state['role_bindings']['synthesis']['canonical_model'], 'vendor/model-4')
+
+    def test_expired_failed_correction_settles_once_and_blocks_next_session(self):
+        self.prepare()
+        self.fail_and_diagnose(corrections=[dict(kind='workspace_guidance', source=0)])
+        council.correct_candidate(self.run, 'investigate', 'member-one', 0)
+        packet = council.packet(self.run, 'investigate', 'member-one')
+        with council._locked(self.run) as value:
+            value['started_monotonic'] -= 601; value['started_wall'] -= 601
+            council._save(self.run, value)
+        council.workers.save(Path(packet['worker_run']) / 'result.json', dict(state='failed',
+            response='', session_id='terminal-after-deadline', local_execution_stopped=True,
+            reported_cost_usd=None, known_cost_subtotal_usd=0, accounting_complete=False,
+            failure=dict(category='service', status_code=503, launch_stage='launched')))
+        state = council.status(self.run)
+        self.assertEqual(state['attempts'][-1]['state'], 'failed')
+        history = self.run.parent.parent / 'council-recovery-history.json'
+        self.assertTrue(history.exists())
+        recorded = history.read_bytes()
+        records = json.loads(recorded)['records']
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]['outcome'], 'failed')
+        self.assertFalse(records[0]['provisional'])
+        self.assertEqual(records[0]['sources'][0]['url'], 'https://docs.example.org/client/1.19.5/retry')
+        for _ in range(3): council.status(self.run)
+        self.assertEqual(history.read_bytes(), recorded)
+        # Replay a history write whose manifest marker was lost; its original record stays unchanged.
+        with council._locked(self.run) as value:
+            value['members']['investigate:member-one'].pop('learning_recorded')
+            council._save(self.run, value)
+        self.assertEqual(history.read_bytes(), recorded)
+        with self.assertRaisesRegex(ValueError, 'deadline_exhausted'):
+            council.replace_candidate(self.run, 'investigate', 'member-one', self.seat(4))
+        self.request['run_id'] = 'after-expired-correction'; self.prepare()
+        self.finish('investigate', 'member-one', accepted=False)
+        with self.assertRaisesRegex(ValueError, 'previously_failed_correction'):
+            self.diagnose(corrections=[dict(kind='workspace_guidance', source=0)])
+
+    def test_native_corrected_receipts_settle_accepted_and_rejected_learning(self):
+        for accepted in (True, False):
+            with self.subTest(accepted=accepted):
+                native = dict(kind='native', model='native-' + str(accepted).lower(), effort='high',
+                    supported_efforts=['low', 'high'], input_tokens=10000, output_tokens=4096, steps=12,
+                    selection='native:current guidance', supervisor_id='coordinator')
+                self.request.update(run_id='native-learning-' + str(accepted).lower(), group='Balanced', chair='member-two')
+                self.request['roster']['member-two'] = native
+                self.request['fallbacks']['member-two'] = []
+                self.prepare()
+                packet = council.packet(self.run, 'investigate', 'member-two')
+                receipt = dict(issued_id=packet['issued_id'], child_id='original-' + str(accepted),
+                    supervisor_id='coordinator', observed_model=native['model'], observed_effort='high',
+                    fork_turns='none', local_execution_stopped=True, accepted=False,
+                    checks=['Host observed unusable original contribution'], report='')
+                council.record_native(self.run, 'investigate', 'member-two', receipt)
+                self.diagnose(member='member-two', corrections=[dict(kind='workspace_guidance', source=0)])
+                council.correct_candidate(self.run, 'investigate', 'member-two', 0)
+                corrected = council.packet(self.run, 'investigate', 'member-two')
+                receipt.update(issued_id=corrected['issued_id'], child_id='corrected-' + str(accepted), accepted=accepted,
+                    checks=['Host verified actual configured controls, source and contribution'], report='Native cited finding')
+                council.record_native(self.run, 'investigate', 'member-two', receipt)
+                history = self.run.parent.parent / 'council-recovery-history.json'
+                self.assertTrue(history.exists())
+                records = json.loads(history.read_bytes())['records']
+                record = next(row for row in records if row['model'] == native['model'])
+                self.assertEqual(record['outcome'], 'accepted' if accepted else 'rejected')
+                self.assertIs(record['provisional'], accepted)
+                self.assertIn('native_receipt_sha256', record['verification'])
+                self.assertNotIn('Native cited finding', json.dumps(record))
+                recorded = history.read_bytes()
+                council.status(self.run); council.status(self.run)
+                self.assertEqual(history.read_bytes(), recorded)
+
+    def test_learning_waits_for_stopped_terminal_or_host_verified_outcome(self):
+        self.prepare()
+        self.fail_and_diagnose(corrections=[dict(kind='workspace_guidance', source=0)])
+        council.correct_candidate(self.run, 'investigate', 'member-one', 0)
+        packet = self.finish('investigate', 'member-one', accepted=False, stopped=False)
+        path = Path(packet['worker_run']) / 'result.json'
+        history = self.run.parent.parent / 'council-recovery-history.json'
+        council.status(self.run)
+        self.assertFalse(history.exists())
+        result = json.loads(path.read_text())
+        result.update(state='unresolved', local_execution_stopped=True)
+        council.workers.save(path, result); council.status(self.run)
+        self.assertFalse(history.exists())
+        result.update(state='accepted', failure=None)
+        council.workers.save(path, result); council.status(self.run)
+        self.assertFalse(history.exists())
+        result['state'] = 'awaiting_verification'
+        council.workers.save(path, result); council.status(self.run)
+        self.assertFalse(history.exists())
+        council.verify_external(self.run, 'investigate', 'member-one', 'accepted', ['Host verified cited source and exact session'])
+        record = json.loads(history.read_bytes())['records'][0]
+        self.assertEqual(record['outcome'], 'accepted')
+        self.assertTrue(record['provisional'])

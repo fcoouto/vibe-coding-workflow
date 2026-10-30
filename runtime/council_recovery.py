@@ -157,7 +157,6 @@ def _guard(run, value, phase, member):
     c._require(observed.get('state') in ('failed', 'rejected', 'unresolved', 'late', 'not_launched'), 'failed_attempt_required')
     failure = c.workers.safe_failure(observed.get('failure')) or {'category': 'substantive_rejection'}
     c._require(failure['category'] not in BLOCKING, 'shared_harness_or_authorization_blocker')
-    learn(value, phase, member, 'failed')
     return item, failure
 
 
@@ -178,7 +177,7 @@ def _history(value, new=None):
         try: records = c.onboarding.read_request(c._read(directory / 'council-recovery-history.json'), c.MANIFEST_LIMIT)['records']
         except FileNotFoundError: records = []
         c._require(isinstance(records, list) and len(records) <= HISTORY_LIMIT, 'invalid_recovery_history')
-        if new is not None:
+        if new is not None and not any(row.get('attempt_id') == new['attempt_id'] for row in records):
             records = [row for row in records if row.get('attempt_id') != new['attempt_id']] + [new]
             c.changes._atomic(directory, 'council-recovery-history.json', c._json(dict(records=records[-HISTORY_LIMIT:])))
         return records
@@ -426,20 +425,27 @@ def fresh_child(value, child):
     c._require(all(owner.get('receipt', {}).get('child_id') != child for owner in owners(value)), 'fresh_native_child_required')
 
 
-def learn(value, phase, member, outcome):
-    owner = value['members'].get(c._key(phase, member), {})
-    if not owner.get('correction') or owner.get('learning_recorded'): return
-    candidate = next(row for row in value['recovery'][member]['candidates'] if row['candidate_id'] == owner['candidate_id'])
-    episode = candidate['investigation']
-    correction = owner['correction']
-    observed = observe(value, owner)
-    if observed.get('local_execution_stopped') is not True: return
-    _history(value, dict(attempt_id=owner['attempt_id'], signature=episode['signature'],
-        model=owner['seat']['model'], provider=owner['seat'].get('provider'),
-        qualification=owner['seat'].get('permission_qualification'), correction={k: v for k, v in correction.items() if k != 'source'},
-        sources=episode['evidence']['sources'], checked_at=time.time(), outcome=outcome,
-        verification=owner.get('verification', {}), provisional=outcome == 'accepted'))
-    owner['learning_recorded'] = True
+def settle_outcomes(value):
+    changed = False
+    for owner in owners(value):
+        if not owner.get('correction') or owner.get('learning_recorded'): continue
+        observed = observe(value, owner)
+        outcome = observed.get('state')
+        if observed.get('local_execution_stopped') is not True or outcome not in ('accepted', 'rejected', 'failed'): continue
+        candidate = next(row for row in value['recovery'][owner['member']]['candidates'] if row['candidate_id'] == owner['candidate_id'])
+        episode = candidate['investigation']
+        correction = owner['correction']
+        verification = owner.get('verification', {})
+        if owner['kind'] == 'native':
+            verification = dict(native_receipt_sha256=c._digest(c._json(owner['receipt'])))
+        _history(value, dict(attempt_id=owner['attempt_id'], signature=episode['signature'],
+            model=owner['seat']['model'], provider=owner['seat'].get('provider'),
+            qualification=owner['seat'].get('permission_qualification'), correction={k: v for k, v in correction.items() if k != 'source'},
+            sources=episode['evidence']['sources'], checked_at=time.time(), outcome=outcome,
+            verification=verification, provisional=outcome == 'accepted'))
+        owner['learning_recorded'] = True
+        changed = True
+    return changed
 
 
 def status(run, value):

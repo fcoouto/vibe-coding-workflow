@@ -44,6 +44,7 @@ def _read(path, limit=MANIFEST_LIMIT):
 
 
 def _save(run, value):
+    if value.get('version') == 3: recovery.settle_outcomes(value)
     changes._atomic(run, 'manifest.json', _json(value))
 
 
@@ -63,6 +64,8 @@ def _locked(run):
     with onboarding._locked(run):
         value = onboarding.read_request(_read(run / 'manifest.json'), MANIFEST_LIMIT)
         _require(value['run'] == str(run), 'council_run_changed')
+        # Completed correction learning is settlement, independent of permission to launch again.
+        if value.get('version') == 3 and recovery.settle_outcomes(value): _save(run, value)
         yield value
 
 
@@ -799,7 +802,6 @@ def verify_external(run: Path, phase: str, member: str, disposition: str, checks
             raw = _report(report)
             changes._atomic(run, 'synthesis-external.md', raw)
             value['frozen']['synthesis-external.md'] = _digest(raw)
-        if value.get('version') == 3: recovery.learn(value, phase, member, disposition)
         _save(run, value)
         return result
 
