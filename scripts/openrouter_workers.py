@@ -421,10 +421,6 @@ def execute(run, executable, auth_data, publish=None, *, launch_guard=None, dead
             if brief.get('council') != previous['council_owner']:
                 raise ValueError('council_worker_identity_changed')
             from runtime import council
-            marker = brief['council']
-            with council._locked(run.parent / ('council-' + marker['run_id'])) as value:
-                ceiling = value['started_monotonic'] + council._end(value, marker['phase'])
-            deadline_monotonic = ceiling if deadline_monotonic is None else min(deadline_monotonic, ceiling)
             launch_guard = lambda: council.external_launch_guard(run, brief)
         deadline = previous.get('deadline_monotonic', time.monotonic() + brief['timeout_seconds'])
         wall_deadline = previous.get('deadline_wall', time.time() + deadline - time.monotonic())
@@ -514,7 +510,15 @@ def _execute(run, brief, executable, auth_data, publish, *, launch_guard=None, d
             try:
                 with settings.admission(brief['source_root'], route, root=run.parent, opencode=executable,
                                         auth_data=auth_data, revision=stamp['revision'], scope_id=stamp['scope_id']), (
-                                            launch_guard() if launch_guard else nullcontext()):
+                                            launch_guard() if launch_guard else nullcontext()) as admission_ceiling:
+                    if 'group' in brief.get('council', {}):
+                        if type(admission_ceiling) not in (int, float) or not math.isfinite(admission_ceiling):
+                            raise ValueError('council_worker_identity_changed')
+                        bounded = min(deadline, admission_ceiling)
+                        wall_deadline -= deadline - bounded
+                        deadline = bounded
+                        result.update(deadline_monotonic=deadline, deadline_wall=wall_deadline)
+                        save(run / 'result.json', result)
                     if route == 'council':
                         council_snapshot.verify(Path(evidence['snapshot']), evidence['manifest'])
                         _verify_council_copy(workspace, evidence['workspace_manifest'])

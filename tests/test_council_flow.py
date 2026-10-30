@@ -1282,3 +1282,99 @@ class CouncilFlowTests(CouncilCase):
             member = 'member-one' if session.startswith('investigate') else 'member-three'
             with self.assertRaisesRegex(ValueError, 'fresh_external_session_required'):
                 council.verify_external(self.run, 'critique', member, 'accepted', ['Host verified'])
+
+
+    def test_grouped_held_council_lock_is_bounded_not_launched_and_cancel_settles_prepared(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        self.grouped_request(); self.prepare()
+        packet = council.packet(self.run, 'investigate', 'member-one')
+        with council._locked(self.run), patch.object(council.workers.time, 'sleep'), redirect_stdout(StringIO()):
+            result = council.workers.execute(Path(packet['worker_run']), self.executable, self.auth)
+        self.assertEqual(result['state'], 'not_launched')
+        self.assertEqual(result['failure']['reason'], 'Onboarding plan busy; retry the same expected revision')
+        self.assertTrue(result['local_execution_stopped'])
+        self.assertTrue(council.workers.resumable(result))
+        self.assertIsNone(result['session_id'])
+        original_deadline = result['deadline_monotonic']
+        unstarted = council.packet(self.run, 'investigate', 'member-two')
+        council.cancel(self.run)
+        with redirect_stdout(StringIO()):
+            settled = council.workers.execute(Path(packet['worker_run']), self.executable, self.auth)
+        self.assertEqual(settled['failure']['reason'], 'cancelled')
+        self.assertTrue(settled['local_execution_stopped'])
+        self.assertEqual(settled['deadline_monotonic'], original_deadline)
+        self.assertIsNone(settled['session_id'])
+        with redirect_stdout(StringIO()), patch.object(council.workers.subprocess, 'Popen', wraps=council.workers.subprocess.Popen) as spawn:
+            prepared = council.workers.execute(Path(unstarted['worker_run']), self.executable, self.auth)
+        self.assertTrue(prepared['local_execution_stopped'])
+        self.assertEqual(prepared['failure']['reason'], 'cancelled')
+        self.assertIsNone(prepared['session_id'])
+        self.assertEqual([call for call in spawn.call_args_list if call.args[0][0] == str(self.executable)], [])
+
+    def test_grouped_three_real_processes_share_guard_contention_without_duplicate_launch(self):
+        import multiprocessing
+        from contextlib import contextmanager, redirect_stdout
+        from runtime.startup import StartupError
+        from io import StringIO
+        self.executable.write_text('#!/usr/bin/env python3\nimport json, sys\nfrom pathlib import Path\n'
+            + f'with Path({str(self.temporary / "spawns")!r}).open("a") as stream: stream.write(sys.argv[sys.argv.index("--title") + 1] + "\\n")\n'
+            + 'session = sys.argv[sys.argv.index("--title") + 1]\n'
+            + 'print(json.dumps({"type":"text","sessionID":session,"part":{"text":"Synthetic local evidence"}}))\n'
+            + 'print(json.dumps({"type":"step_finish","sessionID":session,"part":{"reason":"stop","cost":0,"tokens":{}}}))\n')
+        self.grouped_request()
+        digest = hashlib.sha256(self.executable.read_bytes()).hexdigest()
+        for seat in self.request['roster'].values(): seat['permission_qualification']['opencode_sha256'] = digest
+        self.prepare()
+        packets = [council.packet(self.run, 'investigate', member) for member in self.request['roster']]
+        context = multiprocessing.get_context('fork')
+        output = context.Queue()
+        start = context.Event()
+        contention = context.Event()
+        def execute(packet):
+            try:
+                if not start.wait(timeout=5): raise TimeoutError('fixture start gate')
+                original = council.external_launch_guard
+                @contextmanager
+                def observed_guard(*args, **kwargs):
+                    try:
+                        with original(*args, **kwargs) as ceiling: yield ceiling
+                    except StartupError as error:
+                        if str(error) == 'Onboarding plan busy; retry the same expected revision': contention.set()
+                        raise
+                with redirect_stdout(StringIO()), patch.object(council, 'external_launch_guard', side_effect=observed_guard):
+                    result = council.workers.execute(Path(packet['worker_run']), self.executable, self.auth,
+                        deadline_monotonic=packet['deadline_monotonic'])
+                output.put(dict(member=packet['member'], result=result))
+            except Exception as error:
+                output.put(dict(member=packet['member'], error=type(error).__name__ + ': ' + str(error)))
+        processes = [context.Process(target=execute, args=(packet,)) for packet in packets]
+        self.addCleanup(lambda: [process.kill() for process in processes if process.is_alive()])
+        for process in processes: process.start()
+        with council._locked(self.run):
+            start.set()
+            until = time.monotonic() + 2
+            while time.monotonic() < until:
+                if contention.is_set() and all(json.loads((Path(packet['worker_run']) / 'result.json').read_text())['state'] == 'running' for packet in packets): break
+                if all(not process.is_alive() for process in processes): break
+                time.sleep(.02)
+        self.assertTrue(contention.is_set(), 'fixture must observe an actual Council lock collision')
+        results = [output.get(timeout=12) for _ in processes]
+        for process in processes: process.join(timeout=2)
+        self.assertFalse([item for item in results if 'error' in item], results)
+        for item in results:
+            if item['result']['state'] == 'not_launched':
+                self.assertTrue(council.workers.resumable(item['result']))
+                original_deadline = item['result']['deadline_monotonic']
+                packet = next(packet for packet in packets if packet['member'] == item['member'])
+                with redirect_stdout(StringIO()):
+                    item['result'] = council.workers.execute(Path(packet['worker_run']), self.executable, self.auth)
+                self.assertEqual(item['result']['deadline_monotonic'], original_deadline)
+        self.assertTrue(all(item['result']['state'] == 'awaiting_verification' for item in results), results)
+        launched = (self.temporary / 'spawns').read_text().splitlines()
+        self.assertEqual(sorted(launched), sorted(Path(packet['worker_run']).name for packet in packets))
+        for item in results:
+            packet = next(packet for packet in packets if packet['member'] == item['member'])
+            self.assertLessEqual(item['result']['deadline_monotonic'], packet['deadline_monotonic'])
+            self.assertTrue(item['result']['local_execution_stopped'])
+        self.assertEqual(len(set(item['result']['session_id'] for item in results)), 3)

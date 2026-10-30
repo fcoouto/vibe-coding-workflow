@@ -272,5 +272,31 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(json.loads(result.stdout)['enabled'])
 
+    def test_held_authority_lock_is_safe_control_contention(self):
+        self.enabled()
+        locations = changes._authority_locations([self.scope.runtime.state_dir])
+        with changes._authority_guards([self.scope.runtime.state_dir]):
+            with self.assertRaisesRegex(self.settings.SettingsError, '^openrouter_operation_busy$'):
+                with self.settings.admission(self.repo, 'workers'): self.fail('must not admit')
+        with self.settings.admission(self.repo, 'workers') as admitted:
+            self.assertEqual(admitted['revision'], 2)
+
+    def test_active_uncertain_authority_and_unrelated_storage_failure_stay_blocked(self):
+        self.enabled()
+        location = changes._authority_locations([self.scope.runtime.state_dir])[0]
+        plan = self.root / 'active-plan'; plan.mkdir(mode=0o700)
+        owner = Path(str(location) + '.json')
+        owner.write_text(json.dumps(dict(schema_version=1, plan_dir=str(plan),
+            transaction_id='fixture-active-operation', manifest_digest='0' * 64)))
+        owner.chmod(0o600)
+        with self.assertRaisesRegex(self.settings.SettingsError, '^openrouter_storage_or_scope_unavailable$'):
+            with self.settings.admission(self.repo, 'workers'): self.fail('must not admit')
+        owner.unlink()
+        for error in (OSError('private failure'), startup.StartupError('other busy storage failure'),
+                      changes.Pending('D4 transaction busy; retry the same bound request')):
+            with self.subTest(error=type(error).__name__), patch.object(changes, '_authority_guards', side_effect=error):
+                with self.assertRaisesRegex(self.settings.SettingsError, '^openrouter_storage_or_scope_unavailable$'):
+                    with self.settings.admission(self.repo, 'workers'): self.fail('must not admit')
+
 
 if __name__ == '__main__': unittest.main()

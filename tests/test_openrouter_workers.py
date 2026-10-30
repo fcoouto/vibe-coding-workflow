@@ -719,6 +719,42 @@ else:
             except ProcessLookupError: pass
 
 
+    def test_real_authority_contention_keeps_original_prelaunch_owner_and_deadline(self):
+        from runtime import changes, openrouter_settings
+        exe = self.fixture("print(json.dumps({'type':'text','part':{'text':'Synthetic finding'}}))\n"
+                           "print(json.dumps({'type':'step_finish','part':{'reason':'stop','cost':0,'tokens':{}}}))\n")
+        run = self.api.prepare(self.runs, self.brief)
+        scope = openrouter_settings.resolve(self.source)
+        with changes._authority_guards([scope.runtime.state_dir]), patch.object(self.api.time, 'sleep') as wait:
+            result = self.api.execute(run, exe, self.root / 'auth')
+        self.assertEqual(result['state'], 'not_launched')
+        self.assertEqual(result['failure']['reason'], 'openrouter_operation_busy')
+        self.assertEqual(result['failure']['launch_stage'], 'before_spawn')
+        self.assertEqual(wait.call_count, 2)
+        self.assertTrue(self.api.resumable(result))
+        self.assertTrue(result['local_execution_stopped'])
+        deadline = result['deadline_monotonic']
+        with patch.object(self.api.subprocess, 'Popen', wraps=self.api.subprocess.Popen) as spawn:
+            resumed = self.api.execute(run, exe, self.root / 'auth')
+        self.assertEqual(resumed['state'], 'awaiting_verification')
+        self.assertEqual(resumed['deadline_monotonic'], deadline)
+        self.assertEqual(len([call for call in spawn.call_args_list if call.args[0][0] == str(exe)]), 1)
+        with self.assertRaisesRegex(ValueError, 'already_started'):
+            self.api.execute(run, exe, self.root / 'auth')
+
+    def test_uncertain_authority_and_storage_errors_never_retry_or_resume(self):
+        from runtime import changes
+        for index, error in enumerate((changes.Pending('Shared state authority has an active or uncertain D4 operation; resume its bound journal'),
+                                       OSError('unrelated storage failure'))):
+            run = self.api.prepare(self.runs, dict(self.brief, task_id='blocked-authority-' + str(index)))
+            with patch.object(changes, '_authority_guards', side_effect=error), patch.object(self.api.time, 'sleep') as wait:
+                result = self.api.execute(run, self.root / 'worker', self.root / 'auth')
+            self.assertEqual(result['state'], 'failed')
+            self.assertEqual(result['failure']['reason'], 'openrouter_storage_or_scope_unavailable')
+            self.assertEqual(wait.call_count, 0)
+            self.assertTrue(result['local_execution_stopped'])
+            self.assertFalse(self.api.resumable(result))
+
 
 class CouncilWorkerTests(CouncilCase):
     @classmethod

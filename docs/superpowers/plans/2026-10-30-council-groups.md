@@ -119,6 +119,17 @@ Do not create a general receipt service.
 
 **Files:** private plan workspace qualification harness/reports only, followed by
 factual `docs/council-validation.md` and plan status. No new product service.
+Actual first live concurrency exposed local control defects. A narrow operational
+correction may touch `scripts/openrouter_workers.py`, `runtime/council.py`,
+`runtime/openrouter_settings.py` and their owning tests: include grouped deadline
+admission in safe bounded control handling and classify only demonstrated
+nonblocking D4 lock contention as busy. Active/uncertain D4 ownership and unrelated
+storage failures remain blocked. Preserve the first partial run and all original
+records; do not reset terminal attempts or replay its inference. After focused
+proof and independent scoped review, one fresh Free qualification on changed code
+is authorized within the implementation/live-test task, with the same harmless
+scope, zero paid fallback and 1200-second session ceiling. First-run owners must
+be proven locally stopped before starting it.
 
 **Interfaces:** Use Task1 grouped prepare/packet/verify/status contracts on the
 already authorized disposable checkout and saved Council scope. Reuse existing

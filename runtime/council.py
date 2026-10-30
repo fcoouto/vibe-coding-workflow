@@ -632,7 +632,7 @@ def external_launch_guard(worker_run, brief):
         _remaining(value, phase)
         _require(value['phase'] == phase, 'phase_already_closed')
         _check_external_brief(run, value, phase, member, brief)
-        yield
+        yield value['started_monotonic'] + _end(value, phase)
 
 
 def verify_external(run: Path, phase: str, member: str, disposition: str, checks: list) -> dict:

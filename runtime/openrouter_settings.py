@@ -176,7 +176,12 @@ def guard(cwd, *, write=False, create=False):
     try:
         scope = resolve(cwd)
         with ExitStack() as stack:
-            if write: stack.enter_context(changes._authority_guards([scope.runtime.state_dir]))
+            if write:
+                try: stack.enter_context(changes._authority_guards([scope.runtime.state_dir]))
+                except startup.StartupError as error:
+                    if type(error) is startup.StartupError and str(error) == 'D4 transaction busy; retry the same bound request':
+                        raise SettingsError('openrouter_operation_busy') from None
+                    raise
             binding = authority(scope)
             root = onboarding._open_path(scope.runtime.state_dir, os.O_RDONLY | os.O_DIRECTORY)
             stack.callback(os.close, root)
