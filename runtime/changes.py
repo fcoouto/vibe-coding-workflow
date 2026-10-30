@@ -2869,12 +2869,156 @@ def _check_recovery_source(source,context,db,*,writer=None):
     d3._require(hashlib.sha256(raw).hexdigest()==content['journal']['sha256'],'Recovery journal changed before registration')
 
 
+def _release_source_inputs(source,context,db,groups):
+    """Collect actual local release facts; None selects a genuine unsupported family."""
+    from runtime import evidence,delegation
+    authority=_canonical_plain(context.authority_set[0]);content=_canonical_plain(source.content)
+    evidence._check_context(context,db)
+    originals=_canonical_plain(source.release)
+    tasks=[t for t in originals['tasks'] if t['reference']['authority']==authority]
+    assignments=[a for a in originals['assignments'] if a['authority']==authority]
+    generation=_recovery_generation(db,tasks,assignments)
+    d3._require(generation==source.generations[d3._digest(authority)],'Recovery source selected owner generation changed')
+    records=delegation._ledger(None,db,context=context)
+    references=[c['reference'] for group in groups for c in group['certificates'] if c['reference']['authority']==authority]
+    for record in records:
+        if record['data']['role']!='check' or record['data']['status']!='settled' or record['data']['result']!=dict(outcome='completed'):
+            return None
+        if not any(all(record['owner'][key]==ref[key] for key in ('scope_id','client','session_id','task_id')) for ref in references):return None
+    members=[]
+    for group in groups:
+        for certificate in group['certificates']:
+            ref=certificate['reference']
+            if ref['authority']!=authority:continue
+            task=task_state._task(db,ref['scope_id'],ref['client'],ref['session_id'],ref['task_id'])
+            if task is None or not task.get('lifecycle') or task['lifecycle']['safe_closed_at'] is not None:return None
+            owned=[r for r in records if all(r['owner'][key]==ref[key] for key in ('scope_id','client','session_id','task_id'))]
+            if not owned:return None
+            for record in owned:
+                attempt=next((a for a in task.get('evidence',{}).get('attempts',[]) if a['id']==record['id']),None)
+                if attempt is None or attempt['status']!='passed':return None
+                reconciliation=evidence._read(None,record['data']['reconciliation'],context=context,db=db)
+                d3._require(record['data'].get('lifecycle') and reconciliation.get('version')==2 and
+                    reconciliation.get('proof',{}).get('kind')=='check-writer-reconciliation' and
+                    record['data']['observation'] is not None and reconciliation.get('current_candidate') is not None,
+                    'Release ordinary check lacks actual dated reconciliation/execution support')
+            inputs=_linked_live_certificate_inputs(context,db,dict(reference=ref,pins=certificate['pins']),certificate['linked'])
+            if inputs is None:return None
+            prepared=evidence._linked_owned_preparation(context,db,ref)
+            evidence._prepared_certificate_inputs(certificate,inputs,prepared)
+            key=d3._digest(ref)
+            d3._require(source.ready_inputs is not None and key in source.ready_inputs,
+                'Ready source needs its actual bounded input observation')
+            evidence._check_ready_inputs(_canonical_plain(source.ready_inputs[key]))
+            members.append(dict(reference=ref,inputs=_canonical_plain(inputs),prepared=prepared))
+    artifacts=[]
+    for item in content['artifacts']:
+        if item['authority']!=authority:continue
+        metadata,raw=evidence._managed_artifact(None,item['artifact'],context=context,db=db)
+        artifacts.append(dict(reference=item['artifact'],metadata=metadata,body_digest=hashlib.sha256(raw).hexdigest(),
+            stat=evidence._closure_file_stat(Path(metadata['managed']['path']))))
+    baseline=task_state._source_baseline(None,db,context=context)
+    d3._require(baseline is not None,'Recovery release source baseline unavailable')
+    original_baseline=_d4_publication_lifetime(source)['baselines'][str(context.database)]
+    for observed in (baseline,_canonical_plain(original_baseline)):
+        if any(key in observed or key in observed['content'] for key in ('birth_handoff','birth_expectation','birth_certificate')):return None
+    matches=[edge for edge in baseline['dependencies'] if _canonical_plain(edge['reference']['identity'])==content['identity']]
+    d3._require(len(matches)==1,'Recovery release source head unavailable')
+    head=_canonical_plain(matches[0]['reference']['artifact'])
+    expected=next(row['artifact'] for row in originals['heads'] if row['authority']==authority)
+    head_metadata,head_raw=evidence._managed_artifact(None,head,context=context,db=db)
+    current=json.loads(head_raw)
+    if any(key in current for key in ('birth_handoff','birth_expectation','birth_certificate')):return None
+    if head!=expected:
+        comparable=deepcopy(content)
+        comparable['journal']['observed_at']=current['journal']['observed_at']
+        d3._require(current==comparable,'Recovery release source head changed')
+    rows=evidence._evidence_inventory_rows(db)
+    if any(row['metadata']['status']!='live' for row in rows) or db.execute('select 1 from retired_identities limit 1').fetchone():return None
+    physical=evidence._historical_inventory(context,db,rows)
+    d3._require(sorted(p.name for p in (context.directory/'evidence').iterdir())==
+        sorted(row['reference']['name'] for row in physical if row['stat'] is not None),
+        'Unaccounted release preparation content changed')
+    journal=d3._read_file(Path(content['identity']['plan_dir'])/'transaction.json',MAX_JOURNAL,private=True)
+    d3._require(hashlib.sha256(journal).hexdigest()==content['journal']['sha256'],'Recovery journal changed before registration')
+    evidence._check_context(context,db)
+    return _canonical_freeze(dict(generation=generation,members=members,artifacts=artifacts,baseline=_canonical_plain(baseline),
+        head=head,head_metadata=head_metadata,head_digest=hashlib.sha256(head_raw).hexdigest(),physical=physical,
+        journal_sha256=hashlib.sha256(journal).hexdigest()))
+
+
+def _check_release_source_preflight(source):
+    """Release-only collect/close/full-job/recollect; supplied writers keep the full path."""
+    from runtime import evidence
+    lifetime=_d4_publication_lifetime(source)
+    d3._require(isinstance(source,_RecoverySourceObservation) and source.issuer is _RECOVERY_ISSUER and
+        source.provenance is _RECOVERY_RELEASE_ISSUER and source.release is not None and
+        lifetime['kind']=='release' and lifetime.get('writer') is None,'Actual read-only release owner is required')
+    content=_canonical_plain(source.content)
+    if getattr(source,'birth_certificate',None) is not None or any(
+            key in content for key in ('birth_handoff','birth_expectation','birth_certificate')):return False
+    evidence._recovery_source_shape(content,content['identity'])
+    authorities=[_canonical_plain(c.authority_set[0]) for c in source.contexts]
+    d3._require(sorted(authorities,key=d3._digest)==sorted(content['authorities'],key=d3._digest) and
+        len({d3._digest(a) for a in authorities})==len(authorities),'Release physical authority set differs')
+    groups={}
+    if content['version']!=2 or not content.get('stopped'):return False
+    for certificate in content['stopped']:
+        _stopped_certificate_shape(certificate)
+        if not certificate.get('preparation') or certificate.get('linked',{}).get('version')!=2:return False
+        pointer=evidence._linked_basis_root(certificate['linked']);key=d3._digest(pointer)
+        group=groups.setdefault(key,dict(kind='release-preparation',pointer=pointer,authorities=certificate['preparation']['authorities'],certificates=[]))
+        d3._require(group['authorities']==certificate['preparation']['authorities'] and
+            {d3._digest(a) for a in group['authorities']}<={d3._digest(a) for a in authorities},
+            'Release preparation requires its complete held authorities')
+        group['certificates'].append(certificate)
+    groups=list(groups.values())
+    for group in groups:
+        basis=group['certificates'][0]['linked']
+        d3._require(all(c['linked']==basis for c in group['certificates']) and
+            {d3._digest(c['reference']) for c in group['certificates']}=={d3._digest(m['task']) for m in basis['members']},
+            'Release preparation omits an original component member')
+    _check_d4_current_facts(source,lifetime)
+    captured=[]
+    for context in source.contexts:
+        with evidence._context_database(context) as db:inputs=_release_source_inputs(source,context,db,groups)
+        if inputs is None:return False
+        captured.append(inputs)
+    for group in groups:
+        group['members']=[m for inputs in captured for m in _canonical_plain(inputs)['members']
+            if any(m['reference']==c['reference'] for c in group['certificates'])]
+        response=evidence._resolve_prepared_certificate_job(group)
+        d3._require(isinstance(response,dict) and set(response)=={'job','result'} and response['job']==group and
+            isinstance(response['result'],dict) and set(response['result'])=={'facts','receipts'},
+            'Release preparation job is unresolved or mismatched')
+        result=response['result'];evidence._prepared_certificate_facts(group['certificates'],result['facts'],result['receipts'])
+        evidence._check_preparation_inputs(result['facts'])
+        group['result']=result
+    d3._require(_d4_publication_lifetime(source) is lifetime,'Release owner lifetime changed during semantic validation')
+    _check_d4_current_facts(source,lifetime)
+    for context,original in zip(source.contexts,captured):
+        with evidence._context_database(context) as db:current=_release_source_inputs(source,context,db,groups)
+        d3._require(current==original,'Release source inputs changed during semantic validation')
+    for group in groups:
+        result=group['result'];facts=result['facts']
+        receipts={evidence._raw(m['reference']).decode():evidence._preparation_receipt(facts,m['reference']) for m in facts['members']}
+        d3._require(receipts==result['receipts'],'Release actual preparation receipts changed during validation')
+        evidence._prepared_certificate_facts(group['certificates'],facts,receipts)
+        evidence._check_preparation_inputs(facts)
+    _check_d4_current_facts(source,lifetime)
+    return True
+
+
 def _check_recovery_source_global(source):
     """Recheck each existing store before opening the next local registration writer."""
     from runtime import evidence
-    for context in source.contexts:
-        with evidence._context_database(context) as db:
-            _check_recovery_source(source,context,db)
+    lifetime=getattr(_authority_context,'publication',None)
+    release=(isinstance(source,_RecoverySourceObservation) and source.release is not None and lifetime is not None and
+        lifetime['active'] and lifetime['source'] is source and lifetime['kind']=='release' and lifetime.get('writer') is None)
+    if not (release and _check_release_source_preflight(source)):
+        for context in source.contexts:
+            with evidence._context_database(context) as db:
+                _check_recovery_source(source,context,db)
     age=_existing_recovery_age(source.contexts,_canonical_plain(source.content['identity']))
     d3._require(age is None or age==source.created_at,'Original recovery source age changed')
 

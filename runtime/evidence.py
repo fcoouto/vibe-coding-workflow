@@ -6016,6 +6016,62 @@ def _linked_preparation_reader(authorities):
         _PREPARATION_READER.reset(token)
 
 
+def _prepared_certificate_inputs(certificate,inputs,prepared):
+    """Pure correspondence only; original basis and preparation jobs remain outstanding."""
+    from runtime import changes
+    original={key:value for key,value in certificate.items() if key!='preparation'}
+    assembled=changes._stopped_certificate_from_inputs(_canonical_plain(inputs)['certificate_inputs'])
+    _require(original==assembled==prepared['content']['stopped'],
+        'Release certificate differs from actual complete stopped/preparation inputs')
+    _require(prepared['reference']==certificate['preparation']['reference'] and
+        prepared['metadata']['version']==2 and prepared['metadata']['class']=='compact',
+        'Release preparation differs from actual registered compact pointer')
+    return assembled
+
+
+def _prepared_certificate_facts(certificates,facts,receipts):
+    """Compare complete original job results; missing receipts never establish validation."""
+    _require(isinstance(facts,dict) and not facts.get('discovered_authorities') and
+        isinstance(receipts,dict),'Release preparation job is incomplete')
+    members={_raw(member['reference']).decode():member for member in facts['members']}
+    _require(set(members)=={_raw(c['reference']).decode() for c in certificates} and
+        set(receipts)==set(members) and all(receipts.values()),'Release preparation member/receipt coverage changed')
+    required={_raw(a) for a in facts['basis']['authorities']}
+    required.update(_raw(m['reference']['authority']) for m in facts['members'])
+    for source in facts['sources']:
+        authority=source['reference']['authority'];required.add(_raw(authority))
+        required.update(_raw(edge['reference'].get('authority',authority)) for edge in source['metadata']['dependencies'])
+    for certificate in certificates:
+        member=members[_raw(certificate['reference']).decode()]
+        _require({key:value for key,value in certificate.items() if key!='preparation'}==member['certificate'] and
+            certificate['linked']==facts['basis'],'Release prepared member certificate changed')
+        prepared=certificate['preparation'];own=receipts[_raw(certificate['reference']).decode()]
+        _require(prepared['component_digest']==_digest(facts) and own==dict(
+            authority=certificate['reference']['authority'],artifact=prepared['reference']) and
+            required<={_raw(a) for a in prepared['authorities']},'Release actual preparation pointer/component/authority changed')
+
+
+def _resolve_prepared_certificate_job(job):
+    """Run original full jobs only after the release owner closes its outer readers."""
+    from runtime import changes
+    _require(job['kind']=='release-preparation','Unknown release preparation job')
+    for member in job['members']:
+        assembly=changes._linked_live_certificate_assembly(member['inputs'])
+        basis_job=next(assembly)
+        response=changes._resolve_linked_live_certificate_job(basis_job)
+        try:assembly.send(response)
+        except StopIteration as done:certificate=done.value
+        else:raise state.StateError('Release linked certificate has unresolved obligations')
+        _require(certificate==member['prepared']['content']['stopped'],
+            'Release full basis result differs from registered stopped owner')
+    facts=_linked_preparation_read_facts(job['pointer'],job['authorities'])
+    _require(not facts.get('discovered_authorities'),'Release preparation discovered an unheld authority')
+    receipts={_raw(m['reference']).decode():_preparation_receipt(facts,m['reference']) for m in facts['members']}
+    _prepared_certificate_facts(job['certificates'],facts,receipts)
+    _check_preparation_inputs(facts)
+    return dict(job=job,result=dict(facts=facts,receipts=receipts))
+
+
 def _check_linked_preparation_certificate(context,db,certificate,*,preparation_reader=None,writer=None):
     if preparation_reader is not None:
         _require(type(preparation_reader) is _PreparationReader,'Preparation reader is foreign or expired')
