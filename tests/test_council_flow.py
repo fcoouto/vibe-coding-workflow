@@ -612,6 +612,40 @@ class CouncilFlowTests(CouncilCase):
         self.assertTrue(result['local_execution_stopped'])
         self.assertEqual(result['state'], 'unresolved')
 
+    def test_ambiguous_spawn_retains_owner_across_deadline_and_cancellation(self):
+        from scripts import council as cli
+        for error, category in ((TimeoutError, 'deadline'), (KeyboardInterrupt, 'interrupted')):
+            with self.subTest(error=error.__name__):
+                self.request['run_id'] = 'ambiguous-' + category
+                self.prepare(); self.native('investigate'); self.external('investigate', 'external-two')
+                packet = council.packet(self.run, 'investigate', 'external-one')
+                launch = council.workers.subprocess.Popen
+                def interrupted(command, **kwargs):
+                    if command[0] == str(self.executable): raise error()
+                    return launch(command, **kwargs)
+                with patch.object(council.workers.subprocess, 'Popen', side_effect=interrupted):
+                    result = cli._execute(self.run, 'investigate', packet, self.settings)
+                self.assertEqual(result['state'], 'unresolved')
+                self.assertFalse(council.workers.resumable(result))
+                with self.assertRaisesRegex(ValueError, 'member_not_resumable'):
+                    council.resume_member(self.run, 'investigate', 'external-one')
+                with self.assertRaisesRegex(ValueError, 'already_issued'):
+                    council.packet(self.run, 'investigate', 'external-one')
+                expected_stop = [dict(phase='investigate', member='external-one', worker_run=packet['worker_run'])]
+                report = council.status(self.run)
+                self.assertEqual(report['stop_requests'], expected_stop)
+                self.assertFalse(report['all_local_execution_stopped'])
+                self.assertEqual(report['members']['investigate']['external-one']['state'], 'unresolved')
+                with self.assertRaisesRegex(ValueError, 'phase_not_ready'):
+                    council.packet(self.run, 'critique', 'native')
+                with patch.object(council, '_elapsed', return_value=601):
+                    with self.assertRaisesRegex(ValueError, 'phase_not_ready'):
+                        council.packet(self.run, 'critique', 'native')
+                cancelled = council.cancel(self.run)
+                self.assertTrue(cancelled['cancelled'])
+                self.assertFalse(cancelled['all_local_execution_stopped'])
+                self.assertEqual(cancelled['stop_requests'], expected_stop)
+
     def test_cancel_after_actual_spawn_requests_owner_stop_and_records_local_stop(self):
         from contextlib import redirect_stdout
         from io import StringIO

@@ -608,7 +608,7 @@ def _execute(run, brief, executable, auth_data, publish, *, launch_guard=None, d
             if proc.stdin: proc.stdin.close()
             if proc.stdout: proc.stdout.close()
         else:
-            result['local_execution_stopped'] = True
+            result['local_execution_stopped'] = launch_stage == 'before_spawn'
         if not result['local_execution_stopped']: result['state'] = 'unresolved'
         result['native_fallback_ready'] = result['local_execution_stopped'] and result['state'] in ('failed', 'unresolved')
         result['accounting_complete'] = bool(finished_steps and not missing_cost and result['state'] == 'awaiting_verification')

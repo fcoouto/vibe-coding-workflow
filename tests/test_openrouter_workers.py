@@ -80,6 +80,9 @@ class WorkerTests(unittest.TestCase):
         with patch.object(self.api.settings, 'admission', busy), patch.object(self.api.time, 'sleep') as wait, patch.object(self.api.subprocess, 'Popen') as spawn:
             result = self.api.execute(run, exe, self.root / 'auth')
         self.assertEqual(result['state'], 'not_launched')
+        self.assertTrue(result['local_execution_stopped'])
+        self.assertFalse(result['native_fallback_ready'])
+        self.assertTrue(self.api.resumable(result))
         self.assertEqual(wait.call_count, 2)
         spawn.assert_not_called()
         deadline = result['deadline_monotonic']
@@ -127,6 +130,26 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(result['state'], 'unresolved')
             with self.assertRaisesRegex(ValueError, 'already_started'):
                 self.api.execute(run, self.root / 'worker', self.root / 'auth')
+
+    def test_ambiguous_spawn_retains_unknown_stop_without_replay(self):
+        for error, category in ((TimeoutError, 'deadline'), (KeyboardInterrupt, 'interrupted')):
+            with self.subTest(error=error.__name__):
+                run = self.api.prepare(self.runs, dict(self.brief, task_id='spawn-' + category))
+                launch = self.api.subprocess.Popen
+                def interrupted(command, **kwargs):
+                    if command[0] == str(self.root / 'worker'): raise error()
+                    return launch(command, **kwargs)
+                with patch.object(self.api.subprocess, 'Popen', side_effect=interrupted):
+                    result = self.api.execute(run, self.root / 'worker', self.root / 'auth')
+                self.assertEqual(result['state'], 'unresolved')
+                self.assertEqual(result['failure'], dict(category=category, launch_stage='spawn'))
+                self.assertIsNone(result['session_id'])
+                self.assertEqual(json.loads((run / 'result.json').read_text()), result)
+                self.assertFalse(result['local_execution_stopped'])
+                self.assertFalse(result['native_fallback_ready'])
+                self.assertFalse(self.api.resumable(result))
+                with self.assertRaisesRegex(ValueError, 'already_started'):
+                    self.api.execute(run, self.root / 'worker', self.root / 'auth')
 
     def test_allowlisted_policy_context_and_router_diagnostics(self):
         for name, category in [('ContentFilterError', 'policy'), ('ContextOverflowError', 'context')]:
