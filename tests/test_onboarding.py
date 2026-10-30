@@ -307,6 +307,148 @@ class OnboardingTests(unittest.TestCase):
         self.assertIn("aggregate", error)
         self.assertGreaterEqual(budget["bytes"], 80)
 
+    def snapshot_observation(self, module, root, budget=None):
+        from runtime import startup
+        actual = startup.read_git
+        calls = []
+        def observe(*args, **kwargs):
+            before = budget["bytes"] if budget is not None else None
+            result = actual(*args, **kwargs)
+            calls.append((args, kwargs, result, before))
+            return result
+        with patch.object(startup, "read_git", side_effect=observe):
+            result = module._snapshot(root) if budget is None else module._snapshot(root, budget=budget)
+        return result, calls
+
+    def test_snapshot_budget_charges_all_five_queries_and_preserves_default(self):
+        import time
+        module = self.module()
+        expected, default_calls = self.snapshot_observation(module, self.repo)
+        budget = dict(paths=11, bytes=17, deadline=time.monotonic()+30)
+        result, calls = self.snapshot_observation(module, self.repo, budget)
+        self.assertEqual(result, expected)
+        self.assertEqual([call[0][1:] for call in calls], [call[0][1:] for call in default_calls])
+        self.assertEqual(len(calls), 5)
+        self.assertEqual([call[1].get("timeout",5) for call in calls], [2,5,5,5,5])
+        used = 17
+        for args, kwargs, response, before in calls:
+            self.assertEqual(kwargs["deadline"], budget["deadline"])
+            self.assertEqual(kwargs["limit"], min(module.MAX_FILE, module.MAX_TOTAL-before))
+            used += len(response[1])
+        file_bytes = sum(row.get("bytes",0) for row in result["fingerprints"].values())
+        self.assertEqual(budget["bytes"], used+file_bytes)
+        self.assertEqual(budget["paths"], 12+len(result["fingerprints"]))
+        self.assertTrue(all(call[1].get("deadline") is None for call in default_calls))
+
+    def test_snapshot_expired_budget_launches_no_query(self):
+        from runtime import startup
+        import time
+        module = self.module()
+        budgets = (dict(paths=0, bytes=0, deadline=time.monotonic()-1),
+                   dict(paths=module.MAX_PATHS, bytes=0), dict(paths=0, bytes=module.MAX_TOTAL))
+        for budget in budgets:
+            with self.subTest(budget=budget), patch.object(startup, "read_git", side_effect=AssertionError("exhausted snapshot launched child")):
+                with self.assertRaises(StartupError): module._snapshot(self.repo, budget=budget)
+
+    def test_snapshot_exact_byte_and_path_caps_allow_final_path_free_queries(self):
+        module = self.module()
+        expected, calls = self.snapshot_observation(module, self.repo)
+        total = sum(len(call[2][1]) for call in calls)+sum(row.get("bytes",0) for row in expected["fingerprints"].values())
+        paths = 1+len(expected["fingerprints"])
+        budget = dict(paths=0, bytes=0)
+        with patch.object(module,"MAX_TOTAL",total), patch.object(module,"MAX_PATHS",paths):
+            self.assertEqual(module._snapshot(self.repo,budget=budget),expected)
+        self.assertEqual(budget,dict(paths=paths,bytes=total))
+
+    def test_snapshot_late_query_and_result_construction_cannot_return_complete(self):
+        from runtime import startup
+        module = self.module()
+        actual = startup.read_git
+        actual_hash = module.hashlib.sha256
+        for late_at in ("names", "head", "result"):
+            with self.subTest(late_at=late_at):
+                clock=[100.0];head_done=[False];calls=[]
+                budget=dict(paths=0,bytes=0,deadline=101.0)
+                def observe(*args,**kwargs):
+                    result=actual(*args,**kwargs);calls.append(args[1:])
+                    is_head=args[1:]==("rev-parse","--verify","HEAD")
+                    if is_head: head_done[0]=True
+                    if late_at=="names" and args[1:3]==("ls-files","--cached") or late_at=="head" and is_head:
+                        clock[0]=102.0
+                    return result
+                def digest(*args,**kwargs):
+                    result=actual_hash(*args,**kwargs)
+                    if late_at=="result" and head_done[0]: clock[0]=102.0
+                    return result
+                with patch.object(startup.time,"monotonic",side_effect=lambda:clock[0]), patch.object(startup,"read_git",side_effect=observe), patch.object(module.hashlib,"sha256",side_effect=digest):
+                    with self.assertRaises(StartupError): module._snapshot(self.repo,budget=budget)
+                if late_at=="names": self.assertEqual(len(calls),2)
+
+    def test_snapshot_unknown_partial_query_failure_is_terminal_beyond_owner_cap(self):
+        from runtime import startup
+        module = self.module();actual=startup.read_git
+        budget=dict(paths=0,bytes=0)
+        def fail_names(*args,**kwargs):
+            if args[1:3]==("ls-files","--cached"): raise StartupError("partial Git inventory limit exceeded")
+            return actual(*args,**kwargs)
+        with patch.object(startup,"read_git",side_effect=fail_names):
+            with self.assertRaises(StartupError): module._snapshot(self.repo,budget=budget)
+        self.assertGreater(budget["bytes"],module.MAX_TOTAL)
+        with patch.object(startup,"read_git",side_effect=AssertionError("terminal budget reused")):
+            with self.assertRaises(StartupError): module._snapshot(self.repo,budget=budget)
+
+    def test_snapshot_multiple_members_share_one_owner_allowance(self):
+        module = self.module();other=self.second_repository()
+        costs=[]
+        for root in (self.repo,other):
+            result,calls=self.snapshot_observation(module,root)
+            costs.append(sum(len(call[2][1]) for call in calls)+sum(row.get("bytes",0) for row in result["fingerprints"].values()))
+        maximum=17+sum(costs)-1
+        budget=dict(paths=0,bytes=17)
+        with patch.object(module,"MAX_TOTAL",maximum):
+            first=module._snapshot(self.repo,budget=budget)
+            self.assertEqual(first["repository_root"],str(self.repo))
+            self.assertEqual(budget["bytes"],17+costs[0])
+            with self.assertRaises(StartupError): module._snapshot(other,budget=budget)
+        self.assertGreater(budget["bytes"],maximum)
+
+    def test_snapshot_linked_and_unborn_defaults_match_budgeted_results(self):
+        module=self.module()
+        linked=self.base/"snapshot-linked"
+        self.git("worktree","add","-q","-b","snapshot-fixture",str(linked))
+        unborn=self.base/"unborn"
+        self.git("init","--template=","-q",str(unborn))
+        for root in (linked,unborn):
+            with self.subTest(root=root.name):
+                expected,_=self.snapshot_observation(module,root)
+                result,_=self.snapshot_observation(module,root,dict(paths=0,bytes=0))
+                self.assertEqual(result,expected)
+                if root==unborn:self.assertIsNone(result["head"])
+
+    def test_snapshot_nonzero_head_charges_stdout_and_other_errors_keep_messages(self):
+        from runtime import startup
+        module=self.module();actual=startup.read_git
+        collected=[]
+        def nonzero_head(*args,**kwargs):
+            result=actual(*args,**kwargs);collected.append(result[1])
+            return (1,result[1]) if args[1:]==("rev-parse","--verify","HEAD") else result
+        budget=dict(paths=0,bytes=7)
+        with patch.object(startup,"read_git",side_effect=nonzero_head):
+            result=module._snapshot(self.repo,budget=budget)
+        self.assertIsNone(result["head"])
+        self.assertEqual(budget["bytes"],7+sum(map(len,collected))+sum(row.get("bytes",0) for row in result["fingerprints"].values()))
+        for prefix,message in ((("ls-files","--cached"),"Cannot enumerate checkout files"),
+                               (("ls-files","--stage"),"Cannot read staged checkout identity"),
+                               (("status",),"Cannot read checkout changes")):
+            for used_budget in (None,dict(paths=0,bytes=0)):
+                with self.subTest(prefix=prefix,budgeted=used_budget is not None):
+                    def failed(*args,**kwargs):
+                        value=actual(*args,**kwargs)
+                        return (1,value[1]) if args[1:1+len(prefix)]==prefix else value
+                    with patch.object(startup,"read_git",side_effect=failed):
+                        with self.assertRaisesRegex(StartupError,message):
+                            module._snapshot(self.repo,budget=used_budget)
+
     def test_checkout_observer_accepts_paths_only_and_preserves_used_budget_and_deadline(self):
         from runtime import startup
         import time

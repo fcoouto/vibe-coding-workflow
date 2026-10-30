@@ -364,9 +364,45 @@ def _snapshot_targets(plan):
     return sorted(names | set(_file_targets(plan["actions"])))
 
 def _snapshot(root, targets=(), *, budget=None):
-    identity = checkout(root)
+    def check(*, reading=False):
+        if budget is not None:
+            _require(type(budget["paths"]) is int and 0 <= budget["paths"] <= MAX_PATHS,
+                     "Project aggregate path limit exceeded; inventory remains incomplete")
+            _require(type(budget["bytes"]) is int and 0 <= budget["bytes"] <= MAX_TOTAL,
+                     "Project aggregate byte limit exceeded; inventory remains incomplete")
+            if reading:
+                _require(budget["bytes"] < MAX_TOTAL,
+                         "Project aggregate byte limit exceeded; inventory remains incomplete")
+            _check_observation_deadline(budget)
+
+    def git(*args):
+        if budget is None:
+            return _git(root, *args)
+        check(reading=True)
+        try:
+            code, raw = _git(root, *args, limit=MAX_TOTAL - budget["bytes"], deadline=budget.get("deadline"))
+        except (StartupError, OSError, subprocess.SubprocessError):
+            # Unknown partial output must not leave a reusable allowance.
+            budget["bytes"] = max(budget["bytes"], MAX_TOTAL + 1)
+            raise
+        budget["bytes"] += len(raw)
+        check()
+        return code, raw
+
+    if budget is None:
+        identity = checkout(root)
+    else:
+        check(reading=True)
+        _require(budget["paths"] < MAX_PATHS, "Project aggregate path limit exceeded; inventory remains incomplete")
+        try:
+            identity = checkout(root, limit=min(MAX_FILE, MAX_TOTAL - budget["bytes"]),
+                                deadline=budget.get("deadline"), budget=budget)
+        except (StartupError, OSError, subprocess.SubprocessError):
+            budget["bytes"] = max(budget["bytes"], MAX_TOTAL + 1)
+            raise
+        check()
     _require(identity is not None and identity[0] == root, "Selected checkout identity changed")
-    code, raw = _git(root, "ls-files", "--cached", "--others", "--exclude-standard", "-z")
+    code, raw = git("ls-files", "--cached", "--others", "--exclude-standard", "-z")
     _require(code == 0, "Cannot enumerate checkout files")
     names = sorted(set(os.fsdecode(name) for name in raw.split(b"\x00") if name))
     observed_names = sorted(set(names) | {_relative(name) for name in targets})
@@ -398,16 +434,18 @@ def _snapshot(root, targets=(), *, budget=None):
             if fingerprints[key]["status"] != "absent":
                 instructions.append({"path": str(location), "scope": str(directory),
                                      "editable": location.is_relative_to(root)})
-    code, index = _git(root, "ls-files", "--stage", "-z")
+    code, index = git("ls-files", "--stage", "-z")
     _require(code == 0, "Cannot read staged checkout identity")
-    code, status = _git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    code, status = git("status", "--porcelain=v1", "-z", "--untracked-files=all")
     _require(code == 0, "Cannot read checkout changes")
-    code, head = _git(root, "rev-parse", "--verify", "HEAD")
-    return {"repository_root": str(root), "git_common_dir": str(identity[1]),
+    code, head = git("rev-parse", "--verify", "HEAD")
+    result = {"repository_root": str(root), "git_common_dir": str(identity[1]),
             "head": head.decode("ascii").strip() if code == 0 else None,
             "index_digest": hashlib.sha256(index).hexdigest(),
             "dirty_inventory": [os.fsdecode(v) for v in status.split(b"\x00") if v],
             "paths": names, "fingerprints": fingerprints, "instructions": instructions}
+    check()
+    return result
 
 def _package_pins():
     return {"policy_digest": policy_digest(PACKAGE), "runtime_digest": runtime_fingerprint()}
