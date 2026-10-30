@@ -577,3 +577,48 @@ Package validation passed separately. No live endpoint call or current vendor
 availability claim was made for this clarification. Prior live rosters remain
 historical execution proof; their two-vendor composition alone does not establish
 that a third eligible developer was unavailable or prove this clarified policy.
+
+## Final Free vendor-policy run, 30 October 2026
+
+The user requested final Free validation and closure. A fresh run on `f2b9757`
+selected three eligible model developers from bounded current discovery:
+Thinking Machines (Inkling Small/max), Poolside (Laguna S 2.1/documented default)
+and NVIDIA (Nemotron 3.5 Super VL/documented default, chair). Default maximum
+mappings remained unverified, and missing Poolside comparable indexes remained
+unknown. Exact zero-rate routes/tools were checked; provider data-use terms were
+disclosed and only the same approved harmless 392-byte source was transmitted.
+
+Poolside failed naturally with no usable response or retained diagnostic cause.
+Its bounded investigation found no justified remedy. The preapproved distinct
+fourth developer XingChen/TeleAI, hosted by Phala, returned 429. Exact owned error
+evidence identified transient upstream shared-pool throttling; a documented
+60-second delayed fresh-session correction was attempted and also returned 429.
+No faults were imposed, paid route selected, permission broadened or deadline reset.
+
+The run delivered an **accepted fresh reduced-panel verdict** at **1105.768 seconds**:
+**2/3 investigations, 2/3 critiques and 1/1 synthesis**, outcome **`incomplete`**.
+Eight distinct real external sessions and six native supervisors remain recorded;
+all local executions were observed stopped with no pending stop requests. Known
+reported external subtotal was 0 USD; total and upstream cancellation remained
+unknown after failed calls. Native host usage is separate. Source/frozen hashes
+verified unchanged. This is not a full three-vendor completion.
+
+The test also exposed a preparation gap: only XingChen was preapproved as backup,
+so no same-developer alternative could be selected after the blocked route and
+initial phase expiration. This does not prove that all other third developers or
+same-developer alternatives were unavailable. The common shortlist guidance now
+uses available capacity (up to three) for qualified alternatives, including useful
+same-developer backups. Replacing a model with another from its original developer
+can retain three developers; conditional reuse against other active seats still
+requires the eligibility evidence/gaps defined above. A fresh independent
+three-case instruction application passed: preapprove useful alternatives; reuse
+an approved developer when unused developers are unavailable; and never rewrite
+an active sealed shortlist/history when a backup fails. No runtime schema or
+executor code changed, and no new live pass is inferred for that clarification.
+
+Private metadata, source checks, per-seat proposals/admissions, original retained
+results/briefs/frozen packets, final status, report and SHA256 inventory live in
+this plan's `live-vendor-final/` directory. Earlier complete normal-path and
+controlled-recovery runs retain their original meaning. Final source/package
+validation is separate from observed live availability; comparative evaluation
+remains deferred, and no more endpoint calls followed this verdict.

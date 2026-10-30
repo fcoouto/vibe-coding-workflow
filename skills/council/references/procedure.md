@@ -390,7 +390,12 @@ model and pinned provider routes, not extra spending authority. Supply refreshed
 capability, price and reasoning observations when selecting a listed replacement;
 unchanged route identity and original token/step envelope remain mandatory. Do not
 probe every fallback in advance. Apply [model vendor diversity](#model-vendor-diversity)
-when ranking eligible replacements. Successful actual investigation qualifies the
+when ranking eligible replacements against the other active seats. Use the
+available shortlist capacity (up to three) for qualified alternatives; include
+useful same-developer backups so permitted reuse remains possible if other
+developers fail. Replacing a seat with another model from its original developer
+can still preserve three developers. Do not reserve the list solely for new
+developers and then exhaust it unnecessarily. Successful actual investigation qualifies the
 selected candidate. If metadata supplies no eligible fallback, retain that blocker.
 Every candidate, attempt, session, owner and nullable cost remains in the same run.
 
