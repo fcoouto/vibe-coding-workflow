@@ -8,6 +8,8 @@ The shared runtime resolves the nearest Git checkout and common Git directory. P
 
 Read `.vibe-coding-workflow/project.json` only at the checkout root. Startup tests use disposable fixtures; D4 will create this record through explicit onboarding. A fixture does not establish completed onboarding or qualified enforcement.
 
+Private Project-plan schema 2 is not an enrollment record. Startup still reads schema-1 checkout-root enrollment; private inspection/proposal support does not implement umbrella discovery/adoption or future-member activation. The nested runtime/SQLite schema is a separate version contract.
+
 | Field | Meaning |
 | --- | --- |
 | `schema_version` | Integer `1` |
@@ -19,6 +21,8 @@ Read `.vibe-coding-workflow/project.json` only at the checkout root. Startup tes
 | `runtime` (optional) | Codex D2 opt-in: schema version and private external state directory; see the [runtime contract](runtime.md) |
 
 Additional project fields remain available to later slices. Require the current native client in `clients`. This startup record does not distinguish host surfaces; qualify the actual launch separately.
+
+The current public schema-1 resolver applies optional `runtime` only to Codex. A dual-client record keeps Claude `SessionStart` orientation but does not enable Claude file guards or task controls. Internal read-only canonical acquisition now observes and compares project authority, checkout, physical bindings, dependencies, runtime location and qualification; public startup/task dispatch still uses schema-1 enrollment. Only independently observed qualification facts can yield an active canonical scope. See [Claude's prepared guard boundary](claude-code.md#prepared-file-guard).
 
 A copied checkout record, changed policy digest, malformed JSON, link or special-file record produces a diagnostic. Reconcile accepted scope/version through onboarding; never silently rewrite it during startup. Omitting `runtime` preserves startup-only behavior. This field does not enable Claude lifecycle controls.
 

@@ -8,6 +8,14 @@
 
 For task controls, read [task runtime](clients/runtime.md); for accepted checks, review and completion, load [evidence](clients/evidence.md); for native delegated work only, load [native delegation](clients/delegation.md). Local readiness covers current task evidence and grants no merge authority. D7's [bounded fixture inspector](clients/repository-gate.md) is implemented but always exits 1; production evidence sources, publishing and repository enforcement remain unqualified.
 
+Optional [OpenRouter proposals](skills/openrouter-proposals/SKILL.md) use an explicitly approved MCP connection for bounded work. Discovery is cached; native agents select candidates using benchmarks and comparable task history, then verify each proposal. OpenRouter manages spending limits. The helper never handles credentials or executes model output. Package checks and observed live-client execution are reported separately.
+
+The separate [OpenRouter worker pilot](skills/openrouter-workers/SKILL.md) runs background OpenCode agents under genuine native Codex supervisors. The first slice permits read-only tools over explicitly copied files, with native verification, observed progress and the existing optional Habblaud role/model display. It requires its own OpenCode installation and OpenRouter login; it does not change the coordinator's provider or enable external repository writes. OpenCode owns transient request retries; the workflow adds no outer retry loop and permits native takeover after confirmed local stop. Credit checks are optional; OpenRouter enforces spending limits.
+
+Explicitly invoke [LLM Council](skills/llm-council/SKILL.md) with `$llm-council <question>` for three independent investigations, one critique round and fresh chair synthesis. First choose Frontier, Balanced or Free; current guidance and bounded discovery supply the actual session roster, reasoning mode and chair. Selection weighs Intelligence, Coding and Agentic evidence with task fit; missing scores stay unknown. Paid groups select a group-appropriate native member and two external models. Free uses three distinct zero-rate external variants and a fresh external chair, with native coordination/verification outside membership and no native fallback. It may preserve an exact route's documented reasoning-enabled default, disclosed with maximum mapping unverified. Council preserves coordinator settings, needs its own saved consent and reviewed transmission scope, and defaults to a 20-minute total including preparation and waits. [Validation](docs/council-validation.md) separates package checks, controlled pinned OpenCode qualification and observed execution. Historical runs keep their original labels; grouped package support does not establish live group availability, comparative quality or savings.
+
+Use [Manage OpenRouter Integration](skills/manage-openrouter/SKILL.md) for saved setup, status and enable/disable controls. It starts disabled and currently supports an already enrolled Codex POSIX checkout with accepted private runtime state. Managed executors enforce the selected routes and configured paths. Disable blocks new admissions; launched work can finish and receive native verification. Saved enablement does not verify a connection, client execution or model fitness, and disabling does not revoke direct account access.
+
 ## Prepare your Workspace
 
 Open this checkout in a coding agent with terminal access to the destination machine:
@@ -23,5 +31,15 @@ For Claude Code local testing, launch `claude --plugin-dir .` from this checkout
 ## Enroll a project
 
 For an explicitly selected existing project, use [onboard-my-project](skills/onboard-my-project/SKILL.md) to inspect and prepare a private enrollment plan. Planning does not change the target. After trusted approval binds the exact plan and application manifest, `onboard apply` makes recoverable changes and activates enrollment only after required adoption evidence qualifies. `onboard resume` reconciles interrupted work; `onboard rollback` restores transaction-owned changes. Each command uses `--plan-dir` and a bounded JSON request on stdin. See [application and recovery](skills/onboard-my-project/references/apply-and-recovery.md). Package validation and adoption evidence do not qualify client execution.
+
+## Review a project
+
+Use [review-my-project](skills/review-my-project/SKILL.md) to review selected repositories and areas with safe local evidence. It does not enroll repositories. Until managed target-owner reconciliation is available, limited findings are returned in chat and detailed reports are not saved.
+
+## Observability
+
+Use the separate [Manage Observability Integration](skills/manage-observability/SKILL.md) skill for optional integration setup, credentials, status, scope or enable/disable requests. Its name is provider-neutral; Langfuse is the first connection option. Existing accepted Codex POSIX checkouts support private connection settings, explicit OS storage or environment credentials, current-project verification and an authorized fixed metrics-only synthetic probe. Recommend a dedicated Langfuse project per logical Vibe Project; explicitly confirm sharing before another distinct Project links to a known actively used destination. Same-Project repositories/worktrees normally share one destination. Current checkout controls do not automate canonical cross-Project discovery. Saving/replacing or removing shared credentials follows the provider's [shared impact rule](skills/manage-observability/references/langfuse.md#shared-credential-impact). Desired opt-in starts no native collector; Project-wide activation, workflow measurements, real OS/account qualification and Windows runtime support remain separate.
+
+Project onboarding does not configure or activate observability or OpenRouter delegation. After successful qualified onboarding, it may offer either separate management skill as an optional follow-up.
 
 [Development guide](AGENTS.md)

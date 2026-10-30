@@ -7,6 +7,8 @@ from typing import Literal
 
 EventKind = Literal["PreToolUse", "PostToolUse", "Stop", "Interrupt"]
 Action = Literal["pass", "deny", "context", "continue"]
+GUARDED_MUTATIONS = {"codex": frozenset({"apply_patch"}),
+                     "claude-code": frozenset({"Edit", "Write", "NotebookEdit"})}
 
 
 @dataclass(frozen=True)
@@ -28,6 +30,10 @@ class HookResult:
     event_kind: EventKind
     action: Action = "pass"
     reason: str = ""
+
+
+def guarded_mutation(event):
+    return event.kind == "PreToolUse" and event.tool_name in GUARDED_MUTATIONS.get(event.client, ())
 
 
 def evaluate(event, snapshot):
@@ -58,11 +64,14 @@ def evaluate(event, snapshot):
                 revoke()
                 task["turn_id"] = event.turn_id
                 task["turn_uncertain"] = False
-        if event.tool_name == "apply_patch":
+        if guarded_mutation(event):
             if (not task or task["state"] != "active" or task["mode"] != "editable" or any(
                     condition["status"] == "pending" and condition["kind"] in {"blocker", "decision"}
                     for condition in task["conditions"])):
-                result = HookResult(event.kind, "deny", "Patching requires an active editable bound task without applicable blockers")
+                reason = ("Patching requires an active editable bound task without applicable blockers"
+                          if event.client == "codex" else
+                          "File edits require an active editable bound task without applicable blockers")
+                result = HookResult(event.kind, "deny", reason)
     if event.kind in {"PreToolUse", "PostToolUse"}:
         stable = event.turn_id is not None and event.tool_call_id is not None and event.receipt_fingerprint is not None
         previous = snapshot.get("receipt")

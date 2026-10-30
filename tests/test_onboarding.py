@@ -61,6 +61,619 @@ class OnboardingTests(unittest.TestCase):
     def inspect(self):
         return self.module().inspect_project(self.repo, self.directory, self.record)
 
+    def project_record(self, root=None, members=None, kind="standalone", files=None):
+        root = root or self.repo
+        if kind == "umbrella" and self.directory.is_relative_to(root):
+            private = tempfile.TemporaryDirectory(prefix="vibe-project-plan-")
+            self.addCleanup(private.cleanup)
+            directory = Path(private.name).resolve() / "plan"
+            self.directory.rename(directory)
+            self.directory = directory
+            self.source = directory / "catalog.md"
+            self.record["toolkit"]["files"][0]["local_path"] = str(self.source)
+        authority = root / ".vibe-coding-workflow/project.json"
+        return copy.deepcopy(self.record) | {"project_scope": {
+            "kind": kind, "project_root": str(root),
+            "member_checkouts": [str(p) for p in (members or [self.repo])],
+            "membership": {"include": ["."], "exclude": [], "future_join": False,
+                           "authorization": "fixture:explicit-scope"},
+            "authority": {"path": str(authority), "sha256":
+                hashlib.sha256(authority.read_bytes()).hexdigest() if authority.exists() else "absent",
+                "reference": "fixture:pending-adoption"}, "project_files": files or []}}
+
+    def second_repository(self):
+        first = self.repo
+        self.repo = self.base / "second"
+        self.repo.mkdir()
+        try:
+            self.git("init", "-q")
+            (self.repo / "second.txt").write_text("second product\n")
+            self.git("add", ".")
+            self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                     "commit", "-qm", "second fixture")
+            return self.repo
+        finally:
+            self.repo = first
+
+    def canonical_authority(self, root=None, members=None, kind="standalone"):
+        root = root or self.repo
+        module = self.module()
+        repositories = []
+        for index, member in enumerate(members or [self.repo]):
+            observed, error = module._checkout_observation(str(member), {"paths": 0, "bytes": 0})
+            self.assertIsNone(error)
+            repositories.append(dict(repository_id="accepted-repository-" + str(index),
+                primary_root=observed["primary_root"], git_common_dir=observed["git_common_dir"],
+                binding={k: observed["binding"][k] for k in ("primary_root", "git_common_dir")},
+                membership="joined", checkouts=[dict(checkout_id="accepted-checkout-" + str(index),
+                    root=observed["root"], git_dir=observed["git_dir"],
+                    binding={k: observed["binding"][k] for k in ("root", "git_dir")}, clients=[])]))
+        record = dict(schema_version=2, revision=1, project_id="accepted-project", project_root=str(root),
+            kind=kind, project_binding=module._filesystem_binding(root),
+            membership=dict(include=["."], exclude=[], future_join=True,
+                            authorization=dict(reference="fixture:standing-authority", sha256="a" * 64)),
+            shared_policy=[], repositories=repositories)
+        location = root / ".vibe-coding-workflow/project.json"
+        location.parent.mkdir(exist_ok=True)
+        location.write_text(json.dumps(record))
+        return location, record
+
+    def test_canonical_reuse_standalone_and_full_authority_target(self):
+        location, accepted = self.canonical_authority()
+        request = self.project_record()
+        self.module().inspect_project(self.repo, self.directory, request)
+        plan = self.plan()
+        self.assertEqual(plan["identity"]["project_id"], accepted["project_id"])
+        self.assertEqual(plan["identity"]["id_origin"], "canonical_binding")
+        owner = plan["assessments"]["repositories"][0]["owner"]
+        self.assertEqual((owner["repository_id"], owner["checkout_id"]),
+                         ("accepted-repository-0", "accepted-checkout-0"))
+        authority = next(a for a in plan["identity"]["authority"] if a["path"] == str(location))
+        self.assertEqual(authority["record"], accepted)
+        self.assertEqual(authority["target"]["fingerprint"], authority["fingerprint"])
+        self.assertEqual(set(authority["target"]["parents"]), {str(self.repo), str(location.parent)})
+        self.module().inspect_project(self.repo, self.directory, request)
+        self.assertEqual(self.plan()["identity"], plan["identity"])
+
+    def test_canonical_reuse_umbrella_preserves_unselected_and_tombstone(self):
+        other = self.second_repository()
+        location, accepted = self.canonical_authority(self.base, [self.repo, other], "umbrella")
+        accepted["repositories"][1]["membership"] = "removed"
+        location.write_text(json.dumps(accepted))
+        request = self.project_record(self.base, [self.repo], "umbrella")
+        self.module().inspect_project(self.base, self.directory, request)
+        plan = self.plan()
+        self.assertEqual(plan["identity"]["project_id"], "accepted-project")
+        self.assertEqual(plan["assessments"]["repositories"][0]["owner"]["repository_id"], "accepted-repository-0")
+        self.assertEqual(next(a["record"] for a in plan["identity"]["authority"] if a["path"] == str(location)), accepted)
+
+    def test_canonical_reuse_linked_checkout_and_new_checkout_ids(self):
+        linked = self.base / "linked"
+        self.git("worktree", "add", "--detach", str(linked), "HEAD")
+        location, accepted = self.canonical_authority(members=[linked])
+        request = self.project_record(members=[linked])
+        self.module().inspect_project(linked, self.directory, request)
+        owner = self.plan()["assessments"]["repositories"][0]["owner"]
+        self.assertEqual(owner["checkout_id"], "accepted-checkout-0")
+        (self.directory / "plan.json").unlink()
+        request = self.project_record()
+        self.module().inspect_project(self.repo, self.directory, request)
+        owner = self.plan()["assessments"]["repositories"][0]["owner"]
+        self.assertEqual(owner["repository_id"], "accepted-repository-0")
+        self.assertNotEqual(owner["checkout_id"], "accepted-checkout-0")
+        self.assertEqual(owner["root"], str(self.repo))
+
+    def test_canonical_reuse_future_member_proposes_only_new_ids(self):
+        other = self.second_repository()
+        location, accepted = self.canonical_authority(self.base, [self.repo], "umbrella")
+        request = self.project_record(self.base, [other], "umbrella")
+        self.module().inspect_project(self.base, self.directory, request)
+        plan = self.plan()
+        self.assertEqual(plan["identity"]["project_id"], "accepted-project")
+        self.assertNotEqual(plan["assessments"]["repositories"][0]["owner"]["repository_id"], "accepted-repository-0")
+        self.assertEqual(next(a["record"] for a in plan["identity"]["authority"] if a["path"] == str(location)), accepted)
+        self.assertEqual(json.loads(location.read_text()), accepted)
+
+    def test_canonical_reuse_changed_binding_or_removed_owner_never_mints_replacement(self):
+        location, accepted = self.canonical_authority()
+        for change in ("project", "common", "checkout", "removed"):
+            bad = copy.deepcopy(accepted)
+            if change == "project": bad["project_binding"]["inode"] += 1
+            elif change == "common": bad["repositories"][0]["binding"]["git_common_dir"]["inode"] += 1
+            elif change == "checkout": bad["repositories"][0]["checkouts"][0]["binding"]["root"]["inode"] += 1
+            else: bad["repositories"][0]["membership"] = "removed"
+            location.write_text(json.dumps(bad))
+            with self.subTest(change=change), self.assertRaises(StartupError):
+                self.module().inspect_project(self.repo, self.directory, self.project_record())
+            self.assertFalse((self.directory / "plan.json").exists())
+
+    def test_canonical_reuse_absent_target_and_old_plan_stays_readable_stale(self):
+        request = self.project_record()
+        self.module().inspect_project(self.repo, self.directory, request)
+        plan = self.plan()
+        selected = next(a for a in plan["identity"]["authority"] if a["path"] == request["project_scope"]["authority"]["path"])
+        self.assertEqual(selected["target"]["fingerprint"], {"status": "absent"})
+        self.assertEqual(selected["target"]["parents"], {str(self.repo): self.module()._filesystem_binding(self.repo)})
+        for rows in (plan["identity"]["authority"], plan["current_observations"]["authority"]):
+            for row in rows: row.pop("target")
+        plan["review_digest"] = self.module()._review_digest(plan)
+        self.module()._project_plan_shape(plan)
+        (self.directory / "plan.json").write_text(json.dumps(plan))
+        self.module().inspect_project(self.repo, self.directory, request)
+        current = self.plan()
+        self.assertEqual(current["status"], "stale")
+        self.assertEqual(current["identity"]["authority"], plan["identity"]["authority"])
+        self.assertTrue(all("target" not in a for a in current["current_observations"]["authority"]))
+
+    def test_canonical_reuse_saved_owner_must_match_frozen_authority(self):
+        self.canonical_authority()
+        self.module().inspect_project(self.repo, self.directory, self.project_record())
+        plan = self.plan()
+        owner = plan["assessments"]["repositories"][0]["owner"]
+        owner["repository_id"] = "replacement-id"
+        plan["current_observations"]["repositories"][0]["owner"] = copy.deepcopy(owner)
+        with self.assertRaises(StartupError): self.module()._project_plan_shape(plan)
+
+    def test_canonical_reuse_old_parentless_plan_current_read_keeps_missing_proof(self):
+        request = self.project_record()
+        self.module().inspect_project(self.repo, self.directory, request)
+        plan = self.plan()
+        for rows in (plan["identity"]["authority"], plan["current_observations"]["authority"]):
+            for row in rows: row.pop("target")
+        current, _ = self.module()._project_current(plan)
+        self.assertEqual(current["observations"]["authority"], plan["identity"]["authority"])
+        self.assertIn("authority_parent_observations", self.module()._project_changes(plan, current))
+
+    def test_canonical_reuse_same_bytes_moved_root_blocks(self):
+        location, accepted = self.canonical_authority()
+        moved = self.base / "moved"
+        self.repo.rename(moved)
+        self.repo = moved
+        with self.assertRaises(StartupError):
+            self.module().inspect_project(moved, self.directory, self.project_record())
+        self.assertFalse((self.directory / "plan.json").exists())
+        self.assertEqual(json.loads((moved / ".vibe-coding-workflow/project.json").read_text()), accepted)
+
+    def test_canonical_reuse_overlapping_member_authority_blocks(self):
+        self.canonical_authority(self.base, [self.repo], "umbrella")
+        child = self.repo / ".vibe-coding-workflow/project.json"
+        child.parent.mkdir()
+        child.write_text(json.dumps(dict(schema_version=1, project_id="different-owner", clients=["codex"],
+            repository_root=str(self.repo), git_common_dir=str(self.repo / ".git"),
+            policy_digest=self.module().policy_digest(PACKAGE))))
+        request = self.project_record(self.base, kind="umbrella")
+        with self.assertRaisesRegex(StartupError, "authority|binding"):
+            self.module().inspect_project(self.base, self.directory, request)
+        self.assertFalse((self.directory / "plan.json").exists())
+
+    def test_checkout_observer_accepts_paths_only_and_preserves_used_budget_and_deadline(self):
+        from runtime import startup
+        import time
+        module = self.module()
+        empty = {"paths": 0}
+        observed, error = module._checkout_observation(str(self.repo), empty)
+        self.assertIsNone(error)
+        self.assertEqual(observed["root"], str(self.repo))
+        self.assertGreater(empty["bytes"], 0)
+        deadline = time.monotonic() + 60
+        used = {"paths": 3, "bytes": 123, "deadline": deadline}
+        with patch.object(startup, "read_git", wraps=startup.read_git) as reader:
+            _, error = module._checkout_observation(str(self.repo), used)
+        self.assertIsNone(error)
+        self.assertEqual(used["bytes"], empty["bytes"] + 123)
+        self.assertEqual(used["paths"], empty["paths"] + 3)
+        self.assertEqual(used["deadline"], deadline)
+        self.assertTrue(all(call.kwargs["deadline"] == deadline for call in reader.call_args_list))
+        expired = {"paths": 0, "bytes": 99, "deadline": time.monotonic() - 1}
+        retained = dict(expired)
+        _, error = module._checkout_observation(str(self.repo), expired)
+        self.assertIsNotNone(error)
+        self.assertEqual(expired, retained)
+
+    def test_canonical_deadline_stops_parent_observation_before_next_binding(self):
+        from runtime import startup
+        module = self.module()
+        path = self.repo / "deadline.txt"; path.write_text("observed")
+        fingerprint = module._fingerprint(self.repo, path.name)
+        clock = [100.0]; calls = []
+        original = module._filesystem_binding
+        def expire_after_binding(parent):
+            result = original(parent)
+            calls.append(parent); clock[0] = 104.0
+            return result
+        with patch.object(startup.time, "monotonic", side_effect=lambda: clock[0]),              patch.object(module, "_filesystem_binding", side_effect=expire_after_binding):
+            with self.assertRaises(StartupError):
+                module._physical_target(Path(path.anchor), path, fingerprint,
+                    {"paths": 0, "bytes": 0, "deadline": 104.0})
+        self.assertEqual(len(calls), 1)
+
+    def test_expected_binding_read_rejects_same_inode_change_during_descriptor_read(self):
+        module = self.module()
+        path = self.repo / "stable-read.txt"; path.write_text("original")
+        info = path.stat(); binding = dict(device=info.st_dev, inode=info.st_ino)
+        original = os.fstat
+        observed = []
+        def change_after_first_stat(descriptor):
+            metadata = original(descriptor)
+            if not observed:
+                path.write_text("changed during the same descriptor read")
+                observed.append(True)
+            return metadata
+        with patch.object(module.os, "fstat", side_effect=change_after_first_stat):
+            with self.assertRaises(StartupError):
+                module._read_file(path, 1024, expected_binding=binding)
+        self.assertTrue(observed)
+        self.assertEqual(path.stat().st_ino, info.st_ino)
+
+    def test_canonical_reuse_authority_read_rechecks_physical_target(self):
+        location, _ = self.canonical_authority()
+        read = self.module()._read_file
+        replaced, reads = False, 0
+        def replace_after_read(path, *args, **kwargs):
+            nonlocal replaced, reads
+            raw = read(path, *args, **kwargs)
+            if path == location:
+                reads += 1
+            if path == location and reads == 2 and not replaced:
+                replacement = location.with_name("replacement.json")
+                replacement.write_bytes(raw)
+                replacement.replace(location)
+                replaced = True
+            return raw
+        with patch.object(self.module(), "_read_file", side_effect=replace_after_read):
+            observed = self.module()._authority_observation(self.repo, {"paths": 0, "bytes": 0})
+        self.assertTrue(replaced)
+        self.assertIsNotNone(observed["error"])
+
+    def test_canonical_reuse_new_checkout_cannot_alias_retained_private_git_identity(self):
+        _, accepted = self.canonical_authority()
+        observed, error = self.module()._checkout_observation(str(self.repo), {"paths": 0, "bytes": 0})
+        self.assertIsNone(error)
+        observed["membership"] = "included"
+        observed["root"] = str(self.base / "new-checkout")
+        observed["git_dir"] = str(self.repo / ".git/worktrees/new-checkout")
+        observed["binding"]["root"]["inode"] += 1
+        with self.assertRaisesRegex(StartupError, "identity|ownership"):
+            self.module()._canonical_owner_ids(accepted, observed)
+
+    def test_canonical_reuse_stale_configuration_is_inspected_without_qualification(self):
+        location, accepted = self.canonical_authority()
+        accepted["repositories"][0]["checkouts"][0]["clients"] = [dict(client="codex",
+            configuration=dict(policy_digest="a" * 64, runtime_digest="b" * 64, runtime=None,
+                               shared_dependencies=[], evidence=[]),
+            activation=dict(status="configured", qualification="pending", accepted_scope_digest=None,
+                            transaction_id=None, evidence=[], qualification_binding=None))]
+        location.write_text(json.dumps(accepted))
+        self.module().inspect_project(self.repo, self.directory, self.project_record())
+        self.assertEqual(self.plan()["identity"]["id_origin"], "canonical_binding")
+        before = (self.directory / "plan.json").read_bytes()
+        accepted["revision"] += 1
+        location.write_text(json.dumps(accepted))
+        with self.assertRaises(StartupError):
+            self.module().inspect_project(self.repo, self.directory, self.project_record())
+        self.assertEqual((self.directory / "plan.json").read_bytes(), before)
+
+    def test_project_standalone_keeps_private_ids_and_selected_checkout_without_mutation(self):
+        record = self.project_record()
+        before = self.git("status", "--porcelain=v1", "-z")
+        report = self.module().inspect_project(self.repo, self.directory, record)
+        plan = self.plan()
+        self.assertEqual(plan["schema_version"], 2)
+        self.assertEqual(report["status"], "blocked")
+        self.assertIsNone(plan["assessments"]["project"])
+        repository = plan["assessments"]["repositories"][0]
+        self.assertEqual(repository["owner"]["root"], str(self.repo))
+        self.assertEqual(repository["owner"]["primary_root"], str(self.repo))
+        self.assertEqual(repository["identity"]["snapshot"]["paths"], ["AGENTS.md", "README.md"])
+        self.assertEqual(plan["sources"]["declared"], self.record)
+        self.assertEqual(plan["identity"]["id_origin"], "proposed")
+        self.module().inspect_project(self.repo, self.directory, record)
+        resumed = self.plan()
+        self.assertEqual(resumed["identity"], plan["identity"])
+        self.assertEqual(resumed["assessments"], plan["assessments"])
+        self.assertEqual(resumed["revision"], 2)
+        self.assertEqual(self.git("status", "--porcelain=v1", "-z"), before)
+        self.assertFalse((self.repo / ".vibe-coding-workflow").exists())
+        self.assertFalse((self.repo / ".codex").exists())
+
+    def test_project_private_plan_cannot_be_created_inside_project_or_selected_worktree(self):
+        linked = self.base / "linked"
+        self.git("worktree", "add", "--detach", str(linked), "HEAD")
+        cases = [(self.repo, self.project_record(members=[linked]), linked / "private-plan"),
+                 (self.base, self.project_record(self.base, kind="umbrella"), self.base / "private-plan")]
+        for cwd, record, inside in cases:
+            with self.subTest(inside=inside):
+                with self.assertRaisesRegex(StartupError, "outside the Project"):
+                    self.module().inspect_project(cwd, inside, record)
+                self.assertFalse(inside.exists())
+
+    def test_project_umbrella_inspects_only_named_project_files_and_two_explicit_members(self):
+        other = self.second_repository()
+        (self.base / "AGENTS.md").write_text("shared rules\n")
+        record = self.project_record(self.base, [self.repo, other], "umbrella", ["AGENTS.md"])
+        report = self.module().inspect_project(self.base, self.directory, record)
+        plan = self.plan()
+        self.assertEqual(report["status"], "blocked")
+        self.assertEqual(len(plan["assessments"]["repositories"]), 2)
+        project = plan["assessments"]["project"]
+        self.assertEqual(project["identity"]["paths"], ["AGENTS.md"])
+        self.assertEqual(set(project["identity"]["fingerprints"]), {"AGENTS.md"})
+        self.assertNotIn("head", project["identity"])
+        owners = [r["owner"] for r in plan["assessments"]["repositories"]]
+        self.assertEqual(len({r["repository_id"] for r in owners}), 2)
+        self.assertEqual(len({r["checkout_id"] for r in owners}), 2)
+        self.assertEqual({r["project_id"] for r in owners}, {plan["identity"]["project_id"]})
+        self.module().inspect_project(self.base, self.directory, record)
+        self.assertEqual(self.plan()["assessments"], plan["assessments"])
+        self.assertFalse((self.base / ".vibe-coding-workflow").exists())
+
+    def test_project_linked_worktree_keeps_action_root_and_resolves_primary_from_git(self):
+        linked = self.base / "linked"
+        self.git("worktree", "add", "--detach", str(linked), "HEAD")
+        record = self.project_record(members=[linked])
+        self.module().inspect_project(linked, self.directory, record)
+        repository = self.plan()["assessments"]["repositories"][0]
+        self.assertEqual(repository["owner"]["root"], str(linked))
+        self.assertEqual(repository["owner"]["primary_root"], str(self.repo))
+        self.assertEqual(repository["identity"]["snapshot"]["repository_root"], str(linked))
+        self.assertNotEqual(repository["owner"]["git_dir"], repository["owner"]["git_common_dir"])
+        self.module().inspect_project(linked, self.directory, record)
+        self.assertEqual(self.plan()["assessments"]["repositories"][0], repository)
+
+    def test_project_exclusions_and_symlink_escapes_are_gaps_without_member_reads(self):
+        other = self.second_repository()
+        alias = self.base / "alias"
+        alias.symlink_to(other, target_is_directory=True)
+        record = self.project_record(self.base, [self.repo, alias], "umbrella")
+        record["project_scope"]["membership"]["include"] = ["target", "alias"]
+        record["project_scope"]["membership"]["exclude"] = ["target"]
+        self.module().inspect_project(self.base, self.directory, record)
+        repositories = self.plan()["assessments"]["repositories"]
+        self.assertTrue(all(r["identity"]["snapshot"] is None for r in repositories))
+        self.assertTrue(any("excluded" in b["reason"] for b in self.plan()["blockers"]))
+        self.assertTrue(any("boundary" in b["reason"] or "link" in b["reason"] for b in self.plan()["blockers"]))
+
+    def test_project_named_files_cannot_enter_member_or_git_or_symlink_trees(self):
+        (self.base / "linked-file").symlink_to(self.repo / "README.md")
+        record = self.project_record(self.base, kind="umbrella",
+            files=["target/README.md", "target/.git/config", "linked-file"])
+        report = self.module().inspect_project(self.base, self.directory, record)
+        fingerprints = self.plan()["assessments"]["project"]["identity"]["fingerprints"]
+        self.assertTrue(all(v["status"] == "blocked" for v in fingerprints.values()))
+        self.assertTrue(any("Project file" in b["reason"] for b in report["blockers"]))
+
+    def test_project_named_files_never_fingerprint_unselected_bare_git_metadata(self):
+        bare = self.base / "bare"
+        self.git("init", "--bare", "-q", str(bare))
+        record = self.project_record(self.base, kind="umbrella",
+            files=["bare/config", "bare/missing/new.txt", "docs/new.txt"])
+        before = (bare / "config").read_bytes()
+        with patch.object(self.module(), "_inspection_fingerprint",
+                          wraps=self.module()._inspection_fingerprint) as fingerprints:
+            report = self.module().inspect_project(self.base, self.directory, record)
+        observed = self.plan()["assessments"]["project"]["identity"]["fingerprints"]
+        self.assertEqual(observed["bare/config"], {"status": "blocked"})
+        self.assertEqual(observed["bare/missing/new.txt"], {"status": "blocked"})
+        self.assertEqual(observed["docs/new.txt"], {"status": "absent"})
+        self.assertFalse(any(call.args[0] == self.base and call.args[1].startswith("bare/")
+                             for call in fingerprints.call_args_list))
+        self.assertTrue(any(b["scope"] == "bare/config" and "Git" in b["reason"] for b in report["blockers"]))
+        self.assertEqual((bare / "config").read_bytes(), before)
+        self.assertFalse((bare / "missing").exists())
+        self.assertFalse((self.base / "docs").exists())
+
+    def test_project_scope_change_and_changed_authority_cannot_reuse_a_private_identity(self):
+        record = self.project_record()
+        self.module().inspect_project(self.repo, self.directory, record)
+        before = (self.directory / "plan.json").read_bytes()
+        changed = copy.deepcopy(record)
+        changed["project_scope"]["membership"]["future_join"] = True
+        with self.assertRaisesRegex(StartupError, "scope"):
+            self.module().inspect_project(self.repo, self.directory, changed)
+        authority = self.repo / ".vibe-coding-workflow/project.json"
+        authority.parent.mkdir()
+        authority.write_text('{"schema_version":1}')
+        with self.assertRaisesRegex(StartupError, "authority|binding"):
+            self.module().inspect_project(self.repo, self.directory, record)
+        self.assertEqual((self.directory / "plan.json").read_bytes(), before)
+
+    def test_project_reinspection_retains_frozen_snapshot_and_marks_changed_content_stale(self):
+        record = self.project_record()
+        self.module().inspect_project(self.repo, self.directory, record)
+        before = self.plan()
+        (self.repo / "README.md").write_text("changed product\n")
+        report = self.module().inspect_project(self.repo, self.directory, record)
+        self.assertEqual(report["status"], "stale")
+        self.assertEqual(self.plan()["assessments"], before["assessments"])
+        self.assertNotEqual(self.plan()["current_observations"], before["current_observations"])
+        self.assertNotEqual(report["current_input_digest"], before["current_input_digest"])
+
+    def test_project_legacy_identity_reuse_requires_exact_authority_binding(self):
+        authority = self.repo / ".vibe-coding-workflow/project.json"
+        authority.parent.mkdir()
+        module = self.module()
+        legacy = {"schema_version": 1, "project_id": "accepted-fixture", "clients": ["codex"],
+            "repository_root": str(self.repo), "git_common_dir": str(self.repo / ".git"),
+            "policy_digest": module.policy_digest(module.PACKAGE)}
+        authority.write_text(json.dumps(legacy))
+        record = self.project_record()
+        module.inspect_project(self.repo, self.directory, record)
+        self.assertEqual(self.plan()["identity"]["project_id"], "accepted-fixture")
+        self.assertEqual(self.plan()["identity"]["id_origin"], "legacy_binding")
+        self.assertTrue(all(a["owner"]["repository_id"] != "accepted-fixture"
+                            for a in self.plan()["assessments"]["repositories"]))
+
+    def test_project_copied_or_member_authority_is_a_conflict_not_id_transfer(self):
+        authority = self.repo / ".vibe-coding-workflow/project.json"
+        authority.parent.mkdir()
+        authority.write_text(json.dumps({"schema_version": 1, "project_id": "copied-id",
+            "repository_root": str(self.base / "original"), "git_common_dir": str(self.base / "original/.git"),
+            "clients": ["codex"], "policy_digest": self.module().policy_digest(PACKAGE)}))
+        record = self.project_record(self.base, kind="umbrella")
+        report = self.module().inspect_project(self.base, self.directory, record)
+        self.assertNotEqual(self.plan()["identity"]["project_id"], "copied-id")
+        self.assertTrue(any("authority" in b["reason"] for b in report["blockers"]))
+
+    def test_project_same_path_replaced_checkout_cannot_reuse_identity(self):
+        record = self.project_record()
+        self.module().inspect_project(self.repo, self.directory, record)
+        before = (self.directory / "plan.json").read_bytes()
+        self.repo.rename(self.base / "moved")
+        self.repo.mkdir()
+        self.git("init", "-q")
+        with self.assertRaisesRegex(StartupError, "binding"):
+            self.module().inspect_project(self.repo, self.directory, record)
+        self.assertEqual((self.directory / "plan.json").read_bytes(), before)
+
+    def test_project_duplicate_repository_and_git_umbrella_stay_explicitly_blocked(self):
+        linked = self.base / "linked"
+        self.git("worktree", "add", "--detach", str(linked), "HEAD")
+        record = self.project_record(self.repo, [self.repo, linked], "umbrella")
+        report = self.module().inspect_project(self.repo, self.directory, record)
+        reasons = " ".join(b["reason"] for b in report["blockers"])
+        self.assertIn("non-Git", reasons)
+        self.assertIn("same Repository", reasons)
+
+    def test_project_aggregate_inventory_limit_is_a_gap_not_complete_partial_coverage(self):
+        other = self.second_repository()
+        record = self.project_record(self.base, [self.repo, other], "umbrella")
+        with patch.object(self.module(), "MAX_TOTAL", 80):
+            report = self.module().inspect_project(self.base, self.directory, record)
+        self.assertTrue(any("aggregate" in b["reason"] for b in report["blockers"]))
+        self.assertEqual(report["status"], "blocked")
+
+    def test_project_invalid_authority_json_and_worktree_metadata_are_explicit_gaps(self):
+        authority = self.repo / ".vibe-coding-workflow/project.json"
+        authority.parent.mkdir()
+        authority.write_text('{"project_id": "first", "project_id": "second"}')
+        record = self.project_record()
+        original = self.module()._git
+        def broken_worktrees(root, *args, **kwargs):
+            return (0, b"not-porcelain\x00") if args[:2] == ("worktree", "list") else original(root, *args, **kwargs)
+        with patch.object(self.module(), "_git", side_effect=broken_worktrees):
+            report = self.module().inspect_project(self.repo, self.directory, record)
+        reasons = " ".join(b["reason"] for b in report["blockers"])
+        self.assertIn("authority", reasons)
+        self.assertIn("worktree", reasons)
+        self.assertEqual(self.plan()["identity"]["id_origin"], "proposed")
+
+    def test_project_record_plan_rejects_legacy_payload_before_validation_without_mutation(self):
+        self.module().inspect_project(self.repo, self.directory, self.project_record())
+        before = (self.directory / "plan.json").read_bytes()
+        with self.assertRaisesRegex(StartupError, "object fields"):
+            self.module().record_plan(self.directory, {})
+        self.assertEqual((self.directory / "plan.json").read_bytes(), before)
+
+    def test_project_saved_shape_rejects_unbound_owners_and_unknown_observation_fields(self):
+        self.module().inspect_project(self.repo, self.directory, self.project_record())
+        original = self.plan()
+        variants = []
+        changed = copy.deepcopy(original)
+        changed["current_observations"]["unexpected"] = True
+        variants.append(changed)
+        changed = copy.deepcopy(original)
+        changed["assessments"]["repositories"][0]["owner"]["project_id"] = "another-project"
+        variants.append(changed)
+        changed = copy.deepcopy(original)
+        changed["assessments"]["repositories"][0]["identity"]["root"] = str(self.base)
+        variants.append(changed)
+        changed = copy.deepcopy(original)
+        wrong = changed["assessments"]["repositories"][0]
+        wrong["owner"] = {"kind": "project", "project_id": original["identity"]["project_id"], "root": str(self.repo)}
+        wrong["identity"] = {"project_root": str(self.repo), "paths": [], "fingerprints": {}}
+        changed["current_observations"]["repositories"][0] = {
+            key: copy.deepcopy(wrong[key]) for key in ("owner", "identity")}
+        variants.append(changed)
+        for key in ("sources", "invalidations", "decision_history", "package_pins", "status", "requirements",
+                    "blockers", "evidence_limits", "created_at", "verified_at", "recovery_requirement",
+                    "review_digest", "current_input_digest", "plan_id"):
+            changed = copy.deepcopy(original)
+            changed[key] = None
+            variants.append(changed)
+        for keys, value in ((["sources", "declared"], None), (["sources", "observed"], None),
+                            (["sources", "observed", "catalog.md"], None),
+                            (["package_pins", "runtime_digest"], "invalid"),
+                            (["invalidations"], [{}]),
+                            (["project_scope", "membership", "future_join"], "yes"),
+                            (["assessments", "repositories", 0], None),
+                            (["current_observations", "repositories", 0], None),
+                            (["assessments", "repositories", 0, "inventory"], None),
+                            (["assessments", "repositories", 0, "identity", "binding"], None),
+                            (["assessments", "repositories", 0, "identity", "snapshot", "fingerprints"], None)):
+            changed = copy.deepcopy(original)
+            target = changed
+            for key in keys[:-1]:
+                target = target[key]
+            target[keys[-1]] = value
+            variants.append(changed)
+        for number, value in enumerate(variants):
+            with self.subTest(variant=number):
+                (self.directory / "plan.json").write_text(json.dumps(value))
+                with self.assertRaises(StartupError):
+                    self.module()._load(self.directory)
+
+    def test_project_saved_project_slot_requires_project_owner(self):
+        record = self.project_record(self.base, kind="umbrella")
+        self.module().inspect_project(self.base, self.directory, record)
+        plan = self.plan()
+        wrong = copy.deepcopy(plan["assessments"]["repositories"][0])
+        wrong["owner"].update(repository_id="wrong-project-slot-repository", checkout_id="wrong-project-slot-checkout")
+        plan["assessments"]["project"] = wrong
+        plan["current_observations"]["project"] = {key: wrong[key] for key in ("owner", "identity")}
+        (self.directory / "plan.json").write_text(json.dumps(plan))
+        with self.assertRaises(StartupError):
+            self.module()._load(self.directory)
+
+    def test_project_saved_stale_pins_and_missing_sources_remain_readable(self):
+        record = self.project_record()
+        self.module().inspect_project(self.repo, self.directory, record)
+        plan = self.plan()
+        plan["package_pins"] = {"policy_digest": "a" * 64, "runtime_digest": "b" * 64}
+        plan["sources"]["observed"]["catalog.md"] = {"status": "unavailable"}
+        plan["status"] = "stale"
+        (self.directory / "plan.json").write_text(json.dumps(plan))
+        self.source.unlink()
+        with patch.object(self.module(), "_sources", side_effect=AssertionError("loader read source bytes")), \
+                patch.object(self.module(), "_package_pins", side_effect=AssertionError("loader checked current pins")):
+            self.assertEqual(self.module()._load(self.directory), plan)
+        report = self.module().inspect_project(self.repo, self.directory, record)
+        self.assertEqual(report["status"], "stale")
+        self.assertTrue(any(b["scope"] == "source:catalog.md" for b in report["blockers"]))
+
+    def test_project_copied_selected_authority_conflict_remains_on_reinspection(self):
+        authority = self.repo / ".vibe-coding-workflow/project.json"
+        authority.parent.mkdir()
+        authority.write_text(json.dumps({"schema_version": 1, "project_id": "copied-id",
+            "repository_root": str(self.base / "original"), "git_common_dir": str(self.base / "original/.git"),
+            "clients": ["codex"], "policy_digest": self.module().policy_digest(PACKAGE)}))
+        record = self.project_record()
+        for attempt in range(2):
+            with self.subTest(attempt=attempt):
+                report = self.module().inspect_project(self.repo, self.directory, record)
+                self.assertEqual(self.plan()["identity"]["id_origin"], "proposed")
+                self.assertNotEqual(self.plan()["identity"]["project_id"], "copied-id")
+                self.assertTrue(any(b["scope"] == "authority" for b in report["blockers"]))
+
+    def test_project_aggregate_path_limit_and_missing_member_have_explicit_gaps(self):
+        record = self.project_record(self.base, [self.repo, self.base / "missing"], "umbrella")
+        with patch.object(self.module(), "MAX_PATHS", 24):
+            report = self.module().inspect_project(self.base, self.directory, record)
+        self.assertTrue(any("aggregate" in b["reason"] for b in report["blockers"]))
+        self.assertTrue(any("observation incomplete" in b["reason"] for b in report["blockers"]))
+        self.assertIsNone(self.plan()["assessments"]["repositories"][1]["identity"]["snapshot"])
+
+    def test_project_explicit_scope_and_legacy_inspect_use_existing_cli(self):
+        import sys
+        command = [sys.executable, "-I", "-B", str(PACKAGE / "scripts/workflow.py"),
+            "onboard", "inspect", "--cwd", str(self.repo), "--plan-dir", str(self.directory)]
+        for record, schema in ((self.record, 1), (self.project_record(), 2)):
+            with self.subTest(schema=schema):
+                (self.directory / "plan.json").unlink(missing_ok=True)
+                result = subprocess.run(command, input=json.dumps(record).encode(), capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 2, result.stdout)
+                self.assertEqual(self.plan()["schema_version"], schema)
+                self.assertFalse(result.stderr)
+
     def plan(self):
         return json.loads((self.directory / "plan.json").read_text())
 
@@ -89,6 +702,498 @@ class OnboardingTests(unittest.TestCase):
             "semantic_assessment": {"complete": True, "catalog_complete": True,
                 "conflicts_checked": True, "instructions_checked": True, "source_provenance_checked": True,
                 "native_evaluation": {"method": "disposable native harness", "smoke_cases": ["startup"]}}}
+
+    def qualified(self, owner, local):
+        parts = (["project", owner["project_id"]] if owner["kind"] == "project" else
+                 ["repository", owner["repository_id"], owner["checkout_id"]])
+        return "/".join(part.replace("~", "~0").replace("/", "~1") for part in [*parts, local])
+
+    def scoped_proposal(self):
+        plan = self.plan()
+        result = {"expected_revision": plan["revision"], "assessments": copy.deepcopy(plan["assessments"])}
+        for assessment in [result["assessments"]["project"], *result["assessments"]["repositories"]]:
+            if assessment is None:
+                continue
+            owner = assessment["owner"]
+            root = Path(owner["root"])
+            payload = self.proposal(plan["revision"])
+            payload.pop("expected_revision")
+            action = payload["actions"][0]
+            action.update(owner=copy.deepcopy(owner), cwd=None)
+            target = root / "AGENTS.md"
+            action["before"] = hashlib.sha256(target.read_bytes()).hexdigest() if target.exists() else "absent"
+            ref = lambda local: self.qualified(owner, local)
+            for section in payload["inventory"].values():
+                if "facts" in section:
+                    for fact in section["facts"]:
+                        fact["evidence"] = [ref("inventory")]
+            for row in payload["coverage"]:
+                row["actions"] = [ref("write-rules")]
+            snapshot = assessment["identity"].get("snapshot", assessment["identity"])
+            payload["evidence"][0]["inputs"] = [snapshot["paths"][0]]
+            if owner["kind"] == "project":
+                payload["inventory"] = {"instructions": payload["inventory"]["instructions"],
+                    "documents": {"shared": {"path": "AGENTS.md", "reason": "fixture shared instruction"}}}
+                payload["coverage"] = []
+                payload["semantic_assessment"].pop("catalog_complete")
+                payload["semantic_assessment"].pop("native_evaluation")
+                action["scope"] = "shared"
+                payload["evidence"][0].update(kind="configuration", scope="shared")
+            for evidence in payload["evidence"]:
+                evidence["input_digest"] = self.module()._evidence_digest(owner, snapshot, plan["package_pins"],
+                    plan["sources"]["observed"], evidence["inputs"])
+            assessment.update(payload)
+        project = result["assessments"]["project"]
+        if project:
+            shared = self.qualified(project["owner"], "write-rules")
+            for repository in result["assessments"]["repositories"]:
+                repository["actions"][0]["dependencies"] = [shared]
+                repository["coverage"][0]["actions"].append(shared)
+        return result
+
+    def scoped_inspect(self, umbrella=False, linked=False):
+        if umbrella:
+            other = self.second_repository()
+            (self.base / "AGENTS.md").write_text("shared fixture rules\n")
+            record = self.project_record(self.base, [self.repo, other], "umbrella", ["AGENTS.md"])
+            cwd = self.base
+        elif linked:
+            cwd = self.base / "linked"
+            self.git("worktree", "add", "--detach", str(cwd), "HEAD")
+            record = self.project_record(members=[cwd])
+        else:
+            cwd, record = self.repo, self.project_record()
+        self.module().inspect_project(cwd, self.directory, record)
+        return cwd, record
+
+    def test_scoped_complete_standalone_and_two_repository_proposals(self):
+        for umbrella in (False, True):
+            with self.subTest(umbrella=umbrella):
+                (self.directory / "plan.json").unlink(missing_ok=True)
+                cwd, record = self.scoped_inspect(umbrella=umbrella)
+                request = self.scoped_proposal()
+                report = self.module().record_plan(self.directory, request)
+                self.assertEqual(report["status"], "ready_for_review", report)
+                saved = self.plan()
+                if umbrella:
+                    self.assertEqual(saved["assessments"]["project"]["coverage"], [])
+                    self.assertNotIn("product", saved["assessments"]["project"]["inventory"])
+                else:
+                    self.assertIsNone(saved["assessments"]["project"])
+                report = self.module().inspect_project(cwd, self.directory, record)
+                self.assertEqual(report["status"], "ready_for_review", report)
+                self.assertEqual(saved["assessments"], self.plan()["assessments"])
+                self.assertEqual((self.repo / "AGENTS.md").read_text(), "product rules\nlegacy process\n")
+
+    def test_scoped_every_repository_requires_complete_coverage_and_assessment(self):
+        self.scoped_inspect(umbrella=True)
+        for index in range(2):
+            request = self.scoped_proposal()
+            request["assessments"]["repositories"][index]["coverage"].pop(0)
+            report = self.module().record_plan(self.directory, request)
+            self.assertEqual(report["status"], "blocked", report)
+            self.assertTrue(any("Coverage assessment is missing" in b["reason"] for b in report["blockers"]))
+        request = self.scoped_proposal()
+        request["assessments"]["repositories"].pop()
+        with self.assertRaises(StartupError):
+            self.module().record_plan(self.directory, request)
+
+    def test_scoped_qualified_refs_reject_bare_missing_cyclic_and_sibling_behavior(self):
+        self.scoped_inspect(umbrella=True)
+        for defect in ("bare", "missing", "cycle", "sibling"):
+            with self.subTest(defect=defect):
+                request = self.scoped_proposal()
+                project = request["assessments"]["project"]
+                first, second = request["assessments"]["repositories"]
+                if defect in ("bare", "missing"):
+                    first["actions"][0]["dependencies"] = ["write-rules" if defect == "bare" else
+                        self.qualified(project["owner"], "missing")]
+                elif defect == "cycle":
+                    project["actions"][0]["dependencies"] = [self.qualified(first["owner"], "write-rules")]
+                else:
+                    second["evidence"][0]["kind"] = "behavior"
+                    first["coverage"][0].update(outcome="reuse", current_adoption="qualified",
+                        qualification_evidence=[self.qualified(second["owner"], "inventory")])
+                with self.assertRaises(StartupError):
+                    self.module().record_plan(self.directory, request)
+        self.assertEqual(self.plan()["revision"], 1)
+
+    def test_scoped_shared_configuration_and_local_behavior_proof(self):
+        self.scoped_inspect(umbrella=True)
+        request = self.scoped_proposal()
+        project = request["assessments"]["project"]
+        first = request["assessments"]["repositories"][0]
+        first["coverage"][0]["qualification_evidence"] = [self.qualified(project["owner"], "inventory")]
+        report = self.module().record_plan(self.directory, request)
+        self.assertEqual(report["status"], "ready_for_review", report)
+        request = self.scoped_proposal()
+        first = request["assessments"]["repositories"][0]
+        first["evidence"][0]["kind"] = "behavior"
+        first["evidence"][0]["input_digest"] = self.behavior_digest(first, first["evidence"][0])
+        first["coverage"][0].update(outcome="reuse", current_adoption="qualified",
+            qualification_evidence=[self.qualified(first["owner"], "inventory")])
+        self.assertEqual(self.module().record_plan(self.directory, request)["status"], "ready_for_review")
+
+    def test_scoped_linked_target_and_new_named_absence_are_pinned(self):
+        cwd, record = self.scoped_inspect(linked=True)
+        request = self.scoped_proposal()
+        action = request["assessments"]["repositories"][0]["actions"][0]
+        action.update(target="ignored/new.md", before="absent")
+        report = self.module().record_plan(self.directory, request)
+        self.assertEqual(report["status"], "ready_for_review", report)
+        saved = self.plan()["assessments"]["repositories"][0]
+        self.assertEqual(saved["owner"]["root"], str(cwd))
+        self.assertEqual(saved["identity"]["targets"]["ignored/new.md"]["path"], str(cwd / "ignored/new.md"))
+        self.assertEqual(saved["identity"]["snapshot"]["fingerprints"]["ignored/new.md"], {"status": "absent"})
+        self.module().inspect_project(cwd, self.directory, record)
+        self.assertEqual(self.plan()["assessments"]["repositories"][0], saved)
+        self.assertFalse((cwd / "ignored").exists())
+
+    def test_scoped_hidden_project_targets_and_cross_owner_hardlinks_block(self):
+        self.scoped_inspect(umbrella=True)
+        for name in ("target/AGENTS.md", "target/.git/config", "target/.git/new/file"):
+            request = self.scoped_proposal()
+            request["assessments"]["project"]["actions"][0].update(target=name, before="absent")
+            with self.assertRaises(StartupError):
+                self.module().record_plan(self.directory, request)
+        other = self.base / "second"
+        os.link(self.repo / "AGENTS.md", other / "AGENTS.md")
+        request = self.scoped_proposal()
+        with self.assertRaisesRegex(StartupError, "alias|overlap|observation"):
+            self.module().record_plan(self.directory, request)
+        self.assertEqual(self.plan()["revision"], 1)
+
+    def test_scoped_new_project_targets_and_ancestor_conflicts(self):
+        self.scoped_inspect(umbrella=True)
+        request = self.scoped_proposal()
+        project = request["assessments"]["project"]
+        project["actions"][0].update(target="docs/shared.md", before="absent")
+        report = self.module().record_plan(self.directory, request)
+        self.assertEqual(report["status"], "ready_for_review", report)
+        self.assertIn("docs/shared.md", self.plan()["assessments"]["project"]["identity"]["paths"])
+        request = self.scoped_proposal()
+        project = request["assessments"]["project"]
+        project["actions"][0].update(target="docs", before="absent")
+        duplicate = copy.deepcopy(project["actions"][0])
+        duplicate.update(id="nested", target="docs/file")
+        project["actions"].append(duplicate)
+        with self.assertRaisesRegex(StartupError, "overlap|ancestor"):
+            self.module().record_plan(self.directory, request)
+
+    def scoped_decision(self, assessment):
+        owner = assessment["owner"]
+        return {"id": "choice", "rule": "fixture", "source": "catalog.md", "scope": "checkout",
+            "options": ["adopt"], "recommendation": "adopt", "selected": "adopt", "disposition": "confirmed",
+            "provenance": "fixture explicitly selected", "evidence": [self.qualified(owner, "inventory")],
+            "affected_actions": [self.qualified(owner, "write-rules")], "invalidate_on": [assessment["evidence"][0]["inputs"][0]],
+            "conflict": False, "mode": None}
+
+    def test_scoped_stale_reconciliation_preserves_qualified_decision_history(self):
+        cwd, record = self.scoped_inspect(umbrella=True)
+        request = self.scoped_proposal()
+        for a in request["assessments"]["repositories"]:
+            a["decisions"] = [self.scoped_decision(a)]
+        report = self.module().record_plan(self.directory, request)
+        self.assertEqual(report["status"], "ready_for_review", report)
+        with self.assertRaisesRegex(StartupError, "revision"):
+            self.module().record_plan(self.directory, request)
+        request["expected_revision"] = report["revision"]
+        with self.assertRaisesRegex(StartupError, "decision"):
+            self.module().record_plan(self.directory, self.scoped_proposal())
+        (self.base / "AGENTS.md").write_text("changed shared fixture\n")
+        report = self.module().inspect_project(cwd, self.directory, record)
+        self.assertEqual(report["status"], "stale")
+        saved = self.plan()
+        self.assertTrue(all(a["decisions"][0]["disposition"] == "pending" for a in saved["assessments"]["repositories"]))
+        self.assertEqual(len({entry["decision"]["id"] for entry in saved["decision_history"]}), 2)
+        request = self.scoped_proposal()
+        for a in request["assessments"]["repositories"]:
+            a["decisions"] = [self.scoped_decision(a)]
+        request["reconcile"] = {"input_digest": report["current_input_digest"], "reason": "fixture reinspection"}
+        for a, observed in zip(self.module()._assessments(request["assessments"]),
+                               self.module()._assessments(self.plan()["current_observations"])):
+            identity = observed["identity"].get("snapshot", observed["identity"])
+            for evidence in a["evidence"]:
+                evidence["input_digest"] = self.module()._evidence_digest(a["owner"], identity,
+                    self.plan()["package_pins"], self.plan()["sources"]["observed"], evidence["inputs"])
+        report = self.module().record_plan(self.directory, request)
+        self.assertEqual(report["status"], "ready_for_review", report)
+        self.assertEqual(len(self.plan()["decision_history"]), 4)
+
+    def test_scoped_reconciliation_rejects_source_owner_and_authority_changes(self):
+        self.scoped_inspect()
+        request = self.scoped_proposal()
+        changed = copy.deepcopy(request)
+        changed["assessments"]["repositories"][0]["owner"]["checkout_id"] = "replacement"
+        with self.assertRaises(StartupError):
+            self.module().record_plan(self.directory, changed)
+        self.source.write_text("changed source fixture")
+        report = self.module().inspect_project(self.repo, self.directory, self.project_record())
+        request = self.scoped_proposal()
+        request["reconcile"] = {"input_digest": report["current_input_digest"], "reason": "cannot repin source"}
+        with self.assertRaisesRegex(StartupError, "source bytes"):
+            self.module().record_plan(self.directory, request)
+        self.assertEqual(self.plan()["sources"]["declared"], self.record)
+
+    def test_scoped_saved_malformed_proposal_rejected_without_target_writes(self):
+        self.scoped_inspect()
+        report = self.module().record_plan(self.directory, self.scoped_proposal())
+        self.assertEqual(report["status"], "ready_for_review", report)
+        plan = self.plan()
+        plan["assessments"]["repositories"][0]["actions"][0]["dependencies"] = None
+        (self.directory / "plan.json").write_text(json.dumps(plan))
+        with self.assertRaises(StartupError):
+            self.module()._load(self.directory)
+        self.assertEqual((self.repo / "AGENTS.md").read_text(), "product rules\nlegacy process\n")
+
+    def test_scoped_reconciled_receipts_need_new_local_and_shared_input_bindings(self):
+        cwd, record = self.scoped_inspect(umbrella=True)
+        request = self.scoped_proposal()
+        first = request["assessments"]["repositories"][0]
+        first["evidence"][0]["kind"] = "behavior"
+        first["coverage"][0].update(outcome="reuse", current_adoption="qualified",
+            qualification_evidence=[self.qualified(first["owner"], "inventory")])
+        first["evidence"][0]["input_digest"] = self.behavior_digest(first, first["evidence"][0])
+        report = self.module().record_plan(self.directory, request)
+        self.assertEqual(report["status"], "ready_for_review", report)
+        old_receipt = copy.deepcopy(first["evidence"][0])
+        (self.base / "AGENTS.md").write_text("changed shared fixture\n")
+        report = self.module().inspect_project(cwd, self.directory, record)
+        request = self.scoped_proposal()
+        first = request["assessments"]["repositories"][0]
+        first["evidence"][0] = old_receipt
+        first["coverage"][0].update(outcome="reuse", current_adoption="qualified",
+            qualification_evidence=[self.qualified(first["owner"], "inventory")])
+        request["reconcile"] = {"input_digest": report["current_input_digest"], "reason": "fixture reassessment"}
+        report = self.module().record_plan(self.directory, request)
+        self.assertEqual(report["status"], "blocked", report)
+        self.assertTrue(any("Evidence does not match" in b["reason"] for b in report["blockers"]))
+        self.assertEqual(self.plan()["assessments"]["repositories"][0]["evidence"][0], old_receipt)
+
+    def behavior_digest(self, assessment, evidence):
+        plan = self.plan()
+        # Recorded fixture observations only; this is not native execution evidence.
+        inputs = {name: assessment["identity"]["snapshot"]["fingerprints"].get(name) for name in evidence["inputs"]}
+        project = plan["assessments"]["project"]
+        return self.module()._digest({"owner": assessment["owner"], "inputs": inputs,
+            "context": {"checkout": assessment["identity"]["snapshot"],
+                        "project_files": project["identity"]["fingerprints"] if project else {},
+                        "package_pins": plan["package_pins"], "sources": plan["sources"]["observed"]}})
+
+    def test_scoped_aggregate_rows_include_all_owner_inventory_and_coverage(self):
+        self.scoped_inspect(umbrella=True)
+        request = self.scoped_proposal()
+        with patch.object(self.module(), "MAX_PATHS", 60):
+            with self.assertRaisesRegex(StartupError, "aggregate.*row"):
+                self.module().record_plan(self.directory, request)
+        self.assertEqual(self.plan()["revision"], 1)
+
+    def test_scoped_command_cwd_is_explicit_observed_and_owner_bound(self):
+        self.scoped_inspect()
+        request = self.scoped_proposal()
+        repository = request["assessments"]["repositories"][0]
+        command = repository["actions"][0]
+        command.update(kind="command", target="fixture-check", section=None, before=None,
+                       text=["fixture", "--check"], after=None, cwd=str(self.repo))
+        evidence = copy.deepcopy(repository["evidence"][0])
+        evidence.update(id="authority", kind="authorization")
+        repository["evidence"].append(evidence)
+        report = self.module().record_plan(self.directory, request)
+        self.assertEqual(report["status"], "ready_for_review", report)
+        targets = self.plan()["assessments"]["repositories"][0]["identity"]["targets"]
+        self.assertEqual(targets["cwd:" + str(self.repo)]["binding"], self.module()._filesystem_binding(self.repo))
+        request = self.scoped_proposal()
+        request["assessments"]["repositories"][0]["actions"][0] = command | {"cwd": str(self.base)}
+        request["assessments"]["repositories"][0]["evidence"].append(evidence)
+        with self.assertRaisesRegex(StartupError, "owner"):
+            self.module().record_plan(self.directory, request)
+
+    def test_scoped_dependencies_preserve_owner_order_and_shared_linkage(self):
+        self.scoped_inspect(umbrella=True)
+        request = self.scoped_proposal()
+        first = request["assessments"]["repositories"][0]
+        extra = copy.deepcopy(first["actions"][0])
+        extra.update(id="later", target="later.md", before="absent", dependencies=[])
+        first["actions"].append(extra)
+        first["actions"][0]["dependencies"] = [self.qualified(first["owner"], "later")]
+        with self.assertRaisesRegex(StartupError, "order|Cyclic"):
+            self.module().record_plan(self.directory, request)
+        request = self.scoped_proposal()
+        request["assessments"]["repositories"][1]["coverage"][0]["actions"].pop()
+        report = self.module().record_plan(self.directory, request)
+        self.assertEqual(report["status"], "blocked", report)
+        self.assertTrue(any("linkage" in b["reason"] for b in report["blockers"]))
+
+    def test_scoped_reconciliation_rejects_wrong_digest_and_changed_checkout_authority(self):
+        self.scoped_inspect()
+        request = self.scoped_proposal()
+        request["reconcile"] = {"input_digest": "0" * 64, "reason": "wrong fixture observation"}
+        with self.assertRaisesRegex(StartupError, "inputs changed"):
+            self.module().record_plan(self.directory, request)
+        authority = self.repo / ".vibe-coding-workflow/project.json"
+        authority.parent.mkdir()
+        authority.write_text("{}")
+        request.pop("reconcile")
+        with self.assertRaisesRegex(StartupError, "authority"):
+            self.module().record_plan(self.directory, request)
+        self.assertEqual(self.plan()["revision"], 1)
+
+    def test_scoped_current_input_change_during_validation_preserves_plan(self):
+        self.scoped_inspect()
+        before = (self.directory / "plan.json").read_bytes()
+        original = self.module()._validate_project_proposal
+        calls = 0
+        def changed(plan):
+            nonlocal calls
+            result = original(plan)
+            calls += 1
+            if calls == 2:
+                (self.repo / "README.md").write_text("raced fixture input\n")
+            return result
+        with patch.object(self.module(), "_validate_project_proposal", side_effect=changed):
+            result = self.module().record_plan(self.directory, self.scoped_proposal())
+        self.assertEqual(result["status"], "stale", result)
+        self.assertNotEqual((self.directory / "plan.json").read_bytes(), before)
+
+    def test_scoped_aggregate_bytes_and_incomplete_owner_never_reach_ready(self):
+        other = self.second_repository()
+        (self.repo / "large.txt").write_text("a" * 1800)
+        (other / "large.txt").write_text("b" * 1800)
+        record = self.project_record(self.base, [self.repo, other], "umbrella")
+        with patch.object(self.module(), "MAX_TOTAL", 3000):
+            report = self.module().inspect_project(self.base, self.directory, record)
+        self.assertEqual(report["status"], "blocked", report)
+        self.assertTrue(any("aggregate byte" in b["reason"] for b in report["blockers"]))
+        self.assertTrue(any(a["identity"]["snapshot"] is None for a in self.plan()["assessments"]["repositories"]))
+
+    def test_scoped_saved_history_and_target_shapes_reject_malformed_records(self):
+        self.scoped_inspect()
+        request = self.scoped_proposal()
+        repository = request["assessments"]["repositories"][0]
+        repository["decisions"] = [self.scoped_decision(repository)]
+        self.module().record_plan(self.directory, request)
+        request = self.scoped_proposal()
+        repository = request["assessments"]["repositories"][0]
+        repository["decisions"] = [self.scoped_decision(repository) | {"disposition": "pending"}]
+        self.module().record_plan(self.directory, request)
+        original = self.plan()
+        for defect in ("history", "targets", "inputs", "cwd"):
+            with self.subTest(defect=defect):
+                plan = copy.deepcopy(original)
+                repository = plan["assessments"]["repositories"][0]
+                if defect == "history":
+                    plan["decision_history"][0]["decision"]["disposition"] = {"bad": True}
+                elif defect == "targets":
+                    repository["identity"]["targets"]["AGENTS.md"]["parents"] = []
+                elif defect == "inputs":
+                    repository["evidence"][0]["input_digest"] = False
+                else:
+                    repository["actions"][0]["cwd"] = str(self.repo)
+                (self.directory / "plan.json").write_text(json.dumps(plan))
+                with self.assertRaises(StartupError):
+                    self.module()._load(self.directory)
+        (self.directory / "plan.json").write_text(json.dumps(original))
+        self.source.unlink()
+        self.assertEqual(self.module()._load(self.directory), original)
+
+    def test_scoped_plan_existing_cli_accepts_qualified_assessments(self):
+        import sys
+        self.scoped_inspect()
+        result = subprocess.run([sys.executable, "-I", "-B", str(PACKAGE / "scripts/workflow.py"),
+            "onboard", "plan", "--plan-dir", str(self.directory)],
+            input=json.dumps(self.scoped_proposal()).encode(), capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(json.loads(result.stdout)["status"], "ready_for_review")
+        self.assertFalse(result.stderr)
+
+    def test_scoped_saved_source_location_rejected_before_reading_sources(self):
+        self.scoped_inspect()
+        original = self.plan()
+        request = self.scoped_proposal()
+        outside = self.base / "private-source.txt"
+        outside.write_text("private fixture must not be read\n")
+        outside.chmod(0o600)
+        locations = [str(outside), str(self.directory) + "/../private-source.txt",
+                     str(self.directory / "plan.json"), str(self.directory / ".lock"),
+                     str(self.directory / ".plan-hidden"), str(self.directory)]
+        for location in locations:
+            with self.subTest(location=location):
+                plan = copy.deepcopy(original)
+                plan["sources"]["declared"]["toolkit"]["files"][0]["local_path"] = location
+                (self.directory / "plan.json").write_text(json.dumps(plan))
+                with patch.object(self.module(), "_sources", side_effect=AssertionError("sources must not be read")):
+                    with self.assertRaises(StartupError):
+                        self.module().record_plan(self.directory, request)
+        (self.directory / "plan.json").write_text(json.dumps(original))
+        self.source.unlink()
+        self.assertEqual(self.module()._load(self.directory), original)
+
+    def test_scoped_sibling_configuration_and_actions_cannot_substitute_for_local_coverage(self):
+        self.scoped_inspect(umbrella=True)
+        for defect in ("configuration", "action"):
+            request = self.scoped_proposal()
+            first, second = request["assessments"]["repositories"]
+            if defect == "configuration":
+                second["evidence"][0]["kind"] = "configuration"
+                first["coverage"][0]["qualification_evidence"] = [self.qualified(second["owner"], "inventory")]
+            else:
+                first["coverage"][1]["actions"] = [self.qualified(second["owner"], "write-rules")]
+            with self.subTest(defect=defect), self.assertRaises(StartupError):
+                self.module().record_plan(self.directory, request)
+
+    def test_scoped_saved_requirement_deletion_cannot_qualify_current_package(self):
+        self.scoped_inspect()
+        plan = self.plan()
+        removed = plan["requirements"].pop()
+        self.assertTrue(removed["mandatory"])
+        (self.directory / "plan.json").write_text(json.dumps(plan))
+        with self.assertRaisesRegex(StartupError, "requirements"):
+            self.module().record_plan(self.directory, self.scoped_proposal())
+        self.assertEqual(self.plan()["revision"], 1)
+
+    def test_scoped_capped_blocked_plan_stays_saveable_when_inputs_become_stale(self):
+        self.scoped_inspect()
+        plan = self.plan()
+        plan["assessments"] = self.scoped_proposal()["assessments"]
+        repository = plan["assessments"]["repositories"][0]
+        decision = self.scoped_decision(repository)
+        decision["affected_actions"] = []
+        repository.update(actions=[], coverage=[], decisions=[decision])
+        for key in repository["semantic_assessment"]:
+            repository["semantic_assessment"][key] = ({} if key == "native_evaluation" else False)
+        repository["semantic_assessment"]["native_evaluation"] = {"method": "", "smoke_cases": []}
+        # Synthetic bounded observations exercise the final blocker list, without creating target files.
+        snapshot = repository["identity"]["snapshot"]
+        snapshot["fingerprints"] = {name: snapshot["fingerprints"][name] for name in ("AGENTS.md", "README.md")}
+        snapshot["fingerprints"].update({f"excluded-{i}.txt": {"status": "excluded"} for i in range(48)})
+        current = {"observations": copy.deepcopy(self.module()._frozen_project(plan)),
+                   "sources": copy.deepcopy(plan["sources"]["observed"]),
+                   "package_pins": copy.deepcopy(plan["package_pins"])}
+        with patch.object(self.module(), "MAX_PATHS", 64):
+            report = self.module()._finish_project(plan, current, [])
+            self.assertEqual(report["status"], "blocked")
+            self.assertEqual(len(report["blockers"]), 64)
+            self.assertEqual(report["blockers"][-1]["scope"], "limits")
+            self.module()._project_plan_shape(plan)
+            with self.module()._locked(self.directory) as (path, directory):
+                self.module()._save(plan, path, directory)
+            self.assertEqual(self.module()._load(self.directory), plan)
+            plan["revision"] += 1
+            current["sources"]["catalog.md"]["sha256"] = "f" * 64
+            report = self.module()._finish_project(plan, current, [])
+            self.assertEqual(report["status"], "stale")
+            self.assertEqual(len(report["blockers"]), 64)
+            self.assertEqual(report["blockers"][0]["scope"], "sources")
+            self.assertEqual(report["blockers"][-1]["scope"], "limits")
+            self.assertEqual(repository["decisions"][0]["disposition"], "pending")
+            self.assertEqual(plan["decision_history"][0]["decision"]["id"],
+                             self.qualified(repository["owner"], "choice"))
+            self.assertEqual(plan["decision_history"][0]["decision"]["disposition"], "confirmed")
+            self.assertEqual(plan["invalidations"][-1]["revision"], plan["revision"])
+            self.module()._project_plan_shape(plan)
+            with self.module()._locked(self.directory) as (path, directory):
+                self.module()._save(plan, path, directory)
+            self.assertEqual(self.module()._load(self.directory), plan)
 
     def test_inspection_creates_private_plan_without_target_or_runtime_mutation(self):
         before = self.git("status", "--porcelain=v1", "-z")

@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 import types
 import unittest
@@ -528,6 +529,33 @@ for line in sys.stdin:
         receipt = self.observe_worker(responses, binding)["receipt"]
         self.assertIsNone(receipt["parent_model_provider"])
         self.assertIsNone(receipt["worker_model_provider"])
+
+    def test_canonical_linked_native_observation_binds_original_projection_and_selected_cwd(self):
+        from dataclasses import replace
+        from runtime import state
+        from runtime.startup import _canonical_plain
+        from tests.test_state import canonical_scope
+        from tests.test_evidence import EvidenceTests
+        f = EvidenceTests(methodName='runTest')
+        f.setUp(); self.addCleanup(f.doCleanups)
+        linked = f.root / 'linked'
+        f.git('worktree', 'add', '--detach', str(linked))
+        private = Path(subprocess.check_output(['git', '-C', str(linked),
+            'rev-parse', '--absolute-git-dir']).decode().strip())
+        self.scope = canonical_scope(replace(f.scope, repository_root=linked), primary_root=f.repo, git_dir=private)
+        responses, binding = self.worker_fixture()
+        for name in ('parent', 'child'): responses[name]['thread']['cwd'] = str(linked)
+        binding.update(pins=state._pins(self.scope), accepted_identity=_canonical_plain(self.scope.accepted_identity),
+                       scope_id=state._scope_id(self.scope))
+        result = self.observe_worker(responses, binding)
+        self.assertEqual(result['receipt']['checkout'], str(linked))
+        self.assertIsNone(result['receipt']['execution_model'])
+        changed = copy.deepcopy(binding)
+        changed['accepted_identity']['checkout_id'] = 'other-checkout'
+        with self.assertRaises(StartupError): self.observe_worker(responses, changed)
+        responses['child']['thread']['cwd'] = str(f.repo)
+        with self.assertRaises(StartupError): self.observe_worker(responses, binding)
+
 
     def test_present_provider_metadata_requires_bounded_printable_strings(self):
         for value in ("", "x" * 257, "provider\nname", True, {}):

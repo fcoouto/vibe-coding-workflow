@@ -225,8 +225,8 @@ class GuidanceTests(unittest.TestCase):
         from runtime import evidence
         original = evidence._artifact
         clock = [1800000000]
-        def prepare(scope, value):
-            reference = original(scope, value)
+        def prepare(scope, value, **artifact_kwargs):
+            reference = original(scope, value, **artifact_kwargs)
             clock[0] += 2
             return reference
         with patch.object(api, "_now", side_effect=lambda: clock[0]):
@@ -755,6 +755,230 @@ class AdmissionTests(unittest.TestCase):
         with self.assertRaises(state.StateError):
             request = self.second_owner(1, [dict(kind='path', key=str(relocated / 'HEAD'), mode='write')], scope=scope)
             self.api.prepare_assignment(scope, request)
+
+    def test_worker_plans_reject_external_and_sibling_filesystem_writes(self):
+        sibling = self.root / 'sibling'
+        sibling.mkdir()
+        for number, (kind, target) in enumerate((
+                ('path', self.root / 'external.py'), ('path', sibling / 'app.py'),
+                ('build', self.root / 'build'), ('database', self.root / 'database'))):
+            with self.subTest(kind=kind, target=target):
+                with self.assertRaisesRegex(state.StateError, 'task checkout'):
+                    self.second_owner(number, [dict(kind=kind, key=str(target), mode='write')])
+                with state._database(self.scope) as db:
+                    task = state._task(db, state._scope_id(self.scope), 'codex', 'parent-' + str(number))
+                    self.assertNotIn('delegation', task)
+                    self.assertEqual(db.execute('select count(*) from assignments').fetchone()[0], 0)
+
+    def test_worker_plans_reject_ancestor_foreign_git_and_symlink_escape(self):
+        foreign = self.root / 'foreign'
+        subprocess.run(['git', 'init', '-q', str(foreign)], check=True)
+        (self.repo / 'escape.py').symlink_to(foreign / 'new.py')
+        for target in (self.root, foreign / '.git/HEAD', self.repo / 'escape.py'):
+            with self.subTest(target=target):
+                value = self.plan_value()
+                value['jobs'][0]['claims'] = [dict(kind='path', key=str(target), mode='write')]
+                with self.assertRaises(state.StateError):
+                    self.plan(value)
+        self.assertNotIn('delegation', state.task_status(self.scope, 'codex', 'parent')['task'])
+
+    def test_worker_plans_reject_nested_repository_and_submodule_writes(self):
+        (self.repo / '.git/info/exclude').write_text('nested/\nsubmodule/\n')
+        number = 0
+        for name, marker in (('nested', 'directory'), ('submodule', 'file')):
+            nested = self.repo / name
+            nested.mkdir()
+            if marker == 'directory':
+                subprocess.run(['git', 'init', '-q', str(nested)], check=True)
+            else:
+                (nested / '.git').write_text('gitdir: ../.git/modules/submodule\n')
+            for relative in (name, name + '/app.py', name + '/.git'):
+                with self.subTest(relative=relative):
+                    with self.assertRaisesRegex(state.StateError, 'separate repository'):
+                        self.second_owner(number, [self.path_claim(relative)])
+                number += 1
+
+    def test_worker_directory_claim_cannot_admit_named_nested_repository_file(self):
+        (self.repo / 'work/nested').mkdir(parents=True)
+        value = self.plan_value()
+        value['jobs'][0]['claims'] = [self.path_claim('work')]
+        self.plan(value)
+        (self.repo / 'work/nested/.git').mkdir()
+        request = self.prepare_request()
+        request['brief'].update(resources=value['jobs'][0]['claims'], files=['work/nested/app.py'])
+        with self.assertRaisesRegex(state.StateError, 'separate repository'):
+            self.api.prepare_assignment(self.scope, request)
+        self.assert_no_worker_reservation(request)
+
+    def test_worker_named_file_cannot_escape_through_exact_alias_coverage(self):
+        external = self.root / 'external.py'
+        os.link(self.repo / 'app.py', external)
+        (self.repo / 'alias.py').symlink_to(external)
+        self.plan()
+        request = self.prepare_request()
+        request['brief']['files'] = ['alias.py']
+        with self.assertRaisesRegex(state.StateError, 'task checkout'):
+            self.api.prepare_assignment(self.scope, request)
+        self.assert_no_worker_reservation(request)
+
+    def test_worker_plans_reject_declared_outside_and_nested_aliases_to_checkout(self):
+        nested = self.repo / 'nested'
+        nested.mkdir()
+        (nested / '.git').mkdir()
+        (self.repo / '.git/info/exclude').write_text('nested/\n')
+        for number, alias in enumerate((self.root / 'alias.py', nested / 'alias.py')):
+            alias.symlink_to(self.repo / 'app.py')
+            with self.subTest(alias=alias):
+                with self.assertRaises(state.StateError):
+                    self.second_owner(number, [dict(kind='path', key=str(alias), mode='write')])
+
+    def test_worker_named_nested_alias_cannot_write_parent_checkout(self):
+        nested = self.repo / 'nested'
+        nested.mkdir()
+        (nested / '.git').mkdir()
+        (nested / 'alias.py').symlink_to(self.repo / 'app.py')
+        (self.repo / '.git/info/exclude').write_text('nested/\n')
+        self.plan()
+        request = self.prepare_request()
+        request['brief']['files'] = ['nested/alias.py']
+        with self.assertRaisesRegex(state.StateError, 'separate repository'):
+            self.api.prepare_assignment(self.scope, request)
+        self.assert_no_worker_reservation(request)
+
+    def test_worker_symlink_escape_during_discovery_cannot_reserve(self):
+        self.plan()
+        request = self.prepare_request()
+        external = self.root / 'external.py'
+        original = self.discover.side_effect
+        def discover(scope, controls):
+            (self.repo / 'app.py').rename(external)
+            (self.repo / 'app.py').symlink_to(external)
+            return original(scope, controls)
+        with patch.object(self.discover, 'side_effect', discover):
+            with self.assertRaises(state.StateError):
+                self.api.prepare_assignment(self.scope, request)
+        self.assert_no_worker_reservation(request)
+
+    def test_worker_coarse_claim_rechecks_named_repository_boundary_after_discovery(self):
+        nested = self.repo / 'work/nested'
+        nested.mkdir(parents=True)
+        (self.repo / '.git/info/exclude').write_text('work/\n')
+        value = self.plan_value()
+        value['jobs'][0]['claims'] = [self.path_claim('work')]
+        self.plan(value)
+        request = self.prepare_request()
+        request['brief'].update(resources=value['jobs'][0]['claims'], files=['work/nested/app.py'])
+        original = self.discover.side_effect
+        def discover(scope, controls):
+            (nested / '.git').mkdir()
+            return original(scope, controls)
+        with patch.object(self.discover, 'side_effect', discover):
+            with self.assertRaisesRegex(state.StateError, 'separate repository'):
+                self.api.prepare_assignment(self.scope, request)
+        self.assert_no_worker_reservation(request)
+
+    def assert_no_worker_reservation(self, request):
+        with state._database(self.scope) as db:
+            task = state._task(db, state._scope_id(self.scope), request['client'], request['session_id'])
+            self.assertEqual(task['revision'], request['expected_revision'])
+            self.assertEqual(task['delegation']['attempts_consumed'], 0)
+            self.assertEqual(task['delegation']['resource_units_consumed'], 0)
+            self.assertEqual(db.execute('select count(*) from assignments').fetchone()[0], 0)
+
+    def assert_worker_scope_is_rechecked(self, timing):
+        work = self.repo / 'work'
+        work.mkdir()
+        (work / 'app.py').write_text('value = 1\n')
+        (self.repo / '.git/info/exclude').write_text('work/\n')
+        value = self.plan_value()
+        value['jobs'][0]['claims'] = [self.path_claim('work/app.py')]
+        self.plan(value)
+        request = self.prepare_request()
+        request['brief'].update(resources=value['jobs'][0]['claims'], files=['work/app.py'])
+        original = self.discover.side_effect
+        def discover(scope, controls):
+            if timing == 'during':
+                (work / '.git').mkdir()
+            return original(scope, controls)
+        publish = evidence._artifact
+        def artifact(scope, content, **artifact_kwargs):
+            if timing == 'after' and not (work / '.git').exists():
+                (work / '.git').mkdir()
+            return publish(scope, content, **artifact_kwargs)
+        if timing == 'before':
+            (work / '.git').mkdir()
+        with patch.object(self.discover, 'side_effect', discover), patch.object(evidence, '_artifact', side_effect=artifact):
+            with self.assertRaisesRegex(state.StateError, 'separate repository'):
+                self.api.prepare_assignment(self.scope, request)
+        self.assert_no_worker_reservation(request)
+
+    def test_worker_scope_is_rechecked_before_discovery(self):
+        self.assert_worker_scope_is_rechecked('before')
+
+    def test_worker_scope_is_rechecked_during_discovery(self):
+        self.assert_worker_scope_is_rechecked('during')
+
+    def test_worker_scope_is_rechecked_after_discovery(self):
+        self.assert_worker_scope_is_rechecked('after')
+
+    def test_worker_new_plan_rechecks_scope_before_pinning(self):
+        work = self.repo / 'work'
+        work.mkdir()
+        value = self.plan_value()
+        value['jobs'][0]['claims'] = [self.path_claim('work/app.py')]
+        original = evidence._artifact
+        def publish(scope, content, **artifact_kwargs):
+            (work / '.git').mkdir(exist_ok=True)
+            return original(scope, content, **artifact_kwargs)
+        with patch.object(evidence, '_artifact', side_effect=publish):
+            with self.assertRaisesRegex(state.StateError, 'separate repository'):
+                self.plan(value)
+        self.assertNotIn('delegation', state.task_status(self.scope, 'codex', 'parent')['task'])
+
+    def test_worker_external_reads_and_in_checkout_shared_resources_remain_supported(self):
+        claims = [self.path_claim(), dict(kind='path', key=str(self.root / 'external.py'), mode='read'),
+                  dict(kind='build', key=str(self.repo / 'build'), mode='write'),
+                  dict(kind='database', key=str(self.repo / 'database'), mode='write'),
+                  dict(kind='port', key='tcp:8123', mode='write', host='local')]
+        value = self.plan_value()
+        value['jobs'][0]['claims'] = claims
+        self.plan(value)
+        request = self.prepare_request()
+        request['brief']['resources'] = claims
+        self.assertTrue(self.api.prepare_assignment(self.scope, request)['launch_admitted'])
+        other = self.second_owner(1, [claims[-1]])
+        with self.assertRaisesRegex(state.StateError, 'Canonical resource ownership conflicts'):
+            self.api.prepare_assignment(self.scope, other)
+
+    def test_legacy_external_worker_keeps_status_replay_and_exact_recovery(self):
+        value = self.plan_value()
+        value['jobs'][0]['claims'] = [dict(kind='path', key=str(self.root / 'external.py'), mode='write')]
+        # Retained pre-guard admission, never authority for a new production launch.
+        with patch.object(self.api, '_worker_scope', create=True):
+            planned = self.plan(value)
+            request = self.prepare_request()
+            request['brief'].update(resources=value['jobs'][0]['claims'], files=[])
+            prepared = self.api.prepare_assignment(self.scope, request)
+        self.assertEqual(self.plan(value)['plan'], planned['plan'])
+        report = self.api.delegation_status(self.scope, 'codex', 'parent')
+        self.assertEqual(report['capacity']['unresolved_managed_workers'], 1)
+        self.assertEqual(report['budgets']['attempts_consumed'], 1)
+        self.assertFalse(self.api.prepare_assignment(self.scope, request)['launch_admitted'])
+        with self.assertRaisesRegex(state.StateError, 'task checkout'):
+            self.api.prepare_assignment(self.scope, request | dict(dispatch_id='fresh',
+                expected_revision=self.request()['expected_revision']))
+        self.observe_worker(prepared, self.lifecycle_observation(prepared, turn_status='interrupted'))
+        bad = self.worker_reconciliation_request(prepared, outcome='cancelled', proof_delta=dict(descendants_stopped=False))
+        with self.assertRaises(state.StateError):
+            self.api.reconcile_assignment(self.scope, bad)
+        self.assertNotEqual(self.raw_assignment(prepared['attempt_id'])['status'], 'settled')
+        recovered = self.api.reconcile_assignment(self.scope,
+            self.worker_reconciliation_request(prepared, outcome='cancelled'))
+        self.assertEqual(recovered['outcome'], 'cancelled')
+        report = self.api.delegation_status(self.scope, 'codex', 'parent')
+        self.assertEqual(report['plan'], planned['plan'])
+        self.assertEqual(report['budgets']['attempts_consumed'], 1)
+        self.assertEqual(report['capacity']['unresolved_managed_workers'], 0)
 
     def operation_request(self, identity=None, **fields):
         identity = identity or self.identity
@@ -1554,7 +1778,7 @@ class AdmissionTests(unittest.TestCase):
         shutil.copytree(private, spare)
         (spare / 'commondir').write_text(str(self.scope.git_common_dir) + '\n')
         scope = replace(self.scope, project_id='routing-linked', repository_root=linked)
-        target = spare / 'HEAD'
+        target = linked / 'app.py'
         alias = self.root / 'routing-alias'
         if change == 'private-alias':
             alias.symlink_to(private, target_is_directory=True)
@@ -1564,7 +1788,6 @@ class AdmissionTests(unittest.TestCase):
             (private / 'commondir').write_text(str(alias) + '\n')
             spare_common = self.root / 'spare-common'
             shutil.copytree(self.scope.git_common_dir, spare_common)
-            target = spare_common / 'config'
         request = self.second_owner(1, [dict(kind='path', key=str(target), mode='write')], scope=scope)
         def mutate():
             if change == 'marker':
@@ -1580,12 +1803,12 @@ class AdmissionTests(unittest.TestCase):
         if change == 'common-alias':
             original = evidence._artifact
             changed = False
-            def publish(owner, value):
+            def publish(artifact_scope, value, **artifact_kwargs):
                 nonlocal changed
-                if owner == scope and not changed:
+                if artifact_scope == scope and not changed:
                     changed = True
                     mutate()
-                return original(owner, value)
+                return original(artifact_scope, value, **artifact_kwargs)
             interception = patch.object(evidence, '_artifact', side_effect=publish)
         else:
             original = self.discover.side_effect
@@ -1695,9 +1918,9 @@ class AdmissionTests(unittest.TestCase):
         from runtime import evidence
         value = self.plan_value()
         original_artifact = evidence._artifact
-        def publish(scope, content):
+        def publish(scope, content, **artifact_kwargs):
             value['limits']['max_attempts'] = 9
-            return original_artifact(scope, content)
+            return original_artifact(scope, content, **artifact_kwargs)
         with patch.object(evidence, '_artifact', side_effect=publish):
             planned = self.plan(value)
         self.assertEqual(evidence._read(self.scope, planned['plan'])['limits']['max_attempts'], 8)
@@ -2622,3 +2845,350 @@ class Stage4NativeReviewTests(unittest.TestCase):
         self.assertEqual(replay['attempt']['id'], committed[0]['evidence']['attempts'][0]['id'])
         self.assertEqual(replay['task']['delegation']['attempts_consumed'], 1)
         self.assertEqual(replay['task']['delegation']['resource_units_consumed'], 1)
+
+
+class CanonicalDelegationTests(unittest.TestCase):
+    def setUp(self):
+        from tests.test_state import canonical_scope
+        self.fixture = AdmissionTests(methodName='runTest')
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        f = self.fixture
+        cached = f.api.guidance_status(f.scope, f.cache_request)
+        guidance = evidence._read(f.scope, cached['snapshot_ref'])
+        f.scope = canonical_scope(f.scope)
+        f.fixture.scope = f.scope
+        state.start_task(f.scope, f.identity | dict(mode='editable', decision_ref='user:accepted'))
+        f.fixture.plan()
+        claim = f.api.claim_guidance(f.scope, f.cache_request | dict(trigger=dict(kind='routine', id='canonical-fixture')))
+        f.api.record_guidance(f.scope, f.cache_request | dict(token=claim['token'], generation=claim['generation'],
+            coordinator_ref='fixture:checked', guidance=guidance))
+        f.plan()
+
+    def test_canonical_worker_retains_original_snapshot_and_native_binding_pins(self):
+        f = self.fixture
+        prepared = f.prepare()
+        binding = f.api.prepared_native_assignment(f.scope, prepared['attempt_id'])
+        self.assertEqual(binding['pins']['schema_version'], 3)
+        self.assertEqual(binding['accepted_identity']['checkout_id'], 'checkout')
+        f.observe_worker(prepared)
+        request = f.worker_reconciliation_request(prepared)
+        result = f.api.reconcile_assignment(f.scope, request)
+        self.assertEqual(result['status'], 'settled')
+        self.assertTrue(f.api.reconcile_assignment(f.scope, request)['replayed'])
+
+    def test_canonical_ledger_rejects_rebound_original_snapshot(self):
+        f = self.fixture
+        prepared = f.prepare()
+        with state._database(f.scope, write=True) as db:
+            row = db.execute('select data from assignments where id=?', (prepared['attempt_id'],)).fetchone()
+            data = json.loads(row[0])
+            body = evidence._read(f.scope, data['assignment'])
+            body['accepted_identity']['membership']['authorization']['reference'] = 'fixture:rebound-authority'
+            body['pins']['accepted_scope_digest'] = evidence._digest(body['accepted_identity'])
+            task = state._task(db, state._scope_id(f.scope), 'codex', 'parent')
+            data['assignment'] = evidence._artifact(f.scope, body, owner=evidence._artifact_owner(f.scope, task), db=db)
+            db.execute('update assignments set data=? where id=?', (json.dumps(data), prepared['attempt_id']))
+        with state._database(f.scope) as db:
+            row = db.execute('select id,scope_id,client,session_id,task_id,dispatch_id,data from assignments where id=?',
+                             (prepared['attempt_id'],)).fetchone()
+            self.assertEqual(f.api._record(f.scope, row)['body']['pins'], body['pins'])
+            with self.assertRaises(state.StateError): f.api._ledger(f.scope, db)
+
+
+class AssignedClosureGuidanceTests(unittest.TestCase):
+    setUp=CanonicalDelegationTests.setUp
+
+    def test_original_and_refreshed_current_guidance_are_both_observed(self):
+        f=self.fixture;f.prepare();context=evidence._evidence_context(f.scope)
+        original=f.api.guidance_status(f.scope,f.cache_request)['snapshot_ref']
+        updated=evidence._read(f.scope,original)
+        updated['recommendations'][0]['work']='Refreshed actual fixture guidance'
+        claim=f.api.claim_guidance(f.scope,f.cache_request|dict(trigger=dict(kind='manual',id='refresh-for-closure')))
+        current=f.api.record_guidance(f.scope,f.cache_request|dict(token=claim['token'],generation=claim['generation'],
+            coordinator_ref='fixture:checked-refresh',guidance=updated))['snapshot_ref']
+        with evidence._context_database(context) as db:
+            observed=f.api._closure_guidance(context,db,f.api._ledger(None,db,context=context))
+        self.assertEqual(observed['references'],sorted([original,current],key=evidence._raw))
+        self.assertEqual(len(observed['files']),2)
+
+    def test_original_managed_guidance_substitution_is_protected(self):
+        f=self.fixture;f.prepare();context=evidence._evidence_context(f.scope)
+        reference=f.api.guidance_status(f.scope,f.cache_request)['snapshot_ref']
+        path=context.directory/'evidence'/reference['name']
+        replacement=path.with_name('replacement');replacement.write_bytes(path.read_bytes());replacement.chmod(0o400);replacement.replace(path)
+        with evidence._context_database(context) as db:
+            with self.assertRaises(state.StateError):f.api._closure_guidance(context,db,f.api._ledger(None,db,context=context))
+
+    def stopped_worker(self, *, started=True):
+        f=self.fixture;prepared=f.prepare()
+        if started:f.observe_worker(prepared)
+        f.api.reconcile_assignment(f.scope,f.worker_reconciliation_request(prepared,outcome='completed' if started else 'cancelled'))
+        return (*self.stop_current_task(),prepared)
+
+    def stop_current_task(self):
+        f=self.fixture
+        task=state.task_status(f.scope,'codex','parent')['task']
+        proof=dict(version=1,kind='stopped-writer-reconciliation',identity=f.identity,
+            expected_revision=task['revision'],expected_pins=task['pins'],observed_turn_id=task['turn_id'],
+            stopped=True,descendants_stopped=True,attempt_ids=[],observation_ref='fixture:stopped-coordinator',coordinator_ref='fixture:checked')
+        raw=json.dumps(proof).encode();path=f.root/('closure-stop-'+task['task_id']+'.json');path.write_bytes(raw);path.chmod(0o400)
+        task=state.retire_task(f.scope,f.request(expected_pins=task['pins'],reason='Stopped',reference='fixture:cancel',
+            stop_proof=dict(path=str(path),sha256=hashlib.sha256(raw).hexdigest())))['task']
+        context=evidence._evidence_context(f.scope);ref=evidence._canonical_plain(evidence._artifact_owner(f.scope,task).task)
+        return task,context,ref
+
+    def refresh_guidance(self,stage):
+        f=self.fixture;reference=f.api.guidance_status(f.scope,f.cache_request)['snapshot_ref']
+        updated=evidence._read(f.scope,reference);updated['recommendations'][0]['work']='Refreshed at '+stage
+        claim=f.api.claim_guidance(f.scope,f.cache_request|dict(trigger=dict(kind='manual',id=stage)))
+        return f.api.record_guidance(f.scope,f.cache_request|dict(token=claim['token'],generation=claim['generation'],
+            coordinator_ref='fixture:checked-'+stage,guidance=updated))['snapshot_ref']
+
+    def successor_after_retirement(self,stage):
+        f=self.fixture;task,context,ref,_=self.stopped_worker()
+        if stage in {'before','both'}:self.refresh_guidance('before-retirement')
+        closed=evidence.close_task(f.scope,f.request(expected_pins=task['pins']),evidence._observe_closure((context,),ref))['task']
+        first_compact=evidence._read(f.scope,closed['lifecycle']['compact'])
+        evidence._retire_closed_task(context,ref)
+        if stage in {'after','both'}:self.refresh_guidance('after-retirement')
+        f.identity=f.identity|dict(task_id='second-task')
+        state.start_task(f.scope,f.identity|dict(mode='editable',decision_ref='user:accepted'))
+        second,_,second_ref=self.stop_current_task()
+        return first_compact,second,context,second_ref
+
+    def sequential_closure(self,stage):
+        f=self.fixture;first_compact,second,context,second_ref=self.successor_after_retirement(stage)
+        observed=evidence._observe_closure((context,),second_ref)
+        closed=evidence.close_task(f.scope,f.request(expected_pins=second['pins']),observed)['task']
+        compact=evidence._read(f.scope,closed['lifecycle']['compact'])
+        self.assertEqual(compact['stopped']['assignments'],[])
+        self.assertEqual(compact['workers'],[])
+        self.assertEqual(compact['numerical'],[])
+        for original in first_compact['scope_guidance']:self.assertIn(original,compact['scope_guidance'])
+        evidence._retire_closed_task(context,second_ref)
+        with evidence._context_database(context) as db:self.assertEqual(db.execute('select count(*) from assignments').fetchone()[0],0)
+        return first_compact,compact
+
+    def test_second_task_closes_after_native_assignment_retirement(self):
+        self.sequential_closure('unchanged')
+
+    def test_second_task_preserves_guidance_refreshed_before_retirement(self):
+        self.sequential_closure('before')
+
+    def test_second_task_preserves_guidance_refreshed_after_retirement(self):
+        self.sequential_closure('after')
+
+    def test_second_task_preserves_original_and_both_refreshed_guidance_sources(self):
+        self.sequential_closure('both')
+
+    def test_failed_refresh_for_changed_capability_preserves_historical_guidance_closure(self):
+        f=self.fixture;first,second,context,ref=self.successor_after_retirement('unchanged')
+        old=f.api.guidance_status(f.scope,f.cache_request)['snapshot_ref']
+        path=context.directory/'model-guidance'/(f.cache_request['client_surface']+'.json');before=path.read_bytes()
+        changed=f.cache_request|dict(applicability=dict(client_version='new-version',capability_fingerprint='b'*64))
+        claim=f.api.claim_guidance(f.scope,changed|dict(trigger=dict(kind='routine',id='changed-capability')))
+        result=f.api.record_guidance(f.scope,changed|dict(token=claim['token'],generation=claim['generation'],
+            coordinator_ref='fixture:refresh-failed',failure='Official guidance unavailable for changed capability'))
+        self.assertEqual(result['freshness'],'incompatible');self.assertFalse(result['usable'])
+        self.assertEqual(result['snapshot_ref'],old);self.assertEqual(path.read_bytes(),before)
+        closed=evidence.close_task(f.scope,f.request(expected_pins=second['pins']),evidence._observe_closure((context,),ref))['task']
+        compact=evidence._read(f.scope,closed['lifecycle']['compact'])
+        self.assertEqual(compact['workers'],[]);self.assertEqual(compact['stopped']['assignments'],[])
+        for original in first['scope_guidance']:self.assertIn(original,compact['scope_guidance'])
+        evidence._retire_closed_task(context,ref)
+        with evidence._context_database(context) as db:self.assertEqual(db.execute('select count(*) from assignments').fetchone()[0],0)
+
+    def test_corrupt_verified_guidance_key_still_protects_historical_closure(self):
+        f=self.fixture;_,_,context,ref=self.successor_after_retirement('unchanged')
+        path=context.directory/'model-guidance'/(f.cache_request['client_surface']+'.control.json')
+        control=json.loads(path.read_bytes());self.assertEqual(control['last_attempt']['outcome'],'verified')
+        control['last_attempt']['key']='f'*64;path.write_text(json.dumps(control))
+        with self.assertRaisesRegex(state.StateError,'control/source correspondence'):
+            evidence._observe_closure((context,),ref)
+
+    def test_active_guidance_refresh_still_protects_historical_closure(self):
+        f=self.fixture;_,_,context,ref=self.successor_after_retirement('unchanged')
+        changed=f.cache_request|dict(applicability=dict(client_version='new-version',capability_fingerprint='b'*64))
+        claim=f.api.claim_guidance(f.scope,changed|dict(trigger=dict(kind='routine',id='active-capability-refresh')))
+        self.assertTrue(claim['claimed'])
+        with self.assertRaisesRegex(state.StateError,'refresh remains incomplete'):
+            evidence._observe_closure((context,),ref)
+
+    def test_retained_guidance_original_age_substitution_protects_second_task(self):
+        first,_,context,ref=self.successor_after_retirement('after')
+        original=first['native_guidance'][0]['guidance']['snapshot_ref']
+        with evidence._context_database(context,write=True) as db:
+            metadata=state._metadata(db,original['name']);metadata['created_at']+=1
+            db.execute('update evidence_metadata set created_at=?,data=? where name=?',
+                (metadata['created_at'],json.dumps(metadata),original['name']))
+        with self.assertRaises(state.StateError):evidence._observe_closure((context,),ref)
+
+    def test_retained_guidance_marker_change_after_observation_protects_second_task(self):
+        f=self.fixture;first,second,context,ref=self.successor_after_retirement('after')
+        observed=evidence._observe_closure((context,),ref)
+        assignment_id=first['stopped']['assignments'][0]['reference']['id']
+        with evidence._context_database(context,write=True) as db:
+            marker=state._retired_assignment(db,assignment_id);marker.update(outcome='unknown',evidence_expired=True)
+            db.execute("update retired_identities set data=? where kind='assignment' and assignment_id=?",(json.dumps(marker),assignment_id))
+        with self.assertRaises(state.StartupError):evidence.close_task(f.scope,f.request(expected_pins=second['pins']),observed)
+
+    def test_retained_guidance_marker_change_during_compact_write_rolls_back(self):
+        f=self.fixture;first,second,context,ref=self.successor_after_retirement('after')
+        observed=evidence._observe_closure((context,),ref);assignment_id=first['stopped']['assignments'][0]['reference']['id']
+        with evidence._context_database(context) as db:before=state._retired_assignment(db,assignment_id)
+        original=evidence._artifact_registered
+        def mutate(scope,value,actual_context,owner,db):
+            reference=original(scope,value,actual_context,owner,db)
+            if value.get('kind')=='task-closure':
+                marker=state._retired_assignment(db,assignment_id);marker['retired_at']+=1
+                db.execute("update retired_identities set data=? where kind='assignment' and assignment_id=?",(json.dumps(marker),assignment_id))
+            return reference
+        with patch.object(evidence,'_artifact_registered',side_effect=mutate):
+            with self.assertRaisesRegex(state.StateError,'owner markers changed'):
+                evidence.close_task(f.scope,f.request(expected_pins=second['pins']),observed)
+        with evidence._context_database(context) as db:
+            self.assertEqual(state._retired_assignment(db,assignment_id),before)
+            self.assertIsNone(state._task(db,ref['scope_id'],'codex','parent','second-task')['lifecycle']['safe_closed_at'])
+
+    def test_independently_stopped_not_started_worker_keeps_empty_native_observation(self):
+        f=self.fixture;task,context,ref,prepared=self.stopped_worker(started=False)
+        closed=evidence.close_task(f.scope,f.request(expected_pins=task['pins']),evidence._observe_closure((context,),ref))['task']
+        compact=evidence._read(f.scope,closed['lifecycle']['compact'])
+        self.assertEqual(compact['workers'][0]['observations'],[])
+        self.assertEqual(compact['workers'][0]['outcome'],'cancelled')
+        self.assertEqual(compact['stopped']['assignments'][0]['reconciliation']['proof']['launch_state'],'not-started')
+        evidence._retire_closed_task(context,ref)
+        with evidence._context_database(context) as db:self.assertIsNotNone(state._retired_assignment(db,prepared['attempt_id']))
+
+    def test_actual_native_preparation_guidance_composes_local_closure(self):
+        f=self.fixture;task,context,ref,prepared=self.stopped_worker()
+        observed=evidence._observe_closure((context,),ref)
+        closed=evidence.close_task(f.scope,f.request(expected_pins=task['pins']),observed)['task']
+        compact=evidence._read(f.scope,closed['lifecycle']['compact'])
+        self.assertEqual(compact['outcome'],'cancelled');self.assertEqual(compact['workers'][0]['outcome'],'completed')
+        self.assertEqual(compact['workers'][0]['observations'][0]['report']['status'],'completed')
+        self.assertNotIn('result',compact['workers'][0]['observations'][0])
+        evidence._retire_closed_task(context,ref)
+        with evidence._context_database(context) as db:
+            self.assertIsNotNone(state._retired_assignment(db,prepared['attempt_id']))
+
+    def test_guidance_cache_substitution_after_observation_blocks_closure(self):
+        f=self.fixture;task,context,ref,_=self.stopped_worker()
+        observed=evidence._observe_closure((context,),ref)
+        path=context.directory/'model-guidance'/ (f.cache_request['client_surface']+'.json')
+        replacement=path.with_name('replacement.json');replacement.write_bytes(path.read_bytes());replacement.chmod(0o600)
+        replacement.replace(path)
+        with self.assertRaises(state.StateError):evidence.close_task(f.scope,f.request(expected_pins=task['pins']),observed)
+
+    def test_guidance_owned_raw_dependency_stays_protected(self):
+        f=self.fixture;task,context,ref,_=self.stopped_worker()
+        reference=f.api.guidance_status(f.scope,f.cache_request)['snapshot_ref']
+        with evidence._context_database(context,write=True) as db:
+            metadata=state._metadata(db,reference['name']);metadata['dependencies'].append(dict(kind='task',reference=ref))
+            db.execute('update evidence_metadata set data=? where name=?',(json.dumps(metadata),reference['name']))
+        with self.assertRaisesRegex(state.StateError,'raw task body'):evidence._observe_closure((context,),ref)
+
+    def test_missing_current_guidance_cache_protects_original_assignment(self):
+        f=self.fixture;_,context,ref,_=self.stopped_worker()
+        (context.directory/'model-guidance'/(f.cache_request['client_surface']+'.json')).unlink()
+        with self.assertRaises(state.StateError):evidence._observe_closure((context,),ref)
+
+
+class LifecycleFoundationTests(unittest.TestCase):
+    def setUp(self):
+        self.fixture = CanonicalDelegationTests(methodName='runTest')
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.f = self.fixture.fixture
+
+    def marker(self,prepared,*,expired=True,delete_live=True):
+        # Exact seeded tombstone fixture only; this is not an authorized closure/retirement operation.
+        f=self.f
+        with state._database(f.scope,write=True) as db:
+            record=next(r for r in f.api._ledger(f.scope,db) if r['id']==prepared['attempt_id'])
+            data=dict(version=1,identity=record['owner'],assignment_id=record['id'],
+                pins_digest=state._digest(record['body']['pins']),request_digest=record['data']['request_digest'],
+                created_at=100,retired_at=200,outcome='unknown' if expired else 'completed',evidence_expired=expired)
+            db.execute('insert into retired_identities(kind,identity_digest,data,assignment_id) values(?,?,?,?)',
+                ('assignment',state._retired_identity('assignment',data['identity']),json.dumps(data),data['assignment_id']))
+            if delete_live: db.execute('delete from assignments where id=?',(record['id'],))
+        return data
+
+    def test_lifecycle_assignment_date_is_owner_assigned_once_and_replay_preserves_it(self):
+        f=self.f
+        with patch('runtime.state._owner_time',return_value=100): prepared=f.prepare()
+        with state._database(f.scope) as db:
+            record=f.api._ledger(f.scope,db)[0]
+        self.assertEqual(record['data']['lifecycle'],dict(created_at=100))
+        self.assertEqual(record['body']['lifecycle'],dict(created_at=100))
+        with patch('runtime.state._owner_time',side_effect=AssertionError('replay reset assignment age')):
+            replay=f.prepare()
+        self.assertFalse(replay['launch_admitted'])
+        self.assertEqual(replay['attempt_id'],prepared['attempt_id'])
+
+    def test_lifecycle_retired_dispatch_and_original_id_cannot_launch_or_resolve_as_success(self):
+        f=self.f; prepared=f.prepare(); marker=self.marker(prepared)
+        with state._database(f.scope) as db:
+            self.assertEqual(state._retired_assignment(db,prepared['attempt_id']),marker)
+        with patch('runtime.adapters.codex.discover_native_workers',side_effect=AssertionError('retired dispatch rediscovered native route')):
+            with self.assertRaisesRegex(state.StateError,'[Rr]etired|expired'): f.prepare()
+        with patch.object(f.api,'_ledger',side_effect=AssertionError('retired reference scanned lifetime live rows')):
+            with self.assertRaisesRegex(state.StateError,'[Rr]etired|expired'):
+                f.api.prepared_native_assignment(f.scope,prepared['attempt_id'])
+        changed=f.prepare_request(); changed['brief']['objective']='Different bytes under old dispatch'
+        with self.assertRaises(state.StateError): f.api.prepare_assignment(f.scope,changed)
+        with state._database(f.scope) as db:
+            self.assertEqual(db.execute('select count(*) from assignments').fetchone()[0],0)
+
+    def test_lifecycle_marker_native_id_is_unique_and_scalar_body_mismatch_rejects(self):
+        f=self.f; prepared=f.prepare(); marker=self.marker(prepared)
+        with state._database(f.scope,write=True) as db:
+            other=deepcopy(marker); other['identity']['dispatch_id']='another-dispatch'
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.execute('insert into retired_identities values(?,?,?,?)',('assignment',state._retired_identity('assignment',other['identity']),
+                    json.dumps(other),other['assignment_id']))
+            marker['assignment_id']='f'*32
+            db.execute('update retired_identities set data=?',(json.dumps(marker),))
+        with state._database(f.scope) as db,self.assertRaises(state.StateError):
+            state._retired_assignment(db,prepared['attempt_id'])
+
+    def test_lifecycle_live_and_retired_conflict_remains_protected(self):
+        f=self.f; prepared=f.prepare(); self.marker(prepared,delete_live=False)
+        with state._database(f.scope) as db,self.assertRaises(state.StateError): f.api._ledger(f.scope,db)
+
+
+    def test_lifecycle_more_than_4096_markers_keep_point_lookup_and_live_owners_separate(self):
+        f=self.f; owner=dict(scope_id=state._scope_id(f.scope),client='codex',session_id='parent',task_id='task')
+        rows=[]
+        for number in range(4100):
+            identity=owner | dict(dispatch_id='retired-'+str(number))
+            assignment_id=format(number,'032x')
+            marker=dict(version=1,identity=identity,assignment_id=assignment_id,pins_digest='a'*64,
+                request_digest='b'*64,created_at=100,retired_at=200,outcome='unknown',evidence_expired=True)
+            rows.append(('assignment',state._retired_identity('assignment',identity),json.dumps(marker),assignment_id))
+        with state._database(f.scope,write=True) as db:
+            db.executemany('insert into retired_identities values(?,?,?,?)',rows)
+        with state._database(f.scope) as db:
+            self.assertEqual(f.api._ledger(f.scope,db),[])
+            self.assertTrue(state._retired_assignment(db,format(4099,'032x'))['evidence_expired'])
+            plan=db.execute("explain query plan select data from retired_identities where kind='assignment' and assignment_id=?",
+                            (format(4099,'032x'),)).fetchall()
+            self.assertTrue(any('retired_assignment_id' in r[-1] and 'SEARCH' in r[-1] for r in plan))
+
+    def test_lifecycle_old_assignment_without_date_is_not_given_a_fresh_age(self):
+        f=self.f; prepared=f.prepare()
+        with state._database(f.scope,write=True) as db:
+            raw=db.execute('select data from assignments where id=?',(prepared['attempt_id'],)).fetchone()[0]
+            data=json.loads(raw); body=evidence._read(f.scope,data['assignment'])
+            del data['lifecycle']; del body['lifecycle']
+            task=state._task(db,state._scope_id(f.scope),'codex','parent')
+            data['assignment']=evidence._artifact(f.scope,body,owner=evidence._artifact_owner(f.scope,task),db=db)
+            db.execute('update assignments set data=? where id=?',(json.dumps(data),prepared['attempt_id']))
+        with patch('runtime.state._owner_time',side_effect=AssertionError('old assignment guessed a date')):
+            replay=f.prepare()
+        self.assertFalse(replay['launch_admitted'])
+        with state._database(f.scope) as db:
+            record=f.api._ledger(f.scope,db)[0]
+            self.assertNotIn('lifecycle',record['data'])
+            self.assertNotIn('lifecycle',record['body'])

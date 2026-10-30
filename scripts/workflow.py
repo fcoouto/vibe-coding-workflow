@@ -18,19 +18,30 @@ def control_main():
 
     class Parser(argparse.ArgumentParser):
         def error(self, message):
-            raise StartupError("Invalid task, evidence, delegation, doctor or onboard command arguments")
+            raise StartupError("Invalid task, evidence, delegation, doctor, onboard or storage command arguments")
 
     try:
         parser = Parser(add_help=False)
         commands = parser.add_subparsers(dest="command", required=True)
+        storage = commands.add_parser("storage", add_help=False)
+        storage_actions = storage.add_subparsers(dest="action", required=True)
+        storage_actions.add_parser("status", add_help=False)
+        storage_actions.add_parser("prepare", add_help=False)
+        storage_actions.add_parser("project-owner", add_help=False)
+        storage_actions.add_parser("owner", add_help=False).add_argument("--cwd", required=True)
+        screening = storage_actions.add_parser("screening", add_help=False)
+        screening_actions = screening.add_subparsers(dest="screening_action", required=True)
+        for name in ("status", "reserve", "settle"):
+            screening_actions.add_parser(name, add_help=False)
         task = commands.add_parser("task", add_help=False)
         actions = task.add_subparsers(dest="action", required=True)
         for name in ("start", "update", "status", "retire"):
             action = actions.add_parser(name, add_help=False)
             action.add_argument("--cwd", required=True)
             if name == "status":
-                action.add_argument("--client", required=True, choices=("codex",))
+                action.add_argument("--client", required=True, choices=("codex", "claude-code"))
                 action.add_argument("--session", required=True)
+                action.add_argument("--prepare-observability", action="store_true")
         evidence = commands.add_parser("evidence", add_help=False)
         evidence_actions = evidence.add_subparsers(dest="action", required=True)
         for name in ("plan", "status", "check", "reconcile-check", "verify"):
@@ -71,6 +82,36 @@ def control_main():
             if name == "inspect":
                 action.add_argument("--cwd", required=True)
         args = parser.parse_args()
+        if args.command == "storage":
+            from runtime import review_storage
+            if args.action == "prepare":
+                request = json_object(sys.stdin.buffer.read(MAX_INPUT + 1))
+                if set(request) != {"private_data_dir"} or not isinstance(request["private_data_dir"], str):
+                    raise StartupError("Expected an explicit private_data_dir")
+                report = review_storage.prepare_storage(Path(request["private_data_dir"]))
+            elif args.action == "screening":
+                from runtime import state
+                request = json_object(sys.stdin.buffer.read(MAX_INPUT + 1))
+                extra = {"status": (), "reserve": ("expected_revision",), "settle": ("ticket",)}[args.screening_action]
+                state._fields(request, ("selection", *extra))
+                if args.screening_action == "status":
+                    report = review_storage.screening_status(request["selection"])
+                elif args.screening_action == "reserve":
+                    report = review_storage.reserve_screening(request["selection"], request["expected_revision"])
+                else:
+                    report = review_storage.settle_screening(request["selection"], request["ticket"])
+            elif args.action == "owner":
+                report = review_storage.resolve_owner(Path(args.cwd))
+            elif args.action == "project-owner":
+                from runtime.onboarding import MAX_REQUEST, read_request
+                request = read_request(sys.stdin.buffer.read(MAX_REQUEST + 1))
+                if set(request) != {"project_scope"}:
+                    raise StartupError("Expected exactly project_scope")
+                report = review_storage.resolve_project_owner(request["project_scope"])
+            else:
+                report = review_storage.storage_status()
+            print(json.dumps(report))
+            return 0 if report["ok"] else 1
         if args.command == "onboard":
             from runtime.onboarding import MAX_REQUEST, inspect_project, read_request, record_plan
             request = read_request(sys.stdin.buffer.read(MAX_REQUEST + 1))
@@ -101,7 +142,8 @@ def control_main():
                 args.command == "evidence" and args.action != "status"):
             request = json_object(sys.stdin.buffer.read(MAX_INPUT + 1))
             client = request.get("client")
-            if client != "codex":
+            allowed_clients = {"codex", "claude-code"} if args.command == "task" and args.action in ("start", "update") else {"codex"}
+            if client not in allowed_clients:
                 raise StartupError("Expected a supported native task client")
         else:
             client = args.client
@@ -140,6 +182,14 @@ def control_main():
         from runtime.state import start_task, update_task, task_status, retire_task
         if args.action == "status":
             report = task_status(scope, client, args.session)
+            if args.prepare_observability:
+                try:
+                    from runtime.observability import prepare_task_status
+                    preparation = {"status": "prepared", "data": prepare_task_status(report, enabled=True)}
+                except Exception:
+                    # Optional preparation must preserve the owner's ordinary status result.
+                    preparation = {"status": "unavailable"}
+                report = dict(report, observability_preparation=preparation)
         else:
             report = {"start": start_task, "update": update_task, "retire": retire_task}[args.action](scope, request)
         print(json.dumps(report))
@@ -148,12 +198,15 @@ def control_main():
         reason = str(error)
     except (ImportError, ValueError, TypeError, KeyError, OSError, RecursionError, subprocess.TimeoutExpired):
         reason = "Invalid task input, enrollment or local runtime"
-    print(json.dumps({"ok": False, "error": reason}))
+    report = {"ok": False, "error": reason}
+    if sys.argv[1:3] == ["storage", "screening"]:
+        report.update(status="protected", admitted=False, screening=None, revision=None)
+    print(json.dumps(report))
     return 1
 
 
 def main():
-    control = len(sys.argv) > 1 and sys.argv[1] in {"task", "doctor", "onboard", "evidence", "delegation"}
+    control = len(sys.argv) > 1 and sys.argv[1] in {"task", "doctor", "onboard", "evidence", "delegation", "storage"}
     if sys.version_info < (3, 11):
         print(json.dumps({"ok": False, "error": "Vibe Coding Workflow requires Python 3.11+"} if control else
                          {"systemMessage": "Vibe Coding Workflow requires Python 3.11+ on the hook PATH."}))
@@ -162,38 +215,41 @@ def main():
         return control_main()
     requested_event = sys.argv[2] if len(sys.argv) == 3 else None
     from runtime.adapters import claude_code, codex, session_start
-    from runtime.engine import HookResult
+    from runtime.engine import HookResult, guarded_mutation
     from runtime.startup import MAX_INPUT, RuntimeScopeError, StartupError, json_object, orient, resolve_project
-    runtime_kind = requested_event if requested_event in codex.RUNTIME_EVENTS else None
+    client = sys.argv[1] if len(sys.argv) > 1 else None
+    adapters = {"codex": codex, "claude-code": claude_code}
+    adapter = adapters.get(client)
+    runtime_events = {"codex": codex.RUNTIME_EVENTS, "claude-code": claude_code.RUNTIME_EVENTS}
+    runtime_kind = requested_event if requested_event in runtime_events.get(client, set()) else None
+    event = None
 
     def failure(reason):
         if runtime_kind is not None:
-            return codex.runtime_diagnostic(runtime_kind, reason)
+            return adapter.runtime_diagnostic(runtime_kind, reason)
         return session_start.diagnostic(reason)
 
     try:
-        adapters = {"codex": codex, "claude-code": claude_code}
-        if len(sys.argv) != 3 or sys.argv[1] not in adapters:
+        if len(sys.argv) != 3 or adapter is None:
             raise StartupError("Expected a supported client and event")
-        if requested_event != "SessionStart" and (sys.argv[1] != "codex" or runtime_kind is None):
+        if requested_event != "SessionStart" and runtime_kind is None:
             raise StartupError("Unsupported client runtime event")
-        adapter = adapters[sys.argv[1]]
         payload = json_object(sys.stdin.buffer.read(MAX_INPUT + 1))
         if payload.get("hook_event_name") != requested_event:
             raise StartupError("CLI event does not match the payload event")
         if requested_event == "SessionStart":
             output = adapter.render(orient(adapter.normalize(payload), PACKAGE))
         else:
-            event = codex.normalize_runtime(payload)
+            event = adapter.normalize_runtime(payload)
             scope = resolve_project(event, PACKAGE)
             result = HookResult(event.kind)
             if scope is not None and scope.runtime is not None:
                 from runtime.state import process_event
                 result = process_event(scope, event)
-            output = codex.render_runtime(result)
+            output = adapter.render_runtime(result)
     except RuntimeScopeError as error:
-        if runtime_kind == "PreToolUse" and event.tool_name == "apply_patch":
-            output = codex.render_runtime(HookResult(runtime_kind, "deny", str(error)))
+        if event is not None and guarded_mutation(event):
+            output = adapter.render_runtime(HookResult(event.kind, "deny", str(error)))
         else:
             output = failure(str(error))
     except StartupError as error:

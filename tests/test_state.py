@@ -3,6 +3,7 @@
 from contextlib import closing
 from dataclasses import replace
 import importlib
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -20,6 +21,34 @@ from runtime.startup import ProjectScope, RuntimeSettings
 PACKAGE = Path(__file__).resolve().parents[1]
 
 
+def canonical_scope(legacy, *, client="codex", repository_id="repository", checkout_id="checkout",
+                    primary_root=None, git_dir=None):
+    """Synthetic accepted scope for internal seam tests; no enrollment/transition proof."""
+    from runtime import state
+    from runtime.startup import AcceptedScope, _canonical_freeze, policy_digest
+    root, common = legacy.repository_root, legacy.git_common_dir
+    primary, private = primary_root or root, git_dir or common
+    for path in (root, common, primary, private): path.mkdir(parents=True, exist_ok=True)
+    def binding(path):
+        info = path.stat()
+        return dict(device=info.st_dev, inode=info.st_ino)
+    bindings = {"root": binding(root), "primary_root": binding(primary),
+                "git_dir": binding(private), "git_common_dir": binding(common)}
+    runtime = RuntimeSettings(3, legacy.runtime.state_dir.with_name(legacy.runtime.state_dir.name + "-canonical"))
+    policy, digest = policy_digest(state.PACKAGE), state.runtime_fingerprint()
+    identity = dict(version=1, project_id=legacy.project_id, repository_id=repository_id, checkout_id=checkout_id,
+        project_root=str(primary), project_binding=binding(primary), primary_root=str(primary), repository_root=str(root),
+        git_dir=str(private), git_common_dir=str(common), bindings=bindings, client=client,
+        membership=dict(included=True, authorization=dict(reference="fixture:standing", sha256="a"*64)),
+        configuration=dict(policy_digest=policy, runtime_digest=digest,
+                           runtime=dict(schema_version=3, state_dir=str(runtime.state_dir))), shared_policy=[])
+    scope_digest = hashlib.sha256(json.dumps(identity,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode()).hexdigest()
+    return AcceptedScope(legacy.project_id, repository_id, checkout_id, primary,
+        primary / ".vibe-coding-workflow/project.json", _canonical_freeze({}), 1, root, primary, private, common,
+        _canonical_freeze(bindings), client, policy, digest, runtime, _canonical_freeze(identity), scope_digest,
+        _canonical_freeze(dict(kind="trusted-coordinator", reference="fixture:synthetic", sha256="b"*64)))
+
+
 class StateTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="vibe-state-")
@@ -29,6 +58,10 @@ class StateTests(unittest.TestCase):
                                   RuntimeSettings(2, self.base / "private"))
         self.request = dict(client="codex", session_id="session", task_id="task", scope_ref="request:1",
                             mode="editable", decision_ref="user:1")
+        from runtime import changes
+        guard_patch = patch.object(changes, 'LOCK_ROOT', self.base / 'authority-guards')
+        guard_patch.start()
+        self.addCleanup(guard_patch.stop)
 
     def api(self):
         self.assertIsNotNone(importlib.util.find_spec("runtime.state"), "durable state implementation missing")
@@ -62,7 +95,413 @@ class StateTests(unittest.TestCase):
         self.event()
         self.update(conditions=[self.runnable()])
 
-    def test_historical_retirement_requires_exact_stopped_writer_proof_and_preserves_pins(self):
+    def test_canonical_schema_three_start_restart_immutable_snapshot_and_physical_row(self):
+        self.scope = canonical_scope(self.scope)
+        first = self.start()
+        api = self.api()
+        self.assertEqual(first["task"]["pins"]["schema_version"], 3)
+        self.assertEqual(first["task"]["accepted_identity"]["checkout_id"], "checkout")
+        self.assertEqual(self.start(), first)
+        with api._database(self.scope) as db:
+            self.assertEqual(db.execute("pragma user_version").fetchone()[0], 3)
+            physical = json.loads(db.execute("select physical_identity from checkouts").fetchone()[0])
+            self.assertNotIn("client", physical)
+            self.assertEqual(physical["checkout_id"], "checkout")
+        self.assertEqual(api.SCHEMA_VERSION, 2)
+
+    def test_canonical_scope_cannot_open_or_rewrite_legacy_database(self):
+        self.start()
+        path = self.scope.runtime.state_dir / "runtime.sqlite3"
+        before = path.read_bytes()
+        scope = canonical_scope(self.scope)
+        from runtime.startup import _canonical_plain, _canonical_freeze
+        identity = _canonical_plain(scope.accepted_identity)
+        identity["configuration"]["runtime"]["state_dir"] = str(self.scope.runtime.state_dir)
+        import hashlib
+        scope = replace(scope, runtime=RuntimeSettings(3, self.scope.runtime.state_dir),
+                        accepted_identity=_canonical_freeze(identity), accepted_scope_digest=hashlib.sha256(json.dumps(
+                            identity,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode()).hexdigest())
+        with self.assertRaises(self.api().StateError): self.api().start_task(scope, self.request)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_canonical_checkout_mismatch_rejects_start_and_event_without_generation_changes(self):
+        self.scope = canonical_scope(self.scope)
+        self.start()
+        path = self.scope.runtime.state_dir / "runtime.sqlite3"
+        with closing(sqlite3.connect(path)) as db, db:
+            physical = json.loads(db.execute("select physical_identity from checkouts").fetchone()[0])
+            physical["bindings"]["root"]["inode"] += 1
+            db.execute("update checkouts set physical_identity=?", (json.dumps(physical),))
+        before = path.read_bytes()
+        with self.assertRaises(self.api().StateError): self.start(session_id="other")
+        self.assertEqual(self.event().action, "deny")
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_canonical_save_rejects_rebound_identity_and_missing_digest(self):
+        self.scope = canonical_scope(self.scope)
+        task = self.start()["task"]
+        api = self.api()
+        with api._database(self.scope, write=True) as db:
+            del task["pins"]["accepted_scope_digest"]
+            with self.assertRaises(api.StateError): api._save(db, api._scope_id(self.scope), task)
+        self.assertIn("accepted_scope_digest", self.status()["task"]["pins"])
+
+
+    def test_canonical_client_projections_share_physical_row_and_generation(self):
+        original = self.scope
+        self.scope = canonical_scope(original)
+        self.start()
+        self.event("PostToolUse")
+        other = canonical_scope(original, client="claude-code")
+        api = self.api()
+        with api._database(self.scope, write=True) as db:
+            row = api._checkout_row(db, self.scope)
+            self.assertEqual(api._checkout_row(db, other, initialize=True), row)
+            self.assertEqual(db.execute("select count(*) from checkouts").fetchone()[0], 1)
+            self.assertEqual(row[4], 1)
+        self.assertNotEqual(self.scope.accepted_scope_digest, other.accepted_scope_digest)
+        self.assertEqual(api._scope_id(self.scope), api._scope_id(other))
+
+    def test_canonical_wrong_client_event_cannot_write_generation(self):
+        self.scope = canonical_scope(self.scope)
+        self.start()
+        path = self.scope.runtime.state_dir / "runtime.sqlite3"
+        before = path.read_bytes()
+        self.event("PostToolUse", client="claude-code")
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_canonical_event_can_admit_only_the_exact_physical_checkout(self):
+        self.scope = canonical_scope(self.scope)
+        api = self.api()
+        with api._database(self.scope, write=True, initialize=True): pass
+        self.event("PostToolUse")
+        with api._database(self.scope) as db:
+            row = api._checkout_row(db, self.scope)
+            self.assertEqual(row[4], 1)
+            self.assertEqual(json.loads(row[5])["checkout_id"], "checkout")
+            self.assertEqual(db.execute("select count(*) from tasks").fetchone()[0], 0)
+
+    def test_canonical_changed_configuration_preserves_historical_snapshot_and_cannot_repin(self):
+        import hashlib
+        from runtime.startup import _canonical_plain, _canonical_freeze
+        self.scope = canonical_scope(self.scope)
+        self.start()
+        path = self.scope.runtime.state_dir / "runtime.sqlite3"
+        before = path.read_bytes()
+        snapshot = _canonical_plain(self.scope.accepted_identity)
+        snapshot["shared_policy"] = [dict(path=str(self.base / "guide"), sha256="a"*64)]
+        digest = hashlib.sha256(json.dumps(snapshot,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode()).hexdigest()
+        changed = replace(self.scope, accepted_identity=_canonical_freeze(snapshot), accepted_scope_digest=digest)
+        with self.assertRaises(self.api().StateError): self.api().task_status(changed, "codex", "session")
+        self.assertEqual(path.read_bytes(), before)
+        with self.api()._database(changed) as db:
+            historical = self.api()._task(db, self.api()._scope_id(changed), "codex", "session", "task")
+            self.assertEqual(historical["accepted_identity"]["shared_policy"], [])
+        self.api().start_task(changed, self.request | dict(session_id="new-session", task_id="new-task"))
+        with self.api()._database(changed) as db:
+            self.assertEqual(self.api()._task(db, self.api()._scope_id(changed), "codex", "session", "task"), historical)
+
+    def test_canonical_raw_foreign_snapshot_cannot_claim_another_state_authority(self):
+        self.scope = canonical_scope(self.scope)
+        task = self.start()["task"]
+        task["accepted_identity"]["configuration"]["runtime"]["state_dir"] = str(self.base / "elsewhere")
+        task["pins"]["accepted_scope_digest"] = self.api()._digest(task["accepted_identity"])
+        with closing(sqlite3.connect(self.scope.runtime.state_dir / "runtime.sqlite3")) as db, db:
+            db.execute("update tasks set data=?", (json.dumps(task),))
+        with self.api()._database(self.scope) as db, self.assertRaises(self.api().StateError):
+            self.api()._task(db, self.api()._scope_id(self.scope), "codex", "session", "task")
+
+
+    def test_canonical_retirement_retains_exact_four_key_historical_pins(self):
+        self.scope = canonical_scope(self.scope)
+        self.test_historical_retirement_requires_exact_stopped_writer_proof_and_preserves_pins(canonical=True)
+
+
+    def test_canonical_entry_rejects_mutable_scope_snapshots_before_initialization(self):
+        from types import MappingProxyType
+        from runtime.startup import _canonical_plain
+        scope = canonical_scope(self.scope)
+        for snapshot in (_canonical_plain(scope.accepted_identity), MappingProxyType(_canonical_plain(scope.accepted_identity))):
+            with self.subTest(snapshot=type(snapshot).__name__), self.assertRaises(self.api().StateError):
+                self.api().start_task(replace(scope, accepted_identity=snapshot), self.request)
+        self.assertFalse(scope.runtime.state_dir.exists())
+
+    def test_legacy_schema_one_status_remains_a_read_only_incompatibility_report(self):
+        report = self.api().inspect_state(replace(self.scope, runtime=RuntimeSettings(1, self.scope.runtime.state_dir)))
+        self.assertFalse(report['compatible'])
+        self.assertIn('error', report)
+        self.assertFalse(self.scope.runtime.state_dir.exists())
+
+    def test_canonical_retirement_proof_cannot_be_stored_inside_bare_repository(self):
+        import hashlib
+        self.scope = canonical_scope(self.scope)
+        task = self.start()['task']
+        bare = self.base / 'bare'
+        env = {k:v for k,v in os.environ.items() if not k.startswith('GIT_')}
+        env.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull)
+        subprocess.run(['git', '-c', 'init.templateDir=', '-c', 'core.hooksPath='+os.devnull,
+                        'init', '--bare', '-q', str(bare)], check=True, env=env, capture_output=True)
+        identity = {k: task[k] for k in ('client','session_id','task_id','scope_ref')}
+        proof = dict(version=1, kind='stopped-writer-reconciliation', identity=identity,
+            expected_revision=task['revision'], expected_pins=task['pins'], observed_turn_id=task['turn_id'],
+            stopped=True, descendants_stopped=True, attempt_ids=[], observation_ref='fixture:stopped', coordinator_ref='fixture:checked')
+        raw = json.dumps(proof).encode()
+        path = bare / 'proof.json'; path.write_bytes(raw); path.chmod(0o400)
+        with self.assertRaises(self.api().StateError):
+            self.api().retire_task(self.scope, identity | dict(expected_revision=task['revision'], expected_pins=task['pins'],
+                reason='Stopped', reference='fixture:retire', stop_proof=dict(path=str(path), sha256=hashlib.sha256(raw).hexdigest())))
+        self.assertEqual(self.status()['task'], task)
+
+
+    def test_canonical_wrong_table_shape_is_rejected_without_rewriting(self):
+        self.scope = canonical_scope(self.scope)
+        self.start()
+        path = self.scope.runtime.state_dir / "runtime.sqlite3"
+        with closing(sqlite3.connect(path)) as db, db:
+            db.execute("alter table checkouts drop column physical_identity")
+        before = path.read_bytes()
+        with self.assertRaises(self.api().StateError): self.start()
+        self.assertEqual(path.read_bytes(), before)
+
+
+    def test_lifecycle_schema_three_tables_and_indexes_leave_legacy_exact(self):
+        self.scope = canonical_scope(self.scope)
+        self.start()
+        with self.api()._database(self.scope) as db:
+            tables = {r[0] for r in db.execute("select name from sqlite_master where type='table'")}
+            indexes = {r[0] for r in db.execute("select name from sqlite_master where type='index' and sql is not null")}
+            self.assertTrue({'evidence_metadata','retired_identities'} <= tables)
+            self.assertEqual(indexes, {'evidence_lifecycle','assignment_owner','retired_assignment_id'})
+        legacy = replace(self.scope.runtime, schema_version=2, state_dir=self.base / 'legacy')
+        old = ProjectScope('old', self.scope.repository_root, self.scope.git_common_dir, 'policy', legacy)
+        self.api().start_task(old, self.request)
+        with self.api()._database(old) as db:
+            self.assertEqual({r[0] for r in db.execute("select name from sqlite_master where type='table'")}, self.api().TABLES)
+            self.assertEqual(db.execute("select count(*) from sqlite_master where type='index' and sql is not null").fetchone()[0], 0)
+
+    def test_lifecycle_owner_time_is_once_and_caller_cannot_set_or_reset_age(self):
+        self.scope = canonical_scope(self.scope)
+        with patch('runtime.state._owner_time', return_value=100): first = self.start()['task']
+        self.assertEqual(first['lifecycle'], dict(created_at=100,safe_closed_at=None,closure=None,compact=None))
+        with patch('runtime.state._owner_time', side_effect=AssertionError('replay regenerated age')):
+            self.assertEqual(self.start()['task'], first)
+            self.update(state='active')
+            self.event('PostToolUse')
+        task = self.status()['task']
+        self.assertEqual(task['lifecycle']['created_at'],100)
+        with self.api()._database(self.scope, write=True) as db:
+            task['lifecycle']['created_at'] = 200
+            with self.assertRaises(self.api().StateError): self.api()._save(db,self.api()._scope_id(self.scope),task)
+        with self.assertRaises(self.api().StateError): self.start(lifecycle=dict(created_at=1))
+
+    def test_lifecycle_unknown_old_task_remains_undated_and_protected(self):
+        self.scope = canonical_scope(self.scope)
+        task = self.start()['task']; del task['lifecycle']
+        with closing(sqlite3.connect(self.scope.runtime.state_dir/'runtime.sqlite3')) as db,db:
+            db.execute('update tasks set data=?',(json.dumps(task),))
+        self.assertIsNone(self.api()._task_lifecycle(self.status()['task']))
+        self.event('PostToolUse')
+        self.assertNotIn('lifecycle',self.status()['task'])
+        with self.api()._database(self.scope,write=True) as db:
+            task['lifecycle']=dict(created_at=1,safe_closed_at=None,closure=None,compact=None)
+            with self.assertRaises(self.api().StateError): self.api()._save(db,self.api()._scope_id(self.scope),task)
+
+    def test_lifecycle_identity_reads_live_schema_three_task_from_exact_authority(self):
+        from runtime import evidence
+        self.scope=canonical_scope(self.scope)
+        task=self.start()['task']; api=self.api()
+        context=evidence._evidence_context(self.scope)
+        reference=dict(authority=api._canonical_plain(context.authority_set[0]),scope_id=api._scope_id(self.scope),
+            client=task['client'],session_id=task['session_id'],task_id=task['task_id'])
+        with evidence._context_database(context) as db:
+            actual=api._lifecycle_identity(db,'task',reference)
+        self.assertEqual(dict(actual),dict(status='live',identity={k:reference[k] for k in ('scope_id','client','session_id','task_id')},
+            pins_digest=api._digest(task['pins']),request_digest=None,created_at=task['lifecycle']['created_at']))
+        with evidence._context_database(context) as db,self.assertRaises(api.StateError):
+            api._lifecycle_identity(db,'task',reference | dict(task_id='missing'))
+        wrong=reference | dict(authority=reference['authority'] | dict(directory_binding=dict(device=0,inode=0)))
+        with evidence._context_database(context) as db,self.assertRaises(api.StateError):
+            api._lifecycle_identity(db,'task',wrong)
+
+    def test_lifecycle_identity_does_not_adopt_legacy_authority(self):
+        from runtime import evidence
+        api=self.api()
+        with api._database(self.scope,write=True,initialize=True) as db:
+            context=evidence._evidence_context(self.scope)
+            reference=dict(authority=api._canonical_plain(context.authority_set[0]),scope_id='a'*64,
+                client='codex',session_id='session',task_id='task')
+            with self.assertRaises(api.StateError):
+                api._lifecycle_identity(db,'task',reference)
+
+    def test_lifecycle_identity_requires_original_task_age_and_rejects_live_marker_conflict(self):
+        from runtime import evidence
+        self.scope=canonical_scope(self.scope); task=self.start()['task']; api=self.api()
+        context=evidence._evidence_context(self.scope)
+        reference=dict(authority=api._canonical_plain(context.authority_set[0]),scope_id=api._scope_id(self.scope),
+            client=task['client'],session_id=task['session_id'],task_id=task['task_id'])
+        path=self.scope.runtime.state_dir/'runtime.sqlite3'
+        with closing(sqlite3.connect(path)) as db,db:
+            task.pop('lifecycle')
+            db.execute('update tasks set data=?',(json.dumps(task),))
+        with evidence._context_database(context) as db,self.assertRaises(api.StateError):
+            api._lifecycle_identity(db,'task',reference)
+        task['lifecycle']=dict(created_at='bad',safe_closed_at=None,closure=None,compact=None)
+        with closing(sqlite3.connect(path)) as db,db:
+            db.execute('update tasks set data=?',(json.dumps(task),))
+        with evidence._context_database(context) as db,self.assertRaises(api.StateError):
+            api._lifecycle_identity(db,'task',reference)
+        task.pop('lifecycle')
+        with closing(sqlite3.connect(path)) as db,db:
+            db.execute('update tasks set data=?',(json.dumps(task),))
+        owner={k:reference[k] for k in ('scope_id','client','session_id','task_id')}
+        self.seed_marker('task',owner,request_digest=None)
+        with evidence._context_database(context) as db,self.assertRaises(api.StateError):
+            api._lifecycle_identity(db,'task',reference)
+
+    def test_lifecycle_identity_reads_retired_task_age_and_expiry_without_live_body(self):
+        from runtime import evidence
+        self.scope=canonical_scope(self.scope); self.start(); api=self.api()
+        context=evidence._evidence_context(self.scope)
+        reference=dict(authority=api._canonical_plain(context.authority_set[0]),scope_id=api._scope_id(self.scope),
+            client='codex',session_id='session',task_id='task')
+        owner={k:reference[k] for k in ('scope_id','client','session_id','task_id')}
+        marker=self.seed_marker('task',owner,request_digest=None,expired=True)
+        marker['created_at']='unknown'
+        with api._database(self.scope,write=True) as db:
+            db.execute('update retired_identities set data=?',(json.dumps(marker),))
+        with evidence._context_database(context) as db,self.assertRaises(api.StateError):
+            api._lifecycle_identity(db,'task',reference)
+        marker['created_at']=100
+        with api._database(self.scope,write=True) as db:
+            db.execute('update retired_identities set data=?',(json.dumps(marker),))
+        with closing(sqlite3.connect(context.database)) as db,db:
+            db.execute('delete from tasks where scope_id=? and client=? and session_id=? and task_id=?',
+                (owner['scope_id'],owner['client'],owner['session_id'],owner['task_id']))
+        with evidence._context_database(context) as db:
+            actual=api._lifecycle_identity(db,'task',reference)
+        self.assertEqual((actual['status'],actual['created_at'],actual['pins_digest'],actual['request_digest']),
+            ('expired',marker['created_at'],marker['pins_digest'],None))
+        marker.update(retired_at=marker['created_at']+1,outcome='completed',evidence_expired=False)
+        with api._database(self.scope,write=True) as db:
+            db.execute('update retired_identities set data=?',(json.dumps(marker),))
+        with evidence._context_database(context) as db:
+            retained=api._lifecycle_identity(db,'task',reference)
+        self.assertEqual(retained['status'],'retired')
+
+    def test_lifecycle_identity_uses_live_assignment_parser_then_marker_identity_only(self):
+        from runtime import evidence, state
+        from tests.test_delegation import CanonicalDelegationTests
+        fixture=CanonicalDelegationTests(methodName='runTest')
+        fixture.setUp(); self.addCleanup(fixture.doCleanups)
+        f=fixture.fixture
+        result=f.api.reserve_coordinator(f.scope,f.operation_request())
+        context=evidence._evidence_context(f.scope)
+        with evidence._context_database(context) as db:
+            record=f.api._ledger(f.scope,db)[0]
+            reference=dict(authority=state._canonical_plain(context.authority_set[0]),id=record['id'],
+                owner=record['owner'],assignment=record['data']['assignment'])
+            live=state._lifecycle_identity(db,'assignment',reference)
+        self.assertEqual((live['status'],live['identity'],live['pins_digest'],live['request_digest'],live['created_at']),
+            ('live',dict(id=record['id'],owner=record['owner']),state._digest(record['body']['pins']),
+             record['data']['request_digest'],record['data']['lifecycle']['created_at']))
+        marker=dict(version=1,identity=record['owner'],assignment_id=record['id'],
+            pins_digest=state._digest(record['body']['pins']),request_digest=record['data']['request_digest'],
+            created_at=record['data']['lifecycle']['created_at'],retired_at=record['data']['lifecycle']['created_at']+1,
+            outcome='unknown',evidence_expired=True)
+        with f.api._reservation_write(f.scope) as db:
+            db.execute('insert into retired_identities(kind,identity_digest,data,assignment_id) values(?,?,?,?)',
+                ('assignment',state._retired_identity('assignment',record['owner']),json.dumps(marker),record['id']))
+        with evidence._context_database(context) as db,self.assertRaises(state.StateError):
+            state._lifecycle_identity(db,'assignment',reference)
+        with f.api._reservation_write(f.scope) as db:
+            db.execute('delete from assignments where id=?',(record['id'],))
+        changed_pointer=dict(name='f'*32+'.json',digest='e'*64)
+        with evidence._context_database(context) as db:
+            expired=state._lifecycle_identity(db,'assignment',reference | dict(assignment=changed_pointer))
+            with self.assertRaises(state.StateError):
+                state._lifecycle_identity(db,'assignment',reference | dict(id='f'*32))
+            with self.assertRaises(state.StateError):
+                state._lifecycle_identity(db,'assignment',reference | dict(owner=record['owner'] | dict(dispatch_id='different')))
+        self.assertEqual((expired['status'],expired['identity'],expired['pins_digest'],expired['request_digest'],expired['created_at']),
+            ('expired',dict(id=record['id'],owner=record['owner']),marker['pins_digest'],marker['request_digest'],marker['created_at']))
+        self.assertEqual(result['attempt_id'],record['id'])
+
+    def seed_marker(self,kind,identity,*,request_digest=None,expired=False):
+        api=self.api()
+        data=dict(version=1,identity=identity,pins_digest='a'*64,request_digest=request_digest,
+                  created_at=100,retired_at=200,outcome='unknown' if expired else 'completed',evidence_expired=expired)
+        with api._database(self.scope,write=True) as db:
+            db.execute('insert into retired_identities(kind,identity_digest,data) values(?,?,?)',(kind,api._retired_identity(kind,identity),json.dumps(data)))
+        return data
+
+    def test_lifecycle_retired_task_and_event_point_replays_cannot_recreate_rows(self):
+        self.scope=canonical_scope(self.scope); api=self.api()
+        with api._database(self.scope,write=True,initialize=True): pass
+        owner=dict(scope_id=api._scope_id(self.scope),client='codex',session_id='session',task_id='task')
+        self.seed_marker('task',owner,expired=True)
+        with self.assertRaisesRegex(api.StateError,'[Rr]etired|expired'): self.start()
+        turn={k:owner[k] for k in ('scope_id','client','session_id')} | dict(turn_id='turn')
+        self.seed_marker('turn',turn)
+        path=self.scope.runtime.state_dir/'runtime.sqlite3'; before=path.read_bytes()
+        self.event('PostToolUse')
+        self.assertEqual(path.read_bytes(),before)
+        with api._database(self.scope) as db:
+            self.assertEqual(db.execute('select count(*) from tasks').fetchone()[0],0)
+            self.assertEqual(db.execute('select count(*) from receipts').fetchone()[0],0)
+
+    def test_lifecycle_expired_marker_cannot_retain_a_passing_outcome(self):
+        self.scope=canonical_scope(self.scope)
+        with self.api()._database(self.scope,write=True,initialize=True): pass
+        owner=dict(scope_id=self.api()._scope_id(self.scope),client='codex',session_id='session',task_id='task')
+        marker=self.seed_marker('task',owner,expired=True)
+        marker['outcome']='completed'
+        with self.api()._database(self.scope,write=True) as db:
+            db.execute('update retired_identities set data=?',(json.dumps(marker),))
+        with self.api()._database(self.scope) as db,self.assertRaises(self.api().StateError): self.api()._retired(db,'task',owner)
+
+
+    def test_lifecycle_indexes_are_exact_and_older_unshipped_schema_is_not_upgraded(self):
+        self.scope=canonical_scope(self.scope); self.start()
+        path=self.scope.runtime.state_dir/'runtime.sqlite3'
+        with closing(sqlite3.connect(path)) as db,db:
+            db.execute('drop index retired_assignment_id')
+            db.execute("CREATE UNIQUE INDEX retired_assignment_id ON retired_identities(assignment_id) WHERE kind='assign ment'")
+        before=path.read_bytes()
+        with self.assertRaises(self.api().StateError): self.start()
+        self.assertEqual(path.read_bytes(),before)
+
+    def test_lifecycle_metadata_validates_columns_but_does_not_trust_physical_assertions(self):
+        self.scope=canonical_scope(self.scope); self.start(); api=self.api()
+        name='c'*32+'.json'; binding=dict(device=1,inode=10)
+        value=dict(version=1,owner=dict(kind='project',project_id='project',task=None),created_at=100,
+            **{'class':'compact'},bytes=7,status='live',closed_at=None,dependencies=[],targets=[],export=None,
+            managed=dict(path=str(self.scope.runtime.state_dir/'evidence'/name),binding=binding,
+                parents={str(self.scope.runtime.state_dir/'evidence'):binding},sha256='d'*64,mode=0o400,bytes=7))
+        with api._database(self.scope,write=True) as db:
+            db.execute('insert into evidence_metadata values(?,?,?,?,?,?,?,?,?)',
+                (name,'d'*64,'project:project','compact',100,None,'live',7,json.dumps(value)))
+        # Stored shape is valid even though there is no artifact; later evidence integration must establish ownership.
+        self.assertFalse(Path(value['managed']['path']).exists())
+        with api._database(self.scope) as db:
+            self.assertEqual(api._metadata(db,name),value)
+            self.assertIsNone(api._metadata(db,'e'*32+'.json'))
+        value['bytes']=1
+        value['managed']['bytes']=True
+        with api._database(self.scope,write=True) as db:
+            db.execute('update evidence_metadata set bytes=1,data=?',(json.dumps(value),))
+        with api._database(self.scope) as db,self.assertRaises(api.StateError): api._metadata(db,name)
+
+    def test_lifecycle_caller_cannot_save_a_structurally_valid_synthetic_closure(self):
+        self.scope=canonical_scope(self.scope); task=self.start()['task']; life=task['lifecycle']
+        life['safe_closed_at']=life['created_at']+1
+        life['closure']=dict(version=1,task_revision=task['revision'],dependency_digest='a'*64,
+                             observed_at=life['safe_closed_at'],evidence=[])
+        with self.api()._database(self.scope,write=True) as db,self.assertRaises(self.api().StateError):
+            self.api()._save(db,self.api()._scope_id(self.scope),task)
+        self.assertIsNone(self.status()['task']['lifecycle']['safe_closed_at'])
+
+
+    def test_historical_retirement_requires_exact_stopped_writer_proof_and_preserves_pins(self, *, canonical=False):
         import hashlib
         self.start()
         old = self.status()["task"]
@@ -85,8 +524,20 @@ class StateTests(unittest.TestCase):
         request["stop_proof"] = dict(path=str(path), sha256=hashlib.sha256(raw).hexdigest())
         with self.assertRaises(self.api().StateError):
             self.api().retire_task(self.scope, request | dict(expected_revision=1))
-        with patch.object(self.api(), "runtime_fingerprint", return_value="new-runtime"):
+        if canonical:
+            self.assertEqual(set(historical["pins"]), {"schema_version", "policy_digest", "runtime_digest", "accepted_scope_digest"})
+            with self.api()._database(self.scope) as db:
+                metadata = db.execute("select * from evidence_metadata order by name").fetchall()
+            with patch.object(self.api(), "runtime_fingerprint", return_value="new-runtime"), \
+                    self.assertRaisesRegex(self.api().StateError, "Installed runtime differs"):
+                self.api().retire_task(self.scope, request)
+            with self.api()._database(self.scope) as db:
+                self.assertEqual(self.api()._task(db, self.api()._scope_id(self.scope), "codex", "session", "task"), historical)
+                self.assertEqual(db.execute("select * from evidence_metadata order by name").fetchall(), metadata)
             result = self.api().retire_task(self.scope, request)
+        else:
+            with patch.object(self.api(), "runtime_fingerprint", return_value="new-runtime"):
+                result = self.api().retire_task(self.scope, request)
         self.assertEqual(result["task"]["state"], "cancelled")
         self.assertEqual(result["task"]["pins"], historical["pins"])
         self.assertEqual(self.status()["task"]["task_id"], "new")
@@ -275,6 +726,110 @@ class StateTests(unittest.TestCase):
         self.assertEqual(self.api().process_event(self.scope, other).action, "pass")
         self.update(conditions=[dict(id="patch", kind="blocker", action="patch", reason="Check", reference="ref")])
         self.assertEqual(self.api().process_event(self.scope, other).action, "pass")
+
+    def test_claude_file_tools_use_the_shared_bound_task_guard(self):
+        self.scope = canonical_scope(self.scope, client="claude-code")
+        api = self.api()
+        event = lambda name: RuntimeEvent("PreToolUse", "claude-code", "claude-session",
+                                          self.scope.repository_root, tool_name=name)
+        for name in ("Edit", "Write", "NotebookEdit"):
+            with self.subTest(tool=name):
+                self.assertEqual(api.process_event(self.scope, event(name)).action, "deny")
+
+        request = self.request | dict(client="claude-code", session_id="claude-session")
+        api.start_task(self.scope, request)
+        api.update_task(self.scope, {key: request[key] for key in ("client", "session_id", "task_id", "scope_ref")} |
+                        dict(expected_revision=1, state="active", reason="work", reference="user:1"))
+        for name in ("Edit", "Write", "NotebookEdit"):
+            with self.subTest(tool=name):
+                self.assertEqual(api.process_event(self.scope, event(name)).action, "pass")
+
+        api.update_task(self.scope, {key: request[key] for key in ("client", "session_id", "task_id", "scope_ref")} |
+                        dict(expected_revision=2, state="active", reason="work", reference="user:1",
+                             conditions=[dict(id="block", kind="blocker", action="patch", reason="Check", reference="ref")]))
+        for name in ("Edit", "Write", "NotebookEdit"):
+            with self.subTest(tool=name, blocked=True):
+                self.assertEqual(api.process_event(self.scope, event(name)).action, "deny")
+        self.assertEqual(api.process_event(self.scope, event("Bash")).action, "pass")
+        self.assertEqual(api.process_event(self.scope, event("mcp__demo__write")).action, "pass")
+
+    def test_claude_status_does_not_claim_stored_ready_as_verified(self):
+        self.scope = canonical_scope(self.scope, client="claude-code")
+        api = self.api()
+        request = self.request | dict(client="claude-code", session_id="claude-session")
+        api.start_task(self.scope, request)
+        with api._database(self.scope, write=True) as db:
+            scope_id = api._scope_id(self.scope)
+            raw = db.execute("select data from tasks where scope_id=? and client=? and session_id=? and task_id=?",
+                             (scope_id, "claude-code", "claude-session", "task")).fetchone()[0]
+            task = json.loads(raw)
+            task["state"] = "ready"
+            db.execute("update tasks set data=? where scope_id=? and client=? and session_id=? and task_id=?",
+                       (json.dumps(task, separators=(",", ":")), scope_id, "claude-code", "claude-session", "task"))
+        with self.assertRaisesRegex(api.StateError, "Claude Code task readiness is unverified"):
+            api.task_status(self.scope, "claude-code", "claude-session")
+
+    def test_claude_task_controls_require_exact_canonical_client_scope(self):
+        api = self.api()
+        request = self.request | dict(client="claude-code", session_id="claude-session")
+        with self.assertRaisesRegex(api.StateError, "accepted canonical client scope"):
+            api.start_task(self.scope, request)
+        with self.assertRaisesRegex(api.StateError, "accepted canonical client scope"):
+            api.task_status(self.scope, "claude-code", "claude-session")
+        event = RuntimeEvent("PreToolUse", "claude-code", "claude-session", self.scope.repository_root,
+                            tool_name="Edit")
+        self.assertEqual(api.process_event(self.scope, event).action, "deny")
+
+    def test_claude_scope_does_not_enable_retirement_evidence_or_delegation_apis(self):
+        self.scope = canonical_scope(self.scope, client="claude-code")
+        api = self.api()
+        from runtime import evidence, delegation
+        identity = self.request | dict(client="claude-code", session_id="claude-session")
+        task = api.start_task(self.scope, identity)["task"]
+        retirement = {key: task[key] for key in ("client", "session_id", "task_id", "scope_ref")}
+        retirement.update(expected_revision=task["revision"], expected_pins=task["pins"], reason="Stopped",
+                          reference="fixture:stop", stop_proof={})
+        with self.assertRaisesRegex(api.StateError, "Unsupported task client"):
+            api.retire_task(self.scope, retirement)
+        evidence_request = {key: identity[key] for key in ("client", "session_id", "task_id", "scope_ref")}
+        evidence_request.update(expected_revision=1, plan={})
+        with self.assertRaisesRegex(api.StateError, "Unsupported task client"):
+            evidence.plan_evidence(self.scope, evidence_request)
+        with self.assertRaisesRegex(api.StateError, "Unsupported task client"):
+            delegation.plan_delegation(self.scope, evidence_request | {"plan": {}})
+
+    def test_shared_scans_decode_canonical_claude_task_without_enabling_evidence_apis(self):
+        api = self.api()
+        codex_scope = canonical_scope(self.scope, client="codex")
+        claude_scope = canonical_scope(self.scope, client="claude-code")
+        api.start_task(codex_scope, self.request)
+        claude_request = self.request | dict(client="claude-code", session_id="claude-session")
+        api.start_task(claude_scope, claude_request)
+
+        report = api.inspect_state(claude_scope)
+        self.assertNotIn("error", report)
+        self.assertEqual(len(report["tasks"]), 2)
+
+        from runtime import delegation, evidence
+        with api._database(codex_scope) as db:
+            delegation._resources_available(codex_scope, db, [], [])
+        evidence_request = {key: claude_request[key] for key in
+                            ("client", "session_id", "task_id", "scope_ref")}
+        evidence_request.update(expected_revision=1, purpose="completion")
+        with self.assertRaisesRegex(api.StateError, "Unsupported task client"):
+            evidence.verify_completion(claude_scope, evidence_request)
+
+    def test_canonical_claude_task_replacement_rebinds_only_with_exact_revision(self):
+        self.scope = canonical_scope(self.scope, client="claude-code")
+        api = self.api()
+        request = self.request | dict(client="claude-code", session_id="claude-session")
+        first = api.start_task(self.scope, request)["task"]
+        replacement = request | dict(task_id="task-next", replaces={"task_id": first["task_id"],
+                                                                       "expected_revision": first["revision"]})
+        result = api.start_task(self.scope, replacement)
+        self.assertEqual(result["task"]["task_id"], "task-next")
+        self.assertEqual(api.task_status(self.scope, "claude-code", "claude-session")["task"]["task_id"],
+                         "task-next")
 
     def test_receipts_deduplicate_conflicts_missing_identity_and_late_events(self):
         self.start()
@@ -538,6 +1093,269 @@ class StateTests(unittest.TestCase):
         results = [process.communicate(timeout=5) for process in processes]
         self.assertTrue(all(process.returncode == 0 for process in processes), results)
         self.assertEqual(sum(stdout.strip() == b"continue" for stdout, _ in results), 1, results)
+
+
+class AuthorityBootstrapTests(unittest.TestCase):
+    def setUp(self):
+        self.fixture = StateTests(methodName='runTest')
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.scope = canonical_scope(self.fixture.scope)
+        self.fixture.scope = self.scope
+        self.api = self.fixture.api()
+        from runtime import changes
+        lock_patch = patch.object(changes, 'LOCK_ROOT', self.fixture.base / 'authority-guards')
+        lock_patch.start(); self.addCleanup(lock_patch.stop)
+
+    def baseline(self):
+        with self.api._database(self.scope) as db:
+            return self.api._source_baseline(self.scope, db)
+
+    def test_fresh_owner_baseline_precedes_task_and_preserves_original_age(self):
+        from runtime import evidence
+        with patch.object(self.api, '_owner_time', return_value=100):
+            self.fixture.start()
+        baseline = self.baseline()
+        self.assertEqual(baseline['content']['created_at'], 100)
+        self.assertEqual(baseline['content']['source_contract'], 2)
+        self.assertNotIn('complete', baseline)
+        with self.api._database(self.scope) as db:
+            metadata = self.api._metadata(db, baseline['reference']['name'])
+        self.assertEqual(metadata['class'], 'compact')
+        self.assertEqual(metadata['created_at'], 100)
+        self.assertEqual(metadata['owner'], dict(kind='project', project_id='project', task=None))
+        with patch.object(self.api, '_owner_time', side_effect=AssertionError('baseline age reset')):
+            self.fixture.start()
+        self.assertEqual(self.baseline(), baseline)
+        with self.assertRaises(self.api.StateError):
+            evidence._artifact(self.scope, dict(result='forged purpose'),
+                owner=evidence._ArtifactOwner('project', None, None, 'authority-source-baseline'))
+
+    def test_replacement_after_exclusive_create_before_sqlite_open_rejects(self):
+        original = sqlite3.connect
+        replaced = []
+        path = self.scope.runtime.state_dir / 'runtime.sqlite3'
+        def replace_before_open(database, *args, **kwargs):
+            if not replaced and str(database) == str(path):
+                path.rename(path.with_name('original.sqlite3'))
+                path.touch(mode=0o600)
+                replaced.append(True)
+            return original(database, *args, **kwargs)
+        with patch.object(sqlite3, 'connect', side_effect=replace_before_open):
+            with self.assertRaises(self.api.StateError): self.fixture.start()
+        self.assertTrue(replaced)
+        with closing(original(path)) as db:
+            self.assertEqual(db.execute('select count(*) from sqlite_master').fetchone()[0], 0)
+
+    def test_preexisting_empty_database_never_gets_creation_baseline(self):
+        witness = self.api._initialize(self.scope.runtime.state_dir / 'runtime.sqlite3', version=3)
+        if witness is not None: os.close(witness.descriptor)
+        self.fixture.start()
+        self.assertIsNone(self.baseline())
+
+    def test_copied_database_does_not_rebind_its_baseline(self):
+        import shutil
+        self.fixture.start()
+        original = self.baseline()
+        path = self.scope.runtime.state_dir / 'runtime.sqlite3'
+        replacement = path.with_name('copy.sqlite3')
+        shutil.copyfile(path, replacement); replacement.chmod(0o600); replacement.replace(path)
+        self.assertIsNone(self.baseline())
+        self.fixture.start()
+        self.assertIsNone(self.baseline())
+        with self.api._database(self.scope) as db:
+            self.assertIsNotNone(self.api._metadata(db, original['reference']['name']))
+
+    def test_active_d4_marker_blocks_before_database_creation(self):
+        from runtime import changes
+        directory = self.scope.runtime.state_dir
+        directory.mkdir(mode=0o700)
+        for location in changes._authority_locations([directory]):
+            marker = Path(str(location) + '.json')
+            marker.write_text(json.dumps(dict(schema_version=1, plan_dir=str(self.fixture.base),
+                transaction_id='fixture:active', manifest_digest='a'*64)))
+            marker.chmod(0o600)
+        with self.assertRaises(self.api.StateError): self.fixture.start()
+        self.assertFalse((directory / 'runtime.sqlite3').exists())
+
+    def test_rollback_leaves_protected_orphan_and_never_retrofits_baseline(self):
+        with self.assertRaisesRegex(RuntimeError, 'rollback bootstrap'):
+            with self.api._database(self.scope, write=True, initialize=True):
+                raise RuntimeError('rollback bootstrap')
+        artifacts = list((self.scope.runtime.state_dir / 'evidence').iterdir())
+        self.assertEqual(len(artifacts), 1)
+        self.assertIsNone(self.baseline())
+        self.fixture.start()
+        self.assertIsNone(self.baseline())
+        self.assertEqual(list((self.scope.runtime.state_dir / 'evidence').iterdir()), artifacts)
+
+    def test_missing_and_same_byte_substituted_baseline_remain_unknown_without_retrofit(self):
+        self.fixture.start()
+        baseline = self.baseline()
+        path = self.scope.runtime.state_dir / 'evidence' / baseline['reference']['name']
+        replacement = path.with_suffix('.copy')
+        replacement.write_bytes(path.read_bytes()); replacement.chmod(0o400); replacement.replace(path)
+        with self.assertRaises(self.api.StateError): self.baseline()
+        path.unlink()
+        with self.assertRaises(self.api.StateError): self.baseline()
+        self.fixture.start()
+        self.assertFalse(path.exists())
+
+    def test_concurrent_initializer_cannot_bypass_held_authority_guard(self):
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+        entered, release = threading.Event(), threading.Event()
+        original = self.api._initialize
+        def pause(*args, **kwargs):
+            entered.set()
+            if not release.wait(5): raise AssertionError('bootstrap guard test timed out')
+            return original(*args, **kwargs)
+        with patch.object(self.api, '_initialize', side_effect=pause), ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(self.fixture.start)
+            try:
+                self.assertTrue(entered.wait(5))
+                second = executor.submit(self.fixture.start)
+                with self.assertRaises(self.api.StateError): second.result(timeout=2)
+            finally:
+                release.set()
+            self.assertTrue(first.result(timeout=5)['ok'])
+        self.assertIsNotNone(self.baseline())
+
+    def test_replacement_immediately_after_open_cannot_change_captured_descriptor_identity(self):
+        original_open = os.open
+        path = self.scope.runtime.state_dir / 'runtime.sqlite3'
+        replaced = []
+        def replace_after_open(target, flags, *args, **kwargs):
+            descriptor = original_open(target, flags, *args, **kwargs)
+            actual_target = path if target == path.name and kwargs.get('dir_fd') is not None else Path(target)
+            if actual_target == path and flags & os.O_EXCL and not replaced:
+                path.rename(path.with_name('original.sqlite3'))
+                replacement = original_open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                os.close(replacement)
+                replaced.append(True)
+            return descriptor
+        with patch.object(os, 'open', side_effect=replace_after_open):
+            with self.assertRaises(self.api.StateError): self.fixture.start()
+        self.assertTrue(replaced)
+        with closing(sqlite3.connect(path)) as db:
+            self.assertEqual(db.execute('select count(*) from sqlite_master').fetchone()[0], 0)
+
+    def test_replacement_at_runtime_open_registration_and_first_commit_rejects(self):
+        import shutil
+        from runtime import evidence
+        for stage in ('runtime-open', 'registration', 'first-commit'):
+            with self.subTest(stage=stage):
+                scope = canonical_scope(replace(self.fixture.scope, runtime=replace(self.fixture.scope.runtime,
+                    state_dir=self.fixture.base / ('bootstrap-' + stage))))
+                self.scope = self.fixture.scope = scope
+                path = scope.runtime.state_dir / 'runtime.sqlite3'
+                changed = []
+                def substitute():
+                    copy = path.with_name('copy.sqlite3')
+                    shutil.copyfile(path, copy); copy.chmod(0o600)
+                    path.rename(path.with_name('original.sqlite3')); copy.replace(path)
+                    changed.append(True)
+                original_connect = sqlite3.connect
+                original_register = evidence._register_source_baseline
+                original_save = self.api._save
+                def connect(database, *args, **kwargs):
+                    if stage == 'runtime-open' and str(database).startswith(path.as_uri()) and not changed:
+                        substitute()
+                    return original_connect(database, *args, **kwargs)
+                def register(*args, **kwargs):
+                    if stage == 'registration': substitute()
+                    return original_register(*args, **kwargs)
+                def save(*args, **kwargs):
+                    result = original_save(*args, **kwargs)
+                    if stage == 'first-commit': substitute()
+                    return result
+                with patch.object(sqlite3, 'connect', side_effect=connect), \
+                     patch.object(evidence, '_register_source_baseline', side_effect=register), \
+                     patch.object(self.api, '_save', side_effect=save):
+                    with self.assertRaises(self.api.StateError): self.fixture.start()
+                self.assertTrue(changed)
+                self.assertIsNone(self.baseline())
+
+    def test_preexisting_orphan_blocks_fresh_baseline_and_never_gets_adopted(self):
+        directory = self.scope.runtime.state_dir
+        folder = directory / 'evidence'
+        folder.mkdir(mode=0o700, parents=True); directory.chmod(0o700)
+        orphan = folder / ('f'*32 + '.json')
+        orphan.write_text('{}'); orphan.chmod(0o400)
+        with self.assertRaises(self.api.StateError): self.fixture.start()
+        self.assertIsNone(self.baseline())
+        self.fixture.start()
+        self.assertIsNone(self.baseline())
+        self.assertEqual(list(folder.iterdir()), [orphan])
+
+    def test_exclusive_create_race_winner_does_not_give_loser_a_witness(self):
+        original = self.api._initialize
+        def raced(path, **kwargs):
+            witness = original(path, **kwargs)
+            os.close(witness.descriptor)
+            raise FileExistsError('another initializer won')
+        with patch.object(self.api, '_initialize', side_effect=raced): self.fixture.start()
+        self.assertIsNone(self.baseline())
+
+
+    def test_first_task_write_still_holds_guard_and_existing_d6_path_does_not_reenter(self):
+        from runtime import delegation
+        original = self.api._save
+        checked = []
+        def save(*args, **kwargs):
+            with self.assertRaises(self.api.StateError):
+                with delegation._reservation_write(self.scope): pass
+            checked.append(True)
+            return original(*args, **kwargs)
+        with patch.object(self.api, '_save', side_effect=save): self.fixture.start()
+        self.assertEqual(checked, [True])
+        with delegation._reservation_write(self.scope) as db:
+            self.assertIsNotNone(self.api._source_baseline(self.scope, db))
+
+
+    def test_guarded_directory_replacement_before_initializer_rejects_before_creation(self):
+        original = self.api._initialize
+        directory = self.scope.runtime.state_dir
+        saved = directory.with_name('original-authority-directory')
+        def substitute(path, **kwargs):
+            directory.rename(saved)
+            directory.mkdir(mode=0o700)
+            return original(path, **kwargs)
+        with patch.object(self.api, '_initialize', side_effect=substitute):
+            with self.assertRaises(self.api.StateError): self.fixture.start()
+        self.assertFalse((directory / 'runtime.sqlite3').exists())
+        self.assertFalse((saved / 'runtime.sqlite3').exists())
+        self.assertFalse((directory / 'evidence').exists())
+
+
+
+class LifecycleDependencyTests(unittest.TestCase):
+    def setUp(self):
+        from runtime import evidence
+        self.f=StateTests(methodName='runTest');self.f.setUp();self.addCleanup(self.f.doCleanups)
+        self.f.scope=canonical_scope(self.f.scope);self.api=self.f.api()
+        with patch.object(self.api,'_owner_time',return_value=100):self.f.start()
+        with self.api._database(self.f.scope) as db:
+            task=self.api._task(db,self.api._scope_id(self.f.scope),'codex','session')
+            self.ref=evidence._canonical_plain(evidence._artifact_owner(self.f.scope,task).task)
+
+    def test_dependency_observation_is_bounded_exact_and_read_only(self):
+        with self.api._database(self.f.scope) as db:
+            before=db.total_changes
+            result=self.api.inspect_dependencies(db,self.ref)
+            self.assertEqual(result['task']['lifecycle']['created_at'],100)
+            self.assertEqual(result['task']['task_id'],'task')
+            self.assertEqual(result['assignments'],[])
+            self.assertEqual(result['blockers'],[])
+            self.assertEqual(result,self.api.inspect_dependencies(db,self.ref))
+            self.assertEqual(db.total_changes,before)
+
+    def test_ambiguous_receipt_ownership_is_protected(self):
+        with self.api._database(self.f.scope,write=True) as db:
+            db.execute("insert into receipts values(?,?,?,?,?,?,?,0)",(self.ref['scope_id'],'codex','session','orphan-turn','call','PreToolUse','hash'))
+        with self.api._database(self.f.scope) as db:
+            result=self.api.inspect_dependencies(db,self.ref)
+            self.assertTrue(any('ownership' in b for b in result['blockers']))
 
 
 if __name__ == "__main__":

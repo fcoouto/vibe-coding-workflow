@@ -1,0 +1,11 @@
+# Background OpenRouter worker pilot
+
+The user approved Codex coordination, background OpenCode execution, native supervisor visibility and reuse of the existing Habblaud integration. This is an additive, opt-in pilot; Genesis owns shared runtime and integration files.
+
+One genuine native supervisor owns each external assignment. Its native model identity stays truthful. It invokes a standalone Python runner, narrates observed worker activity and independently verifies the result. OpenCode performs a bounded read-only investigation using tools over explicitly copied input files, not the original repository. Shell, writes, network tools, nested delegation and external-directory access are denied. This first slice proves actual tool use and visibility without granting external repository write access. These are application permissions, not an OS sandbox.
+
+Use pinned OpenCode 1.19.5 in a private installation. Each run uses a fresh private workspace, isolated configuration/data directories, explicit OpenRouter model/provider selection, finite steps and a timeout. The user's independent OpenRouter key is supplied through a private runtime auth file or environment; never extract MCP credentials. OpenRouter manages monetary limits. Existing discovery/triage remains advisory; agent tool competence needs separate observed qualification. A fresh MCP credit preflight precedes each live run.
+
+The runner emits sanitized JSON progress and saves private result/accounting evidence. Reuse the installed Local Model Delegation Habblaud transport with its existing role/model badge convention and heartbeat pattern. Display records correspond to actual attempts only. Habblaud failures do not affect execution; completion animation is not acceptance. Native supervisor cards are genuine native agents, not renamed external agents. Cost and tokens are OpenCode-reported until independently reconciled.
+
+Completion requires real OpenCode execution with at least one allowed tool, observed Habblaud entry, genuine native supervisor dispatch, native acceptance checks and an explicit final disposition. Missing credentials or client evidence remains an incomplete live qualification. Do not alter the old proposal route or claim that proposal qualification transfers to agents.

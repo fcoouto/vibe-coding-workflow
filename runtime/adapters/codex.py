@@ -12,7 +12,7 @@ from runtime.adapters import session_start
 from runtime.adapters.session_start import diagnostic, render
 from runtime.engine import HookResult, RuntimeEvent
 from runtime.doctor import NativeProcess, ObservationError, version
-from runtime.startup import StartupError, json_object
+from runtime.startup import StartupError, AcceptedScope, json_object
 
 
 SOURCES = {"startup", "resume", "clear", "compact", "fork"}
@@ -140,6 +140,9 @@ def _native_reader(methods):
 
 
 def _native_metadata(scope, request, identity, observed_version):
+    if isinstance(scope, AcceptedScope):
+        from runtime.evidence import _canonical_inputs
+        _canonical_inputs(scope)
     thread = request("thread/read", {"threadId": identity, "includeTurns": False}).get("thread")
     if (not isinstance(thread, dict) or thread.get("id") != identity
             or thread.get("cwd") != str(scope.repository_root)
@@ -358,6 +361,12 @@ def _observe_native_assignment(scope, attempt, parent_turn_id, spawn_item_id, *,
     try:
         if not isinstance(binding, dict) or binding.get("attempt_id") != attempt:
             raise ObservationError("assignment_unverified")
+        if isinstance(scope, AcceptedScope):
+            from runtime import state
+            if (binding.get("pins") != state._pins(scope)
+                    or binding.get("accepted_identity") != state._accepted_identity(scope.accepted_identity)
+                    or binding.get("scope_id") != state._scope_id(scope)):
+                raise ObservationError("assignment_unverified")
         for field in ("assignment_digest", "candidate_digest"):
             value = binding.get(field)
             if not isinstance(value, str) or len(value) != 64 or any(char not in "0123456789abcdef" for char in value):

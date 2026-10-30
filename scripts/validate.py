@@ -23,20 +23,26 @@ def local_file(root, value):
     return path
 
 
-def validate_startup_hook(root, manifest, client, root_variable):
+def validate_claude_hooks(root, manifest, root_variable):
     hook_file = local_file(root, manifest["hooks"])
     hooks = read_json(hook_file)["hooks"]
-    if set(hooks) != {"SessionStart"} or len(hooks["SessionStart"]) != 1:
-        raise ValueError("Require one startup hook group per client")
+    if set(hooks) != {"SessionStart", "PreToolUse"} or len(hooks["SessionStart"]) != 1 or len(hooks["PreToolUse"]) != 1:
+        raise ValueError("Require one Claude startup and guarded file-tool hook group")
     group = hooks["SessionStart"][0]
     if group.get("matcher") != "^(startup|resume|clear|compact|fork)$" or len(group["hooks"]) != 1:
         raise ValueError("Register each supported startup source once")
     handler = group["hooks"][0]
-    command = f'python3 -I -B "${{{root_variable}}}/scripts/workflow.py" {client} SessionStart'
+    command = f'python3 -I -B "${{{root_variable}}}/scripts/workflow.py" claude-code SessionStart'
     if handler != {"type": "command", "command": command, "timeout": 5}:
         raise ValueError("Use the bounded, silent native startup command")
-    local_file(root, "./clients/" + client + ".md")
-    local_file(root, "./runtime/adapters/" + client.replace("-", "_") + ".py")
+    group = hooks["PreToolUse"][0]
+    if (group.get("matcher") != "^(Edit|Write|NotebookEdit)$" or len(group.get("hooks", [])) != 1):
+        raise ValueError("Register only the supported Claude file-tool guard")
+    command = f'python3 -I -B "${{{root_variable}}}/scripts/workflow.py" claude-code PreToolUse'
+    if group["hooks"][0] != {"type": "command", "command": command, "timeout": 5}:
+        raise ValueError("Use the bounded Claude file-tool runtime command")
+    local_file(root, "./clients/claude-code.md")
+    local_file(root, "./runtime/adapters/claude_code.py")
 
 
 def validate_codex_hooks(root, manifest):
@@ -84,7 +90,7 @@ def validate(root=ROOT):
     local_file(root, "./clients/codex.md")
     local_file(root, "./runtime/adapters/codex.py")
     validate_codex_hooks(root, manifest)
-    validate_startup_hook(root, claude, "claude-code", "CLAUDE_PLUGIN_ROOT")
+    validate_claude_hooks(root, claude, "CLAUDE_PLUGIN_ROOT")
     for path in ("scripts/workflow.py", "runtime/__init__.py", "runtime/startup.py",
                  "runtime/engine.py", "runtime/state.py", "runtime/doctor.py", "runtime/evidence.py",
                  "runtime/adapters/__init__.py", "runtime/adapters/session_start.py",
@@ -94,6 +100,7 @@ def validate(root=ROOT):
                  "scripts/repository_gate.py", "clients/repository-gate.md",
                  "skills/onboard-my-project/SKILL.md",
                  "skills/onboard-my-project/references/procedure.md",
+                 "skills/onboard-my-project/references/project-plan.md",
                  "skills/onboard-my-project/references/apply-and-recovery.md",
                  "skills/onboard-my-project/agents/openai.yaml"):
         local_file(root, "./" + path)

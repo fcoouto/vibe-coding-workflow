@@ -2,6 +2,10 @@
 
 Read this contract only when a Codex task needs explicit task controls, a `doctor` report, or lifecycle troubleshooting. Startup-only projects do not need it. For native delegated work only, also read [native delegation](delegation.md). For planned checks, review, completion, or local merge evidence, also read [task checks and review evidence](evidence.md). Shared policy remains in the [policy index](../policies/00-index.md); native qualification status and procedures are in [validation guidance](../docs/d2-validation.md).
 
+For code changes to canonical Project/Repository scope or state, also consult [the internal schema-3 boundary](#internal-canonical-schema-3). Routine task controls remain under the public contract below.
+
+This CLI and its evidence, delegation, doctor and retirement APIs remain Codex-only. Read the [Claude Code prepared guard](claude-code.md#prepared-file-guard) only when the task concerns Claude Code support.
+
 ## Opt in
 
 The existing checkout-root `.vibe-coding-workflow/project.json` may include this optional field:
@@ -26,6 +30,8 @@ python3 -I -B /path/to/package/scripts/workflow.py task update --cwd /checkout <
 python3 -I -B /path/to/package/scripts/workflow.py task status --cwd /checkout --client codex --session SESSION
 python3 -I -B /path/to/package/scripts/workflow.py doctor --cwd /checkout --client codex --executable /path/to/codex
 ```
+
+Append `--prepare-observability` to `task status` to prepare optional local data from the same report. It adds `observability_preparation`: `{status:"prepared",data:...}` or `{status:"unavailable"}`. Without the flag, output is unchanged. Ordinary status revalidation still applies; the flag enables neither collection nor exports.
 
 `start.json` requires `client:"codex"`, `session_id`, `task_id`, `scope_ref`, `mode` (`editable` or `read-only`), and `decision_ref`. Optional `replaces` is exactly `{task_id, expected_revision}` and is required to explicitly replace a current binding. A new task starts `planned` at revision 1. Repeating the same start identity is idempotent; task identity, mode, references and policy/runtime pins cannot be silently changed. Rebinding preserves history and revokes old continuations. Replacement/rebinding cannot clear unresolved assignments, including retained historical ownership; reconcile exact attempts first.
 
@@ -56,8 +62,16 @@ Stop continuation is opt-in through one runnable condition, current correlated t
 
 ## Change a pinned runtime
 
-Load this section only for an authorized runtime update or recovery. Follow [application and recovery](../skills/onboard-my-project/references/apply-and-recovery.md) for D4's approved plan and mutation controls. Reconcile affected writers with their supported old pinned runtime before retiring historical tasks. Retirement preserves original pins/history and cannot make a task ready; its exact proof requirements remain in [evidence](evidence.md#request-fields).
+Load this section only for an authorized runtime update or recovery. Follow [application and recovery](../skills/onboard-my-project/references/apply-and-recovery.md) for D4's approved plan and mutation controls. Reconcile affected writers with their supported old pinned runtime before retiring historical tasks. `task retire` cancels and preserves live history; it cannot make a task ready. Exact proof requirements remain in [evidence](evidence.md#request-fields).
 
 Activate schema 2 through a fresh approved shared state directory after D4 verifies proposed, actual and backup authority coverage and all affected writers. Preserve schema-1 databases, artifacts and pins unchanged. Do not migrate in place, copy old successful evidence, silently repin tasks or roll back into active schema-1 runtime. A separate state directory does not clear old ownership. Unknown authority, an unsupported old runtime or unverified writer/descendant state blocks the affected transition.
 
 D4's shared authority guard protects relevant reservation scans through enrollment changes. A protected long operation keeps a durable owner reference while running; a crash or elapsed time does not clear it. Use supported resume/rollback to reconcile that exact operation and its descendants before continuing. Package checks and successful activation do not establish native client execution.
+
+## Internal canonical schema 3
+
+This section applies only when changing or diagnosing canonical Project/Repository scope and state internals. The public workflow still reads checkout-root enrollment schema 1 and nested runtime/SQLite schema 2. The private Project-record schema 2 decoder returns a `CanonicalRecord`; `resolve_canonical_scope` yields an internal `AcceptedScope` only after authority, checkout, client and qualification observations. Canonical task state uses schema 3. That scope binds immutable project, repository, checkout and client identity, accepted-scope digest, policy/runtime pins, and physical checkout identity. Stored task identity and pins cannot be silently replaced. Schema-3 writes require the accepted scope and checked physical authority; they do not authorize bypassing the existing transaction guards.
+
+Read-only canonical acquisition and scope comparison are implemented internally, but task/evidence/delegation handlers are not wired into public dispatch: routine task commands still resolve checkout-root enrollment schema 1 with nested runtime schema 2. Only independently observed qualification facts can yield an active canonical scope; receipt strings or cached shapes alone cannot. Private Project-plan onboarding commands are separate. Internal linked verification can check the bounded complete participant set only from independently checked trusted-coordinator observations; it does not create membership or qualify native execution. For lifecycle closure scope and remaining limits, see [canonical evidence lifecycle](evidence.md#internal-canonical-schema-3-evidence).
+
+The private read-only `state._lifecycle_identity` reader resolves original schema-3 identity, pin/request digests and age from live rows or exact retirement markers in a physically checked authority. A retired assignment marker does not retain the removed assignment artifact pointer; the D4 certificate consumer must compare that pointer with retained owner-issued proof. This identity lookup does not establish closure, completion or cleanup eligibility.

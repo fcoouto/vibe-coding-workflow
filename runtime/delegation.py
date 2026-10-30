@@ -1,9 +1,11 @@
 """Bounded local selection guidance; coordinator assertions grant no route authority."""
+from functools import partial
 from contextlib import contextmanager
 from datetime import datetime
 import fcntl
 import hashlib
 import os
+from pathlib import Path
 import re
 import stat
 import time
@@ -233,7 +235,7 @@ def _locked(scope, request, create=False):
         raise state.StateError("Guidance cache is unavailable, unsafe or locked") from None
 
 
-def _snapshot(scope, folder, request):
+def _snapshot(scope, folder, request, *, context=None, db=None):
     raw = _read_bytes(folder / (request["client_surface"] + ".json")) if folder else None
     prior = hashlib.sha256(raw).hexdigest() if raw is not None else "missing"
     if raw is None:
@@ -245,10 +247,130 @@ def _snapshot(scope, folder, request):
         guidance = stored["guidance"]
         _require(isinstance(guidance, dict), "Invalid guidance snapshot")
         _guidance(guidance, dict(client_surface=request["client_surface"], applicability=guidance.get("applicability")))
-        _require(evidence._read(scope, stored["snapshot_ref"]) == guidance, "Guidance snapshot evidence changed")
+        actual=(evidence._read(scope,stored['snapshot_ref']) if context is None else
+            evidence._read(None,stored['snapshot_ref'],context=context,db=db))
+        _require(actual == guidance, "Guidance snapshot evidence changed")
         return guidance, stored["snapshot_ref"], prior
     except (state.StateError, ValueError, TypeError, RecursionError):
         return None, None, prior
+
+
+def _closure_guidance(context,db,records):
+    """Read original native guidance plus its current cache; never acquire cache locks."""
+    from runtime import changes
+    references={};surfaces=set();files={};folder=context.directory/'model-guidance';retained=[];native=[]
+    def source(reference):
+        value=evidence._read(None,reference,context=context,db=db)
+        _guidance(value,dict(client_surface=value.get('client_surface'),applicability=value.get('applicability')))
+        metadata=state._metadata(db,reference['name'])
+        _require(metadata is not None and metadata['class']=='detail' and metadata['owner']['task'] is None,
+            'Guidance requires original registered scope ownership')
+        result=dict(reference=reference,created_at=metadata['created_at'],owner=metadata['owner'],guidance=value)
+        references[evidence._raw(reference)]=result
+        return result
+    def assignment(body,reference,created_at,request_digest):
+        discovery=evidence._read(None,body['discovery'],context=context,db=db)
+        guidance=body['guidance'];state._fields(guidance,('snapshot_ref','snapshot_digest','checked_at','freshness'))
+        surface=body['binding']['client_surface'];original=source(guidance['snapshot_ref']);surfaces.add(surface)
+        _guidance(original['guidance'],dict(client_surface=surface,applicability=dict(client_version=discovery['native_version'],
+            capability_fingerprint=discovery['capability_digest'])))
+        _require(guidance['snapshot_digest']==guidance['snapshot_ref']['digest'] and guidance['checked_at']==original['guidance']['checked_at'],
+            'Original native guidance correspondence changed')
+        return dict(reference=reference,created_at=created_at,request_digest=request_digest,guidance=guidance,
+            discovery={key:discovery[key] for key in ('client_surface','native_version','capability_digest')},
+            binding={key:body['binding'][key] for key in ('client_surface','native_version','parent_session_id','task_name')},
+            source_created_at=original['created_at'])
+    for record in records:
+        if record['data']['role'] not in NATIVE_ROLES:continue
+        reference=dict(authority=evidence._canonical_plain(context.authority_set[0]),id=record['id'],owner=record['owner'],assignment=record['data']['assignment'])
+        native.append(assignment(record['body'],reference,record['data']['lifecycle']['created_at'],record['data']['request_digest']))
+    rows=db.execute("select name,digest,owner_key,class,created_at,closed_at,status,bytes,data from evidence_metadata where class='compact' and status='live' order by name limit 4097").fetchall()
+    _require(len(rows)<=4096,'Retained guidance ownership support exceeds bound')
+    owners=set()
+    for row in rows:
+        metadata=state._metadata_record(row);owner=metadata['owner'].get('task')
+        if owner is None:continue
+        _require(owner['authority']==evidence._canonical_plain(context.authority_set[0]),'Foreign retained guidance owner remains protected')
+        compact=evidence._read(None,dict(name=row[0],digest=row[1]),context=context,db=db)
+        if evidence._bookkeeping_record(context,db,dict(name=row[0],digest=row[1]),compact):continue
+        marker=state._retired(db,'task',{key:owner[key] for key in ('scope_id','client','session_id','task_id')})
+        if marker is None:continue
+        linked=None
+        if compact.get('kind')=='linked-closure-preparation':
+            support=evidence._linked_retained_component(evidence._linked_basis_root(compact['stopped']['linked']),compact['stopped']['linked']['authorities'],writer=(context,db))
+            _require(not support.get('discovered_authorities'),'Retained guidance source guards are incomplete')
+            member=next(m for m in support['members'] if m['reference']==owner)
+            _require(member['preparation']['reference']==dict(name=row[0],digest=row[1]),'Retained guidance preparation is not its actual owner')
+            continue
+        owner_key=evidence._raw(owner);_require(owner_key not in owners,'Retained guidance owner has ambiguous compact receipts');owners.add(owner_key)
+        if compact.get('stopped',{}).get('linked'):
+            support=evidence._linked_retained_component(evidence._linked_basis_root(compact['stopped']['linked']),compact['stopped']['linked']['authorities'],writer=(context,db))
+            _require(not support.get('discovered_authorities'),'Retained guidance component source guards are incomplete')
+            linked=next(m for m in support['members'] if m['reference']==owner)
+            _require(linked['closure']['reference']==dict(name=row[0],digest=row[1]),'Retained guidance closure is not its actual owner')
+        _require(compact.get('kind')=='task-closure' and compact['identity']==owner and not marker['evidence_expired']
+            and marker['pins_digest']==state._digest(compact['pins']) and marker['created_at']==compact['created_at']==metadata['created_at'],
+            'Retained scope-guidance receipt differs from original task identity/age')
+        changes._check_stopped_certificate(context,db,compact['stopped'])
+        _require(len(compact.get('native_guidance',[]))==sum(item['role'] in NATIVE_ROLES for item in compact['stopped'].get('assignments',[])),
+            'Retained native guidance coverage differs from complete issued assignments')
+        markers=[]
+        for certificate in compact['stopped'].get('assignments',[]):
+            ref=certificate['reference'];assignment_marker=state._retired_assignment(db,ref['id']);markers.append([ref['id'],assignment_marker])
+            if certificate['role'] not in NATIVE_ROLES:continue
+            body=evidence._read(None,ref['assignment'],context=context,db=db)
+            _require(body['owner']==ref['owner'] and body['role']==certificate['role'] and body['pins']==compact['pins'] and body['accepted_identity']==compact['accepted_identity']
+                and body['lifecycle']['created_at']==certificate['created_at'] and evidence._digest(body['request'])==certificate['request_digest'],
+                'Retained native assignment differs from issued owner/pins/request/age')
+            for original in (ref['assignment'],body['discovery'],body['guidance']['snapshot_ref']):
+                source_metadata=state._metadata(db,original['name'])
+                _require(source_metadata is not None,'Retained native guidance source metadata is unavailable')
+                projected=dict(reference=original,created_at=source_metadata['created_at'],owner=source_metadata['owner'],
+                    bytes=source_metadata['bytes'],unit='bytes')
+                if linked is not None:
+                    projected['reference']=dict(authority=owner['authority'],artifact=original)
+                    present=any(source['reference']==projected['reference'] for source in support['sources'])
+                else:present=original in compact['artifacts']
+                _require(present and projected in compact['sources'],
+                    'Retained native guidance source differs from original managed provenance/age')
+            actual=assignment(body,ref,certificate['created_at'],certificate['request_digest'])
+            _require(actual in compact.get('native_guidance',[]),'Retained native guidance projection differs from actual original assignment')
+        for original in compact.get('scope_guidance',[]):
+            actual=source(original['reference'])
+            present=any(source['reference']==dict(authority=owner['authority'],artifact=original['reference']) for source in support['sources']) if linked is not None else original['reference'] in compact['artifacts']
+            _require(actual==original and present,
+                'Retained scope guidance differs from original source projection')
+        receipt=dict(reference=dict(name=row[0],digest=row[1]),identity=owner,marker=marker,assignments=markers)
+        if linked is not None:receipt['linked_component']=support
+        retained.append(receipt)
+    if folder.exists():
+        state._private(folder,True);entries=list(folder.iterdir());_require(len(entries)<=4096,'Guidance cache source bound exceeded')
+        surfaces.update(path.name[:-5] for path in entries if path.name.endswith('.json') and not path.name.endswith('.control.json'))
+    if not surfaces:return dict(references=[],sources=[],native=native,retained=retained,files={},folder=None)
+    state._private(folder,True);folder_binding=evidence._binding(folder)
+    for surface in sorted(surfaces):
+        _require(re.fullmatch(r'[a-z][a-z0-9-]{0,63}',surface),'Invalid original guidance surface')
+        paths=[folder/(surface+suffix) for suffix in ('.json','.control.json')]
+        _require(all(os.path.lexists(path) for path in paths),'Current guidance cache/control is missing')
+        before={str(path):evidence._closure_file_stat(path) for path in paths}
+        raw={str(path):_read_bytes(path) for path in paths}
+        control=_control(folder,surface)
+        _require(control['claim'] is None and control['last_attempt'] is not None,'Guidance refresh remains incomplete')
+        current,reference,_=_snapshot(None,folder,dict(client_surface=surface),context=context,db=db)
+        _require(current is not None and reference is not None,'Current guidance cache is missing or corrupt')
+        _require(control['generation']>0,'Current guidance control generation is unavailable')
+        # Failed refresh keys bind attempted applicability, not the preserved historical snapshot.
+        if control['last_attempt']['outcome']=='verified':
+            _require(control['last_attempt']['key']==_key(dict(applicability=current['applicability']),
+                hashlib.sha256(raw[str(paths[0])]).hexdigest(),True),'Current guidance control/source correspondence changed')
+        _require(all(evidence._closure_file_stat(path)==before[str(path)] and _read_bytes(path)==raw[str(path)] for path in paths)
+            and evidence._binding(folder)==folder_binding,'Guidance cache changed during owner observation')
+        source(reference)
+        for path in paths:
+            files[str(path)]=dict(stat=before[str(path)],digest=hashlib.sha256(raw[str(path)]).hexdigest())
+    sources=sorted(references.values(),key=evidence._raw)
+    return dict(references=sorted([value['reference'] for value in sources],key=evidence._raw),sources=sources,native=native,
+        retained=retained,files=files,folder=dict(path=str(folder),binding=folder_binding))
 
 
 def _trigger(value):
@@ -336,7 +458,7 @@ def record_guidance(scope, request):
         def unexpired():
             _require(claim["expires_at"] > _now(), "Guidance refresh claim expired before publication")
         if "guidance" in request:
-            reference = evidence._artifact(scope, request["guidance"])
+            reference = evidence._artifact(scope, request["guidance"], owner=evidence._guidance_artifact_owner(scope))
             _atomic(folder / (request["client_surface"] + ".json"),
                     dict(guidance=request["guidance"], snapshot_ref=reference), guard=unexpired)
             _, _, prior = _snapshot(scope, folder, request)
@@ -574,6 +696,32 @@ def _worker_claims(scope, claims, git_directory):
                      '.vibe-coding-workflow' not in path.parts, 'Lockfiles and tracking remain coordinator-owned')
 
 
+def _worker_scope(scope, claims, files=()):
+    """Check new filesystem admission against the checkout covered by D5/D6."""
+    from pathlib import Path
+    writes = [(claim, Path(source['key'])) for source, claim in zip(claims, _claims(claims))
+              if claim['mode'] == 'write' and 'path' in claim]
+    for name in files:
+        declared = scope.repository_root / name
+        file = _claims([dict(kind='path', key=str(declared), mode='write')])[0]
+        if any(_covers(claim, file) for claim, _ in writes):
+            writes.append((file, declared))
+    for claim, declared in writes:
+        for path in dict.fromkeys((declared, Path(claim['path']))):
+            _require(path.is_relative_to(scope.repository_root), 'Worker filesystem writes must stay within the task checkout')
+            # No descendant inventory: check declared paths and named files for repository boundaries.
+            for ancestor in (path, *path.parents):
+                if ancestor == scope.repository_root:
+                    break
+                try:
+                    (ancestor / '.git').lstat()
+                except (FileNotFoundError, NotADirectoryError):
+                    continue
+                except OSError:
+                    raise state.StateError('Worker repository boundary is unavailable') from None
+                raise state.StateError('Worker filesystem writes cannot enter a separate repository or submodule')
+
+
 def _delegation_plan(scope, plan):
     evidence._bounded(plan)
     state._fields(plan, (*PLAN_FIELDS, 'git_directory'))
@@ -653,6 +801,8 @@ def plan_delegation(scope, request):
     """Pin one immutable task plan; an assertion records but cannot grant native authority."""
     evidence._request(request, ('plan',))
     request = json_object(evidence._raw(request))
+    with state._database(scope) as db:
+        evidence._task(db,scope,request)
     state._fields(request['plan'], PLAN_FIELDS)
     plan = _delegation_plan(scope, dict(request['plan'], git_directory=_git_directory(scope)))
     _require(plan['route']['parent_session_id'] == request['session_id'], 'Prepared native parent differs from task owner')
@@ -664,10 +814,16 @@ def plan_delegation(scope, request):
             return dict(ok=True, revision=task['revision'], plan=task['delegation']['plan'],
                         plan_digest=task['delegation']['plan']['digest'], limitations=ADMISSION_LIMITATIONS)
     _require(plan['limits']['deadline'] > _now(), 'Delegation admission deadline has elapsed')
-    reference = evidence._artifact(scope, plan)
+    for job in plan['jobs']:
+        if job['role'] == 'worker':
+            _worker_scope(scope, job['claims'])
+    reference = evidence._artifact(scope, plan, owner=evidence._artifact_owner(scope, task))
     with state._database(scope, write=True) as db:
         task = evidence._task(db, scope, request)
         _require('delegation' not in task, 'Delegation plan was concurrently established')
+        for job in plan['jobs']:
+            if job['role'] == 'worker':
+                _worker_scope(scope, job['claims'])
         task['delegation'] = dict(version=ADMISSION_VERSION, plan=reference, attempts_consumed=0, resource_units_consumed=0)
         if task['state'] == 'ready':
             task['state'] = 'verifying'
@@ -700,13 +856,21 @@ def _stored_claims(claims, *, maximum=MAX_CLAIMS):
     return claims
 
 
-def _record(scope, row):
+def _historical_read(scope, context, db, artifact_refs, reference):
+    _reference(reference)
+    value=evidence._read(None if context else scope,reference,context=context,db=db)
+    if artifact_refs is not None: artifact_refs.append(dict(reference))
+    return value
+
+
+def _record(scope, row, *, db=None, context=None, artifact_refs=None):
+    read = partial(_historical_read, scope, context, db, artifact_refs)
     identity, scope_id, client, session, task_id, dispatch_id, raw = row
     try:
         data = json_object(raw, limit=evidence.MAX_ARTIFACT)
         state._fields(data, ('version', 'job_id', 'role', 'status', 'request_digest', 'assignment', 'candidate',
             'claims', 'resource_units', 'revision', 'plan_digest', 'host_capacity', 'binding', 'retry_of',
-            'diagnostic', 'observation', 'reconciliation', 'result'))
+            'diagnostic', 'observation', 'reconciliation', 'result'), ('lifecycle',))
         _require(type(data['version']) is int and data['version'] == ADMISSION_VERSION and
                  isinstance(identity, str) and re.fullmatch(r'[0-9a-f]{32}', identity) and
                  data['role'] in NATIVE_ROLES | {'coordinator', 'check'} and
@@ -714,31 +878,44 @@ def _record(scope, row):
         _require(_hex(data['request_digest']), 'Invalid assignment request digest')
         state._integer(data['revision'], 'stored assignment revision', 1)
         _reference(data['assignment'])
-        body = evidence._read(scope, data['assignment'])
+        body = read(data['assignment'])
         owner = dict(scope_id=scope_id, client=client, session_id=session, task_id=task_id, dispatch_id=dispatch_id)
         _require(body['owner'] == owner and all(body[key] == data[key] for key in
             ('job_id', 'role', 'claims', 'resource_units', 'revision', 'plan_digest', 'host_capacity', 'binding', 'retry_of', 'diagnostic')) and
             body['candidate'] == data['candidate'] and evidence._digest(body['request']) == data['request_digest'],
             'Assignment immutable binding differs from its ledger record')
         state._identity(body['request'])
-        state._fields(body['pins'], ('schema_version', 'policy_digest', 'runtime_digest'))
+        pin_version = state._validate_pins(body['pins'])
+        canonical_fields = ('accepted_identity',) if pin_version == 3 else ()
+        _require(('lifecycle' in body) == ('lifecycle' in data), 'Assignment lifetime metadata differs from immutable body')
+        if 'lifecycle' in data:
+            _require(pin_version == 3 and body['lifecycle'] == data['lifecycle'], 'Legacy or rebound assignment lifetime')
+            state._fields(data['lifecycle'], ('created_at',))
+            state._integer(data['lifecycle']['created_at'], 'original assignment creation time')
+            canonical_fields += ('lifecycle',)
+        if pin_version == 3:
+            accepted = state._accepted_identity(body.get('accepted_identity'))
+            _require(state._digest(accepted) == body['pins']['accepted_scope_digest'] and
+                state._digest([3, accepted['project_id'], accepted['repository_id'], accepted['checkout_id']]) == scope_id and
+                accepted['client'] == client and all(accepted['configuration'][k] == body['pins'][k]
+                    for k in ('policy_digest', 'runtime_digest')), 'Assignment accepted scope changed')
         _require(type(body['version']) is int and body['version'] == ADMISSION_VERSION and
-            type(body['pins']['schema_version']) is int and body['pins']['schema_version'] == state.SCHEMA_VERSION and
+            type(body['pins']['schema_version']) is int and pin_version in (2, 3) and
             all(_hex(body['pins'][key]) for key in ('policy_digest', 'runtime_digest')) and
             all(body['request'][key] == owner[key] for key in ('client', 'session_id', 'task_id', 'dispatch_id')),
             'Assignment original owner or pins are corrupt')
-        verifier = data['role'] == 'coordinator' and evidence._read(scope, body['operation']).get('kind') == 'completion-verification'
+        verifier = data['role'] == 'coordinator' and read(body['operation']).get('kind') == 'completion-verification'
         size = len(raw.encode('utf-8')) if isinstance(raw, str) else len(raw)
         _require(verifier or size <= MAX_INPUT, 'Assignment record exceeds its role-specific byte limit')
         _stored_claims(data['claims'], maximum=MAX_VERIFICATION_CLAIMS if verifier else MAX_CLAIMS)
-        policy = evidence._read(scope, body['policy'])
+        policy = read(body['policy'])
         _require(policy['policy_digest'] == body['pins']['policy_digest'], 'Immutable assignment policy binding changed')
         if data['role'] in NATIVE_ROLES:
-            state._fields(body, ('version', 'owner', 'pins', 'request', 'job_id', 'role', 'claims', 'resource_units',
+            state._fields(body, ('version', 'owner', 'pins', *canonical_fields, 'request', 'job_id', 'role', 'claims', 'resource_units',
                 'revision', 'plan', 'plan_digest', 'git_routing', 'host_capacity', 'binding', 'candidate',
                 'discovery', 'policy', 'report_contract', 'guidance', 'retry_of', 'diagnostic'), ('review',))
             _reference(body['plan'])
-            plan = evidence._read(scope, body['plan'])
+            plan = read(body['plan'])
             _require(body['plan']['digest'] == data['plan_digest'] and
                 plan['route']['parent_session_id'] == session, 'Native assignment has no actual original plan')
             if data['role'] == 'review':
@@ -748,7 +925,7 @@ def _record(scope, row):
                 _require(all(review[key] == body['request'][key] for key in ('coverage', 'criteria')),
                          'Review metadata differs from its original request')
                 _require(review['assignment_digest'] == hashlib.sha256(body['request']['assignment'].encode()).hexdigest() and
-                    evidence._read(scope, data['candidate'])['definitions_digest'] == review['d5_plan']['digest'] and
+                    read(data['candidate'])['definitions_digest'] == review['d5_plan']['digest'] and
                     all(claim['mode'] == 'read' for claim in data['claims']), 'Review prompt/plan/resources binding changed')
             else:
                 _require('review' not in body, 'Worker cannot carry review admission metadata')
@@ -762,14 +939,14 @@ def _record(scope, row):
                 binding['task_name'] == ('worker_' if data['role'] == 'worker' else 'review_') + identity and
                 binding['candidate_digest'] == data['candidate']['digest'], 'Native assignment locator binding is corrupt')
         else:
-            state._fields(body, ('version', 'owner', 'pins', 'scope_ref', 'decision_ref', 'request', 'operation',
+            state._fields(body, ('version', 'owner', 'pins', *canonical_fields, 'scope_ref', 'decision_ref', 'request', 'operation',
                 'job_id', 'role', 'claims', 'resource_units', 'revision', 'plan_digest', 'candidate', 'd5_plan',
                 'd6_plan', 'host_capacity', 'binding', 'retry_of', 'diagnostic', 'policy'))
             _require(type(data['resource_units']) is int and data['resource_units'] == 0 and
                 data['binding'] is None and data['host_capacity'] is None and data['retry_of'] is None and
                 data['diagnostic'] is None, 'Model-free assignment cannot invent native facts or consumption')
             _require(body['scope_ref'] == body['request']['scope_ref'], 'Operation scope differs from original request')
-            operation = evidence._read(scope, body['operation'])
+            operation = read(body['operation'])
             state._fields(operation, ('id', 'kind', 'decision_ref', 'claims_digest'))
             _require(operation['claims_digest'] == evidence._digest(data['claims']) and
                 operation['decision_ref'] == body['decision_ref'], 'Operation resource/decision binding is corrupt')
@@ -778,22 +955,22 @@ def _record(scope, row):
                          'Task-only operation invented D5 plan/candidate facts')
             else:
                 _reference(body['d5_plan'])
-                evidence._read(scope, body['d5_plan'])
+                read(body['d5_plan'])
                 _require(data['plan_digest'] == body['d5_plan']['digest'], 'Original D5 plan binding changed')
                 if data['candidate'] is not None:
                     _reference(data['candidate'])
-                    candidate = evidence._read(scope, data['candidate'])
+                    candidate = read(data['candidate'])
                     _require(candidate['definitions_digest'] == data['plan_digest'] and candidate['pins'] == body['pins'],
                              'Original candidate binding changed')
             if body['d6_plan'] is not None:
                 _reference(body['d6_plan'])
-                evidence._read(scope, body['d6_plan'])
+                read(body['d6_plan'])
             if data['role'] == 'coordinator':
                 _require(operation['kind'] in {'coordinator-work', 'completion-verification'}, 'Invalid coordinator operation')
                 if data['job_id'] is not None:
                     _require(body['d6_plan'] is not None and operation['id'] == data['job_id'] and
                         any(job['id'] == data['job_id'] and job['role'] == 'coordinator'
-                            for job in evidence._read(scope, body['d6_plan'])['jobs']), 'Coordinator job binding is corrupt')
+                            for job in read(body['d6_plan'])['jobs']), 'Coordinator job binding is corrupt')
                 if operation['kind'] == 'completion-verification':
                     _require(body['d5_plan'] is not None and all(c['mode'] == 'read' for c in data['claims']),
                              'Verifier barrier requires actual D5 context and read-only claims')
@@ -804,14 +981,14 @@ def _record(scope, row):
                 _reference(data['candidate'])
                 _require(_hex(data['plan_digest']) and operation['kind'] == 'check' and
                     data['job_id'] == operation['id'], 'Check assignment requires actual D5 bindings')
-                plan = evidence._read(scope, body['d5_plan'])
-                candidate = evidence._read(scope, data['candidate'])
+                plan = read(body['d5_plan'])
+                candidate = read(data['candidate'])
                 _require(body['d5_plan']['digest'] == data['plan_digest'] and
                     candidate['definitions_digest'] == data['plan_digest'] and candidate['pins'] == body['pins'] and
                     any(check['id'] == operation['id'] for check in plan['checks']), 'Check bindings do not match actual D5 evidence')
         if data['status'] == 'settled':
             _reference(data['reconciliation'])
-            evidence._read(scope, data['reconciliation'])
+            read(data['reconciliation'])
             _require(isinstance(data['result'], dict) and data['result'].get('outcome') in
                      {'completed', 'failed', 'cancelled'}, 'Settled assignment has no reconciled result')
         return dict(id=identity, owner=owner, data=data, body=body)
@@ -819,11 +996,23 @@ def _record(scope, row):
         raise state.StateError('Shared assignment history is corrupt or incompatible') from None
 
 
-def _ledger(scope, db):
+def _ledger(scope, db, *, context=None, artifact_refs=None):
+    read = partial(_historical_read, scope, context, db, artifact_refs)
     rows = db.execute('select id,scope_id,client,session_id,task_id,dispatch_id,data from assignments limit ?',
                       (MAX_ASSIGNMENTS + 1,)).fetchall()
     _require(len(rows) <= MAX_ASSIGNMENTS, 'Shared assignment history exceeds its inspection bound')
-    return [_record(scope, row) for row in rows]
+    records = [_record(scope, row, db=db, context=context, artifact_refs=artifact_refs) for row in rows]
+    for record in records:
+        owner, body = record['owner'], record['body']
+        if state._retired(db, 'assignment', owner) or state._retired_assignment(db, record['id']):
+            raise state.StateError('Live assignment conflicts with a retired identity marker')
+        original = state._task(db, owner['scope_id'], owner['client'], owner['session_id'], owner['task_id'])
+        _require(original is not None and original['pins'] == body['pins'] and
+            (body['pins']['schema_version'] != 3 or original['accepted_identity'] == body['accepted_identity']),
+            'Assignment no longer matches its immutable original task')
+        if record['data']['candidate'] is not None:
+            evidence._candidate_projection(read(record['data']['candidate']), original)
+    return records
 
 
 def _ready_closure(scope, task):
@@ -844,7 +1033,7 @@ def _invalidate_ready(db, scope, task, claims):
         if (scope_id, client, session, task_id) == owner:
             continue
         current = state._task(db, scope_id, client, session, task_id)
-        if current['state'] != 'ready':
+        if current['state'] != 'ready' or current.get('lifecycle',{}).get('safe_closed_at') is not None:
             continue
         closure = _ready_closure(scope, current)
         if closure is None or _held_conflict(claims, closure):
@@ -854,6 +1043,12 @@ def _invalidate_ready(db, scope, task, claims):
 
 
 def _insert_assignment(db, scope, task, record):
+    marker = state._retired(db, 'assignment', record['owner'])
+    if marker is not None:
+        _require(marker['request_digest'] == record['data']['request_digest'], 'Retired dispatch was reused with changed request bytes')
+        raise state.StateError('Retired dispatch cannot create a new assignment; evidence is unavailable or expired')
+    if state._retired_assignment(db, record['id']):
+        raise state.StateError('Retired native assignment ID cannot be reused')
     _require(db.execute('select count(*) from assignments').fetchone()[0] < MAX_ASSIGNMENTS,
              'Shared assignment history exceeds its insertion bound')
     owner, data = record['owner'], record['data']
@@ -862,7 +1057,7 @@ def _insert_assignment(db, scope, task, record):
         'Reservation owner or revision differs from the current task')
     row = (record['id'], owner['scope_id'], owner['client'], owner['session_id'], owner['task_id'],
            owner['dispatch_id'], evidence._raw(data).decode())
-    _record(scope, row)
+    _record(scope, row, db=db)
     _invalidate_ready(db, scope, task, data['claims'])
     db.execute('insert into assignments values(?,?,?,?,?,?,?)', row)
     if data['role'] in NATIVE_ROLES:
@@ -886,6 +1081,15 @@ def _reply(record, admitted=False):
         requested_model=data['binding']['requested_model'], requested_effort=data['binding']['requested_effort'],
         revision=data['revision'], status=data['status'], launch_admitted=admitted, replayed=not admitted,
         limitations=list(ADMISSION_LIMITATIONS))
+
+
+
+def _retired_dispatch(scope, db, request):
+    owner = dict(scope_id=state._scope_id(scope), **{k:request[k] for k in ('client','session_id','task_id','dispatch_id')})
+    marker = state._retired(db, 'assignment', owner)
+    if marker is not None:
+        _require(marker['request_digest'] == evidence._digest(_semantic(request)), 'Retired dispatch was reused with changed request bytes')
+        raise state.StateError('Retired dispatch evidence is unavailable or expired; no new launch is admitted')
 
 
 def _replay(scope, records, request):
@@ -968,6 +1172,8 @@ def _discovery(scope, plan, request):
 
 
 def _admission(scope, db, task, plan, job, claims, records, request):
+    if job['role'] == 'worker':
+        _worker_scope(scope, job['claims'], request['brief']['files'])
     limits = plan['limits']
     _require(task['state'] not in {'blocked', 'awaiting_user', 'cancelled'} and not any(
         c['kind'] in {'blocker', 'decision'} and c['status'] == 'pending' for c in task['conditions']),
@@ -1025,7 +1231,8 @@ def _check_claims(scope, definition):
     return _claims([dict(kind='path', key=str(scope.repository_root), mode='write')])
 
 
-def _linked_check(scope, scope_id, task, attempt, records):
+def _linked_check(scope, scope_id, task, attempt, records, *, context=None, db=None, artifact_refs=None):
+    read = partial(_historical_read, scope, context, db, artifact_refs)
     if attempt.get('kind') != 'check' or 'ledger_assignment_digest' not in attempt:
         return None
     found = next((r for r in records if r['id'] == attempt['id']), None)
@@ -1040,18 +1247,19 @@ def _linked_check(scope, scope_id, task, attempt, records):
         found['data']['observation'] == attempt.get('execution'), 'Check ledger link is absent or corrupt')
     _require(attempt['candidate'] == found['data']['candidate'], 'Check candidate reference changed')
     if attempt.get('execution'):
-        executed = evidence._read(scope, attempt['execution'])
-        definition = next(check for check in evidence._read(scope, found['body']['d5_plan'])['checks'] if check['id'] == attempt['check_id'])
+        executed = read(attempt['execution'])
+        definition = next(check for check in read(found['body']['d5_plan'])['checks'] if check['id'] == attempt['check_id'])
         _require(executed['command'] == definition and executed['result']['id'] == attempt['id'] and
             executed['result']['candidate_digest'] == attempt['candidate_digest'] and
-            executed['tool'] == evidence._read(scope, attempt['candidate'])['tools'][attempt['check_id']],
+            executed['tool'] == read(attempt['candidate'])['tools'][attempt['check_id']],
             'Check link does not bind actual command/execution')
     if attempt['status'] in {'reserved', 'running', 'uncertain'}:
         _require(found['data']['status'] != 'settled', 'Unresolved check cannot adopt settled ledger ownership')
     return found
 
 
-def _linked_review(scope, scope_id, task, attempt, records):
+def _linked_review(scope, scope_id, task, attempt, records, *, context=None, db=None, artifact_refs=None):
+    read = partial(_historical_read, scope, context, db, artifact_refs)
     if attempt.get('kind') != 'review' or 'ledger_assignment_digest' not in attempt:
         return None
     record = next((r for r in records if r['id'] == attempt['id']), None)
@@ -1064,7 +1272,7 @@ def _linked_review(scope, scope_id, task, attempt, records):
         record['owner']['dispatch_id'] == attempt['dispatch_id'] and data['job_id'] == attempt['job_id'] and
         data['candidate'] == attempt['candidate'] and data['candidate']['digest'] == attempt['candidate_digest'] and
         review['d5_plan']['digest'] == attempt['plan_digest'] and review['assignment_digest'] == attempt['assignment_digest'] and
-        evidence._read(scope, attempt['assignment']) == dict(prompt=record['body']['request']['assignment']) and
+        read(attempt['assignment']) == dict(prompt=record['body']['request']['assignment']) and
         all(review[key] == attempt[key] for key in ('coverage', 'criteria')) and
         data['binding']['task_name'] == attempt['task_name'] == 'review_' + attempt['id'], 'Review D5/D6 immutable link changed')
     if attempt.get('ownership_reconciliation') is not None:
@@ -1073,8 +1281,8 @@ def _linked_review(scope, scope_id, task, attempt, records):
     return record
 
 
-def _linked_attempt(scope, scope_id, task, attempt, records):
-    return (_linked_review if attempt.get('kind') == 'review' else _linked_check)(scope, scope_id, task, attempt, records)
+def _linked_attempt(scope, scope_id, task, attempt, records, *, context=None, db=None, artifact_refs=None):
+    return (_linked_review if attempt.get('kind') == 'review' else _linked_check)(scope, scope_id, task, attempt, records, context=context, db=db, artifact_refs=artifact_refs)
 
 
 def _resources_available(scope, db, claims, records):
@@ -1120,18 +1328,23 @@ def _operation_record(scope, task, request, role, claims, identity, candidate, o
     d5_plan = task.get('evidence', {}).get('plan')
     d6_plan = task.get('delegation', {}).get('plan') if role == 'coordinator' else None
     owner = dict(scope_id=state._scope_id(scope), **{key: request[key] for key in ('client', 'session_id', 'task_id', 'dispatch_id')})
-    operation = evidence._artifact(scope, dict(operation, decision_ref=task['decision_ref'], claims_digest=evidence._digest(claims)))
+    operation = evidence._artifact(scope, dict(operation, decision_ref=task['decision_ref'], claims_digest=evidence._digest(claims)), owner=evidence._artifact_owner(scope, task))
     body = dict(version=ADMISSION_VERSION, owner=owner, pins=task['pins'], scope_ref=task['scope_ref'], decision_ref=task['decision_ref'],
         request=_semantic(request), operation=operation, job_id=job_id, role=role,
         claims=claims, resource_units=0, revision=request['expected_revision'] + 1, plan_digest=d5_plan['digest'] if d5_plan else None,
         candidate=candidate, d5_plan=d5_plan, d6_plan=d6_plan, host_capacity=None, binding=None, retry_of=None, diagnostic=None,
-        policy=evidence._artifact(scope, dict(policy_digest=task['pins']['policy_digest'], **(routing or {}))))
+        policy=evidence._artifact(scope, dict(policy_digest=task['pins']['policy_digest'], **(routing or {})), owner=evidence._artifact_owner(scope, task)))
+    if task['pins']['schema_version'] == 3:
+        body['accepted_identity'] = task['accepted_identity']
+        body['lifecycle'] = dict(created_at=state._owner_time())
     evidence._bounded(body, byte_limit)
-    reference = evidence._artifact(scope, body)
+    reference = evidence._artifact(scope, body, owner=evidence._artifact_owner(scope, task))
     data = {key: body[key] for key in ('version', 'job_id', 'role', 'claims', 'resource_units', 'revision', 'plan_digest',
                                       'candidate', 'host_capacity', 'binding', 'retry_of', 'diagnostic')}
     data.update(status='prepared', request_digest=evidence._digest(_semantic(request)), assignment=reference,
                 observation=None, reconciliation=None, result=None)
+    if 'lifecycle' in body:
+        data['lifecycle'] = body['lifecycle']
     record = dict(id=identity, owner=owner, data=data, body=body)
     return record
 
@@ -1181,6 +1394,8 @@ def _reserve_operation(scope, request, *, role, _verification=False):
         state._fields(request['verification'], ('purpose', 'git_directory', 'git_routing'))
     with state._database(scope) as db:
         _require(db is not None, 'Runtime task state is missing')
+        _retired_dispatch(scope, db, request)
+        state._assert_open(state._task(db,state._scope_id(scope),request['client'],request['session_id'],request['task_id']))
         records = _ledger(scope, db)
         replay = _replay(scope, records, request)
         if replay:
@@ -1203,6 +1418,8 @@ def _reserve_operation(scope, request, *, role, _verification=False):
     record = _operation_record(scope, task, request, role, claims, uuid.uuid4().hex, candidate, request['operation'],
         request['operation']['id'] if role == 'check' else job_id, byte_limit=byte_limit)
     with _reservation_write(scope) as db:
+        _retired_dispatch(scope, db, request)
+        state._assert_open(state._task(db,state._scope_id(scope),request['client'],request['session_id'],request['task_id']))
         records = _ledger(scope, db)
         replay = _replay(scope, records, request)
         if replay:
@@ -1231,6 +1448,13 @@ def reserve_coordinator(scope, request):
 
 
 def _validate_operation_proof(scope, record, task, proof, *, current_candidate_digest=None):
+    return _validate_role_proof(record, task, proof, scope_id=state._scope_id(scope), revision=task['revision'],
+        read=lambda reference: evidence._read(scope, reference),
+        linked_review=lambda attempt: _linked_review(scope, state._scope_id(scope), task, attempt, [record]),
+        current_candidate_digest=current_candidate_digest)
+
+
+def _validate_role_proof(record, task, proof, *, scope_id, revision, read, linked_review, current_candidate_digest=None):
     """Validate exact role bindings only; never authenticate host authority or release ownership."""
     evidence._bounded(proof)
     data, body, owner = record['data'], record['body'], record['owner']
@@ -1253,14 +1477,14 @@ def _validate_operation_proof(scope, record, task, proof, *, current_candidate_d
         kind = 'assignment-writer-reconciliation'
     state._fields(proof, required)
     state._integer(proof['expected_revision'], 'proof task revision', 1)
-    state._fields(proof['expected_pins'], ('schema_version', 'policy_digest', 'runtime_digest'))
+    state._validate_pins(proof['expected_pins'])
     state._integer(proof['expected_pins']['schema_version'], 'proof schema version', 1)
     _require(all(task[key] == owner[key] == body['request'][key] for key in ('client', 'session_id', 'task_id')) and
         task['scope_ref'] == body['request']['scope_ref'], 'Proof task differs from the original reservation')
     _require(type(proof['version']) is int and proof['version'] == 2 and proof['kind'] == kind and
         proof['identity'] == {key: task[key] for key in evidence.IDENTITY[:4]} and
-        proof['expected_pins'] == task['pins'] == body['pins'] and proof['expected_revision'] == task['revision'] and
-        proof['scope_id'] == owner['scope_id'] == state._scope_id(scope) and proof['attempt_id'] == record['id'] and
+        proof['expected_pins'] == task['pins'] == body['pins'] and proof['expected_revision'] == revision and
+        proof['scope_id'] == owner['scope_id'] == scope_id and proof['attempt_id'] == record['id'] and
         proof['dispatch_id'] == owner['dispatch_id'] and proof['assignment_digest'] == data['assignment']['digest'] and
         proof['claims_digest'] == evidence._digest(data['claims']), 'Host proof does not bind the exact original reservation')
     for key in ('observation_ref', 'coordinator_ref'):
@@ -1272,14 +1496,14 @@ def _validate_operation_proof(scope, record, task, proof, *, current_candidate_d
         if data['candidate'] is not None:
             _require(_hex(current_candidate_digest) and proof['current_candidate_digest'] == current_candidate_digest and
                 proof['candidate_digest'] == data['candidate']['digest'], 'Coordinator proof requires actual candidate context')
-        operation = evidence._read(scope, body['operation'])
+        operation = read(body['operation'])
         _require(proof['decision_ref'] == body['decision_ref'] == task['decision_ref'] and
             proof['operation_id'] == operation['id'] and proof['operation_digest'] == body['operation']['digest'] and
             proof['operation_stopped'] is True and proof['operation_descendants_stopped'] is True,
             'Coordinator operation or its descendants remain unverified')
         for key in ('operation_evidence', 'resource_observations'):
             _reference(proof[key])
-            observed = evidence._read(scope, proof[key])
+            observed = read(proof[key])
             _require(all(observed.get(field) == proof[field] for field in ('operation_id', 'operation_digest', 'claims_digest')),
                      'Independent evidence belongs to different operation resources')
     else:
@@ -1293,9 +1517,9 @@ def _validate_operation_proof(scope, record, task, proof, *, current_candidate_d
         else:
             if role == 'review':
                 attempt = next((a for a in task['evidence']['attempts'] if a['id'] == record['id']), None)
-                _require(attempt is not None and _linked_review(scope, state._scope_id(scope), task, attempt, [record]) is not None,
+                _require(attempt is not None and linked_review(attempt) is not None,
                          'Review proof has no exact immutable D5 attempt/plain-prompt binding')
-            observation = evidence._read(scope, data['observation']) if data['observation'] else None
+            observation = read(data['observation']) if data['observation'] else None
             receipt = observation['receipt'] if observation else {}
             _require(isinstance(receipt, dict), 'No actual native identity was observed; missing history cannot prove never-started')
             binding = data['binding']
@@ -1324,6 +1548,8 @@ def _prepare_native(scope, request, *, role):
     state._integer(request['resource_units'], 'admitted resource units', 1)
     with state._database(scope) as db:
         _require(db is not None, 'Runtime task state is missing')
+        _retired_dispatch(scope, db, request)
+        state._assert_open(state._task(db,state._scope_id(scope),request['client'],request['session_id'],request['task_id']))
         records = _ledger(scope, db)
         replay = _replay(scope, records, request)
         if replay:
@@ -1345,10 +1571,12 @@ def _prepare_native(scope, request, *, role):
         _admission(scope, db, task, plan, job, claims, records, request)
     _require(_git_directory(scope) == plan['git_directory'], 'Prepared worktree Git metadata changed')
     git_routing = _git_routing(scope, plan['git_directory'])
+    with state._database(scope) as db:
+        evidence._task(db,scope,request)
     observed, guidance = _discovery(scope, plan, request)
     candidate = evidence.capture_candidate(scope, proof_plan)
     _require(candidate['actual_policy_digest'] == task['pins']['policy_digest'], 'Actual policy changed from accepted task pins')
-    candidate_ref = evidence._artifact(scope, candidate)
+    candidate_ref = evidence._artifact(scope, candidate, owner=evidence._artifact_owner(scope, task))
     attempt_id = uuid.uuid4().hex
     binding = dict(attempt_id=attempt_id, parent_session_id=plan['route']['parent_session_id'], task_name=('worker_' if role == 'worker' else 'review_') + attempt_id,
         candidate_digest=candidate_ref['digest'], requested_model=request['selection']['model']
@@ -1356,33 +1584,40 @@ def _prepare_native(scope, request, *, role):
         if request['selection']['mode'] == 'explicit' else None, client_surface=observed['client_surface'], native_version=observed['native_version'])
     # The content digest excludes itself; the accessor supplies the immutable artifact digest.
     content_binding = binding
-    diagnostic = evidence._artifact(scope, request['diagnostic']) if 'diagnostic' in request else None
+    diagnostic = evidence._artifact(scope, request['diagnostic'], owner=evidence._artifact_owner(scope, task)) if 'diagnostic' in request else None
     owner = dict(scope_id=state._scope_id(scope), **{key: request[key] for key in ('client', 'session_id', 'task_id', 'dispatch_id')})
     body = dict(version=ADMISSION_VERSION, owner=owner, pins=task['pins'], request=_semantic(request), job_id=job['id'], role=role,
         claims=claims, resource_units=request['resource_units'], revision=request['expected_revision'] + 1,
         plan=task['delegation']['plan'], plan_digest=plan_digest, git_routing=git_routing,
         host_capacity=plan['limits']['host_capacity'], binding=content_binding, candidate=candidate_ref,
-        discovery=evidence._artifact(scope, observed), policy=evidence._artifact(scope, dict(
+        discovery=evidence._artifact(scope, observed, owner=evidence._artifact_owner(scope, task)), policy=evidence._artifact(scope, dict(
             policy_digest=task['pins']['policy_digest'], actual_policy_digest=candidate['actual_policy_digest'],
             files=[dict(path=path.name, sha256=hashlib.sha256(path.read_bytes()).hexdigest())
-                   for path in sorted((state.PACKAGE / 'policies').glob('*.md'))])),
+                   for path in sorted((state.PACKAGE / 'policies').glob('*.md'))]), owner=evidence._artifact_owner(scope, task)),
         report_contract=dict(version=1, status=['completed', 'blocked', 'pending-decision'],
             required=['version', 'attempt_id', 'assignment_digest', 'candidate_digest', 'status', 'changed_paths', 'evidence', 'limitations']),
         guidance={key: guidance[key] for key in ('snapshot_ref', 'snapshot_digest', 'checked_at', 'freshness')},
         retry_of=request.get('retry_of'), diagnostic=diagnostic)
+    if task['pins']['schema_version'] == 3:
+        body['accepted_identity'] = task['accepted_identity']
+        body['lifecycle'] = dict(created_at=state._owner_time())
     if role == 'review':
         body['review'] = dict(assignment_digest=hashlib.sha256(request['assignment'].encode()).hexdigest(),
             coverage=request['coverage'], criteria=request['criteria'], d5_plan=task['evidence']['plan'])
         body['report_contract'] = dict(version=1, assignment_digest=body['review']['assignment_digest'],
             required=['version', 'attempt_id', 'assignment_digest', 'candidate_digest', 'coverage', 'findings', 'limitations'])
     evidence._bounded(body)
-    assignment_ref = evidence._artifact(scope, body)
+    assignment_ref = evidence._artifact(scope, body, owner=evidence._artifact_owner(scope, task))
     data = dict(version=ADMISSION_VERSION, job_id=job['id'], role=role, status='prepared', request_digest=evidence._digest(_semantic(request)),
         assignment=assignment_ref, candidate=candidate_ref, claims=claims, resource_units=request['resource_units'],
         revision=request['expected_revision'] + 1, plan_digest=plan_digest, host_capacity=plan['limits']['host_capacity'],
         binding=content_binding, retry_of=request.get('retry_of'), diagnostic=diagnostic,
         observation=None, reconciliation=None, result=None)
+    if 'lifecycle' in body:
+        data['lifecycle'] = body['lifecycle']
     with _reservation_write(scope) as db:
+        _retired_dispatch(scope, db, request)
+        state._assert_open(state._task(db,state._scope_id(scope),request['client'],request['session_id'],request['task_id']))
         records = _ledger(scope, db)
         replay = _replay(scope, records, request)
         if replay:
@@ -1395,11 +1630,13 @@ def _prepare_native(scope, request, *, role):
                  'Prepared scope, policy, resources or checkout generation changed')
         if role == 'review':
             evidence._review_admission(scope, task, proof_plan, request)
+        else:
+            _require(_brief(scope, job, request['brief'], proof_plan) == claims, 'Prepared worker resources changed')
         _admission(scope, db, task, plan, job, claims, records, request)
         _insert_assignment(db, scope, task, dict(id=attempt_id, owner=owner, data=data, body=body))
         record = dict(id=attempt_id, owner=owner, data=data, body=body)
         if role == 'review':
-            task['evidence']['attempts'].append(evidence._review_attempt(scope, record))
+            task['evidence']['attempts'].append(evidence._review_attempt(scope, record, task=task, db=db))
         state._save(db, state._scope_id(scope), task)
     if role == 'worker':
         return _reply(record, admitted=True)
@@ -1412,6 +1649,8 @@ MAX_OBSERVATIONS = 32
 
 def _assignment(scope, db, request, *, roles=('worker',)):
     _require(db is not None, 'Missing native assignment state')
+    if state._retired_assignment(db, request['attempt_id']):
+        raise state.StateError('Retired assignment evidence is unavailable or expired')
     record = next((r for r in _ledger(scope, db) if r['id'] == request['attempt_id']), None)
     _require(record is not None and record['data']['role'] in roles and
         record['owner'] == dict(scope_id=state._scope_id(scope),
@@ -1421,25 +1660,72 @@ def _assignment(scope, db, request, *, roles=('worker',)):
     return record
 
 
+def _closure_assignments(context,db,task_ref,task,certificate):
+    """Complete original membership, independently stopped and reconciled per role."""
+    from runtime import changes
+    records=[record for record in _ledger(None,db,context=context) if all(
+        record['owner'][key]==task_ref[key] for key in ('scope_id','client','session_id','task_id'))]
+    issued=certificate.get('assignments',[])
+    _require(len(issued)==len(records) and len({item['reference']['id'] for item in issued})==len(issued),
+        'Stopped assignment certificate membership differs from complete original owners')
+    actual=[changes._assignment_certificate(context,db,task,record) for record in records]
+    _require(sorted(actual,key=evidence._raw)==sorted(issued,key=evidence._raw),
+        'Stopped assignments differ from exact current immutable reconciliation support')
+    return records
+
+
+def retire_settled(db, task_ref, closure):
+    """Insert exact certified assignment markers before atomically removing their rows."""
+    context=evidence._existing_authority_context(task_ref['authority'],db=db)
+    facts=evidence._check_closure_observation(context,db,task_ref,closure)
+    _require('linked' not in facts and 'retained_linked_closure' not in facts,'Linked removal needs its complete retirement observation')
+    records=_closure_assignments(context,db,task_ref,facts['task'],facts['certificate'])
+    task=state._task(db,task_ref['scope_id'],task_ref['client'],task_ref['session_id'],task_ref['task_id'])
+    lifetime=state._task_lifecycle(task)
+    _require(lifetime is not None and lifetime['safe_closed_at'] is not None
+        and evidence._read(None,lifetime['compact'],context=context,db=db)==evidence._retirement_content(facts),
+        'Assignment retirement requires exact retained safe closure')
+    retired_at=state._owner_time()
+    _require(retired_at>=lifetime['safe_closed_at'],'Assignment retirement clock regressed')
+    markers=[]
+    for record in records:
+        owner=record['owner'];data=record['data']
+        _require(state._retired(db,'assignment',owner) is None and state._retired_assignment(db,record['id']) is None,
+            'Live assignment conflicts with retained marker')
+        marker=dict(version=1,identity=owner,pins_digest=state._digest(record['body']['pins']),request_digest=data['request_digest'],
+            created_at=data['lifecycle']['created_at'],retired_at=retired_at,outcome=data['result']['outcome'],
+            evidence_expired=False,assignment_id=record['id'])
+        digest=state._retired_identity('assignment',owner);raw=evidence._raw(marker).decode()
+        state._retired_record('assignment',digest,raw,record['id'])
+        db.execute('insert into retired_identities values(?,?,?,?)',('assignment',digest,raw,record['id']))
+        markers.append((record['id'],marker))
+    for record in records:db.execute('delete from assignments where id=?',(record['id'],))
+    evidence._check_closure_observation(context,db,task_ref,closure,assignments_retired=True)
+    _require(all(state._retired_assignment(db,identity)==marker for identity,marker in markers),
+        'Assignment marker changed before local retirement')
+    return len(records)
+
+
 def _assignment_task(scope, db, request, *, revision=True):
     task = state._task(db, state._scope_id(scope), request['client'], request['session_id'], request['task_id'])
     _require(task is not None and all(task[key] == request[key] for key in evidence.IDENTITY[:4]),
              'Assignment task identity changed')
     state._compatible(scope, task)
+    state._assert_open(task)
     _require(not revision or task['revision'] == request['expected_revision'], 'Assignment task revision conflict')
     return task
 
 
-def _worker_history(scope, reference):
+def _worker_history(scope, reference, *, context=None):
     history, seen = [], set()
     while reference is not None:
         _reference(reference)
         _require(reference['digest'] not in seen and len(history) < MAX_OBSERVATIONS, 'Worker observation history bound reached')
         seen.add(reference['digest'])
-        value = evidence._read(scope, reference)
+        value = evidence._read(None if context is not None else scope, reference, context=context)
         state._fields(value, ('version', 'receipt', 'result', 'report', 'error', 'previous', 'conflict', 'revision', 'status', 'request', 'incoming'))
         _reference(value['incoming'])
-        evidence._read(scope, value['incoming'])
+        evidence._read(None if context is not None else scope, value['incoming'], context=context)
         _require(type(value['version']) is int and value['version'] == 1 and value['status'] in {'observed', 'uncertain'},
                  'Worker observation history is incompatible')
         state._integer(value['revision'], 'observation revision', 1)
@@ -1463,9 +1749,10 @@ def _worker_report(scope, record, result):
         report['status'] in {'completed', 'blocked', 'pending-decision'}, 'Worker report binding is invalid')
     for field in ('changed_paths', 'evidence', 'limitations'):
         _strings(report[field], 'worker report ' + field, maximum=64, limit=4096)
+    root=scope.repository_root if scope is not None else Path(state._accepted_identity(record['body']['accepted_identity'])['repository_root'])
     for name in report['changed_paths']:
         evidence._relative(name)
-        claim = _claims([dict(kind='path', key=str(scope.repository_root / name), mode='write')])[0]
+        claim = _claims([dict(kind='path', key=str(root / name), mode='write')])[0]
         _require(name != '.' and any(_covers(held, claim) and held['mode'] == 'write' for held in data['claims']),
                  'Worker report names an unreserved mutable path')
     return report
@@ -1556,7 +1843,7 @@ def observe_assignment(scope, request):
     if duplicate:
         return _observation_reply(record, *duplicate, replayed=True)
     _require(len(history) < MAX_OBSERVATIONS, 'Worker observation history bound reached')
-    incoming_ref = evidence._artifact(scope, incoming)
+    incoming_ref = evidence._artifact(scope, incoming, owner=evidence._artifact_owner(scope, task))
     prior = history[0][1] if history else None
     conflict = prior['conflict'] if prior else None
     previous_receipt = prior['receipt'] if prior else None
@@ -1581,7 +1868,7 @@ def observe_assignment(scope, request):
     value = dict(version=1, receipt=receipt, result=result, report=report, error=error,
         request=_semantic(request), incoming=incoming_ref, previous=record['data']['observation'], conflict=conflict,
         revision=request['expected_revision'] + 1, status='uncertain' if error or conflict else 'observed')
-    reference = evidence._artifact(scope, value)
+    reference = evidence._artifact(scope, value, owner=evidence._artifact_owner(scope, task))
     with _reservation_write(scope) as db:
         current = _assignment(scope, db, request, roles=('worker', 'review'))
         duplicate = _observation_replay(scope, _worker_history(scope, current['data']['observation']), incoming)
@@ -1655,9 +1942,9 @@ def reconcile_assignment(scope, request):
             'Completed review requires the exact latest collected D5 report and uncontradicted native completion')
     artifact = dict(version=2, request_digest=evidence._digest(_semantic(request)), proof=proof,
         source_digest=request['host_proof']['sha256'], assessment=assessment,
-        current_candidate=evidence._artifact(scope, candidate) if candidate is not None else None, reservation_snapshot_digest=evidence._digest(reservations),
+        current_candidate=evidence._artifact(scope, candidate, owner=evidence._artifact_owner(scope, task)) if candidate is not None else None, reservation_snapshot_digest=evidence._digest(reservations),
         revision=request['expected_revision'] + 1)
-    reference = evidence._artifact(scope, artifact)
+    reference = evidence._artifact(scope, artifact, owner=evidence._artifact_owner(scope, task))
     with _reservation_write(scope) as db:
         current = _assignment(scope, db, request, roles=('worker', 'review', 'coordinator'))
         task = _assignment_task(scope, db, request)
@@ -1679,20 +1966,33 @@ def reconcile_assignment(scope, request):
     return _reconciliation_reply(record, artifact)
 
 
+
+def _native_binding(record):
+    binding = dict(record['data']['binding'], assignment_digest=record['data']['assignment']['digest'])
+    if record['body']['pins']['schema_version'] == 3:
+        binding.update(pins=record['body']['pins'], accepted_identity=record['body']['accepted_identity'],
+                       scope_id=record['owner']['scope_id'])
+    return binding
+
+
 def prepared_native_assignment(scope, attempt_id):
     """Read the immutable prepared identity used by the actual native worker observer."""
     _require(isinstance(attempt_id, str) and re.fullmatch(r'[0-9a-f]{32}', attempt_id), 'Invalid native assignment id')
     with state._database(scope) as db:
         _require(db is not None, 'Missing native assignment state')
+        if state._retired_assignment(db, attempt_id):
+            raise state.StateError('Retired native assignment evidence is unavailable or expired')
         found = next((r for r in _ledger(scope, db) if r['id'] == attempt_id and r['owner']['scope_id'] == state._scope_id(scope)), None)
         _require(found is not None and found['data']['role'] == 'worker', 'Native worker assignment is absent or unqualified')
-        return dict(found['data']['binding'], assignment_digest=found['data']['assignment']['digest'])
+        return _native_binding(found)
 
 
 def prepared_native_review_assignment(scope, attempt_id):
     """Read the exact same-ID D6 review binding for A5 lifecycle observation."""
     _require(isinstance(attempt_id, str) and re.fullmatch(r'[0-9a-f]{32}', attempt_id), 'Invalid native review assignment id')
     with state._database(scope) as db:
+        if db is not None and state._retired_assignment(db, attempt_id):
+            raise state.StateError('Retired native review evidence is unavailable or expired')
         record = next((r for r in _ledger(scope, db) if r['id'] == attempt_id and
             r['owner']['scope_id'] == state._scope_id(scope)), None) if db is not None else None
         _require(record is not None and record['data']['role'] == 'review', 'Exact native review assignment is absent')
@@ -1701,7 +2001,7 @@ def prepared_native_review_assignment(scope, attempt_id):
         attempt = next((a for a in task['evidence']['attempts'] if a['id'] == attempt_id), None)
         _require(attempt is not None, 'Exact D5 review attempt is absent')
         _linked_review(scope, owner['scope_id'], task, attempt, [record])
-        return dict(record['data']['binding'], assignment_digest=record['data']['assignment']['digest'])
+        return _native_binding(record)
 
 
 def delegation_status(scope, client, session_id):
