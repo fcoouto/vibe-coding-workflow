@@ -1033,16 +1033,191 @@ def _closure_recovery_files(recovery):
     return files
 
 
-def _closure_recovery(context,task_ref=None):
+def _closure_recovery(context,task_ref=None,*,authorities=None):
     """Inspect all current D4 roots, with optional named-task D4 stop correspondence."""
     from runtime import changes
-    authorities=[_canonical_plain(context.authority_set[0])]
+    authorities=authorities if authorities is not None else [_canonical_plain(context.authority_set[0])]
     task_refs=[] if task_ref is None else [task_ref]
     result=_canonical_plain(changes._inspect_lifecycle_recovery_guarded(authorities,task_refs))
     before=_closure_recovery_files(result)
     latest=_canonical_plain(changes._inspect_lifecycle_recovery_guarded(authorities,task_refs))
     _require(latest==result and _closure_recovery_files(latest)==before,'Recovery source moved during closure observation')
     return result,before
+
+
+def _ordinary_peer_census(context,task,budget):
+    """Actual taskless D4 peer; delegated readers keep their original bounds."""
+    from runtime.startup import PROJECT_FILE
+    budget.check();external={};project=task['accepted_identity']['project_id']
+    def observe(path):
+        path=str(path);value=budget.observe(path)
+        _require(path not in external or external[path]==value,'Ordinary peer physical observations disagree')
+        external[path]=value
+        return value['stat']
+    with _context_database(context) as db:
+        for table in ('tasks','assignments','bindings','turns','receipts','retired_identities'):
+            _require(db.execute('select 1 from '+table+' limit 1').fetchone() is None,
+                'Ordinary closure peer has unsupported owner history')
+        rows=db.execute('select scope_id,project_id,repository_root,git_common_dir,generation,physical_identity from checkouts order by scope_id limit 4097').fetchall()
+        _require(0<len(rows)<=4096,'Ordinary peer checkout observation exceeds bound')
+        for row in rows:
+            identity=json_object(row[5])
+            _require(row[1]==identity['project_id']==project and row[2:4]==(identity['repository_root'],identity['git_common_dir'])
+                and identity['project_root']==task['accepted_identity']['project_root']
+                and identity['project_binding']==task['accepted_identity']['project_binding']
+                and type(row[4]) is int and row[4]>=0 and row[0]==state._digest([3,project,identity['repository_id'],identity['checkout_id']]),
+                'Ordinary peer checkout identity differs')
+            bindings={identity['project_root']:identity['project_binding']}
+            bindings.update({identity[k]:identity['bindings'][label] for k,label in
+                (('repository_root','root'),('primary_root','primary_root'),('git_dir','git_dir'),('git_common_dir','git_common_dir'))})
+            for path,binding in bindings.items():
+                info=observe(path)
+                _require(info is not None and stat.S_ISDIR(info[2]) and dict(device=info[0],inode=info[1])==binding,
+                    'Ordinary peer checkout physical binding changed')
+            canonical=observe(Path(identity['project_root'])/PROJECT_FILE)
+            _require(canonical is not None and stat.S_ISREG(canonical[2]),'Ordinary peer canonical authority is unavailable')
+        baseline=_canonical_plain(state._source_baseline(None,db,context=context))
+        _require(baseline is not None and baseline['content']['source_contract']==2 and baseline['content']['project_id']==project,
+            'Ordinary peer creation-time provenance is unavailable')
+        metadata=_evidence_inventory_rows(db)
+        physical=_historical_inventory(context,db,metadata)
+        for item in physical:
+            original=item['metadata'];body=_read(None,item['reference'],context=context,db=db)
+            _require(original['owner']==dict(kind='project',project_id=project,task=None) and original['class']=='compact'
+                and original['status']=='live' and original['closed_at'] is None and not original['targets'] and original['export'] is None
+                and body.get('kind') in {'authority-source-baseline','d4-recovery-source'},'Ordinary peer is not taskless D4 support')
+            _require(observe(original['managed']['path'])==item['stat'],'Ordinary peer managed content changed')
+    folder=context.directory/'evidence';info=observe(folder)
+    _require(info is not None,'Ordinary peer evidence folder is unavailable')
+    _require(stat.S_ISDIR(info[2]) and info[3]==os.getuid() and not info[2]&0o077,'Ordinary peer evidence folder is not private')
+    names=budget.names(folder,external[str(folder)])
+    _require(names==sorted(item['reference']['name'] for item in physical),'Ordinary peer has unaccounted evidence')
+    cache=context.directory/'model-guidance';info=observe(cache)
+    if info is not None:
+        _require(stat.S_ISDIR(info[2]) and info[3]==os.getuid() and not info[2]&0o077,'Ordinary peer guidance folder is not private')
+        _require(not budget.names(cache,external[str(cache)]),'Ordinary peer guidance needs its existing owner integration')
+    budget.check()
+    return _canonical_plain(_canonical_freeze(dict(authority=_canonical_plain(context.authority_set[0]),
+        checkouts=rows,baseline=baseline,metadata=metadata,physical=physical,external=external,names=names)))
+
+
+@contextmanager
+def _ordinary_closure_scope(context,task_ref,started):
+    """Discovery releases partial guards; only the complete serial bracket admits a peer."""
+    from runtime import changes,closure_witness
+    pending={_raw(task_ref['authority']):task_ref['authority']}
+    budget=closure_witness.Budget(started)
+    for _ in range(4096):
+        contexts=tuple(_reference_context(a) for a in sorted(pending.values(),key=_raw))
+        with _closure_support_guards(contexts):
+            if len(contexts)==1:
+                recovery,files=_closure_recovery(context,task_ref)
+                discovered=recovery['discovered_authorities']
+                if not discovered:
+                    yield dict(recovery=recovery,files=files,peer=None,witness=None)
+                    return
+            else:
+                budget.check()
+                _require(len(contexts)==2,'Ordinary closure supports exactly one taskless D4 peer')
+                authorities=[_canonical_plain(c.authority_set[0]) for c in contexts]
+                _require(changes._held_authority_guards([c.directory for c in contexts]),'Ordinary closure complete guards are unavailable')
+                peer=next(c for c in contexts if _canonical_plain(c.authority_set[0])!=task_ref['authority'])
+                with _context_database(context) as db:
+                    task=state._task(db,*[task_ref[k] for k in ('scope_id','client','session_id','task_id')])
+                _require(task is not None,'Ordinary closure original task is unavailable')
+                forbidden=(_canonical_plain(context.database_binding)['device'],_canonical_plain(context.database_binding)['inode'])
+                with closure_witness.PeerWitness(peer.database,budget,forbidden) as witness:
+                    witness.read_pass(1)
+                    recovery,files=_closure_recovery(context,task_ref,authorities=authorities)
+                    discovered=recovery['discovered_authorities']
+                    if not discovered:
+                        _require(recovery['complete'] is True and not recovery['blockers'] and
+                            sorted(recovery['authorities'],key=_raw)==sorted(authorities,key=_raw),'Ordinary closure complete D4 coverage changed')
+                        observed=_ordinary_peer_census(peer,task,budget)
+                        _require(_ordinary_peer_census(peer,task,budget)==observed,'Ordinary peer census changed')
+                        observed['bytes']=witness.read_pass(2)
+                        yield dict(recovery=recovery,files=files,peer=observed,witness=witness,
+                            context=peer,contexts=contexts,budget=budget,closed_at=task['lifecycle']['safe_closed_at'])
+                        return
+        budget.check()
+        for authority in discovered:pending[_raw(authority)]=authority
+        _require(len(pending)<=4096,'Ordinary closure authority discovery exceeds bound')
+    raise state.StateError('Ordinary closure authority discovery did not converge')
+
+
+def _ordinary_peer_check(scope,number):
+    """Raw entry/commit recheck only; never opens peer SQLite."""
+    if scope['witness'] is None:return
+    from runtime import changes
+    budget=scope['budget'];peer=scope['peer'];budget.check()
+    _require(changes._held_authority_guards([c.directory for c in scope['contexts']]),'Ordinary closure guard lifetime changed')
+    _require(scope['witness'].read_pass(number)==peer['bytes'],'Ordinary closure peer snapshot changed')
+    for path,original in peer['external'].items():
+        _require(budget.observe(path)==original,'Ordinary closure peer external physical inputs changed')
+    context=scope['context']
+    _require(budget.names(context.directory/'evidence',peer['external'][str(context.directory/'evidence')])==peer['names'],
+        'Ordinary closure peer evidence membership changed')
+    cache=context.directory/'model-guidance'
+    if peer['external'][str(cache)]['stat'] is not None:
+        _require(not budget.names(cache,peer['external'][str(cache)]),'Ordinary closure peer guidance appeared')
+    for item in peer['physical']:
+        _managed_content(context,item['reference'],item['metadata'])
+        budget.check()
+    budget.check()
+
+
+def _ordinary_transition(context,db,task_ref,facts,compact,*,retired=False,closed_at=None):
+    """Exact actual local result, captured after the existing transition kernels."""
+    task=_linked_raw_task(db,task_ref) if retired else state._task(db,*[task_ref[k] for k in ('scope_id','client','session_id','task_id')])
+    if retired:_require(task is None,'Ordinary retired task body remains live')
+    metadata=state._metadata(db,compact['name'])
+    _require(metadata is not None and metadata['class']=='compact' and metadata['status']=='live'
+        and metadata['owner']==dict(kind='project',project_id=facts['task']['accepted_identity']['project_id'],task=task_ref)
+        and metadata['created_at']==facts['task']['lifecycle']['created_at'], 'Ordinary retained compact owner or original age changed')
+    if not retired:
+        _require(task is not None,'Ordinary closed task disappeared')
+        lifetime=task['lifecycle']
+        _require(lifetime['compact']==compact and lifetime['safe_closed_at'] is not None
+            and (closed_at is None or lifetime['safe_closed_at']==closed_at)
+            and lifetime['closure']==dict(version=1,task_revision=facts['task']['revision'],dependency_digest=_digest(facts),
+                observed_at=lifetime['safe_closed_at'],evidence=facts['artifacts']), 'Ordinary final closure envelope changed')
+        closed_at=lifetime['safe_closed_at']
+        _require(dict(task,lifecycle=facts['task']['lifecycle'])==facts['task'],'Ordinary closed owner body changed')
+    _require(closed_at is not None and metadata['closed_at'] in ((closed_at,) if retired else (None,closed_at)),
+        'Ordinary retained compact closure date changed')
+    markers=[]
+    if retired:
+        identity={k:task_ref[k] for k in ('scope_id','client','session_id','task_id')}
+        keys=[('task',identity)]
+        turns=[row for row in facts['observed']['turns'] if tuple(row[:3])==tuple(identity.values())[:3] and row[4]==identity['task_id']]
+        keys.extend(('turn',dict(zip(('scope_id','client','session_id','turn_id'),row[:4]))) for row in turns)
+        keys.extend(('receipt',dict(zip(('scope_id','client','session_id','turn_id','tool_call_id','kind'),row[:6])))
+            for row in facts['observed']['receipts'] if any(tuple(row[:4])==tuple(t[:4]) for t in turns))
+        for kind,key in keys:
+            marker=state._retired(db,kind,key)
+            _require(marker is not None,'Ordinary retirement marker is missing')
+            markers.append([kind,key,marker])
+        retired_at=markers[0][2]['retired_at']
+        _require(retired_at>=closed_at,'Ordinary retirement precedes first safe closure')
+        receipts={_raw(dict(zip(('scope_id','client','session_id','turn_id','tool_call_id','kind'),row[:6]))):state._digest(row[6])
+            for row in facts['observed']['receipts']}
+        for kind,key,marker in markers:
+            _require(marker==dict(version=1,identity=key,pins_digest=state._digest(facts['task']['pins']),
+                request_digest=receipts[_raw(key)] if kind=='receipt' else None,
+                created_at=facts['task']['lifecycle']['created_at'],retired_at=retired_at,outcome=facts['task']['state'],evidence_expired=False),
+                'Ordinary retirement marker differs from original owner')
+    assignments=[[item['reference']['id'],state._retired_assignment(db,item['reference']['id'])]
+        for item in facts['certificate'].get('assignments',[])] if retired else []
+    return deepcopy(dict(task=task,metadata=metadata,markers=markers,assignments=assignments))
+
+
+def _ordinary_commit(scope,context,db,task_ref,issued,transition,compact,*,retired=False):
+    _ordinary_peer_check(scope,4)
+    facts=_check_closure_observation(context,db,task_ref,issued,new_compact=compact,
+        retired=retired,assignments_retired=retired)
+    _require(_ordinary_transition(context,db,task_ref,facts,compact,retired=retired,closed_at=scope['closed_at'])==transition,
+        'Ordinary closure final local transition changed')
+    scope['budget'].check()
 
 
 def _ready_stop_shape(proof):
@@ -1187,13 +1362,14 @@ def _stop_input_files(task,candidate):
     return files
 
 
-def _closure_facts(context, task_ref, db, recovery, *, recovery_files=None):
+def _closure_facts(context, task_ref, db, recovery, *, recovery_files=None, ordinary_peer=None):
     from runtime import changes,delegation
     _check_context(context,db)
     state._fields(recovery,('complete','dependencies','blockers','roots','requirements','authorities','discovered_authorities'))
     authority=_canonical_plain(context.authority_set[0])
+    expected=[authority] if ordinary_peer is None else [authority,ordinary_peer['authority']]
     _require(recovery['complete'] is True and not recovery['blockers'] and not recovery['discovered_authorities']
-        and recovery['authorities']==[authority],'Recovery current source coverage is incomplete or foreign')
+        and sorted(recovery['authorities'],key=_raw)==sorted(expected,key=_raw),'Recovery current source coverage is incomplete or foreign')
     observed=state.inspect_dependencies(db,task_ref);task=observed['task']
     assignment_blocker='Assignment body requires original task; exact assignment certificate integration is required'
     _require(not [blocker for blocker in observed['blockers'] if blocker!=assignment_blocker],'; '.join(observed['blockers']))
@@ -1207,6 +1383,10 @@ def _closure_facts(context, task_ref, db, recovery, *, recovery_files=None):
     records=delegation._closure_assignments(context,db,task_ref,task,certificate)
     all_records=delegation._ledger(None,db,context=context)
     guidance=delegation._closure_guidance(context,db,all_records)
+    if ordinary_peer is not None:
+        _require(ordinary_peer['baseline']['content']['project_id']==task['accepted_identity']['project_id']
+            and not any('linked_component' in item for item in guidance['retained']),
+            'Ordinary peer closure needs its existing foreign guidance owner integration')
     projection=_closure_assignment_projection(context,db,task,records)
     own_ids={record['id'] for record in records}
     projection.update(native_guidance=[item for item in guidance['native'] if item['reference']['id'] in own_ids],
@@ -1273,9 +1453,11 @@ def _closure_facts(context, task_ref, db, recovery, *, recovery_files=None):
     bindings={original['project_root']:original['project_binding']}
     bindings.update({original[k]:original['bindings'][label] for k,label in (('repository_root','root'),('primary_root','primary_root'),('git_dir','git_dir'),('git_common_dir','git_common_dir'))})
     _require(all(_binding(Path(path))==binding for path,binding in bindings.items()),'Historical checkout physical identity changed')
-    return dict(version=1,task_ref=task_ref,task=task,certificate=certificate,bindings=bindings,recovery_files=recovery_files or {},
+    facts=dict(version=1,task_ref=task_ref,task=task,certificate=certificate,bindings=bindings,recovery_files=recovery_files or {},
         observed=normalized,physical=physical,ready_files=ready_files,requirements=sorted(requirements,key=_raw),recovery=recovery,
         artifacts=sorted(own_refs,key=_raw),projection=projection,guidance=guidance)
+    if ordinary_peer is not None:facts['ordinary_peer']=ordinary_peer
+    return facts
 
 
 def _linked_closure_recovery_heads(authorities,*,writer=None):
@@ -1611,6 +1793,7 @@ def _closure_support_guards(contexts):
 
 def _observe_closure(contexts, task_ref):
     """Internal owner observation. Types/flags authenticate nothing; writers rederive facts."""
+    started=time.monotonic()
     from runtime import changes
     contexts=tuple(contexts)
     context=next((c for c in contexts if _canonical_plain(c.authority_set[0])==task_ref['authority']),None)
@@ -1627,10 +1810,11 @@ def _observe_closure(contexts, task_ref):
     _require(len(contexts)==1,'Foreign owner closure needs complete terminal component integration')
     context=contexts[0];authority=_canonical_plain(context.authority_set[0])
     _require(task_ref['authority']==authority,'Closure task authority differs')
-    with _closure_support_guards((context,)):
-        recovery,files=_closure_recovery(context,task_ref)
+    with _ordinary_closure_scope(context,task_ref,started) as ordinary:
         with _context_database(context) as db:
-            return _ClosureObservation(_canonical_freeze(_closure_facts(context,task_ref,db,recovery,recovery_files=files)),context,_CLOSURE_ISSUER)
+            facts=_closure_facts(context,task_ref,db,ordinary['recovery'],recovery_files=ordinary['files'],ordinary_peer=ordinary['peer'])
+        if ordinary['witness'] is not None:ordinary['budget'].check()
+        return _ClosureObservation(_canonical_freeze(facts),context,_CLOSURE_ISSUER)
 
 
 def _closure_content(facts):
@@ -1737,6 +1921,7 @@ def _check_closure_observation(context, db, task_ref, observations, *, new_compa
 
 def close_task(scope, request, observations):
     """Internal coordinator wrapper only; public JSON/CLI cannot supply closure authority."""
+    started=time.monotonic()
     _require(isinstance(scope,AcceptedScope),'Closure requires current accepted scope wrapper')
     state._fields(request,('client','session_id','task_id','scope_ref','expected_revision','expected_pins'))
     state._identity(request);state._integer(request['expected_revision'],'expected_revision',1)
@@ -1760,8 +1945,8 @@ def close_task(scope, request, observations):
             _require(task['revision']==request['expected_revision'] and task['pins']==request['expected_pins'] and task['scope_ref']==request['scope_ref'],
                 'Closure replay request differs from exact original owner')
             return dict(ok=True,task=task)
-    guards=_linked_stop_guards(linked['aggregate'],linked['authorities']) if linked else _closure_support_guards((context,))
-    with guards, ExitStack() as read_scopes:
+    guards=_linked_stop_guards(linked['aggregate'],linked['authorities']) if linked else _ordinary_closure_scope(context,task_ref,started)
+    with guards as ordinary, ExitStack() as read_scopes:
         read_roster=(read_scopes.enter_context(_linked_preparation_read_roster(linked['aggregate'],linked['authorities'],
             basis=original['certificate']['linked'])) if linked else None)
         if linked:
@@ -1769,8 +1954,8 @@ def close_task(scope, request, observations):
             recovery=_canonical_plain(changes._inspect_lifecycle_recovery_guarded(linked['authorities'],refs,read_roster=read_roster));files=_closure_recovery_files(recovery)
             actual=_linked_closure_facts(context,task_ref,linked['aggregate'],linked['authorities'],recovery,files,read_context=_bind_linked_read_context(linked['aggregate'],linked['authorities'],basis=original['certificate']['linked']),read_roster=read_roster)
         else:
-            recovery,files=_closure_recovery(context,task_ref)
-            with _context_database(context) as reader:actual=_closure_facts(context,task_ref,reader,recovery,recovery_files=files)
+            with _context_database(context) as reader:
+                actual=_closure_facts(context,task_ref,reader,ordinary['recovery'],recovery_files=ordinary['files'],ordinary_peer=ordinary['peer'])
         _require(actual==_issued_closure(context,observations),'Closure owner observation is stale or caller supplied')
         _require(actual['task']['revision']==request['expected_revision'] and actual['task']['pins']==request['expected_pins'] and
             actual['task']['scope_ref']==request['scope_ref'],'Closure request differs from exact original owner')
@@ -1798,7 +1983,10 @@ def close_task(scope, request, observations):
                     'Closure request differs from exact original owner')
                 if task['lifecycle']['safe_closed_at'] is not None:return dict(ok=True,task=task)
                 return dict(ok=True,task=state._close_lifecycle(db,task_ref,issued,compact))
-        with _context_database(context,write=True) as db:
+        compact=None;transition=None
+        callback=(lambda db:_ordinary_commit(ordinary,context,db,task_ref,issued,transition,compact)) if ordinary['witness'] is not None else None
+        with _context_database(context,write=True,before_commit=callback) as db:
+            _ordinary_peer_check(ordinary,3)
             facts=_check_closure_observation(context,db,task_ref,issued);task=facts['task']
             _require(task['revision']==request['expected_revision'] and task['pins']==request['expected_pins']
                 and task['scope_ref']==request['scope_ref'],'Closure request differs from exact original owner')
@@ -1806,6 +1994,8 @@ def close_task(scope, request, observations):
             if actual['lifecycle']['safe_closed_at'] is not None:
                 _require(_read(None,actual['lifecycle']['compact'],context=context,db=db)==_closure_content(facts),
                     'Retained closure compact support changed')
+                compact=actual['lifecycle']['compact']
+                if callback is not None:transition=_ordinary_transition(context,db,task_ref,facts,compact,closed_at=ordinary['closed_at'])
                 return dict(ok=True,task=actual)
             content=_closure_content(facts)
             dependencies=tuple(_canonical_freeze(dict(kind='artifact',reference=ref)) for ref in facts['artifacts'])
@@ -1813,6 +2003,7 @@ def close_task(scope, request, observations):
             compact=_artifact(None,content,context=context,owner=owner,db=db)
             _check_closure_observation(context,db,task_ref,issued,new_compact=compact)
             task=state._close_lifecycle(db,task_ref,issued,compact)
+            if callback is not None:transition=_ordinary_transition(context,db,task_ref,facts,compact,closed_at=ordinary['closed_at'])
             return dict(ok=True,task=task)
 
 
@@ -3122,6 +3313,7 @@ def _diagnostic_output_routes(context, db, task_ref):
 
 
 def _retire_closed_task(context, task_ref):
+    started=time.monotonic()
     from runtime import changes,delegation
     protected=dict(owner=task_ref,closed_at=None,coverage='classification-only',deletion_authorized=False,outputs=[],
         blockers=['Linked diagnostic content requires its complete owner classification'])
@@ -3155,20 +3347,23 @@ def _retire_closed_task(context, task_ref):
                     delegation.retire_settled(db,task_ref,issued)
                     return state.retire_closed(db,task_ref,issued) | dict(diagnostic_retention=protected)
         raise state.StateError('Linked retirement source authority closure did not converge')
-    with _closure_support_guards((context,)):
-        recovery,files=_closure_recovery(context,task_ref)
+    with _ordinary_closure_scope(context,task_ref,started) as ordinary:
         with _context_database(context) as reader:
-            facts=_closure_facts(context,task_ref,reader,recovery,recovery_files=files)
+            facts=_closure_facts(context,task_ref,reader,ordinary['recovery'],recovery_files=ordinary['files'],ordinary_peer=ordinary['peer'])
         issued=_ClosureObservation(_canonical_freeze(facts),context,_CLOSURE_ISSUER)
-        with _context_database(context,write=True) as db:
+        compact=None;transition=None
+        callback=(lambda db:_ordinary_commit(ordinary,context,db,task_ref,issued,transition,compact,retired=True)) if ordinary['witness'] is not None else None
+        with _context_database(context,write=True,before_commit=callback) as db:
+            _ordinary_peer_check(ordinary,3)
             _check_closure_observation(context,db,task_ref,issued)
             task=_linked_raw_task(db,task_ref)
             _require(task['lifecycle']['safe_closed_at'] is not None,'Task has no retained safe closure')
-            compact=_read(None,task['lifecycle']['compact'],context=context,db=db)
-            _require(compact==_closure_content(facts),'Closure support or current dependencies changed')
+            compact=task['lifecycle']['compact']
+            _require(_read(None,compact,context=context,db=db)==_closure_content(facts),'Closure support or current dependencies changed')
             _stamp_linked_retirement(context,db,task_ref,issued)
             delegation.retire_settled(db,task_ref,issued)
             result=state.retire_closed(db,task_ref,issued)
+            if callback is not None:transition=_ordinary_transition(context,db,task_ref,facts,compact,retired=True,closed_at=ordinary['closed_at'])
             return result | dict(diagnostic_retention=_diagnostic_output_routes(context,db,task_ref))
 
 
