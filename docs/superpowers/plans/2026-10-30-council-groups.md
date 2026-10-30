@@ -28,7 +28,7 @@ pinned OpenCode 1.19.5 and the user's existing OpenRouter setup.
 - Old manifests retain their historical interpretation; do not mutate evidence.
 - Preserve coordinator/authentication/subscriptions; no paid fallback or outer
   inference replay. Comparative evaluation remains deferred.
-- Use skill-creator for workflow instructions; entry point stays within150 words.
+- Use skill-creator for workflow instructions; entry point stays within 150 words.
 - Validate with `python3 -B scripts/validate.py`; report client execution separately.
 
 ## Review Focus
@@ -88,29 +88,29 @@ acceptance. Legacy worker verification remains supported for legacy runs; groupe
 observations must not trust a bypassed manual accepted flag as freshness proof.
 Do not create a general receipt service.
 
-- [ ] **Step 1: Write focused failing tests.** Cover all-free full 3+3+1 acceptance,
+- [x] **Step 1: Write focused failing tests.** Cover all-free full 3+3+1 acceptance,
   group-specific native selection, wrong topology/native Free/paid Free/duplicate
   models rejection, chair restriction, complete/incomplete/partial coverage,
   old manifest/request behavior and all seven external attempts in accounting/stop.
   Capture RED before implementation.
-- [ ] **Step 2: Extend the existing runtime and worker contract.** Add version-aware
+- [x] **Step 2: Extend the existing runtime and worker contract.** Add version-aware
   three-slot/chair helpers; external synthesis support; preflight all executable
   phase briefs; zero-rate/variant checks; phase-aware sealed synthesis packet and
   headroom for six reports, research and observations. Preserve no-clobber recovery,
   source hashes and absolute deadlines. Avoid unrelated refactoring.
-- [ ] **Step 3: Prove synthesis and ownership.** Add RED/GREEN tests for critiques
+- [x] **Step 3: Prove synthesis and ownership.** Add RED/GREEN tests for critiques
   and anonymous observations present in the external packet, frozen changes blocked,
   distinct original sessions, missing/reused synthesis session rejected, bypassed
   accepted flag excluded, terminal failure settlement, original lost response,
   cancel/disable/stale consent and ambiguous spawn retaining owner. Keep reports
   in files rather than exceeding the objective envelope. No extra inference retry.
-- [ ] **Step 4: Update runtime instructions once.** Invocation asks the group first;
+- [x] **Step 4: Update runtime instructions once.** Invocation asks the group first;
   current guidance/cache supplies eligible group-specific participants and chair,
   with no fixed names or group-wide catalog prefetch. Show concrete scope/roster,
   reuse authorization, preserve free variant and handle unavailable full group.
   Specify fresh Free chair, no native fallback, host verification and truthful
   coverage/cost. Update source coverage and representative loading walkthroughs.
-- [ ] **Step 5: Verify and self-review.** Run affected Council/OpenRouter modules,
+- [x] **Step 5: Verify and self-review.** Run affected Council/OpenRouter modules,
   skill validation, package validation and diff checks; retain raw RED/GREEN logs.
   No historical 90-minute broad discovery replay. Coordinator owns commits and
   independent task review; fix material findings with scoped covering checks.
@@ -137,19 +137,19 @@ pinned binary/auth references without reading or copying credentials. Default li
 group Free unless the user selects another. Existing temporary enrollment exception
 is not full project adoption. Do not enroll or change a live project.
 
-- [ ] **Step 1: Resolve readiness.** Confirm actual existing disposable scope is
+- [x] **Step 1: Resolve readiness.** Confirm actual existing disposable scope is
   idle and configured. Use bounded public discovery for selected group, exact
   routing/effort/zero-price evidence and any concrete pinned wire-control question.
   A credential-free local fixture may establish outgoing parameter behavior; no
   real model call is a substitute for missing readiness. Show resolved roster,
   scope and budgets before inference. Stop dependent live work on a real blocker,
   without silently downgrading, replacing or purchasing a fallback.
-- [ ] **Step 2: Run authorized live proof.** Three investigations, three critiques,
-  one fresh chair synthesis; default1200s with600/360/240 cumulative phase budgets.
+- [x] **Step 2: Run authorized live proof.** Three investigations, three critiques,
+  one fresh chair synthesis; default 1200s with 600/360/240 cumulative phase budgets.
   Use a harmless synthetic dependency/evidence question; no real source or probe
   instructions. Keep finite model-specific allowances, advisory report brevity,
   native supervision, actual session handles and progress. No outer replay.
-- [ ] **Step 3: Verify evidence and stop.** Independently check source claims,
+- [x] **Step 3: Verify evidence and stop.** Independently check source claims,
   original snapshot/frozen reports, accepted phase membership/freshness, all local
   owners and reported nullable costs. Retain sanitized original result/progress
   records and exact unknowns. Do not label an incomplete run complete.
@@ -166,3 +166,15 @@ Task1 contracts. All five Review Focus cases have Task1 owning tests. Group-firs
 selection and native variation are instruction policy, not a new ranking engine.
 The user already approved implementation and live testing after the reviewed
 direction; no redundant plan/approach approval is requested.
+
+## Execution status
+
+Task1 implemented and independently reviewed through `bad0f92`. Task2 reproduced
+and corrected two local startup defects at `1754424`, with independent scoped
+review and 162 affected tests passing. First partial live run is preserved and all
+its owners are stopped. One fresh changed-code Free run completed all seven
+external assignments in 254.020 seconds with distinct sessions and confirmed local
+stops. Its result is **partial**, with 3/3 accepted investigations, 1/3 critiques
+and no accepted synthesis. No inference retry, replacement or native Council
+fallback was used. Final integrated review remains pending; full Free
+qualification and comparative evaluation remain open.

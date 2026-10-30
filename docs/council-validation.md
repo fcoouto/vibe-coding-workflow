@@ -21,6 +21,7 @@ records qualification; it does not authorize a Council run or activate a route.
 | Nonsecret host identity observation | In this task's existing delegated shell, `CODEX_THREAD_ID` identified a distinct child UUID while `CODEX_SESSION_ID` retained the parent session UUID | One host observation only; not a Council run, universally portable identity API or independent authentication |
 | Native functional canary | **Observed**, with synthetic external process reports; three fresh native children, one critique round and fresh synthesis; local runtime outcome `complete` | Configured native controls and completed host states verified; execution model/effort telemetry unknown; no forced cancellation, long-wait cadence or real three-provider concurrency qualification |
 | Actual cross-provider Council | **Observed incomplete**, four paid external assignments and three fresh native phases in 1,014.271 seconds; all local execution stopped | Opus investigation failed with a reported content filter; its critique exceeded the word bound and was rejected. Full-roster qualification, settled billing and upstream settings remain unverified |
+| Runtime groups and Free execution | Grouped runtime and local admission checks pass; fresh Free session observed all seven external assignments, distinct sessions and local stops in 254.020 seconds | Outcome **partial**: three accepted investigations, one accepted critique, rejected synthesis; no usable Free Council verdict or full-roster qualification |
 | Comparative quality/cost | **Deferred separate experiment** | Operation does not establish superiority, reliability rate, token savings or avoided spending |
 
 Task-local raw logs, source resolution and walkthrough inputs/reviews are retained
@@ -295,6 +296,89 @@ marker with incorrect sealing remain conservative recovery blockers; uncertain
 files are preserved. The historical 21 failures and six errors were not replayed
 or repaired. No new paid inference, full-roster qualification, model replacement
 or comparative evaluation was performed.
+
+## Runtime model groups and Free qualification
+
+The [runtime-groups plan](superpowers/plans/2026-10-30-council-groups.md) adds
+Frontier, Balanced and Free selection at invocation, followed by current discovery
+for only the chosen group. Commercial rosters are not fixed in the package.
+Intelligence, Coding and Agentic indexes inform task-specific selection; missing
+scores remain unknown. Paid groups select an appropriate native member, while
+Free uses three distinct external models and a fresh external chair, with no
+native Council member or fallback. Host coordination and verification still use
+the native allowance.
+
+Local proof includes 171 affected tests for the core change, focused checks for
+Free documented-default reasoning, 83 Council flow tests after retained-session
+history correction, and 162 affected tests after the local admission correction.
+These runs overlap and must not be added. Independent task review closed the
+freshness-history issue and approved the narrow admission fixes. Package validation
+continues to report `client_execution: not_checked`; live observations below are
+separate.
+
+The user selected Free for the live test. Runtime public metadata selected
+`thinkingmachines/inkling-small:free` and `thinkingmachines/inkling:free`, both
+requesting their observed maximum `max`, plus
+`nvidia/nemotron-3.5-super-vl:free`. The latter exact route documents reasoning on
+by default but exposes no effort selector. Its default was preserved by omitting
+the entire reasoning option; the upstream maximum mapping remains **unverified**.
+The initial chair was Inkling Small. These are this session's observed selections,
+not future defaults or a universal quality ranking. Exact route rates were zero.
+NVIDIA's free endpoint excludes confidential/personal input; only the existing
+392-byte harmless synthetic evidence was supplied.
+
+The first test at `bad0f92` exposed two local startup defects before the affected
+models launched: a Council lock error escaped bounded admission, and an exact D4
+lock-busy error was masked as unavailable storage. One Inkling investigation
+completed and was accepted; the session was cancelled and remains **partial**.
+The unstarted prepared owner subsequently observed cancellation through the
+existing execution guard, with OpenCode launch explicitly prohibited. All original
+owners were then confirmed stopped. Original unsettled and settled records remain
+retained; no terminal attempt or model inference was replayed.
+
+The narrow correction at `1754424` moves the original Council ceiling into final
+bounded admission and recognizes only the exact plain D4 lock-busy error. Active
+or uncertain ownership and unrelated storage failures still block. Real-lock and
+three-process fixtures prove bounded original-owner recovery without increasing
+inference retries or deadlines. A scoped independent review approved the patch
+before one fresh changed-code qualification.
+
+That fresh session executed all seven original external assignments under the
+same 1200-second cumulative ceiling and 600/360/240 phase reserves. Per-assignment
+allowances remained 32,768 input tokens, 16,384 output tokens and eight steps.
+At verification, elapsed time was **254.020 seconds**. All seven actual session
+IDs were distinct and every local execution was confirmed stopped. Original
+source, copied workspaces and frozen report hashes verified unchanged.
+
+| Seat | Investigation | Critique | Fresh synthesis |
+| --- | --- | --- | --- |
+| Inkling Small | Accepted | Failed after launch; retained client category `unknown` | Rejected: malformed interruption/internal-state text and unsupported claims |
+| Inkling | Accepted | Rejected: report said source and peer contents remained unread and requested bypassing deny rules | Not chair |
+| Nemotron 3.5 Super VL | Accepted | Accepted with an explicit unsupported report-availability caveat | Not chair |
+
+Acceptance records source-grounded substantive findings, not endorsement of every
+incidental inference. All original reports remain verbatim. In particular, some
+reports incorrectly describe anonymous reports as unavailable; later-phase frozen
+peers were supplied. The malformed synthesis was rejected for usability and
+evidence problems, not its advisory word count. No permission was broadened in
+response to the rejected request. No model was retried, replaced or given a
+native fallback.
+
+Final outcome is **`partial`**, with 3/3 investigations, 1/3 critiques and 0/1
+accepted synthesis. `fresh_synthesis_available` is false; no usable Council verdict
+was delivered. The client-reported known external subtotal is **0 USD** and six
+assignments reported complete zero-cost accounting, but the failed critique leaves
+`external_total_usd` **null**. Source-stipulated historical 0.25 USD is unrelated.
+No independent provider billing or serving-model/effort attestation was observed.
+This test establishes bounded all-external execution and truthful failure handling;
+it does not qualify reliable Free deliberation or comparative effectiveness.
+
+Private evidence is retained under
+`.superpowers/sdd/2026-10-30-council-groups/`, including original partial records,
+the fresh run's approved request, packets, source checks, result/progress copies,
+frozen manifests and SHA256 inventory. Credentials and auth-directory contents
+were neither read nor copied. Existing temporary enrollment and saved consent
+were reused without account, provider-billing or configuration changes.
 
 ## Next qualification
 
