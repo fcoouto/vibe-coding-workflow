@@ -312,6 +312,35 @@ class LangfuseTests(unittest.TestCase):
             self.assertEqual(result['status'], 'pending')
             self.assertEqual(sum(request['method'] == 'POST' for request in server.requests), 2)
 
+    def test_auth_quota_and_outage_failures_stop_at_each_protocol_boundary(self):
+        from runtime import langfuse
+        with protocol_server() as server:
+            for phase in ('projects', 'post', 'read'):
+                for status in (403, 429, 503):
+                    with self.subTest(phase=phase, status=status):
+                        server.requests.clear()
+                        server.projects_status = server.post_status = server.read_status = 200
+                        setattr(server, phase + '_status', status)
+                        guarded = []
+                        if phase == 'read':
+                            result = langfuse.synthetic_probe(server.url, 'lf-project',
+                                before_ingest=lambda: guarded.append(True))
+                            self.assertTrue(result['accepted'])
+                            self.assertFalse(result['verified'])
+                            self.assertEqual(result['status'], 'pending')
+                        else:
+                            with self.assertRaises(langfuse.LangfuseError) as caught:
+                                langfuse.synthetic_probe(server.url, 'lf-project',
+                                    before_ingest=lambda: guarded.append(True))
+                            expected = ('ingestion_outcome_unknown' if phase == 'post' else
+                                'authentication_failed' if status == 403 else 'destination_rejected_request')
+                            self.assertEqual(str(caught.exception), expected)
+                        self.assertEqual(len(guarded), int(phase != 'projects'))
+                        self.assertEqual(sum(r['method'] == 'POST' for r in server.requests),
+                            int(phase != 'projects'))
+                        self.assertEqual(sum('/v2/observations?' in r['path'] for r in server.requests),
+                            int(phase == 'read'))
+
 
 if __name__ == '__main__':
     unittest.main()
