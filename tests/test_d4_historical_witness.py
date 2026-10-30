@@ -1,5 +1,7 @@
 """Real producer observations for the future-only D4 historical witness contract."""
 import copy
+import hashlib
+import json
 from pathlib import Path
 import shutil
 import tempfile
@@ -17,20 +19,20 @@ class HistoricalWitnessTests(unittest.TestCase):
         self.addCleanup(self.fixture.doCleanups)
         self.addCleanup(self.fixture.tearDown)
 
-    def test_actual_source_records_original_stop_reason_before_permission_denial(self):
+    def observe_before_storage(self):
+        """Acquire a real source while the finite host deliberately omits its historical subject."""
         fixture = self.fixture
         request, scope, context, task, shared = fixture.historical_shared_consumer()
-        with evidence._context_database(context, write=True) as db:
-            proof = dict(version=1, kind='stopped-writer-reconciliation',
-                identity={k: task[k] for k in ('client', 'session_id', 'task_id', 'scope_ref')},
-                expected_revision=task['revision'], expected_pins=task['pins'], observed_turn_id=task['turn_id'],
-                stopped=True, descendants_stopped=True, attempt_ids=[], observation_ref='fixture:stopped', coordinator_ref='fixture:owner')
-            reference = evidence._artifact(scope, proof, owner=evidence._artifact_owner(scope, task), db=db)
-            retired = copy.deepcopy(task)
-            retired.update(state='cancelled', revision=task['revision'] + 1,
-                retirement=dict(proof_digest=reference['digest'], proof=reference,
-                    observation_ref='fixture:stopped', coordinator_ref='fixture:owner', previous_revision=task['revision']))
-            state._save(db, state._scope_id(scope), retired)
+        identity={k:task[k] for k in ('client','session_id','task_id','scope_ref')}
+        proof=dict(version=1,kind='stopped-writer-reconciliation',identity=identity,
+            expected_revision=task['revision'],expected_pins=task['pins'],observed_turn_id=task['turn_id'],
+            stopped=True,descendants_stopped=True,attempt_ids=[],observation_ref='fixture:stopped',coordinator_ref='fixture:owner')
+        path=fixture.directory/'historical-witness-stop.json';raw=json.dumps(proof,sort_keys=True).encode();path.write_bytes(raw);path.chmod(0o600)
+        retired=state.retire_task(scope,identity|dict(expected_revision=task['revision'],expected_pins=task['pins'],
+            reason='Observed stopped writer and descendants',reference='fixture:native-retirement',
+            stop_proof=dict(path=str(path),sha256=hashlib.sha256(raw).hexdigest())))['task']
+        self.assertEqual(retired['pins'],task['pins']);self.assertEqual(retired['state'],'cancelled')
+        reference=retired['retirement']['proof']
         captured = []
         observe = fixture.changes._observe_recovery_source
         def observe_actual(*args, **kwargs):
@@ -38,13 +40,22 @@ class HistoricalWitnessTests(unittest.TestCase):
             captured.append(source)
             return source
         before = shared.read_bytes()
+        from tests import test_onboarding_host
+        from scripts.onboard_coordinator import run_verified_operation
+        contexts=tuple(evidence._evidence_context(existing) for existing in fixture.d4_bookkeeping_scopes)
+        decision=test_onboarding_host.OnboardingHostTests.decision(self,fixture,request,'apply',contexts)
+        decision['bookkeeping_scope']['subjects']=[subject for subject in decision['bookkeeping_scope']['subjects']
+            if not all(subject[key]==task['accepted_identity'][key] for key in ('project_id','repository_id','checkout_id','client'))]
         with patch.object(fixture.changes, '_observe_recovery_source', side_effect=observe_actual):
-            result = fixture.run_with_d4_host(request, 'apply')
-        # The producer half deliberately leaves the existing permission gate closed.
+            result = run_verified_operation(decision,fixture.directory,request)
         self.assertNotEqual(result['exit_code'], 0, result)
-        self.assertIn('Current D4 source subject enrollment changed', str(result))
         self.assertEqual(shared.read_bytes(), before)
         self.assertTrue(captured, result)
+        return request,scope,context,task,shared,reference,captured
+
+    def test_actual_source_preserves_original_stop_without_omitted_current_consent(self):
+        fixture=self.fixture
+        request,scope,context,task,shared,reference,captured=self.observe_before_storage()
         content = evidence._canonical_plain(captured[-1].content)
         self.assertIn('use_contract', content)
         contract = recovery_uses.validate(content['use_contract'])
@@ -95,7 +106,7 @@ class HistoricalWitnessTests(unittest.TestCase):
         self.assertEqual({row['purpose'] for row in mixed_contract['edges']
             if row['parent'] is None and row['dependency'] == dict(kind='task', reference=original)},
             {'retention-only', 'content'})
-        # Exercise the real cut producer without granting or registering the held source.
+        # Exercise the real cut producer without granting or registering the observed source.
         with evidence._context_database(context) as db:
             certificate = fixture.changes._stopped_certificate(context, db,
                 next(row for row in content['tasks'] if row['reference'] == original))

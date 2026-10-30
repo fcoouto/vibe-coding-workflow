@@ -157,6 +157,18 @@ class CoordinatorOperationOwner:
                 projection = startup.canonical_scope_projection(startup.decode_project_record(permission['authority']['record']),
                     repository_id=subject['repository_id'], checkout_id=subject['checkout_id'], client=subject['client'])
                 self._projection(startup._canonical_plain(projection))
+        # Inherited owners need their exact independently captured identity, not only a subject name.
+        for projection in facts['registration_projections'].values():
+            capture=projection['inputs'].get('history_capture')
+            if capture is None:continue
+            for response in capture['job_results']:
+                kind=response['job']['kind'];result=response['result']
+                if kind=='task':self._projection(result['task']['accepted_identity'])
+                elif kind in ('historical-anchor','stopped-certificate'):
+                    self._projection(result['certificate']['accepted_identity'])
+        for permission in facts['permissions'].get('retention_bookkeeping',[]):
+            self._require(permission['authority'] in scope['authorities'] or self._birth_authority(permission['authority']))
+            self._projection(permission['identity'])
         return issue(frozen_facts)
 
 

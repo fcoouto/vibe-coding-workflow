@@ -284,7 +284,8 @@ class CaptureBudget:
 def _history_body(body):
     _require(type(body) is dict and type(body.get('version')) is int and body['version'] in (1,2))
     _fields(body, ('version','kind','identity','journal','authorities','tasks','assignments','artifacts','previous',
-        *(['stopped','supersedes'] if body['version']==2 else []), *(['use_contract'] if 'use_contract' in body else [])))
+        *(['stopped','supersedes'] if body['version']==2 else []), *(['use_contract'] if 'use_contract' in body else []),
+        *(['birth_handoff'] if 'birth_handoff' in body else [])))
     _require(body['kind']=='d4-recovery-source'); _identity(body['identity'])
     _fields(body['journal'],('sha256','observed_at','state')); _hash(body['journal']['sha256'])
     _require(type(body['journal']['observed_at']) is int and body['journal']['observed_at']>=0)
@@ -295,6 +296,9 @@ def _history_body(body):
     if body['previous'] is not None:_artifact(body['previous'])
     if body['version']==2:_require(body['previous'] is None)
     if 'use_contract' in body:validate(body['use_contract'])
+    if 'birth_handoff' in body:
+        from runtime import evidence
+        evidence._birth_handoff_shape(body['birth_handoff'],body['identity'])
 
 
 def _history_dependencies(body, authority):
@@ -303,6 +307,10 @@ def _history_dependencies(body, authority):
     rows.extend(dict(kind='artifact', reference=row) for row in body['artifacts'])
     if body['previous']:
         rows.append(dict(kind='recovery', reference=dict(authority=authority, artifact=body['previous'])))
+    origin=body.get('birth_handoff',{}).get('origin_source')
+    if origin is not None:
+        edge=dict(kind='recovery',reference=origin)
+        if edge not in rows:rows.append(edge)
     for row in rows: _dependency(row)
     _require(len(rows) <= MAX_ROWS)
     return rows
@@ -351,6 +359,9 @@ def project_history(inputs, created_at, budget):
     _require('use_contract' in template,'History comparison requires its actual current root program')
     program = validate(template['use_contract'])
     direct = _history_dependencies(template, authority)
+    birth_origin=template.get('birth_handoff',{}).get('origin_source')
+    origin_edge=dict(kind='recovery',reference=birth_origin) if birth_origin is not None else None
+    payload_direct=[edge for edge in direct if edge!=origin_edge]
     head = inputs['reference']; history = inputs['history']; baseline = inputs['baseline']
     _require(type(history) is list and len(history)<=MAX_ROWS)
     _require(type(inputs['anchors']) is list and len(inputs['anchors'])<=MAX_ROWS)
@@ -406,8 +417,8 @@ def project_history(inputs, created_at, budget):
         budget.retain(jobs)
         return dict(comparison_only=True,content=None,reference=None,created_at=created_at,
             pending_jobs=deepcopy(jobs),obligations=[])
-    check_coverage(program, direct, inputs['metadata'])
-    payload = [pointer for edge in direct if (pointer:=_history_pointer(edge)) is not None]
+    check_coverage(program, payload_direct, inputs['metadata'])
+    payload = [pointer for edge in payload_direct if (pointer:=_history_pointer(edge)) is not None]
     observed_payload = _history_walk(payload,inputs['metadata'])
     _require({key(row) for row in observed_payload}==set(inputs['metadata']), 'Recovery payload has extra observed parents')
     pointer = dict(authority=authority,artifact=head) if head else None
@@ -424,8 +435,8 @@ def project_history(inputs, created_at, budget):
         _require(type(row['support']) is list and len(row['support'])==2 and set(map(key,row['support']))==set(map(key,allowed)),
             'Recovery historical support is not exact')
         name=key(row['root']);_require(name not in seen_anchors,'Recovery history has duplicate anchors');seen_anchors.add(name)
-    if head and template['version']==1:
-        _require(anchors, 'Recovery previous has no independently justified historical anchor')
+    if (head and template['version']==1) or birth_origin is not None:
+        _require(anchors, 'Recovery history has no independently justified historical anchor')
     anchor = min(anchors,key=lambda row:key(row['root'])) if anchors else None
     def candidate(previous, observed_at=None):
         _require(len(key(template).encode())<=MAX_BYTES,'Recovery candidate whole-body byte bound exceeded')
@@ -433,8 +444,9 @@ def project_history(inputs, created_at, budget):
         body = deepcopy(template); body['previous'] = previous
         if observed_at is not None: body['journal']['observed_at'] = observed_at
         edges = deepcopy(program['edges']); roots = program['roots']
-        if previous:
-            index = roots.index(anchor['root']); start = dict(authority=authority,artifact=previous)
+        starts=([dict(authority=authority,artifact=previous)] if previous else [])+([birth_origin] if birth_origin is not None else [])
+        for start in {key(pointer):pointer for pointer in starts}.values():
+            index = roots.index(anchor['root'])
             seed = dict(root=index,parent=None,dependency=dict(kind='recovery',reference=start),purpose='retention-only')
             budget.take(edges=1); budget.retain(seed); edges.append(seed)
             for parent in _history_walk(start,inputs['history_metadata']):
@@ -462,10 +474,10 @@ def project_history(inputs, created_at, budget):
     if reused is None: body,dependencies = candidate(head if template['version']==1 else None)
     else: body,dependencies = replay,deps
     budget.retain(body)
-    support = set(map(key,anchor['support'])) if anchor else set()
+    supports={program['roots'].index(row['root']):set(map(key,row['support'])) for row in anchors}
     obligations = []
     for row in body['use_contract']['edges']:
-        waiver = anchor is not None and row['root']==program['roots'].index(anchor['root']) and row['purpose']=='retention-only' and key(row['dependency']) in support
+        waiver = row['purpose']=='retention-only' and key(row['dependency']) in supports.get(row['root'],set())
         obligations.append(dict(row,requirement='validated-stop-support' if waiver else 'current-permission'))
     return dict(comparison_only=True,content=body,reference=reused,dependencies=dependencies,created_at=created_at,
         pending_jobs=[],obligations=obligations)

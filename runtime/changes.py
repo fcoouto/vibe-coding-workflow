@@ -2354,12 +2354,20 @@ def _assignment_certificate_shape(value, task):
     return value
 
 
-def _assignment_certificate(context,db,task,record):
+def _assignment_certificate(context,db,task,record,*,read_context=None,read_roster=None):
     from runtime import evidence
+    if read_roster is not None:
+        linked=task.get('writer_stop',{}).get('linked')
+        read_roster=evidence._matching_linked_read_roster(read_roster,
+            evidence._read(None,linked,context=context,db=db) if linked else None)
+        if read_roster is not None:
+            evidence._check_linked_read_roster(read_roster,evidence._canonical_plain(read_roster.pointer),
+                member=dict(authority=_canonical_plain(context.authority_set[0]),scope_id=evidence._task_scope_id(task),
+                    **{key:task[key] for key in ('client','session_id','task_id')}),writer=(context,db))
     d3._require(record['data']['status']=='settled' and record['data'].get('lifecycle'),'Recovery assignment lacks dated reconciled stop proof')
     rec=evidence._read(None,record['data']['reconciliation'],context=context,db=db)
-    if rec.get('kind')=='synchronous-verification':task_state._ready_stop(context,db,task)
-    return _assignment_certificate_fields(context,db,task,record,rec)
+    if rec.get('kind')=='synchronous-verification':task_state._ready_stop(context,db,task,read_context=read_context,read_roster=read_roster)
+    return evidence._finish_linked_read_context(_assignment_certificate_fields(context,db,task,record,rec),read_context,read_roster=read_roster)
 
 
 def _assignment_certificate_fields(context,db,task,record,rec):
@@ -2495,12 +2503,16 @@ def _stopped_certificate_shape(value):
     return value
 
 
-def _stopped_certificate(context,db,item):
+def _stopped_certificate(context,db,item,*,read_context=None,read_roster=None):
     from runtime import evidence
     ref=item['reference']; task=task_state._task(db,ref['scope_id'],ref['client'],ref['session_id'],ref['task_id'])
     d3._require(task is not None and task.get('lifecycle') and task['pins']==item['pins'],'Recovery original stopped owner/age/pins changed')
+    if read_roster is not None:
+        linked=task.get('writer_stop',{}).get('linked')
+        read_roster=evidence._matching_linked_read_roster(read_roster,
+            evidence._read(None,linked,context=context,db=db) if linked else None)
     if task.get('writer_stop'):
-        proof=task_state._ready_stop(context,db,task,observe=True)
+        proof=task_state._ready_stop(context,db,task,observe=True,read_context=read_context,read_roster=read_roster)
         result=dict(reference=ref,created_at=task['lifecycle']['created_at'],version=2,state=task['state'],writer_stop=task['writer_stop'],
             **{k:task[k] for k in ('revision','pins','accepted_identity','scope_ref','turn_id')},proof=proof)
         if 'linked' in task['writer_stop']:result['linked']=evidence._read(None,task['writer_stop']['linked'],context=context,db=db)
@@ -2515,9 +2527,9 @@ def _stopped_certificate(context,db,item):
             ('revision','pins','accepted_identity','scope_ref','turn_id','retirement')},proof=proof)
     from runtime import delegation
     records=delegation._ledger(None,db,context=context)
-    result['assignments']=[_assignment_certificate(context,db,task,r) for r in records if all(r['owner'][k]==ref[k] for k in ('scope_id','client','session_id','task_id'))]
+    result['assignments']=[_assignment_certificate(context,db,task,r,read_context=read_context,read_roster=read_roster) for r in records if all(r['owner'][k]==ref[k] for k in ('scope_id','client','session_id','task_id'))]
     result['assignments'].sort(key=d3._digest)
-    return _stopped_certificate_shape(result)
+    return evidence._finish_linked_read_context(_stopped_certificate_shape(result),read_context,read_roster=read_roster)
 
 
 def _stopped_certificate_inputs(context,db,item):
@@ -2592,18 +2604,18 @@ def _stopped_certificate_assembly(inputs):
     return result
 
 
-def _resolve_stopped_certificate_job(context,job):
+def _resolve_stopped_certificate_job(context,job,*,read_context=None,read_roster=None):
     """Normal full validators; the serial owner calls this only after closing its local reader."""
     from runtime import evidence
     d3._require(job['reference']['authority']==_canonical_plain(context.authority_set[0]),'Stopped job authority differs')
     if job['kind']=='ready-candidate':
-        result=evidence._ready_stop_candidate(context,job['task'],job['candidate'])
+        result=evidence._ready_stop_candidate(context,job['task'],job['candidate'],read_context=read_context,read_roster=read_roster)
     else:
         d3._require(job['kind']=='linked-certificate','Unknown stopped certificate validation job')
         with evidence._context_database(context) as db:
-            result=_stopped_certificate(context,db,job['item'])
-            _check_stopped_certificate(context,db,result)
-    return dict(job=job,result=result)
+            result=_stopped_certificate(context,db,job['item'],read_context=read_context,read_roster=read_roster)
+            _check_stopped_certificate(context,db,result,read_context=read_context,read_roster=read_roster)
+    return evidence._finish_linked_read_context(dict(job=job,result=result),read_context,read_roster=read_roster)
 
 
 def _linked_live_certificate_inputs(context,db,item,basis):
@@ -2651,11 +2663,11 @@ def _linked_live_certificate_assembly(inputs):
     return _stopped_certificate_from_inputs(inputs)
 
 
-def _resolve_linked_live_certificate_job(job):
+def _resolve_linked_live_certificate_job(job,*,read_context=None,read_roster=None):
     """The acquisition owner closes its member reader before invoking the complete basis validator."""
     from runtime import evidence
     d3._require(job['kind']=='linked-basis','Unknown live linked certificate job')
-    return dict(job=job,result=evidence._linked_stopped_basis(job['aggregate'],job['authorities']))
+    return evidence._finish_linked_read_context(dict(job=job,result=evidence._linked_stopped_basis(job['aggregate'],evidence._linked_read_authorities(read_context,job['expected'],member=job['reference'],read_roster=read_roster))),read_context,read_roster=read_roster)
 
 
 def _check_stopped_task_identity(identity,value):
@@ -2678,21 +2690,32 @@ def _stopped_assignment_certificate(value,reference):
     return matches[0]
 
 
-def _check_stopped_certificate(context,db,value,*,preparation_reader=None,writer=None):
+def _check_stopped_certificate(context,db,value,*,preparation_reader=None,writer=None,read_context=None,read_roster=None):
     from runtime import evidence
     _stopped_certificate_shape(value)
     ref=value['reference']
+    read_context=evidence._matching_linked_read_context(read_context,value['linked']) if value.get('linked') else None
     linked_writer=writer if writer is not None else (context,db)
+    component_context=read_context
+    if type(read_roster) is _RecoveryReadRosters:
+        read_roster=read_roster.select(value,writer=linked_writer)
+        # The exact component scope owns full validation; retain the borrowed check at return.
+        component_context=None
+    read_roster=evidence._matching_linked_read_roster(read_roster,value.get('linked'))
+    if read_roster is not None:
+        evidence._check_linked_read_roster(read_roster,evidence._linked_basis_root(value['linked']),
+            basis=value['linked'],member=ref,writer=linked_writer)
     if value.get('linked') and evidence._linked_component_closed(evidence._linked_basis_root(value['linked']),writer=linked_writer):
         if preparation_reader is not None and 'preparation' in value:
-            evidence._check_linked_preparation_certificate(context,db,value,preparation_reader=preparation_reader,writer=writer)
+            evidence._check_linked_preparation_certificate(context,db,value,preparation_reader=preparation_reader,writer=writer,read_context=component_context,read_roster=read_roster)
         else:
-            authorities=value.get('preparation',{}).get('authorities',value['linked']['authorities'])
+            authorities=(evidence._linked_read_authorities(component_context,value['linked'],member=ref,writer=linked_writer,read_roster=read_roster)
+                if component_context is not None or read_roster is not None else value.get('preparation',{}).get('authorities',value['linked']['authorities']))
             support=evidence._linked_retained_component(evidence._linked_basis_root(value['linked']),authorities,writer=linked_writer)
             evidence._check_retained_linked_certificate(support,value)
         identity=task_state._lifecycle_identity(db,'task',ref)
         d3._require(identity['status']!='expired','Expired linked identity cannot validate historical support')
-        return identity
+        return evidence._finish_linked_read_context(identity,read_context,read_roster=read_roster)
     identity=task_state._lifecycle_identity(db,'task',ref)
     _check_stopped_task_identity(identity,value)
     if identity['status']=='live':
@@ -2700,7 +2723,7 @@ def _check_stopped_certificate(context,db,value,*,preparation_reader=None,writer
         complete='writer_stop' in value
         d3._require(task['state']==value.get('state','cancelled') and all(task[k]==value[k] for k in
             ('revision','pins','accepted_identity','scope_ref','turn_id',*(['writer_stop',*(['retirement'] if task['state']=='cancelled' else [])] if complete else ['retirement']))),'Recovery live stopped owner changed')
-        if complete:task_state._ready_stop(context,db,task)
+        if complete:task_state._ready_stop(context,db,task,read_context=component_context,read_roster=read_roster)
         attempts=[a['id'] for a in task.get('evidence',{}).get('attempts',[]) if complete or a['status'] in {'reserved','running','uncertain'}]
         d3._require(attempts==value['proof']['attempt_ids'],'Recovery live stopped attempts changed')
     for assignment in value.get('assignments',[]):
@@ -2710,15 +2733,15 @@ def _check_stopped_certificate(context,db,value,*,preparation_reader=None,writer
             from runtime import delegation
             row=db.execute('select id,scope_id,client,session_id,task_id,dispatch_id,data from assignments where id=?',(assignment['reference']['id'],)).fetchone()
             record=delegation._record(None,row,context=context,db=db)
-            d3._require(_assignment_certificate(context,db,task,record)==assignment,'Recovery live stopped assignment changed')
-    if 'preparation' in value:evidence._check_linked_preparation_certificate(context,db,value,preparation_reader=preparation_reader,writer=writer)
-    return identity
+            d3._require(_assignment_certificate(context,db,task,record,read_context=component_context,read_roster=read_roster)==assignment,'Recovery live stopped assignment changed')
+    if 'preparation' in value:evidence._check_linked_preparation_certificate(context,db,value,preparation_reader=preparation_reader,writer=writer,read_context=component_context,read_roster=read_roster)
+    return evidence._finish_linked_read_context(identity,read_context,read_roster=read_roster)
 
 
-def _cut_recovery_content(content,certificates,contexts):
+def _cut_recovery_content(content,certificates,contexts,*,read_context=None):
     # Preserve independent artifact/assignment raw routes; only the issued proof route is cut.
     from runtime import evidence
-    content=deepcopy(content);certificates,extra,component_routes=evidence._linked_prepared_replacements(certificates,contexts)
+    content=deepcopy(content);certificates,extra,component_routes=evidence._linked_prepared_replacements(certificates,contexts,read_context=read_context)
     content['artifacts']=list({evidence._raw(row):row for row in [*content['artifacts'],*extra]}.values())
     certificates=sorted(certificates,key=d3._digest)
     component_routes={(d3._digest(ref['authority']),d3._digest(ref['artifact'])):owners
@@ -2793,7 +2816,7 @@ def _cut_recovery_content(content,certificates,contexts):
     return content
 
 
-def _recovery_ready_inputs(content,contexts):
+def _recovery_ready_inputs(content,contexts,*,read_context=None):
     from runtime import evidence
     files={}
     for context in contexts:
@@ -2807,7 +2830,7 @@ def _recovery_ready_inputs(content,contexts):
                 task=task_state._task(db,ref['scope_id'],ref['client'],ref['session_id'],ref['task_id'])
                 if certificate.get('linked') and task['lifecycle']['safe_closed_at'] is not None and evidence._linked_component_closed(evidence._linked_basis_root(certificate['linked']),writer=(context,db)):continue
                 candidate=evidence._read(None,task['writer_stop']['candidate'],context=context,db=db)
-                files[d3._digest(ref)]=evidence._ready_stop_candidate(context,task,candidate)
+                files[d3._digest(ref)]=evidence._ready_stop_candidate(context,task,candidate,read_context=evidence._matching_linked_read_context(read_context,certificate['linked']) if certificate.get('linked') else None)
     return _canonical_freeze(files)
 
 
@@ -3064,7 +3087,7 @@ def _project_recovery_uses(content,contexts,contracts,legacy_routes=()):
     except recovery_uses.UseContractError as exc:raise Pending(str(exc)) from None
 
 
-def _existing_recovery_age(contexts,identity):
+def _existing_recovery_age(contexts,identity,*,read_context=None):
     """Observe one original source age across stores, with no cross-store transaction held."""
     from runtime import evidence
     ages=set()
@@ -3076,7 +3099,7 @@ def _existing_recovery_age(contexts,identity):
             d3._require(len(matches)<=1,'Conflicting original recovery source age edges')
             if matches:
                 reference=_canonical_plain(matches[0]['reference']['artifact'])
-                evidence._recovery_source_history(context,db,reference,identity)
+                evidence._recovery_source_history(context,db,reference,identity,read_context=read_context)
                 ages.add(task_state._metadata(db,reference['name'])['created_at'])
     d3._require(len(ages)<=1,'Conflicting original recovery source ages')
     return next(iter(ages)) if ages else None
@@ -3100,8 +3123,7 @@ def _observe_recovery_source(path, journal, contexts, task_refs):
     from runtime import evidence
     if any(reason['root']['purpose']=='historical-stop' for reason in use_roots):
         content['use_contract']=_build_recovery_uses(content,contexts,use_roots)
-    prior_cuts=[];supersedes=[];contracts=[];legacy_sources=[]
-    if 'use_contract' in content:contracts.append(content['use_contract'])
+    prior_cuts=[];supersedes=[];restricted='use_contract' in content
     for context in contexts:
         authority=_canonical_plain(context.authority_set[0])
         _,sources=_recovery_sources(context)
@@ -3110,21 +3132,14 @@ def _observe_recovery_source(path, journal, contexts, task_refs):
             with evidence._context_database(context) as db:
                 history=evidence._recovery_source_history(context,db,reference,content['identity'])
             for prior_reference,prior_body in history:
-                if 'use_contract' in prior_body:contracts.append(prior_body['use_contract'])
-                else:
-                    origin=dict(authority=authority,artifact=prior_reference,identity=prior_body['identity'],journal_sha256=prior_body['journal']['sha256'])
-                    legacy_sources.append((origin,prior_body))
+                if 'use_contract' in prior_body:restricted=True
             if prior['version']==2:
                 prior_cuts.extend(prior['stopped']);supersedes.extend(prior['supersedes'])
-    if contracts:
-        legacy_routes=[recovery_uses.legacy_projection(origin,body) for origin,body in legacy_sources]
-        try:content['use_contract']=recovery_uses.merge([*contracts,recovery_uses.build([],[],legacy_routes)])
-        except recovery_uses.UseContractError as exc:raise Pending(str(exc)) from None
+    if restricted and 'use_contract' not in content:
+        content['use_contract']=_build_recovery_uses(content,contexts,use_roots)
     if prior_cuts or supersedes:
         content=_cut_recovery_content(content,list({d3._digest(c):c for c in prior_cuts}.values()),contexts)
         content['supersedes']=sorted({d3._digest(c):c for c in supersedes}.values(),key=d3._digest)
-    elif contracts:
-        content['use_contract']=_project_recovery_uses(content,contexts,[content['use_contract']])
     generations={}
     for context in contexts:
         authority=_canonical_plain(context.authority_set[0])
@@ -3140,6 +3155,79 @@ def _observe_recovery_source(path, journal, contexts, task_refs):
     return _RecoverySourceObservation(_canonical_freeze(content),contexts,_canonical_freeze(generations),created_at,_RECOVERY_ISSUER,
         ready_inputs=_recovery_ready_inputs(content,contexts),
         birth_certificate=_canonical_freeze(journal['birth']['certificate']) if journal.get('birth',{}).get('certificate') else None)
+
+
+def _content_linked_read_context(content,authorities,*,writer=None):
+    from runtime import evidence
+    certificate=next((c for c in content.get('stopped',()) if c.get('linked')),None)
+    if certificate is None:return None
+    return evidence._bind_linked_read_context(evidence._linked_basis_root(_canonical_plain(certificate['linked'])),
+        _canonical_plain(authorities),writer=writer,basis=_canonical_plain(certificate['linked']))
+
+
+def _content_linked_read_roster(content,authorities,scopes,rosters,*,read_roster=None,writer=None):
+    """Select one certificate's exact subset of the already-held inspection set."""
+    from runtime import evidence
+    certificates=[c for c in content.get('stopped',()) if c.get('linked')]
+    d3._require(len(certificates)<=1,'Recovery read routing requires one exact certificate')
+    if not certificates:
+        evidence._matching_linked_read_roster(read_roster,None)
+        return None
+    certificate=certificates[0]
+    basis=_canonical_plain(certificate['linked'])
+    selected=evidence._matching_linked_read_roster(read_roster,basis)
+    pointer=evidence._linked_basis_root(basis);key=d3._digest(pointer)
+    allowed={evidence._raw(_canonical_plain(a)) for a in authorities}
+    if selected is None and key in rosters:
+        selected=evidence._matching_linked_read_roster(rosters[key],basis)
+    if selected is None:
+        pending=sorted(basis['authorities'],key=evidence._raw)
+        for _ in range(4096):
+            d3._require({evidence._raw(a) for a in pending}<=allowed,'Recovery component authority is outside inspection')
+            d3._require(_held_authority_guards(Path(a['directory']) for a in pending),'Recovery component authority is unheld')
+            for authority in pending:evidence._check_context(evidence._reference_context(authority))
+            _,expanded,_=evidence._linked_stop_sources(pointer,pending)
+            if expanded==pending:break
+            pending=expanded
+        else:raise task_state.StateError('Recovery component read closure did not converge')
+        rosters[key]=scopes.enter_context(evidence._linked_preparation_read_roster(pointer,
+            pending,basis=basis,writer=writer))
+        selected=evidence._matching_linked_read_roster(rosters[key],basis)
+    current=evidence._check_linked_read_roster(selected,pointer,basis=basis,
+        member=certificate['reference'],writer=writer)
+    d3._require({evidence._raw(a) for a in current}<=allowed,'Recovery component roster exceeds inspection')
+    return selected
+
+
+class _RecoveryReadRosters:
+    """Explicit lexical routing owner; entries hold scope tokens, never semantic results."""
+    def __init__(self,authorities,scopes,*,read_roster=None):
+        self.authorities=_canonical_plain(authorities)
+        self.scopes=scopes
+        self.supplied=read_roster
+        self.rosters={}
+        self.active=True
+
+    def select(self,certificate,*,writer=None):
+        d3._require(self.active,'Recovery read routing owner expired')
+        return _content_linked_read_roster(dict(stopped=[certificate]),self.authorities,self.scopes,
+            self.rosters,read_roster=self.supplied,writer=writer)
+
+    def finish(self):
+        from runtime import evidence
+        d3._require(self.active,'Recovery read routing owner expired')
+        for roster in self.rosters.values():evidence._check_linked_read_roster(roster,evidence._canonical_plain(roster.pointer))
+        if self.supplied is not None:evidence._check_linked_read_roster(self.supplied,evidence._canonical_plain(self.supplied.pointer))
+
+
+def _source_linked_read_context(source,*,writer=None):
+    from runtime import evidence
+    lifetime=_d4_publication_lifetime(source)
+    if lifetime['kind']!='release':return None
+    certificate=next((c for c in source.content.get('stopped',()) if c.get('linked')),None)
+    if certificate is None:return None
+    return evidence._bind_linked_read_context(evidence._linked_basis_root(_canonical_plain(certificate['linked'])),
+        _canonical_plain(source.content['authorities']),writer=writer,basis=_canonical_plain(certificate['linked']))
 
 
 def _check_recovery_source(source,context,db,*,writer=None):
@@ -3159,7 +3247,12 @@ def _check_recovery_source(source,context,db,*,writer=None):
             evidence._managed_artifact(None,item['artifact'],context=context,db=db)
     for certificate in content.get('stopped',[]):
         if certificate['reference']['authority']!=authority:continue
-        identity=_check_stopped_certificate(context,db,certificate,writer=writer)
+        read_context=None
+        lifetime=getattr(_authority_context,'publication',None)
+        if certificate.get('linked') and lifetime is not None and lifetime['source'] is source:
+            _d4_publication_lifetime(source)
+            read_context=evidence._bind_linked_read_context(evidence._linked_basis_root(certificate['linked']),content['authorities'],writer=writer,basis=certificate['linked'])
+        identity=_check_stopped_certificate(context,db,certificate,writer=writer,read_context=read_context)
         historical=certificate.get('linked') and evidence._linked_component_closed(evidence._linked_basis_root(certificate['linked']),
             writer=writer if writer is not None else (context,db))
         if certificate.get('writer_stop') and identity['status']=='live' and not historical:
@@ -3174,7 +3267,8 @@ def _check_recovery_source(source,context,db,*,writer=None):
         expected=next(row['artifact'] for row in originals['heads'] if row['authority']==authority)
         if head!=expected:
             current=evidence._read(None,head,context=context,db=db)
-            comparable=deepcopy(content); comparable['journal']['observed_at']=current['journal']['observed_at']
+            projection=_d4_publication_lifetime(source)['registration_projections'][str(context.database)]
+            comparable=deepcopy(projection['content']); comparable['journal']['observed_at']=current['journal']['observed_at']
             d3._require(current==comparable,'Recovery release source head changed')
     evidence._check_context(context,db)
     raw=d3._read_file(Path(content['identity']['plan_dir'])/'transaction.json',MAX_JOURNAL,private=True)
@@ -3299,7 +3393,7 @@ def _check_release_source_preflight(source):
     for group in groups:
         group['members']=[m for inputs in captured for m in _canonical_plain(inputs)['members']
             if any(m['reference']==c['reference'] for c in group['certificates'])]
-        response=evidence._resolve_prepared_certificate_job(group)
+        response=evidence._resolve_prepared_certificate_job(group,read_context=evidence._bind_linked_read_context(group['pointer'],group['authorities'],basis=group['certificates'][0]['linked']))
         d3._require(isinstance(response,dict) and set(response)=={'job','result'} and response['job']==group and
             isinstance(response['result'],dict) and set(response['result'])=={'facts','receipts'},
             'Release preparation job is unresolved or mismatched')
@@ -3331,7 +3425,11 @@ def _check_recovery_source_global(source):
         for context in source.contexts:
             with evidence._context_database(context) as db:
                 _check_recovery_source(source,context,db)
-    age=_existing_recovery_age(source.contexts,_canonical_plain(source.content['identity']))
+    read_context=None
+    if release and source.content.get('stopped'):
+        certificate=next((c for c in source.content['stopped'] if c.get('linked')),None)
+        if certificate is not None:read_context=evidence._bind_linked_read_context(evidence._linked_basis_root(_canonical_plain(certificate['linked'])),_canonical_plain(source.content['authorities']),basis=_canonical_plain(certificate['linked']))
+    age=_existing_recovery_age(source.contexts,_canonical_plain(source.content['identity']),read_context=read_context)
     d3._require(age is None or age==source.created_at,'Original recovery source age changed')
 
 
@@ -3344,7 +3442,7 @@ def _recovery_context(authority):
         return evidence._existing_authority_context(authority,db=db)
 
 
-def _recovery_sources(context,*,validate_stops=True,preparation_reader=None):
+def _recovery_sources(context,*,validate_stops=True,preparation_reader=None,read_context=None,read_roster=None):
     from runtime import evidence
     with evidence._context_database(context) as db:
         baseline=task_state._source_baseline(None,db,context=context)
@@ -3356,7 +3454,7 @@ def _recovery_sources(context,*,validate_stops=True,preparation_reader=None):
             metadata=task_state._metadata(db,reference['name'])
             d3._require(metadata['class']=='compact' and metadata['owner']==dict(kind='project',project_id=baseline['content']['project_id'],task=None)
                 and metadata['closed_at'] is None and not metadata['targets'] and metadata['export'] is None,'Recovery source metadata owner differs')
-            evidence._recovery_source_history(context,db,reference,_canonical_plain(edge['reference']['identity']),validate_stops=validate_stops,preparation_reader=preparation_reader)
+            evidence._recovery_source_history(context,db,reference,_canonical_plain(edge['reference']['identity']),validate_stops=validate_stops,preparation_reader=preparation_reader,read_context=read_context,read_roster=read_roster)
             evidence._recovery_source_shape(content,_canonical_plain(edge['reference']['identity']))
             sources.append((reference,content))
         return baseline,sources
@@ -3366,7 +3464,7 @@ def _recovery_foreign_authorities(context,manifest):
     return _collect_recovery_references(manifest,(context,))[3]
 
 
-def _validate_recovery_references(content,contexts,*,preparation_reader=None):
+def _validate_recovery_references(content,contexts,*,preparation_reader=None,read_context=None,read_roster=None):
     from runtime import evidence,delegation
     by_authority={d3._digest(_canonical_plain(c.authority_set[0])):c for c in contexts}
     generations={}
@@ -3394,7 +3492,7 @@ def _validate_recovery_references(content,contexts,*,preparation_reader=None):
                 if item['authority']==authority:
                     evidence._managed_artifact(None,item['artifact'],context=context,db=db)
             for certificate in content.get('stopped',[]):
-                if certificate['reference']['authority']==authority: _check_stopped_certificate(context,db,certificate,preparation_reader=preparation_reader)
+                if certificate['reference']['authority']==authority: _check_stopped_certificate(context,db,certificate,preparation_reader=preparation_reader,read_context=read_context,read_roster=read_roster)
     for item in [*[t['reference'] for t in content['tasks']],*content['assignments'],*content['artifacts']]:
         d3._require(d3._digest(item['authority']) in by_authority,'Recovery reference physical authority unavailable')
     return generations
@@ -3501,14 +3599,52 @@ def _d4_taskless_permission(journal,context,db,project):
         permitted=[proofs[key] for key in sorted(proofs)])
 
 
-def _d4_permission_facts(journal,source):
+def _d4_recovery_bookkeeping(journal,source,projections,pointer,metadata,current):
+    """Eligibility only: the real current host must independently consent to every inherited identity."""
+    if projections is None:return None
+    from runtime import evidence
+    proofs=[];record=journal['manifest']['enrollment']['record']
+    for database,projection in projections.items():
+        for occurrence in projection.get('obligations') or []:
+            dependency=occurrence['dependency']
+            if recovery_uses._history_pointer(dependency)!=pointer:continue
+            if dependency['kind']!='recovery' or occurrence['purpose']!='retention-only' or occurrence['requirement']!='current-permission':return None
+            capture=projection['inputs'].get('history_capture')
+            if capture is None or capture['authority']!=pointer['authority'] or capture['jobs']:return None
+            root=projection['content']['use_contract']['roots'][occurrence['root']]
+            if root['purpose']!='historical-stop':return None
+            ancestors=[row for row in capture['observations'] if row['pointer']==pointer and
+                recovery_uses.key(pointer) in capture['history_metadata']]
+            if len(ancestors)!=1:return None
+            ancestor=ancestors[0]
+            d3._require(ancestor['metadata']==metadata and ancestor['content']['identity']==source.content['identity']
+                and metadata['created_at']==source.created_at and metadata['owner']==dict(kind='project',project_id=record['project_id'],task=None),
+                'Recovery bookkeeping predecessor lost its actual owner, identity or original age')
+            support=[response for response in capture['job_results'] if response['job']==dict(kind='historical-anchor',root=root)]
+            d3._require(len(support)==1 and support[0]['result']['anchor'] in capture['anchors'],
+                'Recovery bookkeeping lacks its exact completed historical owner job')
+            certificate=support[0]['result']['certificate'];_stopped_certificate_shape(certificate)
+            identity=certificate['accepted_identity']
+            d3._require(certificate['reference']==root['task'] and _stop_envelope(certificate)['proof']==root['proof']['artifact']
+                and identity['project_id']==record['project_id'] and identity['project_root']==record['project_root']
+                and identity['membership']['included'] and identity['configuration']['runtime']==dict(schema_version=3,state_dir=root['task']['authority']['directory']),
+                'Recovery bookkeeping support is not this exact historical physical member')
+            observed=d3._authority_observation(Path(identity['project_root']),{'paths':0,'bytes':0},canonical_only=True)
+            d3._require(not observed['error'] and observed['record']==current,'Recovery bookkeeping current Project phase changed')
+            proofs.append(dict(database=database,occurrence=occurrence,identity=identity,authority=pointer['authority'],source=pointer,
+                head=capture['reference'],baseline=capture['baseline'],history=capture['history'],support=support[0],
+                created_at=source.created_at,current=observed))
+    return proofs or None
+
+
+def _d4_permission_facts(journal,source,projections=None):
     from runtime import evidence
     record=journal['manifest']['enrollment']['record'];root=Path(record['project_root'])
     d3._require(_scoped_owned_authority(journal),'Current D4 Project authority changed outside its owned transition')
     _scoped_owner_bindings(journal['plan'])
     target=_scoped_target(root,str(PROJECT_FILE))
     current=d3.read_request(d3._read_file(root/PROJECT_FILE,128*1024)) if target['binding'] is not None else None
-    subjects={};sources=[];current_permissions=[];project_permissions={}
+    subjects={};sources=[];current_permissions=[];project_permissions={};retention_bookkeeping=[]
     _,prior=_scoped_prior(journal['plan'])
     for candidate in (prior,record):
         if not candidate or candidate.get('schema_version')!=2:continue
@@ -3520,9 +3656,22 @@ def _d4_permission_facts(journal,source):
                 subjects[d3._digest(subject)]=subject
     by_authority={d3._digest(_canonical_plain(c.authority_set[0])):c for c in source.contexts}
     refs={d3._digest(t['reference']):t['reference'] for t in _canonical_plain(source.content)['tasks']}
+    artifacts={recovery_uses.key(item):item for item in _canonical_plain(source.content)['artifacts']}
+    requirements={};occurrences=[]
+    if projections is not None:
+        for database,projection in projections.items():
+            for row in projection.get('obligations') or []:
+                occurrence=dict(database=database,**row);occurrences.append(occurrence)
+                dependency=row['dependency'];name=recovery_uses.key(dependency)
+                if requirements.get(name)!='current-permission':requirements[name]=row['requirement']
+                pointer=recovery_uses._history_pointer(dependency)
+                if pointer is not None:artifacts[recovery_uses.key(pointer)]=pointer
+                elif dependency['kind']=='task':refs[d3._digest(dependency['reference'])]=dependency['reference']
+    def needs_current(kind,reference):
+        return requirements.get(recovery_uses.key(dict(kind=kind,reference=reference)))!='validated-stop-support'
     # Artifact ownership may be retained; explicit task requirements still need raw rows.
-    owners={}
-    for item in _canonical_plain(source.content)['artifacts']:
+    owners={};owner_requirements={}
+    for item in artifacts.values():
         context=by_authority[d3._digest(item['authority'])]
         with evidence._context_database(context) as db:
             metadata,_=evidence._managed_artifact(None,item['artifact'],context=context,db=db)
@@ -3530,12 +3679,23 @@ def _d4_permission_facts(journal,source):
             if metadata['owner']['task'] is not None:
                 ref=metadata['owner']['task']
                 owners[d3._digest(ref)]=(ref,evidence._source_subject(context,db,metadata))
+                uses=[requirements[name] for kind in ('artifact','recovery')
+                    if (name:=recovery_uses.key(dict(kind=kind,reference=item))) in requirements]
+                needed=not uses or 'current-permission' in uses
+                owner_requirements[d3._digest(ref)]=owner_requirements.get(d3._digest(ref),False) or needed
             else:
-                key=(str(context.database),metadata['owner']['project_id'])
-                if key not in project_permissions:
-                    project_permissions[key]=_d4_taskless_permission(journal,context,db,metadata['owner']['project_id'])
-                    for proof in project_permissions[key]['permitted']:
-                        subjects[d3._digest(proof['subject'])]=proof['subject']
+                retained=_d4_recovery_bookkeeping(journal,source,projections,item,metadata,current)
+                if retained is not None:
+                    retention_bookkeeping.extend(retained)
+                    for proof in retained:
+                        subject={key:proof['identity'][key] for key in ('project_id','repository_id','checkout_id','client')}
+                        subjects[d3._digest(subject)]=subject
+                else:
+                    key=(str(context.database),metadata['owner']['project_id'])
+                    if key not in project_permissions:
+                        project_permissions[key]=_d4_taskless_permission(journal,context,db,metadata['owner']['project_id'])
+                        for proof in project_permissions[key]['permitted']:
+                            subjects[d3._digest(proof['subject'])]=proof['subject']
             sources.append(dict(reference=item,metadata=metadata))
     for ref in refs.values():
         context=by_authority[d3._digest(ref['authority'])]
@@ -3543,12 +3703,14 @@ def _d4_permission_facts(journal,source):
             task=task_state._task(db,ref['scope_id'],ref['client'],ref['session_id'],ref['task_id'])
             d3._require(task is not None,'Current D4 subject owner is unavailable')
             owners[d3._digest(ref)]=(ref,dict(identity=task['accepted_identity'],pins=task['pins']))
+            owner_requirements[d3._digest(ref)]=owner_requirements.get(d3._digest(ref),False) or needs_current('task',ref)
     for ref,owner in owners.values():
         context=by_authority[d3._digest(ref['authority'])]
         with evidence._context_database(context) as db:
             identity=task_state._accepted_identity(owner['identity'])
             subject={k:identity[k] for k in ('project_id','repository_id','checkout_id','client')}
             subjects[d3._digest(subject)]=subject
+            if not owner_requirements[d3._digest(ref)]:continue
             own=identity['project_id']==record['project_id'] and identity['project_root']==str(root)
             key=tuple(identity[k] for k in ('repository_id','checkout_id','client'))
             transition=own and _d4_owned_transition(journal,key)
@@ -3574,7 +3736,67 @@ def _d4_permission_facts(journal,source):
                             owner=item['metadata']['owner'],created_at=item['metadata']['created_at'],pins=owner['pins']),db=db)
                         current_permissions.append(dict(source=item['reference'],permission=permission))
     return dict(subjects=sorted(subjects.values(),key=d3._digest),record=dict(path=str(root/PROJECT_FILE),target=target,content=current),
-        sources=sources,current_permissions=current_permissions,project_permissions=[project_permissions[key] for key in sorted(project_permissions)])
+        sources=sources,current_permissions=current_permissions,project_permissions=[project_permissions[key] for key in sorted(project_permissions)],
+        occurrences=occurrences,retention_bookkeeping=retention_bookkeeping)
+
+
+def _resolve_recovery_history_job(job,source,journal,budget):
+    """Close the capture reader before asking the original responsible owner for its facts."""
+    from runtime import evidence,delegation
+    kind=job['kind']
+    reference=job.get('reference',job.get('root',{}).get('task',job.get('certificate',{}).get('reference')))
+    authority=reference['authority']
+    contexts=[context for context in source.contexts if _canonical_plain(context.authority_set[0])==authority]
+    d3._require(len(contexts)==1 and _held_authority_guards([contexts[0].directory]),'History job lacks its actual guarded owner')
+    context=contexts[0]
+    with evidence._context_database(context) as db:
+        if kind=='managed-source':
+            observed=task_state._metadata(db,reference['artifact']['name'])
+            d3._require(observed is not None,'History managed owner is unavailable')
+            budget.take(bytes=observed['bytes']);budget.retain(observed)
+            metadata,raw=evidence._managed_artifact(None,reference['artifact'],context=context,db=db)
+            result=dict(pointer=reference,metadata=metadata,content=json.loads(raw),
+                stat=evidence._closure_file_stat(Path(metadata['managed']['path'])))
+        elif kind=='task':
+            task=task_state._task(db,reference['scope_id'],reference['client'],reference['session_id'],reference['task_id'])
+            d3._require(task is not None,'History raw task obligation is unavailable')
+            result=dict(reference=reference,task=task,identity=task_state._lifecycle_identity(db,'task',reference))
+        elif kind=='assignment':
+            row=db.execute('select id,scope_id,client,session_id,task_id,dispatch_id,data from assignments where id=?',(reference['id'],)).fetchone()
+            d3._require(row is not None,'History raw assignment obligation is unavailable')
+            record=delegation._record(None,row,db=db,context=context)
+            d3._require(record['owner']==reference['owner'] and record['data']['assignment']==reference['assignment'],
+                'History assignment owner returned another original assignment')
+            result=dict(reference=reference,record=record,identity=task_state._lifecycle_identity(db,'assignment',reference))
+        elif kind=='stopped-certificate':
+            certificate=job['certificate']
+            result=dict(certificate=certificate,identity=_check_stopped_certificate(context,db,certificate))
+        else:
+            d3._require(kind=='historical-anchor','Unknown original history owner job')
+            task=task_state._task(db,reference['scope_id'],reference['client'],reference['session_id'],reference['task_id'])
+            d3._require(task is not None,'Historical anchor lacks its original responsible raw owner')
+            roots=_historical_recovery_roots(journal['manifest'],context,db,task,reference)
+            d3._require(job['root'] in roots,'History owner did not justify this exact historical occurrence')
+            result=dict(anchor=dict(root=job['root'],support=[job['root']['reference'],dict(kind='artifact',reference=job['root']['proof'])]),
+                certificate=_stopped_certificate(context,db,dict(reference=reference,pins=task['pins'])))
+    response=dict(job=deepcopy(job),result=_canonical_plain(result));budget.retain(response)
+    return response
+
+
+def _capture_recovery_history(context,source,journal,budget):
+    """Regenerate complete captures from exact original jobs and actual owner responses."""
+    from runtime import evidence
+    responses=[]
+    for _ in range(recovery_uses.MAX_ROWS):
+        with evidence._context_database(context) as db:
+            baseline=task_state._source_baseline(None,db,context=context)
+            heads=[edge['reference']['artifact'] for edge in baseline['dependencies'] if edge['reference']['identity']==source.content['identity']]
+            d3._require(len(heads)<=1,'History original baseline head is ambiguous')
+            captured=evidence._recovery_history_inputs(context,db,_canonical_plain(heads[0]) if heads else None,
+                source,journal['manifest'],budget,responses=responses)
+        if not captured['jobs']:return captured
+        responses.extend(_resolve_recovery_history_job(job,source,journal,budget) for job in captured['jobs'])
+    raise Pending('History owner job discovery did not converge')
 
 
 def _d4_publication_lifetime(source):
@@ -3661,8 +3883,12 @@ def _check_d4_current_facts(source,lifetime):
     d3._require(_d4_publication_lifetime(source) is lifetime,'Recovery publication lifetime changed')
     if lifetime['kind']=='operation':
         if lifetime.get('birth_reobserve') is not None:lifetime['birth_reobserve']()
-        d3._require(_d4_permission_facts(lifetime['journal'],source)==lifetime['permissions'],
-            'Current D4 subject, source or owned enrollment transition changed')
+        if 'use_contract' in source.content and lifetime.get('writer') is not None:
+            _check_operation_permission_files(lifetime)
+        else:
+            d3._require(_d4_permission_facts(lifetime['journal'],source,
+                lifetime['registration_projections'] if 'use_contract' in source.content else None)==lifetime['permissions'],
+                'Current D4 subject, source or owned enrollment transition changed')
         for location in lifetime['markers']:
             d3._require(_authority_owner(location)==lifetime['owner'],'D4 protective operation marker changed')
         _check_operation_files(Path(source.content['identity']['plan_dir']),lifetime['journal'])
@@ -3687,7 +3913,15 @@ def _check_d4_publication(source,context,db):
     from runtime import evidence
     lifetime=_d4_publication_lifetime(source)
     writer=(context,db)
-    if _taskless_publication(source,lifetime):
+    if lifetime['kind']=='operation' and 'use_contract' in source.content:
+        held=lifetime.get('writer')
+        d3._require(held is not None and held[0] is context and held[1] is db,'Annotated recovery requires its actual supplied writer')
+        _check_operation_source_local(source,context,db,lifetime)
+        for other in source.contexts:
+            if other.database!=context.database:
+                d3._require(_operation_database_files(other)==lifetime['serial_databases'][str(other.database)],
+                    'Prepared remote recovery comparison changed inside supplied writer')
+    elif _taskless_publication(source,lifetime):
         held=lifetime.get('writer')
         d3._require(held is not None and held[0] is context and held[1] is db,
             'Recovery publication requires its actual supplied writer')
@@ -3701,6 +3935,86 @@ def _check_d4_publication(source,context,db):
                 with evidence._context_database(other) as reader:_check_recovery_source(source,other,reader,writer=writer)
     _check_d4_current_facts(source,lifetime)
     return lifetime
+
+
+def _operation_database_files(context):
+    from runtime import evidence
+    evidence._check_context(context)
+    paths=[context.database,*[Path(str(context.database)+suffix) for suffix in ('-wal','-shm','-journal')]]
+    return {str(path):evidence._closure_file_stat(path) if path.exists() else None for path in paths}
+
+
+def _check_operation_permission_files(lifetime):
+    from runtime import evidence
+    permissions=lifetime['permissions'];record=permissions['record'];path=Path(record['path'])
+    root=Path(lifetime['journal']['manifest']['enrollment']['record']['project_root'])
+    d3._require(path==root/PROJECT_FILE and _scoped_target(root,str(PROJECT_FILE))==record['target'] and
+        (d3.read_request(d3._read_file(path,128*1024)) if path.exists() else None)==record['content'],
+        'Current D4 acquired Project record changed')
+    observations=[row['authority'] for row in permissions['current_permissions'] if 'authority' in row]
+    observations.extend(row['current'] for row in permissions['project_permissions'])
+    observations.extend(row['current'] for row in permissions['retention_bookkeeping'])
+    for original in observations:
+        value=original['record']
+        d3._require(value is not None and d3._authority_observation(Path(value['project_root']),{'paths':0,'bytes':0},canonical_only=True)==original,
+            'Current D4 acquired source authority changed')
+    for row in permissions['current_permissions']:
+        if 'permission' not in row:continue
+        observed=row['permission'];file=Path(observed['path'])
+        d3._require(evidence._closure_file_stat(file)==observed['stat'] and
+            hashlib.sha256(d3._read_file(file,128*1024)).hexdigest()==observed['sha256'],
+            'Current D4 acquired source permission file changed')
+
+
+def _check_operation_source_local(source,context,db,lifetime):
+    """Compare original local inputs and exact owned overlays; never open a peer reader."""
+    from runtime import evidence
+    evidence._check_context(context,db);authority=_canonical_plain(context.authority_set[0])
+    content=_canonical_plain(source.content)
+    evidence._recovery_source_shape(content,content['identity'])
+    tasks=[row for row in content['tasks'] if row['reference']['authority']==authority]
+    assignments=[row for row in content['assignments'] if row['authority']==authority]
+    d3._require(_recovery_generation(db,tasks,assignments)==source.generations[d3._digest(authority)],
+        'Recovery source selected owner generation changed')
+    capture=lifetime['registration_projections'][str(context.database)]['inputs']['history_capture']
+    for response in capture['job_results']:
+        job=response['job'];result=response['result'];reference=job.get('reference')
+        if reference is None or reference['authority']!=authority:continue
+        if job['kind']=='task':
+            task=task_state._task(db,reference['scope_id'],reference['client'],reference['session_id'],reference['task_id'])
+            d3._require(task==result['task'] and task_state._lifecycle_identity(db,'task',reference)==result['identity'],
+                'Recovery original local task job changed')
+        elif job['kind']=='assignment':
+            row=db.execute('select data from assignments where id=?',(reference['id'],)).fetchone()
+            d3._require(row is not None and json.loads(row[0])==result['record']['data'] and
+                task_state._lifecycle_identity(db,'assignment',reference)==result['identity'],'Recovery original local assignment job changed')
+    expected=lifetime['registrations'].get(str(context.database),{}).get('expected',lifetime['baselines'][str(context.database)])
+    d3._require(_canonical_plain(task_state._source_baseline(None,db,context=context))==expected,
+        'Recovery baseline differs from its exact original or owned overlay')
+    evidence._check_recovery_projection(context,db,source,lifetime)
+    raw=d3._read_file(Path(content['identity']['plan_dir'])/'transaction.json',MAX_JOURNAL,private=True)
+    d3._require(hashlib.sha256(raw).hexdigest()==content['journal']['sha256'],'Recovery journal changed before registration')
+
+
+def _check_operation_publication_serial(source):
+    """Run full original owner jobs with every capture/writer closed, then recollect comparisons."""
+    from runtime import evidence
+    lifetime=_d4_publication_lifetime(source)
+    d3._require(lifetime['kind']=='operation' and 'use_contract' in source.content and lifetime.get('writer') is None,
+        'Annotated serial check requires its actual operation acquisition')
+    for context in source.contexts:
+        projection=lifetime['registration_projections'][str(context.database)]
+        for response in projection['inputs']['history_capture']['job_results']:
+            current=_resolve_recovery_history_job(response['job'],source,lifetime['journal'],lifetime['capture_budget'])
+            d3._require(current==response,'Original recovery owner job changed after capture')
+    _check_d4_current_facts(source,lifetime)
+    for context in source.contexts:
+        with evidence._context_database(context) as db:
+            _check_operation_source_local(source,context,db,lifetime)
+            if str(context.database) in lifetime['registrations']:
+                evidence._verify_recovery_registration(context,db,source,lifetime)
+    _check_d4_current_facts(source,lifetime)
+    lifetime['serial_databases']={str(context.database):_operation_database_files(context) for context in source.contexts}
 
 
 def _check_taskless_publication_serial(source):
@@ -3729,15 +4043,14 @@ def _d4_publication_batch(path,journal,contexts,request,host,owner,markers):
     if journal.get('birth',{}).get('certificate'):
         _birth_current_history(journal['manifest']['enrollment']['record'], journal['birth']['intent']['history'])
     source=_observe_recovery_source(path,journal,contexts,())
-    permissions=_d4_permission_facts(journal,source)
+    annotated='use_contract' in source.content
+    budget=recovery_uses.CaptureBudget() if annotated else None
+    captures={str(context.database):_capture_recovery_history(context,source,journal,budget) for context in contexts} if annotated else {}
     baselines=[];projections={};local_chains={};chain_rows=0
     for context in contexts:
         with evidence._context_database(context) as db:
             baseline=task_state._source_baseline(None,db,context=context)
             d3._require(baseline is not None and baseline['content']['source_contract']==2,'D4 requires original source_contract2 coverage')
-            project=baseline['content']['project_id']
-            d3._require(project==journal['manifest']['enrollment']['record']['project_id'] or any(
-                subject['project_id']==project for subject in permissions['subjects']),'D4 Project owner lacks exact current subject coverage')
             baselines.append(dict(authority=_canonical_plain(context.authority_set[0]),baseline=_canonical_plain(baseline)))
             content=_canonical_plain(source.content)
             if _taskless_chain_content(content) and local_chains is not None:
@@ -3752,7 +4065,20 @@ def _d4_publication_batch(path,journal,contexts,request,host,owner,markers):
             heads=[edge['reference']['artifact'] for edge in baseline['dependencies'] if _canonical_plain(edge['reference']['identity'])==content['identity']]
             d3._require(len(heads)<=1,'Recovery original baseline head is ambiguous')
             inputs=evidence._recovery_use_inputs(context,db,_canonical_plain(heads[0]) if heads else None,content['identity'],content=content)
-            projections[str(context.database)]=evidence._recovery_registration_projection(content,source.created_at,inputs,birth_certificate=_canonical_plain(source.birth_certificate) if source.birth_certificate is not None else None)
+            if annotated:
+                inputs['history_capture']=captures[str(context.database)]
+                authority=_canonical_plain(context.authority_set[0])
+                for row in inputs['history_capture']['observations']:
+                    if row['pointer']['authority']==authority:
+                        observed=dict(reference=row['reference'],metadata=row['metadata'])
+                        if observed not in inputs['local_sources']:inputs['local_sources'].append(observed)
+            projections[str(context.database)]=evidence._recovery_registration_projection(content,source.created_at,inputs,
+                birth_certificate=_canonical_plain(source.birth_certificate) if source.birth_certificate is not None else None,budget=budget)
+    permissions=_d4_permission_facts(journal,source,projections if annotated else None)
+    for item in baselines:
+        project=item['baseline']['content']['project_id']
+        d3._require(project==journal['manifest']['enrollment']['record']['project_id'] or any(
+            subject['project_id']==project for subject in permissions['subjects']),'D4 Project owner lacks exact current subject coverage')
     facts=dict(operation='protective-recovery-bookkeeping',request=request,plan=journal['plan'],identity=_canonical_plain(source.content)['identity'],
         journal=_canonical_plain(source.content)['journal'],permissions=permissions,baselines=baselines,
         source=_canonical_plain(source.content),generations=_canonical_plain(source.generations),created_at=source.created_at,
@@ -3771,7 +4097,8 @@ def _d4_publication_batch(path,journal,contexts,request,host,owner,markers):
                 guards=tuple(getattr(_authority_context,'held',())),markers=tuple(markers),owner=owner,registrations={},
                 baselines={str(context.database):item['baseline'] for context,item in zip(contexts,baselines)},
                 registration_projections=_canonical_plain(grant.facts)['registration_projections'],
-                local_chain_inputs=_canonical_plain(grant.facts)['local_chain_inputs'],writer=None,birth_reobserve=reobserve_birth)
+                local_chain_inputs=_canonical_plain(grant.facts)['local_chain_inputs'],writer=None,birth_reobserve=reobserve_birth,
+                capture_budget=budget)
             previous=getattr(_authority_context,'publication',None);_authority_context.publication=lifetime
             try:yield lifetime
             finally:lifetime['active']=False;_authority_context.publication=previous
@@ -3785,6 +4112,23 @@ def _scoped_register_sources(path,journal,contexts):
     d3._require(lifetime is not None and lifetime['kind']=='operation','D4 source publication requires actual host acquisition')
     source=lifetime['source']
     d3._require(tuple(contexts)==source.contexts,'D4 registration omitted an acquired authority')
+    if 'use_contract' in source.content:
+        try:
+            for context in contexts:
+                _check_operation_publication_serial(source)
+                try:
+                    with evidence._context_database(context,write=True,durable=True,
+                            before_commit=lambda db,context=context:evidence._check_recovery_registration(context,db,source)) as db:
+                        lifetime['writer']=(context,db)
+                        evidence._register_recovery_source(None,db,source,context=context)
+                finally:lifetime['writer']=None
+                _check_operation_publication_serial(source)
+            d3._require(set(lifetime['registrations'])=={str(c.database) for c in contexts},'D4 all-peer registrations are incomplete')
+            _check_operation_publication_serial(source)
+            return
+        except BaseException:
+            lifetime['failure']='annotated-publication-failed'
+            raise
     if _taskless_publication(source,_d4_publication_lifetime(source)):
         try:
             for context in contexts:
@@ -3876,10 +4220,20 @@ def _observe_recovery_release(authorities,identity):
     from runtime import evidence
     identity=_canonical_plain(identity)
     with _recovery_release_guards(authorities,identity) as (path,journal,contexts):
+        read_context=None
         heads=[]; supersedes=[]; tasks={};assignments={};artifacts={};certificates={}; generations={};ages=set();contracts=[];legacy_sources=[]
         for context in contexts:
             authority=_canonical_plain(context.authority_set[0])
-            baseline,sources=_recovery_sources(context)
+            read_context=None
+            with evidence._context_database(context) as db:
+                actual_baseline=task_state._source_baseline(None,db,context=context)
+                for edge in actual_baseline['dependencies']:
+                    if _canonical_plain(edge['reference']['identity'])!=identity:continue
+                    head=evidence._read(None,_canonical_plain(edge['reference']['artifact']),context=context,db=db)
+                    linked=next((c['linked'] for c in head.get('stopped',[]) if c.get('linked')),None)
+                    if linked is not None:
+                        read_context=evidence._bind_linked_read_context(evidence._linked_basis_root(linked),[_canonical_plain(c.authority_set[0]) for c in contexts],writer=(context,db),basis=linked)
+            baseline,sources=_recovery_sources(context,read_context=read_context)
             d3._require(baseline is not None and baseline['content']['source_contract']==2,'Recovery release requires creation-time D4 coverage')
             matches=[(ref,c) for ref,c in sources if c['identity']==identity]
             d3._require(len(matches)==1,'Recovery release source head unavailable')
@@ -3889,9 +4243,9 @@ def _observe_recovery_release(authorities,identity):
                 'Recovery release journal snapshot requires reconciliation')
             with evidence._context_database(context) as db:
                 ages.add(task_state._metadata(db,reference['name'])['created_at'])
-                history=evidence._recovery_source_history(context,db,reference,identity)
+                history=evidence._recovery_source_history(context,db,reference,identity,read_context=read_context)
             for prior_ref,content in history:
-                _validate_recovery_references(content,contexts)
+                _validate_recovery_references(content,contexts,read_context=read_context)
                 if 'use_contract' in content:contracts.append(content['use_contract'])
                 else:
                     origin=dict(authority=authority,artifact=prior_ref,identity=content['identity'],journal_sha256=content['journal']['sha256'])
@@ -3912,7 +4266,12 @@ def _observe_recovery_release(authorities,identity):
                 associated=[a for a in assignments.values() if a['authority']==authority]
                 generations[d3._digest(authority)]=_recovery_generation(db,selected,associated)
                 for task in selected:
-                    cert=_stopped_certificate(context,db,task);certificates[d3._digest(cert['reference'])]=cert
+                    read_context=None
+                    actual=task_state._task(db,*[task['reference'][k] for k in ('scope_id','client','session_id','task_id')])
+                    if actual.get('writer_stop',{}).get('linked'):
+                        linked=evidence._read(None,actual['writer_stop']['linked'],context=context,db=db)
+                        read_context=evidence._bind_linked_read_context(evidence._linked_basis_root(linked),[_canonical_plain(c.authority_set[0]) for c in contexts],writer=(context,db),basis=linked)
+                    cert=_stopped_certificate(context,db,task,read_context=read_context);certificates[d3._digest(cert['reference'])]=cert
         canonical=lambda rows:sorted(rows,key=d3._digest)
         content=dict(version=2,kind='d4-recovery-source',identity=identity,
             journal=dict(sha256=hashlib.sha256(raw).hexdigest(),observed_at=task_state._owner_time(),state=journal['state']),
@@ -3923,10 +4282,10 @@ def _observe_recovery_release(authorities,identity):
             legacy_routes=[recovery_uses.legacy_projection(origin,body) for origin,body in legacy_sources]
             try:content['use_contract']=recovery_uses.merge([*contracts,recovery_uses.build([],[],legacy_routes)])
             except recovery_uses.UseContractError as exc:raise Pending(str(exc)) from None
-        content=_cut_recovery_content(content,list(certificates.values()),contexts)
+        content=_cut_recovery_content(content,list(certificates.values()),contexts,read_context=read_context)
         original=dict(heads=heads,tasks=list(tasks.values()),assignments=list(assignments.values()))
         return _RecoverySourceObservation(_canonical_freeze(content),tuple(contexts),_canonical_freeze(generations),next(iter(ages)),_RECOVERY_ISSUER,_canonical_freeze(original),
-            _recovery_ready_inputs(content,contexts),_RECOVERY_RELEASE_ISSUER)
+            _recovery_ready_inputs(content,contexts,read_context=read_context),_RECOVERY_RELEASE_ISSUER)
 
 
 def _register_recovery_release(observation):
@@ -3942,6 +4301,9 @@ def _register_recovery_release(observation):
                 'Recovery release complete authority set changed')
             lifetime=dict(active=True,kind='release',source=observation,journal=deepcopy(journal),
                 guards=tuple(getattr(_authority_context,'held',())),registrations={},baselines={},registration_projections={})
+            budget=recovery_uses.CaptureBudget() if 'use_contract' in content else None
+            captures={str(context.database):_capture_recovery_history(context,observation,journal,budget) for context in contexts} if budget is not None else {}
+            lifetime['capture_budget']=budget
             for context in contexts:
                 with evidence._context_database(context) as db:
                     lifetime['baselines'][str(context.database)]=_canonical_plain(task_state._source_baseline(None,db,context=context))
@@ -3949,7 +4311,8 @@ def _register_recovery_release(observation):
                     heads=[edge['reference']['artifact'] for edge in baseline['dependencies'] if edge['reference']['identity']==content['identity']]
                     d3._require(len(heads)==1,'Recovery release source head unavailable')
                     inputs=evidence._recovery_use_inputs(context,db,heads[0],content['identity'],content=content)
-                    lifetime['registration_projections'][str(context.database)]=evidence._recovery_registration_projection(content,observation.created_at,inputs)
+                    if budget is not None:inputs['history_capture']=captures[str(context.database)]
+                    lifetime['registration_projections'][str(context.database)]=evidence._recovery_registration_projection(content,observation.created_at,inputs,budget=budget)
             previous=getattr(_authority_context,'publication',None);_authority_context.publication=lifetime
             try:
                 for context in contexts:
@@ -3985,91 +4348,104 @@ def _recovery_current_requirements(root,history):
     return requirements
 
 
-def _inspect_lifecycle_recovery_guarded(authorities,task_refs):
+def _inspect_lifecycle_recovery_guarded(authorities,task_refs,*,read_roster=None):
     """One reader lifetime stays inside this read-only, caller-guarded invocation."""
     from runtime import evidence
+    if read_roster is not None:evidence._check_linked_read_roster(read_roster,evidence._canonical_plain(read_roster.pointer))
     with evidence._linked_preparation_reader(authorities) as preparation_reader:
-        return _inspect_lifecycle_recovery_read(authorities,task_refs,preparation_reader)
+        return _inspect_lifecycle_recovery_read(authorities,task_refs,preparation_reader,read_roster=read_roster)
 
 
-def _inspect_lifecycle_recovery_read(authorities,task_refs,preparation_reader):
+def _inspect_lifecycle_recovery_read(authorities,task_refs,preparation_reader,*,read_roster=None):
     """Inspect one fixed set under caller-held complete guards; never acquire/expand locks."""
-    from runtime import evidence
-    dependencies=[];blockers=[];roots=[];requirements=[];discovered={};contexts=[];observed=[];pending={};journals={}
-    def result():
-        return _canonical_freeze(dict(complete=not blockers and not discovered,dependencies=dependencies,blockers=blockers,
-            roots=roots,requirements=requirements,authorities=sorted([_canonical_plain(c.authority_set[0]) for c in contexts],key=d3._digest),
-            discovered_authorities=sorted(discovered.values(),key=d3._digest)))
-    try:
-        pending={d3._digest(_canonical_plain(a)):_canonical_plain(a) for a in authorities}
-        d3._require(0<len(pending)<=4096,'Recovery authority selection is empty or exceeds bound')
-        for authority in pending.values():
-            seen_markers=set()
-            for location in _authority_locations([Path(authority['directory'])]):
-                marker=_authority_owner(location)
-                if marker is not None and d3._digest(marker) not in seen_markers:
-                    seen_markers.add(d3._digest(marker))
-                    blockers.append(dict(reason='active_or_uncertain_operation',authority=authority,owner=marker))
-                    dependencies.append(dict(authority=authority,**marker,source_artifact=None,journal=None,task_refs=[]))
-            context=_recovery_context(authority); contexts.append(context)
-            baseline,sources=_recovery_sources(context,validate_stops=False)
-            if baseline is None or baseline['content']['source_contract']!=2:
-                blockers.append(dict(reason='unknown_creation_time_d4_coverage',authority=authority))
-            for reference,content in sources:
+    with ExitStack() as read_scopes:
+        read_rosters=_RecoveryReadRosters(authorities,read_scopes,read_roster=read_roster)
+        from runtime import evidence
+        dependencies=[];blockers=[];roots=[];requirements=[];discovered={};contexts=[];observed=[];pending={};journals={}
+        def result():
+            return _canonical_freeze(dict(complete=not blockers and not discovered,dependencies=dependencies,blockers=blockers,
+                roots=roots,requirements=requirements,authorities=sorted([_canonical_plain(c.authority_set[0]) for c in contexts],key=d3._digest),
+                discovered_authorities=sorted(discovered.values(),key=d3._digest)))
+        try:
+            pending={d3._digest(_canonical_plain(a)):_canonical_plain(a) for a in authorities}
+            d3._require(0<len(pending)<=4096,'Recovery authority selection is empty or exceeds bound')
+            for authority in pending.values():
+                seen_markers=set()
+                for location in _authority_locations([Path(authority['directory'])]):
+                    marker=_authority_owner(location)
+                    if marker is not None and d3._digest(marker) not in seen_markers:
+                        seen_markers.add(d3._digest(marker))
+                        blockers.append(dict(reason='active_or_uncertain_operation',authority=authority,owner=marker))
+                        dependencies.append(dict(authority=authority,**marker,source_artifact=None,journal=None,task_refs=[]))
+                context=_recovery_context(authority); contexts.append(context)
+                baseline,sources=_recovery_sources(context,validate_stops=False)
+                if baseline is None or baseline['content']['source_contract']!=2:
+                    blockers.append(dict(reason='unknown_creation_time_d4_coverage',authority=authority))
+                for reference,content in sources:
+                    with evidence._context_database(context) as db:
+                        history=evidence._recovery_source_history(context,db,reference,content['identity'],validate_stops=False)
+                    for _,prior in history:
+                        for other in prior['authorities']:
+                            key=d3._digest(other)
+                            if key not in pending: discovered[key]=other
+                    observed.append((context,reference,content))
+            if discovered:
+                d3._require(len(pending)+len(discovered)<=4096,'Recovery authority closure exceeds bound')
+                blockers.append(dict(reason='recovery_authority_set_incomplete'))
+                return result()
+            for context,reference,content in observed:
+                authority=_canonical_plain(context.authority_set[0])
+                path=Path(content['identity']['plan_dir'])
+                raw=d3._read_file(path/'transaction.json',MAX_JOURNAL,private=True)
+                journal=_scoped_journal_shape(d3.read_request(raw,limit=MAX_JOURNAL))
+                journals[path]=hashlib.sha256(raw).hexdigest()
+                d3._require(journal is not None and journal['schema_version']==2 and
+                    all(journal[k]==content['identity'][k] for k in ('transaction_id','manifest_digest')),
+                    'Recovery journal stable identity differs')
+                if hashlib.sha256(raw).hexdigest()!=content['journal']['sha256'] or journal['state']!=content['journal']['state']:
+                    blockers.append(dict(reason='journal_snapshot_requires_reconciliation',identity=content['identity']))
+                read_context=_content_linked_read_context(content,[_canonical_plain(c.authority_set[0]) for c in contexts])
+                source_roster=read_rosters
+                generations=_validate_recovery_references(content,contexts,preparation_reader=preparation_reader,read_context=read_context,read_roster=source_roster)
                 with evidence._context_database(context) as db:
-                    history=evidence._recovery_source_history(context,db,reference,content['identity'],validate_stops=False)
+                    history=evidence._recovery_source_history(context,db,reference,content['identity'],preparation_reader=preparation_reader,read_context=read_context,read_roster=source_roster)
                 for _,prior in history:
-                    for other in prior['authorities']:
-                        key=d3._digest(other)
-                        if key not in pending: discovered[key]=other
-                observed.append((context,reference,content))
-        if discovered:
-            d3._require(len(pending)+len(discovered)<=4096,'Recovery authority closure exceeds bound')
-            blockers.append(dict(reason='recovery_authority_set_incomplete'))
+                    _validate_recovery_references(prior,contexts,preparation_reader=preparation_reader,read_context=read_context,read_roster=source_roster)
+                current_root=dict(authority=authority,identity=content['identity'],source_artifact=reference)
+                roots.append(current_root);requirements.extend(_recovery_current_requirements(current_root,history))
+                d3._require(len(requirements)<=4096,'Recovery current-root requirements exceed bound')
+                dependencies.append(dict(authority=authority,**content['identity'],source_artifact=reference,journal=content['journal'],
+                    task_refs=[t['reference'] for t in content['tasks']],assignments=content['assignments'],artifacts=content['artifacts'],generation_digest=d3._digest(generations)))
+            for original_ref in task_refs:
+                ref=_canonical_plain(original_ref); task_state._task_reference(ref)
+                context=next((c for c in contexts if _canonical_plain(c.authority_set[0])==ref['authority']),None)
+                d3._require(context is not None,'Named task authority is outside observed closure')
+                with evidence._context_database(context) as db:
+                    identity=task_state._lifecycle_identity(db,'task',ref)
+                    if identity['status']!='live':
+                        certificates=[certificate for _,_,value in observed for certificate in value.get('stopped',[]) if certificate['reference']==ref]
+                        d3._require(certificates,'Named retired recovery task lacks retained stopped support')
+                        for certificate in certificates:
+                            selected_context=(evidence._bind_linked_read_context(evidence._linked_basis_root(certificate['linked']),authorities,writer=(context,db),basis=certificate['linked']) if certificate.get('linked') else None)
+                            source_roster=read_rosters
+                            _check_stopped_certificate(context,db,certificate,preparation_reader=preparation_reader,
+                                read_context=selected_context,read_roster=source_roster)
+            # Sources/physical bindings must still be the exact point observations before return.
+            for context,reference,content in observed:
+                selected_context=_content_linked_read_context(content,authorities)
+                source_roster=read_rosters
+                _,latest=_recovery_sources(context,preparation_reader=preparation_reader,read_context=selected_context,read_roster=source_roster)
+                d3._require(any(ref==reference and value==content for ref,value in latest),'Recovery source edge changed during inspection')
+            for path,digest in journals.items():
+                d3._require(hashlib.sha256(d3._read_file(path/'transaction.json',MAX_JOURNAL,private=True)).hexdigest()==digest,
+                    'Recovery journal changed during inspection')
+            preparation_reader.finish()
+            read_rosters.finish()
             return result()
-        for context,reference,content in observed:
-            authority=_canonical_plain(context.authority_set[0])
-            path=Path(content['identity']['plan_dir'])
-            raw=d3._read_file(path/'transaction.json',MAX_JOURNAL,private=True)
-            journal=_scoped_journal_shape(d3.read_request(raw,limit=MAX_JOURNAL))
-            journals[path]=hashlib.sha256(raw).hexdigest()
-            d3._require(journal is not None and journal['schema_version']==2 and
-                all(journal[k]==content['identity'][k] for k in ('transaction_id','manifest_digest')),
-                'Recovery journal stable identity differs')
-            if hashlib.sha256(raw).hexdigest()!=content['journal']['sha256'] or journal['state']!=content['journal']['state']:
-                blockers.append(dict(reason='journal_snapshot_requires_reconciliation',identity=content['identity']))
-            generations=_validate_recovery_references(content,contexts,preparation_reader=preparation_reader)
-            with evidence._context_database(context) as db:
-                history=evidence._recovery_source_history(context,db,reference,content['identity'],preparation_reader=preparation_reader)
-            for _,prior in history:
-                _validate_recovery_references(prior,contexts,preparation_reader=preparation_reader)
-            current_root=dict(authority=authority,identity=content['identity'],source_artifact=reference)
-            roots.append(current_root);requirements.extend(_recovery_current_requirements(current_root,history))
-            d3._require(len(requirements)<=4096,'Recovery current-root requirements exceed bound')
-            dependencies.append(dict(authority=authority,**content['identity'],source_artifact=reference,journal=content['journal'],
-                task_refs=[t['reference'] for t in content['tasks']],assignments=content['assignments'],artifacts=content['artifacts'],generation_digest=d3._digest(generations)))
-        for original_ref in task_refs:
-            ref=_canonical_plain(original_ref); task_state._task_reference(ref)
-            context=next((c for c in contexts if _canonical_plain(c.authority_set[0])==ref['authority']),None)
-            d3._require(context is not None,'Named task authority is outside observed closure')
-            with evidence._context_database(context) as db:
-                identity=task_state._lifecycle_identity(db,'task',ref)
-                if identity['status']!='live':
-                    certificates=[certificate for _,_,value in observed for certificate in value.get('stopped',[]) if certificate['reference']==ref]
-                    d3._require(certificates,'Named retired recovery task lacks retained stopped support')
-                    for certificate in certificates: _check_stopped_certificate(context,db,certificate,preparation_reader=preparation_reader)
-        # Sources/physical bindings must still be the exact point observations before return.
-        for context,reference,content in observed:
-            _,latest=_recovery_sources(context,preparation_reader=preparation_reader)
-            d3._require(any(ref==reference and value==content for ref,value in latest),'Recovery source edge changed during inspection')
-        for path,digest in journals.items():
-            d3._require(hashlib.sha256(d3._read_file(path/'transaction.json',MAX_JOURNAL,private=True)).hexdigest()==digest,
-                'Recovery journal changed during inspection')
-        preparation_reader.finish()
-        return result()
-    except (StartupError,task_state.StateError,OSError,sqlite3.Error,ValueError,TypeError,KeyError) as error:
-        blockers.append(dict(reason=str(error) if isinstance(error,(StartupError,task_state.StateError)) else 'recovery_source_unavailable'))
-        return result()
+        except (StartupError,task_state.StateError,OSError,sqlite3.Error,ValueError,TypeError,KeyError) as error:
+            blockers.append(dict(reason=str(error) if isinstance(error,(StartupError,task_state.StateError)) else 'recovery_source_unavailable'))
+            return result()
+        finally:read_rosters.active=False
 
 
 def inspect_lifecycle_recovery(authorities,task_refs):

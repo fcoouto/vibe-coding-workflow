@@ -2668,7 +2668,10 @@ class LinkedVerificationTests(D4RecoveryFixture, unittest.TestCase):
         request=self.no_verifier_stop_request(f,captured)
         peer=self.members[1];body=self.api._linked_source(root)
         owner=self.api._LinkedOwner(self.api._artifact_owner(peer.scope,self.task(peer)),tuple(self.api._canonical_freeze(edge) for edge in self.api._linked_capture_dependencies(body)[1:]))
-        forged=dict(authority=self.reference(peer)['authority'],reference=self.api._artifact(peer.scope,body,owner=owner))
+        with self.assertRaises((StartupError,state.StateError)):self.api._artifact(peer.scope,body,owner=owner)
+        self.assertEqual([self.task(member) for member in self.members],originals)
+        self.assertEqual(self.api._linked_source(root),body)
+        forged=dict(authority=self.reference(peer)['authority'],reference=root['reference'])
         with self.assertRaises((StartupError,state.StateError)):
             state._retain_ready_stop(f.scope,request,linked_basis=forged)
         for wrong in (dict(authority=root['authority'],reference=dict(name='0'*64+'.json',digest='0'*64)),
@@ -2884,8 +2887,15 @@ class LinkedVerificationTests(D4RecoveryFixture, unittest.TestCase):
         with self.api._context_database(context) as db:metadata=state._metadata(db,pointer['reference']['name'])
         owner=self.api._LinkedOwner(self.api._artifact_owner(self.selected.scope,self.task(self.selected)),
             tuple(self.api._canonical_freeze(edge) for edge in metadata['dependencies'][1:]))
-        clone=dict(authority=pointer['authority'],reference=self.api._artifact(self.selected.scope,content,owner=owner))
-        with self.assertRaisesRegex(StartupError,'selected original publication'):self.stop_request(self.members[1],clone)
+        originals=[self.task(member) for member in self.members]
+        with self.assertRaises((StartupError,state.StateError)):self.api._artifact(self.selected.scope,content,owner=owner)
+        self.assertEqual([self.task(member) for member in self.members],originals)
+        self.assertEqual(self.api._linked_source(pointer),content)
+        wrong=dict(authority=pointer['authority'],reference=self.task(self.selected)['evidence']['plan'])
+        with self.assertRaises((StartupError,state.StateError)):self.stop_request(self.members[1],wrong)
+        request=self.stop_request(self.members[1],pointer)
+        stopped=state._retain_ready_stop(self.members[1].scope,request)['task']
+        self.assertEqual(state._retain_ready_stop(self.members[1].scope,request)['task'],stopped)
 
     def test_linked_stop_peer_revision_generation_plan_and_source_changes_are_protected(self):
         for mutation in ('revision','generation','plan','source'):

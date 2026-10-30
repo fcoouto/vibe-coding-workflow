@@ -643,25 +643,30 @@ def _ready_stop_local(context,db,task):
     return dict(proof=proof,bindings=inputs['bindings'],candidate=inputs['candidate'],linked=job)
 
 
-def _ready_stop(context,db,task,*,observe=False):
+def _ready_stop(context,db,task,*,observe=False,read_context=None,read_roster=None):
     from runtime import evidence
+    member=(dict(authority=evidence._canonical_plain(context.authority_set[0]),scope_id=evidence._task_scope_id(task),
+        **{k:task[k] for k in ('client','session_id','task_id')}) if read_context is not None or read_roster is not None else None)
     stop=task.get('writer_stop');_writer_stop_shape(stop)
+    if read_roster is not None:
+        linked=evidence._read(None,stop['linked'],context=context,db=db) if stop.get('linked') else None
+        read_roster=evidence._matching_linked_read_roster(read_roster,linked)
     if stop.get('linked') and task['lifecycle']['safe_closed_at'] is not None:
         linked=evidence._read(None,stop['linked'],context=context,db=db)
         if evidence._linked_component_closed(evidence._linked_basis_root(linked),writer=(context,db)):
-            retained=evidence._linked_retained_component(evidence._linked_basis_root(linked),linked['authorities'],writer=(context,db))
+            retained=evidence._linked_retained_component(evidence._linked_basis_root(linked),evidence._linked_read_authorities(read_context,linked,member=member,writer=(context,db),read_roster=read_roster),writer=(context,db))
             if retained.get('discovered_authorities'):raise StateError('Retained linked stop requires complete source guards')
             own=next(m for m in retained['members'] if m['reference']['authority']==evidence._canonical_plain(context.authority_set[0]) and
                 m['reference']['scope_id']==evidence._task_scope_id(task) and all(m['reference'][key]==task[key] for key in ('client','session_id','task_id')))
             if own['task']!=task or own['preparation']['content']['stopped']['writer_stop']!=stop:raise StateError('Historical linked stop owner changed')
-            return own['preparation']['content']['stopped']['proof']
+            return evidence._finish_linked_read_context(own['preparation']['content']['stopped']['proof'],read_context,read_roster=read_roster)
     inputs=_ready_stop_local_inputs(context,db,task)
     linked=inputs['linked']
     if linked is not None:
-        if evidence._linked_stopped_basis(evidence._linked_basis_root(linked),linked['authorities'],writer=(context,db))!=linked:raise StateError('Linked complete-stop basis changed')
+        if evidence._linked_stopped_basis(evidence._linked_basis_root(linked),evidence._linked_read_authorities(read_context,linked,member=member,writer=(context,db),read_roster=read_roster),writer=(context,db))!=linked:raise StateError('Linked complete-stop basis changed')
     proof=_check_ready_stop_local_inputs(context,db,task,inputs)
-    if observe and linked is None:evidence._ready_stop_candidate(context,task,inputs['candidate'])
-    return proof
+    if observe and linked is None:evidence._ready_stop_candidate(context,task,inputs['candidate'],read_context=read_context,read_roster=read_roster)
+    return evidence._finish_linked_read_context(proof,read_context,read_roster=read_roster)
 
 
 def _retain_ready_stop(scope,request,*,linked_basis=None):
@@ -685,7 +690,7 @@ def _retain_ready_stop(scope,request,*,linked_basis=None):
                 if linked_basis is not None:
                     retained=evidence._read(None,task['writer_stop']['linked'],context=context,db=db)
                     if evidence._linked_basis_root(retained)!=pointer:raise StateError('Ready stop replay common basis changed')
-                _ready_stop(context,db,task,observe=True)
+                _ready_stop(context,db,task,observe=True,read_context=evidence._bind_linked_read_context(pointer,authorities,writer=(context,db),basis=evidence._read(None,task['writer_stop']['linked'],context=context,db=db)) if pointer is not None and task['writer_stop'].get('linked') else None)
                 if task['writer_stop']['request_digest']!=request_digest or task['writer_stop']['proof_digest']!=request['stop_proof']['sha256']:
                     raise StateError('Ready stop replay payload changed')
                 return dict(ok=True,task=task,replayed=True)
@@ -718,14 +723,15 @@ def _retain_ready_stop(scope,request,*,linked_basis=None):
             if linked is not None:
                 dependencies=[dict(kind='artifact',reference=dict(authority=pointer['authority'],artifact=pointer['reference']))]
                 dependencies += [dict(kind='task',reference=row['task']) for row in linked['members']]
-                retained_owner=evidence._LinkedOwner(owner,tuple(_canonical_freeze(d) for d in dependencies))
-                stop['linked']=evidence._artifact(scope,linked,owner=retained_owner,db=db)
+                with evidence._bound_stop_registration(scope,request,context,db,owner,linked,dependencies,
+                        proof,candidate,verification_ref,authorities) as retained_owner:
+                    stop['linked']=evidence._artifact(scope,linked,owner=retained_owner,db=db)
             task=dict(task,writer_stop=stop);_writer_stop_shape(stop)
             raw=json.dumps(task,separators=(',',':'))
             if len(raw.encode())>4*1024*1024:raise StateError('Ready stop exceeds the original task record bound')
             db.execute('update tasks set data=? where scope_id=? and client=? and session_id=? and task_id=?',
                 (raw,_scope_id(scope),task['client'],task['session_id'],task['task_id']))
-            _ready_stop(context,db,task)
+            _ready_stop(context,db,task,read_context=evidence._bind_linked_read_context(pointer,authorities,writer=(context,db),basis=evidence._read(None,task['writer_stop']['linked'],context=context,db=db)) if pointer is not None and task['writer_stop'].get('linked') else None)
             evidence._check_ready_inputs(files)
             if linked is not None and evidence._linked_stop_basis(pointer,authorities)!=linked:raise StateError('Linked stop source changed during registration')
             return dict(ok=True,task=task,replayed=False)

@@ -215,7 +215,7 @@ class RecoveryUseInputsTests(unittest.TestCase):
                 for (root, path), fingerprint in before_effects.items():
                     self.assertEqual(changes._fingerprint(Path(root), path), fingerprint)
 
-    def test_shape_and_historical_permission_gates_remain_closed(self):
+    def test_shape_acceptance_does_not_authorize_recovery_storage(self):
         case = self.fixture()
         request, contexts = case.d4_bookkeeping_request()
         captured = []
@@ -227,7 +227,11 @@ class RecoveryUseInputsTests(unittest.TestCase):
         self.assertEqual(result["exit_code"], 0, result)
         body = evidence._canonical_plain(captured[0].content)
         body["use_contract"] = dict(version=1, roots=[], edges=[], legacy_routes=[])
-        with self.assertRaises(state.StateError):evidence._recovery_source_shape(body, body["identity"])
+        self.assertEqual(evidence._recovery_source_shape(body,body['identity']),body)
+        malformed=deepcopy(body);malformed['use_contract']['version']=2
+        with self.assertRaises(state.StateError):evidence._recovery_source_shape(malformed,body['identity'])
+        with evidence._context_database(contexts[0]) as db:
+            with self.assertRaises(state.StateError):evidence._artifact(None,body,context=contexts[0],db=db)
 
     def test_real_cut_returns_pending_certificates_without_peer_validation(self):
         case = self.fixture()
@@ -248,32 +252,32 @@ class RecoveryUseInputsTests(unittest.TestCase):
         case = test_d4_historical_witness.HistoricalWitnessTests(methodName="runTest")
         case.setUp()
         self.addCleanup(case.doCleanups)
-        captured = []
-        observe = case.fixture.changes._observe_recovery_source
-        def actual(*args, **kwargs):
-            source = observe(*args, **kwargs);captured.append(source);return source
-        with patch.object(case.fixture.changes, "_observe_recovery_source", side_effect=actual):
-            case.test_actual_source_records_original_stop_reason_before_permission_denial()
+        _,_,_,_,_,_,captured=case.observe_before_storage()
         source = captured[-1]
         content = evidence._canonical_plain(source.content)
         proof_authority = next(root["proof"]["authority"] for root in content["use_contract"]["roots"] if root["purpose"] == "historical-stop")
         context = next(context for context in source.contexts if evidence._canonical_plain(context.authority_set[0]) == proof_authority)
         other = next(context for context in source.contexts if evidence._canonical_plain(context.authority_set[0]) != proof_authority)
         with evidence._context_database(other) as db:
-            pending = evidence._recovery_use_inputs(other, db, None, content["identity"], content=content)
+            baseline=state._source_baseline(None,db,context=other)
+            heads=[edge['reference']['artifact'] for edge in evidence._canonical_plain(baseline)['dependencies'] if edge['reference']['identity']==content['identity']]
+            pending = evidence._recovery_use_inputs(other, db, heads[0] if heads else None, content["identity"], content=content)
             self.assertTrue(any(job["kind"] == "managed-source" for job in pending["jobs"]))
             with self.assertRaisesRegex(state.StateError, "external managed inputs"):
                 evidence._recovery_registration_projection(content, source.created_at, pending)
         with evidence._context_database(context) as db:
-            inputs = evidence._recovery_use_inputs(context, db, None, content["identity"], content=content)
+            baseline=state._source_baseline(None,db,context=context)
+            heads=[edge['reference']['artifact'] for edge in evidence._canonical_plain(baseline)['dependencies'] if edge['reference']['identity']==content['identity']]
+            inputs = evidence._recovery_use_inputs(context, db, heads[0] if heads else None, content["identity"], content=content)
             projected = evidence._recovery_registration_projection(content, source.created_at, inputs)
             self.assertEqual(projected["content"]["use_contract"], content["use_contract"])
             missing = deepcopy(content)
             missing["use_contract"]["edges"] = []
             with self.assertRaisesRegex(state.StateError, "coverage"):
                 evidence._recovery_registration_projection(missing, source.created_at, inputs)
+            self.assertEqual(evidence._recovery_source_shape(projected['content'],content['identity']),projected['content'])
             with self.assertRaises(state.StateError):
-                evidence._recovery_source_shape(projected["content"], content["identity"])
+                evidence._artifact(None,projected['content'],context=context,db=db)
 
     def test_actual_owned_overlay_corruption_blocks_commit_and_effects(self):
         case = self.fixture()

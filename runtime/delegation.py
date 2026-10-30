@@ -352,31 +352,38 @@ def _closure_guidance_job(job):
     return response['result']
 
 
-def _resolve_closure_guidance_job(context,db,job):
+def _resolve_closure_guidance_job(context,db,job,*,read_context=None,read_roster=None):
     """Normal wrapper's full validators; this is not the authority-local input seam."""
     from runtime import changes
+    if read_context is not None:evidence._check_linked_read_context(read_context,evidence._canonical_plain(read_context.pointer),writer=(context,db))
+    if read_roster is not None:evidence._check_linked_read_roster(read_roster,evidence._canonical_plain(read_roster.pointer))
     kind=job['kind']
     if kind=='bookkeeping':result=evidence._bookkeeping_record(context,db,job['reference'],job['body'])
     elif kind=='retained-owner':result=evidence._retained_for_owner(context,db,job['owner'])
     elif kind=='linked-component':
         basis=job['basis']
-        result=evidence._linked_retained_component(evidence._linked_basis_root(basis),basis['authorities'],writer=(context,db))
-    elif kind=='stopped-certificate':result=changes._check_stopped_certificate(context,db,job['certificate'])
+        selected=evidence._matching_linked_read_context(read_context,basis)
+        read_roster=evidence._matching_linked_read_roster(read_roster,basis)
+        result=evidence._linked_retained_component(evidence._linked_basis_root(basis),evidence._linked_read_authorities(selected,basis,writer=(context,db),read_roster=read_roster),writer=(context,db))
+    elif kind=='stopped-certificate':result=changes._check_stopped_certificate(context,db,job['certificate'],read_context=read_context,read_roster=read_roster)
     else:raise state.StateError('Unknown guidance validation job')
-    return dict(job=job,result=result)
+    return evidence._finish_linked_read_context(dict(job=job,result=result),read_context,read_roster=read_roster)
 
 
-def _closure_guidance(context,db,records):
+def _closure_guidance(context,db,records,*,read_context=None,read_roster=None):
     """Preserve full normal validation; pending local inputs never authorize a closure."""
     inputs=_closure_guidance_inputs(context,db,records)
     assembly=_closure_guidance_assembly(inputs)
     try:
         job=next(assembly)
-        while True:job=assembly.send(_resolve_closure_guidance_job(context,db,job))
+        while True:
+            response=(_resolve_closure_guidance_job(context,db,job) if read_context is None and read_roster is None else
+                _resolve_closure_guidance_job(context,db,job,read_context=read_context,read_roster=read_roster))
+            job=assembly.send(response)
     except StopIteration as completed:
         _require(_closure_guidance_inputs(context,db,records)==inputs,
             'Guidance local inputs changed during complete validation')
-        return completed.value
+        return evidence._finish_linked_read_context(completed.value,read_context,read_roster=read_roster)
 
 
 def _closure_guidance_assembly(inputs):
@@ -1801,7 +1808,7 @@ def _assignment(scope, db, request, *, roles=('worker',)):
     return record
 
 
-def _closure_assignments(context,db,task_ref,task,certificate):
+def _closure_assignments(context,db,task_ref,task,certificate,*,read_context=None,read_roster=None):
     """Complete original membership, independently stopped and reconciled per role."""
     from runtime import changes
     records=[record for record in _ledger(None,db,context=context) if all(
@@ -1809,10 +1816,10 @@ def _closure_assignments(context,db,task_ref,task,certificate):
     issued=certificate.get('assignments',[])
     _require(len(issued)==len(records) and len({item['reference']['id'] for item in issued})==len(issued),
         'Stopped assignment certificate membership differs from complete original owners')
-    actual=[changes._assignment_certificate(context,db,task,record) for record in records]
+    actual=[changes._assignment_certificate(context,db,task,record,read_context=read_context,read_roster=read_roster) for record in records]
     _require(sorted(actual,key=evidence._raw)==sorted(issued,key=evidence._raw),
         'Stopped assignments differ from exact current immutable reconciliation support')
-    return records
+    return evidence._finish_linked_read_context(records,read_context,read_roster=read_roster)
 
 
 def retire_settled(db, task_ref, closure):

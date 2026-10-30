@@ -54,9 +54,9 @@ class LinkedLiveInputsTests(unittest.TestCase):
                     active.remove(connection)
         resolve = changes._resolve_linked_live_certificate_job
         resolved = []
-        def actual(job):
+        def actual(job, *, read_context=None, read_roster=None):
             self.assertFalse(active, 'Member reader remains open at external resolution')
-            result = resolve(job)
+            result = resolve(job, read_context=read_context, read_roster=read_roster)
             self.assertFalse(active)
             resolved.append(result)
             return result
@@ -68,8 +68,8 @@ class LinkedLiveInputsTests(unittest.TestCase):
             with database(context) as db:
                 self.assertEqual(certificate, changes._stopped_certificate(context, db, item))
                 changes._check_stopped_certificate(context, db, certificate)
-            def changed(job):
-                result = actual(job)
+            def changed(job, *, read_context=None, read_roster=None):
+                result = actual(job, read_context=read_context, read_roster=read_roster)
                 with database(context, write=True) as db:
                     db.execute('update checkouts set generation=generation+1 where scope_id=?', (reference['scope_id'],))
                 return result
@@ -86,8 +86,8 @@ class LinkedLiveInputsTests(unittest.TestCase):
             pass
         observe = evidence._observe_linked_live_certificate
         reached = []
-        def stop_after_certificate(*args):
-            result = observe(*args)
+        def stop_after_certificate(*args, read_context=None, read_roster=None):
+            result = observe(*args, read_context=read_context, read_roster=read_roster)
             reached.append(result)
             raise Observed()
         with patch.object(evidence, '_observe_linked_live_certificate', side_effect=stop_after_certificate):
