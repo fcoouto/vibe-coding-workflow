@@ -22,8 +22,8 @@ PACKAGE = Path(__file__).resolve().parents[1]
 
 
 def canonical_scope(legacy, *, client="codex", repository_id="repository", checkout_id="checkout",
-                    primary_root=None, git_dir=None):
-    """Synthetic accepted scope for internal seam tests; no enrollment/transition proof."""
+                    primary_root=None, git_dir=None, initialize_existing=True):
+    """Synthetic existing-authority fixture; no enrollment or fresh-birth proof."""
     from runtime import state
     from runtime.startup import AcceptedScope, _canonical_freeze, policy_digest
     root, common = legacy.repository_root, legacy.git_common_dir
@@ -43,10 +43,14 @@ def canonical_scope(legacy, *, client="codex", repository_id="repository", check
         configuration=dict(policy_digest=policy, runtime_digest=digest,
                            runtime=dict(schema_version=3, state_dir=str(runtime.state_dir))), shared_policy=[])
     scope_digest = hashlib.sha256(json.dumps(identity,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode()).hexdigest()
-    return AcceptedScope(legacy.project_id, repository_id, checkout_id, primary,
+    scope = AcceptedScope(legacy.project_id, repository_id, checkout_id, primary,
         primary / ".vibe-coding-workflow/project.json", _canonical_freeze({}), 1, root, primary, private, common,
         _canonical_freeze(bindings), client, policy, digest, runtime, _canonical_freeze(identity), scope_digest,
         _canonical_freeze(dict(kind="trusted-coordinator", reference="fixture:synthetic", sha256="b"*64)))
+    if initialize_existing:
+        with state._database(scope, write=True, initialize=True) as db:
+            state._checkout_row(db, scope, initialize=True)
+    return scope
 
 
 class StateTests(unittest.TestCase):
@@ -108,6 +112,37 @@ class StateTests(unittest.TestCase):
             self.assertNotIn("client", physical)
             self.assertEqual(physical["checkout_id"], "checkout")
         self.assertEqual(api.SCHEMA_VERSION, 2)
+
+    def test_canonical_missing_store_cannot_start_or_create_authority(self):
+        from runtime.startup import _canonical_freeze, _canonical_plain
+        scope = canonical_scope(self.scope)
+        absent = scope.runtime.state_dir.with_name('absent-canonical')
+        identity = _canonical_plain(scope.accepted_identity)
+        identity['configuration']['runtime']['state_dir'] = str(absent)
+        missing = replace(scope, runtime=replace(scope.runtime, state_dir=absent),
+            accepted_identity=_canonical_freeze(identity), accepted_scope_digest=self.api()._digest(identity))
+        before = sorted(str(path) for path in self.base.rglob('*'))
+        with self.assertRaisesRegex(self.api().StateError, 'owned D4 operation'):
+            self.api().start_task(missing, self.request)
+        self.assertEqual(sorted(str(path) for path in self.base.rglob('*')), before)
+        self.assertFalse(absent.exists())
+        self.assertTrue(self.api().start_task(scope, self.request)['ok'])
+
+    def test_canonical_task_guard_rechecks_existing_database_binding(self):
+        from contextlib import contextmanager
+        import shutil
+        from runtime import changes
+        scope=canonical_scope(self.scope);path=scope.runtime.state_dir/'runtime.sqlite3'
+        acquire=changes._authority_guards
+        @contextmanager
+        def substitute(*args,**kwargs):
+            with acquire(*args,**kwargs) as held:
+                replacement=path.with_name('replacement.sqlite3')
+                shutil.copyfile(path,replacement);replacement.chmod(0o600);replacement.replace(path)
+                yield held
+        with patch.object(changes,'_authority_guards',substitute), patch.object(self.api(),'_prepare_directory',side_effect=AssertionError('Existing task prepared storage')):
+            with self.assertRaisesRegex(self.api().StateError,'physical identity changed before task guard'):
+                self.api().start_task(scope,self.request)
 
     def test_canonical_scope_cannot_open_or_rewrite_legacy_database(self):
         self.start()
@@ -220,7 +255,7 @@ class StateTests(unittest.TestCase):
     def test_canonical_entry_rejects_mutable_scope_snapshots_before_initialization(self):
         from types import MappingProxyType
         from runtime.startup import _canonical_plain
-        scope = canonical_scope(self.scope)
+        scope = canonical_scope(self.scope, initialize_existing=False)
         for snapshot in (_canonical_plain(scope.accepted_identity), MappingProxyType(_canonical_plain(scope.accepted_identity))):
             with self.subTest(snapshot=type(snapshot).__name__), self.assertRaises(self.api().StateError):
                 self.api().start_task(replace(scope, accepted_identity=snapshot), self.request)
@@ -442,10 +477,14 @@ class StateTests(unittest.TestCase):
         with self.assertRaisesRegex(api.StateError,'[Rr]etired|expired'): self.start()
         turn={k:owner[k] for k in ('scope_id','client','session_id')} | dict(turn_id='turn')
         self.seed_marker('turn',turn)
-        path=self.scope.runtime.state_dir/'runtime.sqlite3'; before=path.read_bytes()
-        self.event('PostToolUse')
-        self.assertEqual(path.read_bytes(),before)
+        tables=('tasks','bindings','turns','receipts','retired_identities')
         with api._database(self.scope) as db:
+            generation=api._checkout_row(db,self.scope)[4]
+            before={table:db.execute('select * from '+table).fetchall() for table in tables}
+        self.event('PostToolUse')
+        with api._database(self.scope) as db:
+            self.assertEqual(api._checkout_row(db,self.scope)[4],generation+1)
+            self.assertEqual({table:db.execute('select * from '+table).fetchall() for table in tables},before)
             self.assertEqual(db.execute('select count(*) from tasks').fetchone()[0],0)
             self.assertEqual(db.execute('select count(*) from receipts').fetchone()[0],0)
 
@@ -1100,12 +1139,18 @@ class AuthorityBootstrapTests(unittest.TestCase):
         self.fixture = StateTests(methodName='runTest')
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
-        self.scope = canonical_scope(self.fixture.scope)
+        self.scope = canonical_scope(self.fixture.scope, initialize_existing=False)
         self.fixture.scope = self.scope
         self.api = self.fixture.api()
         from runtime import changes
         lock_patch = patch.object(changes, 'LOCK_ROOT', self.fixture.base / 'authority-guards')
         lock_patch.start(); self.addCleanup(lock_patch.stop)
+
+    def initialize(self):
+        """Exercise the original initializer seam without authorizing production task birth."""
+        with self.api._database(self.scope, write=True, initialize=True) as db:
+            self.api._checkout_row(db, self.scope, initialize=True)
+        return dict(ok=True)
 
     def baseline(self):
         with self.api._database(self.scope) as db:
@@ -1114,6 +1159,7 @@ class AuthorityBootstrapTests(unittest.TestCase):
     def test_fresh_owner_baseline_precedes_task_and_preserves_original_age(self):
         from runtime import evidence
         with patch.object(self.api, '_owner_time', return_value=100):
+            self.initialize()
             self.fixture.start()
         baseline = self.baseline()
         self.assertEqual(baseline['content']['created_at'], 100)
@@ -1142,7 +1188,7 @@ class AuthorityBootstrapTests(unittest.TestCase):
                 replaced.append(True)
             return original(database, *args, **kwargs)
         with patch.object(sqlite3, 'connect', side_effect=replace_before_open):
-            with self.assertRaises(self.api.StateError): self.fixture.start()
+            with self.assertRaises(self.api.StateError): self.initialize()
         self.assertTrue(replaced)
         with closing(original(path)) as db:
             self.assertEqual(db.execute('select count(*) from sqlite_master').fetchone()[0], 0)
@@ -1150,18 +1196,18 @@ class AuthorityBootstrapTests(unittest.TestCase):
     def test_preexisting_empty_database_never_gets_creation_baseline(self):
         witness = self.api._initialize(self.scope.runtime.state_dir / 'runtime.sqlite3', version=3)
         if witness is not None: os.close(witness.descriptor)
-        self.fixture.start()
+        self.initialize()
         self.assertIsNone(self.baseline())
 
     def test_copied_database_does_not_rebind_its_baseline(self):
         import shutil
-        self.fixture.start()
+        self.initialize()
         original = self.baseline()
         path = self.scope.runtime.state_dir / 'runtime.sqlite3'
         replacement = path.with_name('copy.sqlite3')
         shutil.copyfile(path, replacement); replacement.chmod(0o600); replacement.replace(path)
         self.assertIsNone(self.baseline())
-        self.fixture.start()
+        self.initialize()
         self.assertIsNone(self.baseline())
         with self.api._database(self.scope) as db:
             self.assertIsNotNone(self.api._metadata(db, original['reference']['name']))
@@ -1175,7 +1221,7 @@ class AuthorityBootstrapTests(unittest.TestCase):
             marker.write_text(json.dumps(dict(schema_version=1, plan_dir=str(self.fixture.base),
                 transaction_id='fixture:active', manifest_digest='a'*64)))
             marker.chmod(0o600)
-        with self.assertRaises(self.api.StateError): self.fixture.start()
+        with self.assertRaises(self.api.StateError): self.initialize()
         self.assertFalse((directory / 'runtime.sqlite3').exists())
 
     def test_rollback_leaves_protected_orphan_and_never_retrofits_baseline(self):
@@ -1185,12 +1231,12 @@ class AuthorityBootstrapTests(unittest.TestCase):
         artifacts = list((self.scope.runtime.state_dir / 'evidence').iterdir())
         self.assertEqual(len(artifacts), 1)
         self.assertIsNone(self.baseline())
-        self.fixture.start()
+        self.initialize()
         self.assertIsNone(self.baseline())
         self.assertEqual(list((self.scope.runtime.state_dir / 'evidence').iterdir()), artifacts)
 
     def test_missing_and_same_byte_substituted_baseline_remain_unknown_without_retrofit(self):
-        self.fixture.start()
+        self.initialize()
         baseline = self.baseline()
         path = self.scope.runtime.state_dir / 'evidence' / baseline['reference']['name']
         replacement = path.with_suffix('.copy')
@@ -1198,7 +1244,7 @@ class AuthorityBootstrapTests(unittest.TestCase):
         with self.assertRaises(self.api.StateError): self.baseline()
         path.unlink()
         with self.assertRaises(self.api.StateError): self.baseline()
-        self.fixture.start()
+        self.initialize()
         self.assertFalse(path.exists())
 
     def test_concurrent_initializer_cannot_bypass_held_authority_guard(self):
@@ -1211,10 +1257,10 @@ class AuthorityBootstrapTests(unittest.TestCase):
             if not release.wait(5): raise AssertionError('bootstrap guard test timed out')
             return original(*args, **kwargs)
         with patch.object(self.api, '_initialize', side_effect=pause), ThreadPoolExecutor(max_workers=2) as executor:
-            first = executor.submit(self.fixture.start)
+            first = executor.submit(self.initialize)
             try:
                 self.assertTrue(entered.wait(5))
-                second = executor.submit(self.fixture.start)
+                second = executor.submit(self.initialize)
                 with self.assertRaises(self.api.StateError): second.result(timeout=2)
             finally:
                 release.set()
@@ -1235,7 +1281,7 @@ class AuthorityBootstrapTests(unittest.TestCase):
                 replaced.append(True)
             return descriptor
         with patch.object(os, 'open', side_effect=replace_after_open):
-            with self.assertRaises(self.api.StateError): self.fixture.start()
+            with self.assertRaises(self.api.StateError): self.initialize()
         self.assertTrue(replaced)
         with closing(sqlite3.connect(path)) as db:
             self.assertEqual(db.execute('select count(*) from sqlite_master').fetchone()[0], 0)
@@ -1246,7 +1292,7 @@ class AuthorityBootstrapTests(unittest.TestCase):
         for stage in ('runtime-open', 'registration', 'first-commit'):
             with self.subTest(stage=stage):
                 scope = canonical_scope(replace(self.fixture.scope, runtime=replace(self.fixture.scope.runtime,
-                    state_dir=self.fixture.base / ('bootstrap-' + stage))))
+                    state_dir=self.fixture.base / ('bootstrap-' + stage))), initialize_existing=False)
                 self.scope = self.fixture.scope = scope
                 path = scope.runtime.state_dir / 'runtime.sqlite3'
                 changed = []
@@ -1257,7 +1303,7 @@ class AuthorityBootstrapTests(unittest.TestCase):
                     changed.append(True)
                 original_connect = sqlite3.connect
                 original_register = evidence._register_source_baseline
-                original_save = self.api._save
+                original_seed = self.api._checkout_row
                 def connect(database, *args, **kwargs):
                     if stage == 'runtime-open' and str(database).startswith(path.as_uri()) and not changed:
                         substitute()
@@ -1265,14 +1311,14 @@ class AuthorityBootstrapTests(unittest.TestCase):
                 def register(*args, **kwargs):
                     if stage == 'registration': substitute()
                     return original_register(*args, **kwargs)
-                def save(*args, **kwargs):
-                    result = original_save(*args, **kwargs)
+                def seed(*args, **kwargs):
+                    result = original_seed(*args, **kwargs)
                     if stage == 'first-commit': substitute()
                     return result
                 with patch.object(sqlite3, 'connect', side_effect=connect), \
                      patch.object(evidence, '_register_source_baseline', side_effect=register), \
-                     patch.object(self.api, '_save', side_effect=save):
-                    with self.assertRaises(self.api.StateError): self.fixture.start()
+                     patch.object(self.api, '_checkout_row', side_effect=seed):
+                    with self.assertRaises(self.api.StateError): self.initialize()
                 self.assertTrue(changed)
                 self.assertIsNone(self.baseline())
 
@@ -1282,9 +1328,9 @@ class AuthorityBootstrapTests(unittest.TestCase):
         folder.mkdir(mode=0o700, parents=True); directory.chmod(0o700)
         orphan = folder / ('f'*32 + '.json')
         orphan.write_text('{}'); orphan.chmod(0o400)
-        with self.assertRaises(self.api.StateError): self.fixture.start()
+        with self.assertRaises(self.api.StateError): self.initialize()
         self.assertIsNone(self.baseline())
-        self.fixture.start()
+        self.initialize()
         self.assertIsNone(self.baseline())
         self.assertEqual(list(folder.iterdir()), [orphan])
 
@@ -1294,20 +1340,29 @@ class AuthorityBootstrapTests(unittest.TestCase):
             witness = original(path, **kwargs)
             os.close(witness.descriptor)
             raise FileExistsError('another initializer won')
-        with patch.object(self.api, '_initialize', side_effect=raced): self.fixture.start()
+        with patch.object(self.api, '_initialize', side_effect=raced): self.initialize()
         self.assertIsNone(self.baseline())
 
 
     def test_first_task_write_still_holds_guard_and_existing_d6_path_does_not_reenter(self):
-        from runtime import delegation
+        from concurrent.futures import ThreadPoolExecutor
+        from runtime import changes, delegation
+        self.initialize()
+        self.fixture.start()
         original = self.api._save
         checked = []
+        def competing_d4():
+            with changes._authority_guards([self.scope.runtime.state_dir]): pass
         def save(*args, **kwargs):
+            self.assertTrue(changes._held_authority_guards([self.scope.runtime.state_dir]))
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                with self.assertRaises(changes.StartupError):
+                    executor.submit(competing_d4).result(timeout=2)
             with self.assertRaises(self.api.StateError):
                 with delegation._reservation_write(self.scope): pass
             checked.append(True)
             return original(*args, **kwargs)
-        with patch.object(self.api, '_save', side_effect=save): self.fixture.start()
+        with patch.object(self.api, '_save', side_effect=save): self.fixture.start(session_id='next-session', task_id='next-task')
         self.assertEqual(checked, [True])
         with delegation._reservation_write(self.scope) as db:
             self.assertIsNotNone(self.api._source_baseline(self.scope, db))
@@ -1322,7 +1377,7 @@ class AuthorityBootstrapTests(unittest.TestCase):
             directory.mkdir(mode=0o700)
             return original(path, **kwargs)
         with patch.object(self.api, '_initialize', side_effect=substitute):
-            with self.assertRaises(self.api.StateError): self.fixture.start()
+            with self.assertRaises(self.api.StateError): self.initialize()
         self.assertFalse((directory / 'runtime.sqlite3').exists())
         self.assertFalse((saved / 'runtime.sqlite3').exists())
         self.assertFalse((directory / 'evidence').exists())

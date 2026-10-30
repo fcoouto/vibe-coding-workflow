@@ -1,6 +1,6 @@
 """Explicit machine-private bootstrap and compact, non-enrolling review owners."""
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 import fcntl
 import math
@@ -135,11 +135,13 @@ def _machine_guard(*, create=False, deadline=None):
                 time.sleep(0.01)
         _check_parents(parents)
         _check_parents(original_parents)
-        token = _MACHINE_ACQUISITION.set(dict(path=path, descriptor=descriptor, parents=parents, contexts=[]))
+        acquisition=dict(path=path,descriptor=descriptor,parents=parents,contexts=[],active=True)
+        token = _MACHINE_ACQUISITION.set(acquisition)
         try:
             yield path, descriptor, parents
             _check_parents(parents)
         finally:
+            acquisition['active']=False
             _MACHINE_ACQUISITION.reset(token)
     finally:
         os.close(descriptor)
@@ -680,13 +682,154 @@ def _record_targets(data):
     return targets
 
 
+def _birth_history_snapshot(config, context, db, targets, budget):
+    """Read full owner metadata; summaries cannot preserve mutable screening charges."""
+    from runtime import onboarding as d3
+    acquired = _MACHINE_ACQUISITION.get()
+    _require(acquired is not None and any(item is context for item in acquired['contexts']))
+    owners = _owners(config, context, db, budget=budget)
+    related = _related_owners(owners, targets, budget)
+    allowed = {target['path'] for target in targets}
+    _require(all(target['path'] in allowed for owner in related for target in owner['targets']))
+    inventory, sources = [], []
+    for owner in owners:
+        metadata, _ = evidence._managed_artifact(None, owner['reference'], context=context, db=db)
+        inventory.append(dict(reference=owner['reference'], metadata=metadata))
+        pointer = metadata.get('screening_result')
+        if owner in related and pointer is not None:
+            state._screening_record(metadata['screening']); state._screening_result(pointer)
+            payload = d3._read_onboarding_screening_source(pointer, budget=budget)
+            _require(payload['accounting'] == dict(authority=config['authority'], owner=owner['owner'],
+                reference=owner['reference'], created_at=owner['created_at'])
+                and payload['ticket'] == metadata['screening']['last_receipt']['ticket']
+                and payload['repositories'] == [target for target in metadata['targets'] if target['git'] is not None])
+            sources.append(dict(owner_reference=owner['reference'], pointer=pointer,
+                payload_digest=d3._digest(payload)))
+    machine = acquired['path']
+    return dict(version=1, machine=dict(path=str(machine), binding=evidence._binding(machine),
+        parents=acquired['parents'], configuration=config,
+        provenance_metadata=state._metadata(db, config['provenance']['name'])),
+        inventory=sorted(inventory, key=lambda row: evidence._raw(row['reference'])),
+        related=sorted([owner['reference'] for owner in related], key=evidence._raw),
+        screening_sources=sorted(sources, key=lambda row: evidence._raw(row['owner_reference'])))
+
+
+def _birth_history_shape(value):
+    state._fields(value, ('version', 'machine', 'inventory', 'related', 'screening_sources'))
+    _require(type(value['version']) is int and value['version'] == 1)
+    state._fields(value['machine'], ('path', 'binding', 'parents', 'configuration', 'provenance_metadata'))
+    _path(value['machine']['path']); state._canonical_binding(value['machine']['binding'])
+    state._fields(value['machine']['configuration'], ('version','state','private_data_dir','parents','machine_parents','authority','provenance','owner','created_at'))
+    _require(value['machine']['configuration']['state']=='ready')
+    for path,binding in value['machine']['parents'].items():_path(path);state._canonical_binding(binding)
+    for name in ('inventory', 'related', 'screening_sources'):
+        _require(isinstance(value[name], list) and len(value[name]) <= MAX_RECORDS)
+    refs = []
+    for row in value['inventory']:
+        state._fields(row, ('reference', 'metadata')); state._artifact_reference(row['reference'])
+        metadata=row['metadata']
+        _require(metadata['owner']['kind'] == 'temporary')
+        state._metadata_record((row['reference']['name'],row['reference']['digest'],'temporary:'+metadata['owner']['id'],
+            metadata['class'],metadata['created_at'],metadata['closed_at'],metadata['status'],metadata['bytes'],evidence._raw(metadata).decode()))
+        if 'screening' in row['metadata']: state._screening_record(row['metadata']['screening'])
+        if 'screening_result' in row['metadata']: state._screening_result(row['metadata']['screening_result'])
+        refs.append(row['reference'])
+    _require(len({evidence._raw(ref) for ref in refs}) == len(refs)
+        and all(ref in refs for ref in value['related']))
+    for row in value['screening_sources']:
+        state._fields(row, ('owner_reference', 'pointer', 'payload_digest'))
+        _require(row['owner_reference'] in value['related'])
+        state._screening_result(row['pointer']); state._canonical_hash(row['payload_digest'])
+    _require(len(evidence._raw(value)) <= evidence.MAX_ARTIFACT)
+    return value
+
+
+@contextmanager
+def _capture_birth_history(record):
+    """A D4-only live acquisition; it does not prepare missing machine storage."""
+    from runtime import onboarding as d3
+    budget = _budget()
+    targets = _record_targets(record)
+    active = True
+    with ExitStack() as guards:
+        acquired = _MACHINE_ACQUISITION.get()
+        if acquired is None:
+            path, descriptor, parents = guards.enter_context(_machine_guard(deadline=budget['deadline']))
+        else:
+            _require(acquired.get('active') is True, 'Birth history requires a live machine acquisition')
+            path, descriptor, parents = acquired['path'], acquired['descriptor'], acquired['parents']
+            info=os.fstat(descriptor)
+            _require(stat.S_ISDIR(info.st_mode) and dict(device=info.st_dev,inode=info.st_ino)==parents[str(path.parent)])
+            _require(_path(_machine_config_path()) == path); _check_parents(parents)
+        snapshot = _configuration_snapshot(path, descriptor); config = snapshot[0]
+        _require(config is not None, 'Canonical birth needs ready machine-private history')
+        context = _ready_context(config, parents, deadline=budget['deadline'])
+        _storage_outside(context, path, targets)
+        machine = _MACHINE_ACQUISITION.get()
+        def observe():
+            _require(active and machine.get('active') is True and _MACHINE_ACQUISITION.get() is machine
+                and _configuration_snapshot(path, descriptor) == snapshot)
+            _ready_context(config, parents, deadline=budget['deadline'])
+            _require(evidence._binding(Path(record['project_root'])) == record['project_binding'])
+            for repository in record['repositories']:
+                for selected in repository['checkouts']:
+                    observed, error = d3._checkout_observation(selected['root'], budget)
+                    expected = dict(root=selected['root'], primary_root=repository['primary_root'],
+                        git_dir=selected['git_dir'], git_common_dir=repository['git_common_dir'],
+                        binding=repository['binding'] | selected['binding'])
+                    _require(error is None and all(observed[key] == value for key, value in expected.items()))
+            with evidence._context_database(context) as db:
+                return _birth_history_snapshot(config, context, db, targets, budget)
+        history = observe(); _birth_history_shape(history)
+        def reobserve():
+            _require(observe() == history, 'Canonical birth history changed')
+        try: yield history, reobserve
+        finally: active = False
+
+
+def _retained_birth_history(certificate):
+    """Reobserve the original physical scope without creating an accepted task scope."""
+    intent=certificate['intent']; repositories={}
+    for member in intent['members']:
+        physical=member['physical_identity']; key=member['repository_id']
+        repository=repositories.setdefault(key,dict(repository_id=key,primary_root=physical['primary_root'],
+            git_common_dir=physical['git_common_dir'],binding={name:physical['bindings'][name] for name in ('primary_root','git_common_dir')},checkouts=[]))
+        repository['checkouts'].append(dict(checkout_id=member['checkout_id'],root=physical['repository_root'],git_dir=physical['git_dir'],
+            binding={name:physical['bindings'][name] for name in ('root','git_dir')}))
+    physical=intent['members'][0]['physical_identity']
+    record=dict(project_root=physical['project_root'],project_binding=physical['project_binding'],repositories=list(repositories.values()))
+    with _capture_birth_history(record) as (actual,reobserve):
+        expected=intent['history']; _require(actual['machine']==expected['machine'] and actual['related']==expected['related'])
+        current={evidence._raw(row['reference']):row for row in actual['inventory']}
+        old={evidence._raw(row['reference']):row for row in expected['inventory']}
+        _require(all(current.get(evidence._raw(ref))==old[evidence._raw(ref)] for ref in expected['related'])
+            and actual['screening_sources']==expected['screening_sources'])
+        reobserve()
+
+
 def _enrolled_history(config, context, db, observed, budget, *, data=None):
     owners = _owners(config, context, db, budget=budget)
     targets = [dict(path=observed['root'], binding=observed['binding']['root'], git=observed)]
     if data is not None:
         targets.extend(_record_targets(data))
     related = _related_owners(owners, targets, budget)
-    if related:
+    _require(data is not None)
+    # Resolve expected history even when deleting the final owner made current inventory empty.
+    _, _, _, canonical = _enrolled_selection(_acquire_canonical_membership(Path(observed['root']), authority_path=None, budget=budget), budget)
+    with evidence._context_database(canonical) as reader:
+        baseline = state._source_baseline(None,reader,context=canonical)
+        _require(baseline is not None)
+        handoff = evidence._read_birth_handoff(canonical,reader)
+    if baseline['content'].get('birth_expectation') is not None:
+        _require(handoff is not None)
+        expected = handoff['certificate']['intent']['history']
+        actual = _birth_history_snapshot(config,context,db,targets,budget)
+        _require(actual['machine']==expected['machine'] and actual['related']==expected['related'])
+        current = {evidence._raw(row['reference']):row for row in actual['inventory']}
+        previous = {evidence._raw(row['reference']):row for row in expected['inventory']}
+        _require(all(current.get(evidence._raw(ref))==previous[evidence._raw(ref)] for ref in expected['related'])
+            and actual['screening_sources']==expected['screening_sources'])
+    elif related:
         raise _HistoryConflict(related)
     return owners
 
@@ -766,6 +909,8 @@ def _enrolled_result(selected, acquisitions, budget, *, scope=None, control=None
     with _machine_guard(deadline=budget['deadline']) as (path, descriptor, parents):
         snapshot = _configuration_snapshot(path, descriptor)
         config = snapshot[0]
+        if baseline['content'].get('birth_expectation') is not None:
+            _require(config is not None, 'Original birth history needs ready machine-private storage')
         history = dict(complete=False, reason='machine_configuration_absent')
         temporary_context = owners = None
         if config is not None:
@@ -773,9 +918,13 @@ def _enrolled_result(selected, acquisitions, budget, *, scope=None, control=None
             _storage_outside(temporary_context, path, _record_targets(data))
             with evidence._context_database(temporary_context) as db:
                 owners = _enrolled_history(config, temporary_context, db, observed, budget, data=data)
-            history = dict(complete=True, reason='authenticated_no_related_history')
-            if scope is not None:
-                history['owners'] = []
+            retained = _related_owners(owners, _record_targets(data), budget)
+            history = dict(complete=True, reason='authenticated_retained_history' if retained else 'authenticated_no_related_history')
+            if scope is not None or retained or baseline['content'].get('birth_expectation') is not None:
+                history['owners']=[{key:owner[key] for key in ('owner','reference','created_at')} for owner in retained]
+            if baseline['content'].get('birth_expectation') is not None:
+                with evidence._context_database(context) as reader: handoff=evidence._read_birth_handoff(context,reader)
+                history['handoff']=dict(source=handoff['source'],certificate_digest=evidence._digest(handoff['certificate']))
         for member, acquired in zip(selected, acquisitions):
             _require(_acquire_canonical_membership(member, authority_path=None, budget=budget) == acquired)
         # Reopen after the first transaction ends so committed baseline changes are visible.

@@ -5,6 +5,7 @@ values. References and equality checks bind that decision; they do not prove it.
 """
 
 from copy import deepcopy
+from pathlib import Path
 
 from runtime import changes, onboarding, startup
 
@@ -14,12 +15,17 @@ class CoordinatorOperationOwner:
         decision = deepcopy(startup._canonical_plain(verified_decision))
         onboarding._bounded(decision)
         onboarding._object(decision, ('decision_reference', 'operation', 'plan_directory',
-            'plan_digest', 'approved', 'bookkeeping_scope'))
+            'plan_digest', 'approved', 'bookkeeping_scope'), ('creation',))
         onboarding._require(changes._evidence(decision['decision_reference']), 'A prior verified decision reference is required')
         onboarding._require(decision['operation'] in ('apply', 'resume', 'rollback'), 'Unknown coordinator operation')
         onboarding._hash(decision['plan_digest'])
         onboarding._object(decision['approved'], ('manifest', 'approval'))
         onboarding._object(decision['bookkeeping_scope'], ('subjects', 'authorities'))
+        self._creation = startup._canonical_freeze(decision['creation']) if 'creation' in decision else None
+        if self._creation is not None:
+            onboarding._object(decision['creation'], ('version','intent','resume'))
+            self._require(type(decision['creation']['version']) is int and decision['creation']['version']==1)
+            changes._birth_intent_shape(decision['creation']['intent'])
         self._decision = startup._canonical_freeze(decision)
         self._entered = False
         self._projections = None
@@ -42,7 +48,7 @@ class CoordinatorOperationOwner:
             and facts['plan_directory'] == decision['plan_directory'])
         allowed = decision['bookkeeping_scope']
         for item in facts.get('authorities', []):
-            self._require(item['authority'] in allowed['authorities']
+            self._require((item['authority'] in allowed['authorities'] or self._birth_authority(item['authority']))
                 and item['project_id'] in {subject['project_id'] for subject in allowed['subjects']})
         prior = changes._scoped_prior(facts['plan'])[1]
         final = decision['approved']['manifest']['enrollment']['record']
@@ -67,13 +73,70 @@ class CoordinatorOperationOwner:
         subject = {key: identity[key] for key in ('project_id', 'repository_id', 'checkout_id', 'client')}
         self._require(onboarding._digest(identity) in self._projections.get(onboarding._digest(subject), set()))
 
+    def _birth_authority(self, authority):
+        if self._creation is None:
+            return False
+        intent = startup._canonical_plain(self._creation)['intent']
+        if authority['directory'] != intent['destination']['directory']:
+            return False
+        journal = changes._load_journal(Path(intent['identity']['plan_dir']))
+        if not journal or 'birth' not in journal or journal['birth']['intent'] != intent:
+            return False
+        certificate = journal['birth']['certificate']
+        if certificate is None or certificate['allocation']['authority'] != authority:
+            return False
+        changes._birth_certificate_shape(certificate)
+        from runtime import evidence, state
+        context = changes._recovery_context(authority)
+        with evidence._context_database(context) as db:
+            baseline = state._source_baseline(None, db, context=context)
+        return baseline is not None and {key: startup._canonical_plain(baseline[key]) for key in ('reference','content')} == certificate['baseline']
+
     def acquire_d4_bookkeeping(self, frozen_facts, issue):
         facts = startup._canonical_plain(frozen_facts)
         self._require(self._entered)
         decision = self._core(facts['plan'], facts['request'])
+        if facts.get('operation') == 'canonical-authority-birth':
+            self._require(self._creation is not None)
+            creation = startup._canonical_plain(self._creation)
+            onboarding._object(facts, ('operation','version','stage','request','plan','identity','intent','journal_digest',
+                'directories','allocation','baseline','certificate_digest'))
+            self._require(facts['version']==1 and facts['intent']==creation['intent'] and facts['identity']==creation['intent']['identity']
+                and facts['stage'] in ('directories','allocate','commit','reconcile'))
+            scope = decision['bookkeeping_scope']
+            self._require(all(peer['authority'] in scope['authorities'] for peer in creation['intent']['peers']))
+            record = decision['approved']['manifest']['enrollment']['record']
+            for member in creation['intent']['members']:
+                for client in member['clients']:
+                    projection = startup.canonical_scope_projection(startup.decode_project_record(record),
+                        repository_id=member['repository_id'], checkout_id=member['checkout_id'], client=client)
+                    self._require(projection is not None)
+                    self._projection(startup._canonical_plain(projection))
+            self._require(all(row['path'] in creation['intent']['destination']['missing_directories']
+                and row['status'] in ('prepared','owned') for row in facts['directories']))
+            if facts['stage'] in ('directories','allocate'):
+                self._require(facts['allocation'] is None and facts['baseline'] is None and facts['certificate_digest'] is None)
+            if facts['stage'] in ('allocate','commit'):
+                self._require(len(facts['directories'])==len(creation['intent']['destination']['missing_directories'])
+                    and all(row['status']=='owned' and row['binding'] is not None for row in facts['directories']))
+            if facts['stage']=='commit':
+                self._require(facts['allocation'] is not None and facts['baseline'] is None and facts['certificate_digest'] is None)
+            if facts['allocation'] is not None:
+                self._require(facts['allocation']['authority']['directory']==creation['intent']['destination']['directory'])
+            if facts['stage']=='reconcile':
+                resume=creation['resume']
+                self._require(resume is not None and resume==dict(intent_digest=onboarding._digest(facts['intent']),
+                    allocation=facts['allocation'],baseline=facts['baseline'],certificate_digest=facts['certificate_digest']))
+            elif creation['resume'] is not None:
+                self._require(creation['resume']==dict(intent_digest=onboarding._digest(facts['intent']),allocation=None,baseline=None,certificate_digest=None))
+            return issue(frozen_facts)
         self._require(facts['identity']['plan_dir'] == decision['plan_directory']['path'])
         scope = decision['bookkeeping_scope']
-        self._require(all(authority in scope['authorities'] for authority in facts['source']['authorities']))
+        certificate=facts.get('birth_certificate')
+        if certificate is not None:
+            self._require(self._creation is not None and certificate['intent']==startup._canonical_plain(self._creation)['intent']
+                and self._birth_authority(certificate['allocation']['authority']))
+        self._require(all(authority in scope['authorities'] or self._birth_authority(authority) for authority in facts['source']['authorities']))
         self._require(facts['permissions']['record']['content'] in self._records)
         self._require(all(onboarding._digest(subject) in self._projections for subject in facts['permissions']['subjects']))
         for task in facts['source']['tasks']:

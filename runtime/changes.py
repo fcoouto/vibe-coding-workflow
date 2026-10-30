@@ -504,7 +504,7 @@ def _journal(path):
     except FileNotFoundError:
         return None
     result = d3.read_request(raw, limit=MAX_JOURNAL)
-    d3._object(result, ("schema_version", "transaction_id", "manifest_digest", "manifest", "approval", "plan", "state", "receipts", "enrollment", "blocked", "directories", "observations"))
+    d3._object(result, ("schema_version", "transaction_id", "manifest_digest", "manifest", "approval", "plan", "state", "receipts", "enrollment", "blocked", "directories", "observations"), ("birth",) if result.get("schema_version") == 2 else ())
     if result.get("schema_version") == 2:
         return _scoped_journal_shape(result)
     d3._require(result["schema_version"] == 1 and result["state"] in
@@ -1535,11 +1535,316 @@ def _public_source_guards(locations, owner, manifest):
         yield acquired
 
 
-def _public_existing_authorities(locations, contexts, plan, manifest):
+def _birth_intent_shape(intent):
+    from runtime import review_storage
+    d3._object(intent, ('identity', 'project_id', 'destination', 'members', 'peers', 'history'))
+    d3._object(intent['identity'], ('plan_dir', 'transaction_id', 'manifest_digest'))
+    task_state._canonical_path(intent['identity']['plan_dir']); d3._text(intent['identity']['transaction_id']); d3._hash(intent['identity']['manifest_digest'])
+    d3._text(intent['project_id'])
+    destination = intent['destination']
+    d3._object(destination, ('directory', 'database', 'parents', 'missing_directories', 'directory_preimage', 'database_preimage'))
+    task_state._canonical_path(destination['directory'])
+    d3._require(destination['database'] == str(Path(destination['directory']) / 'runtime.sqlite3')
+        and destination['database_preimage'] == 'absent', 'Invalid birth destination')
+    d3._object(destination['directory_preimage'], ('status', 'binding'))
+    d3._require(destination['directory_preimage']['status'] in ('absent', 'private-empty'), 'Invalid birth preimage')
+    for binding in destination['parents'].values(): task_state._canonical_binding(binding)
+    d3._require(isinstance(destination['missing_directories'], list) and len(destination['missing_directories']) <= 128, 'Invalid birth directory chain')
+    for path in destination['missing_directories']: task_state._canonical_path(path)
+    d3._require(isinstance(intent['members'], list) and 0 < len(intent['members']) <= 4096
+        and isinstance(intent['peers'], list) and len(intent['peers']) <= 4096, 'Invalid birth members/peers')
+    for member in intent['members']:
+        d3._object(member, ('repository_id', 'checkout_id', 'clients', 'physical_identity'))
+        d3._text(member['repository_id']); d3._text(member['checkout_id']); d3._strings(member['clients'], empty=False)
+        d3._object(member['physical_identity'], ('version', 'project_id', 'repository_id', 'checkout_id', 'project_root',
+            'project_binding', 'primary_root', 'repository_root', 'git_dir', 'git_common_dir', 'bindings'))
+        d3._require(member['physical_identity']['project_id'] == intent['project_id'] and member['physical_identity']['repository_id'] == member['repository_id']
+            and member['physical_identity']['checkout_id'] == member['checkout_id'], 'Birth member identity changed')
+    for peer in intent['peers']:
+        d3._object(peer, ('authority', 'baseline'))
+        d3._object(peer['authority'], ('directory', 'database', 'directory_binding', 'database_binding'))
+        d3._object(peer['baseline'], ('reference', 'content', 'dependencies'))
+    review_storage._birth_history_shape(intent['history'])
+    d3._require(len(json.dumps(intent,sort_keys=True).encode()) <= d3.MAX_REQUEST, 'Birth intent exceeds existing input bound')
+    return intent
+
+
+def _birth_intent(plan, manifest, history, *, plan_dir):
+    from runtime import review_storage, evidence
+    entries = _scoped_entries(manifest['enrollment']['record'])
+    directories = {Path(entry['configuration']['runtime']['state_dir']) for _, _, entry in entries.values()
+        if entry['configuration'] and entry['configuration']['runtime']}
+    fresh = [path for path in directories if not os.path.lexists(path / 'runtime.sqlite3')]
+    d3._require(len(fresh) == 1, 'Birth requires one approved absent shared authority')
+    directory = review_storage._location(fresh[0])
+    roots = {Path(manifest['enrollment']['record']['project_root'])}
+    roots.update(Path(value) for repository, checkout, _ in entries.values() for value in
+        (repository['primary_root'], repository['git_common_dir'], checkout['root'], checkout['git_dir']))
+    d3._require(not any(directory.is_relative_to(root) or root.is_relative_to(directory) for root in roots), 'Birth storage overlaps Project/Git scope')
+    if directory.exists():
+        task_state._private(directory, True)
+        d3._require(next(directory.iterdir(), None) is None, 'Unknown existing birth directory content')
+    missing = []; parent = directory
+    while not parent.exists(): missing.append(str(parent)); parent = parent.parent
+    destination = dict(directory=str(directory), database=str(directory / 'runtime.sqlite3'),
+        parents=review_storage._parents(directory, existing=True), missing_directories=list(reversed(missing)),
+        directory_preimage=dict(status='private-empty' if directory.exists() else 'absent',
+            binding=d3._filesystem_binding(directory) if directory.exists() else None), database_preimage='absent')
+    record = manifest['enrollment']['record']; members = {}
+    for key, (_, _, entry) in entries.items():
+        if not entry['configuration'] or entry['configuration']['runtime'] != dict(schema_version=3, state_dir=str(directory)): continue
+        projection = _scoped_projection(record, key); physical = task_state._physical_identity(projection)
+        member = members.setdefault(key[:2], dict(repository_id=key[0], checkout_id=key[1], clients=[], physical_identity=physical))
+        d3._require(member['physical_identity'] == physical, 'Birth physical client identities differ')
+        member['clients'].append(key[2])
+    peers = {}; pending = set(directories) - {directory}
+    _, prior = _scoped_prior(plan)
+    pending.update(_scoped_runtime_locations([prior]) if prior else ())
+    pending.discard(directory)
+    while pending:
+        location = pending.pop()
+        if str(location) in peers: continue
+        context = _recovery_context(task_state._authority_identity(location / 'runtime.sqlite3'))
+        with evidence._context_database(context) as db: baseline = task_state._source_baseline(None, db, context=context)
+        d3._require(baseline is not None and baseline['content']['source_contract'] == 2, 'Birth peer has no original baseline')
+        if baseline['content'].get('birth_expectation') is not None:
+            with evidence._context_database(context) as db: handoff=evidence._read_birth_handoff(context,db)
+            review_storage._retained_birth_history(handoff['certificate'])
+        peers[str(location)] = dict(authority=_canonical_plain(context.authority_set[0]), baseline=_canonical_plain(baseline))
+        _, sources = _recovery_sources(context)
+        pending.update(Path(authority['directory']) for _, body in sources for authority in body['authorities'] if Path(authority['directory']) != directory)
+        d3._require(len(peers) <= 4096, 'Birth peer coverage exceeds bound')
+    intent = dict(identity=dict(plan_dir=str(plan_dir), transaction_id=manifest['transaction_id'], manifest_digest=d3._digest(manifest)),
+        project_id=record['project_id'], destination=destination, members=[members[key] for key in sorted(members)],
+        peers=[peers[key] for key in sorted(peers)], history=deepcopy(history))
+    return _birth_intent_shape(intent)
+
+
+def _birth_certificate_shape(certificate):
+    d3._object(certificate, ('version', 'intent', 'allocation', 'baseline', 'seed_digest'))
+    d3._require(type(certificate['version']) is int and certificate['version'] == 1, 'Unsupported birth certificate')
+    intent = _birth_intent_shape(certificate['intent'])
+    d3._object(certificate['allocation'], ('authority', 'created_at'))
+    authority = certificate['allocation']['authority']; d3._object(authority, ('directory', 'database', 'directory_binding', 'database_binding'))
+    d3._require(authority['directory'] == intent['destination']['directory'] and authority['database'] == intent['destination']['database'], 'Birth allocation destination changed')
+    for name in ('directory_binding', 'database_binding'): task_state._canonical_binding(authority[name])
+    task_state._integer(certificate['allocation']['created_at'], 'original birth time')
+    d3._object(certificate['baseline'], ('reference', 'content')); task_state._artifact_reference(certificate['baseline']['reference'])
+    content = certificate['baseline']['content']
+    d3._object(content, ('version','kind','source_contract','authority','project_id','created_at','runtime_digest','birth_expectation'))
+    d3._require(type(content['version']) is int and content['version']==1 and type(content['source_contract']) is int
+        and content['source_contract']==2 and content['kind']=='authority-source-baseline','Invalid original birth baseline content')
+    d3._hash(content['runtime_digest'])
+    d3._object(content['birth_expectation'], ('version','identity','intent_digest'))
+    d3._require(type(content['birth_expectation']['version']) is int and content['birth_expectation']['version']==1,
+        'Invalid original birth expectation version')
+    d3._require(content['authority'] == authority and content['project_id'] == intent['project_id']
+        and content['created_at'] == certificate['allocation']['created_at']
+        and content.get('birth_expectation') == dict(version=1, identity=intent['identity'], intent_digest=d3._digest(intent)), 'Original birth expectation differs')
+    d3._hash(certificate['seed_digest'])
+    d3._require(certificate['seed_digest']==d3._digest(_birth_seed(None,intent)), 'Original birth seed certificate changed')
+    return certificate
+
+
+def _birth_seed(db, intent):
+    rows = []
+    for member in intent['members']:
+        identity = member['physical_identity']; scope_id = d3._digest([3, intent['project_id'], member['repository_id'], member['checkout_id']])
+        rows.append((scope_id, intent['project_id'], identity['repository_root'], identity['git_common_dir'], 0, json.dumps(identity, sort_keys=True)))
+    return sorted(rows)
+
+
+def _birth_store_inventory(context, db):
+    from runtime import evidence
+    rows=db.execute('select name,digest from evidence_metadata limit 4097').fetchall()
+    d3._require(len(rows)<=4096,'Birth artifact inventory exceeds bound')
+    folder=context.directory/'evidence';task_state._private(folder,True)
+    d3._require({entry.name for entry in folder.iterdir()}=={row[0] for row in rows},'Unaccounted birth artifact stays protected')
+    total=0
+    for name,digest in rows:
+        metadata=task_state._metadata(db,name);total+=metadata['bytes']
+        d3._require(total<=d3.MAX_TOTAL,'Birth artifact inventory byte bound exceeded')
+        evidence._managed_artifact(None,dict(name=name,digest=digest),context=context,db=db)
+
+
+def _birth_current_history(record, expected):
+    from runtime import review_storage
+    with review_storage._capture_birth_history(record) as (history, reobserve):
+        d3._require(history == expected, 'Original birth history changed')
+        reobserve()
+
+
+@contextmanager
+def _birth_grant(host, stage, path, plan, request, journal, *, expect_absent=False):
+    from runtime import review_storage, evidence
+    birth = journal['birth']; certificate = birth['certificate']
+    journal_file=path/'transaction.json'
+    raw=d3._read_file(journal_file,MAX_JOURNAL,private=True) if journal_file.exists() else None
+    d3._require(not expect_absent or raw is None,'Another private journal appeared before birth admission')
+    facts = dict(operation='canonical-authority-birth', version=1, stage=stage, request=request, plan=plan,
+        identity=birth['intent']['identity'], intent=birth['intent'], journal_digest=hashlib.sha256(raw).hexdigest() if raw is not None else None,
+        directories=birth['directories'], allocation=birth['allocation'],
+        baseline=birth['committed']['baseline'] if birth['committed'] else None,
+        certificate_digest=d3._digest(certificate) if certificate else None)
+    operation = _canonical_plain(host.owner._decision)['operation']
+    with _acquire_d4_grant(host, facts) as grant:
+        _public_entry(host,path,plan,request,operation)
+        observed=d3._read_file(journal_file,MAX_JOURNAL,private=True) if journal_file.exists() else None
+        d3._require(observed==raw,'Birth journal changed during host acquisition')
+        intent=birth['intent'];destination=Path(intent['destination']['directory'])
+        review_storage._location(destination);review_storage._check_parents(intent['destination']['parents'])
+        for row in birth['directories']:
+            if row['status']=='owned':d3._require(evidence._binding(Path(row['path']))==row['binding'],'Birth directory ownership changed')
+        if destination.exists() and intent['destination']['directory_preimage']['status']=='absent':
+            d3._require(any(row['path']==str(destination) and row['status']=='owned' and row['binding']==evidence._binding(destination)
+                for row in birth['directories']),'Unowned birth destination appeared')
+        elif intent['destination']['directory_preimage']['status']=='private-empty':
+            d3._require(evidence._binding(destination)==intent['destination']['directory_preimage']['binding'],'Selected private directory changed')
+        existing=[destination] if destination.exists() else []
+        existing.extend(Path(peer['authority']['directory']) for peer in intent['peers'])
+        d3._require(not existing or _held_authority_guards(existing),'Birth authority guards changed')
+        for peer in intent['peers']:
+            context=_recovery_context(peer['authority'])
+            with evidence._context_database(context) as db:baseline=task_state._source_baseline(None,db,context=context)
+            d3._require(baseline is not None and {key:_canonical_plain(baseline[key]) for key in ('reference','content')}==
+                {key:peer['baseline'][key] for key in ('reference','content')},'Original birth peer baseline changed')
+            if stage in ('directories','allocate','commit'):
+                d3._require(_canonical_plain(baseline)==peer['baseline'],'Birth peer dependencies changed before creation')
+                _,sources=_recovery_sources(context)
+                allowed={d3._digest(item['authority']) for item in intent['peers']}
+                d3._require(all(d3._digest(authority) in allowed for _,body in sources for authority in body['authorities']),
+                    'Original birth peer closure changed')
+        _birth_current_history(request['manifest']['enrollment']['record'],intent['history'])
+        yield grant
+        _public_entry(host,path,plan,request,operation)
+
+
+def _prepare_birth(path, plan, request, host, owner, journal):
+    from runtime import review_storage, evidence
+    creation_decision = getattr(host.owner, '_creation', None)
+    if creation_decision is None: return journal
+    creation_decision = _canonical_plain(creation_decision); intent = creation_decision['intent']
+    _birth_intent_shape(intent)
+    d3._require(intent['identity'] == dict(plan_dir=str(path), transaction_id=request['manifest']['transaction_id'],
+        manifest_digest=d3._digest(request['manifest'])), 'Birth transaction changed')
+    record = request['manifest']['enrollment']['record']; directory = Path(intent['destination']['directory'])
+    entries=_scoped_entries(record)
+    if any(entries[(member['repository_id'],member['checkout_id'],client)][2]['activation']['status']=='active'
+            for member in intent['members'] for client in member['clients']):
+        raise Pending('Fresh authority supports configured enrollment only; native qualification remains unavailable')
+    review_storage._location(directory); review_storage._check_parents(intent['destination']['parents'])
+    _birth_current_history(record, intent['history'])
+    if journal is None:
+        actual = _birth_intent(plan, request['manifest'], intent['history'], plan_dir=path)
+        d3._require(actual == intent and creation_decision['resume'] is None, 'Fresh birth decision changed')
+        journal = dict(schema_version=2, transaction_id=request['manifest']['transaction_id'], manifest_digest=d3._digest(request['manifest']),
+            manifest=deepcopy(request['manifest']), approval=deepcopy(request['approval']), plan=deepcopy(plan), state='prepared',
+            receipts={}, enrollment=None, blocked=[], directories={}, observations=[],
+            birth=dict(version=1, intent=intent, intent_digest=d3._digest(intent), phase='intent', directories=[], allocation=None, committed=None, certificate=None))
+        # Actual host admission and complete guarded peer checks precede intent persistence.
+        current, _ = d3._project_current(plan)
+        d3._require(not d3._project_changes(plan,current), 'Birth plan inputs changed')
+        for action in request['manifest']['actions']:
+            for effect in action['effects']:
+                d3._require(_fingerprint(Path(action['owner']['root']),effect['path'])==effect['before'], 'Birth effect preimage changed')
+        locations=_scoped_runtime_locations([_scoped_prior(plan)[1],record])
+        with _scoped_source_guards(locations,owner,request['manifest']) as (_,contexts):
+            actual_peers=[]
+            for context in contexts:
+                with evidence._context_database(context) as db: baseline=task_state._source_baseline(None,db,context=context)
+                actual_peers.append(dict(authority=_canonical_plain(context.authority_set[0]),baseline=_canonical_plain(baseline)))
+            d3._require(sorted(actual_peers,key=lambda row:row['authority']['directory'])==intent['peers'], 'Birth peer closure changed')
+            _birth_current_history(record,intent['history'])
+            roots,git_roots=_scoped_writer_roots(request['manifest'])
+            _scoped_writers(_scoped_writer_locations(locations,contexts),roots,git_roots,changed_paths=_scoped_changed_paths(request['manifest']))
+            with _birth_grant(host, 'directories', path, plan, request, journal, expect_absent=True): _save(path, journal)
+    birth = journal['birth']; d3._require(birth['intent'] == intent, 'Original birth intent changed')
+    if birth['allocation'] is None and os.path.lexists(directory/'runtime.sqlite3'):
+        raise Pending('Unreceipted birth database stays protected; manual reconciliation required')
+    all_directories = [directory, *[Path(peer['authority']['directory']) for peer in intent['peers']]]
+    if birth['certificate'] is not None:
+        certificate = _birth_certificate_shape(birth['certificate']); context = _recovery_context(certificate['allocation']['authority'])
+        with evidence._context_database(context) as db:
+            baseline = task_state._source_baseline(None, db, context=context)
+            _birth_store_inventory(context,db)
+            d3._require(baseline is not None and {key: _canonical_plain(baseline[key]) for key in ('reference', 'content')} == certificate['baseline'], 'Original completed birth changed')
+        with _authority_guards(all_directories,owner), _birth_grant(host, 'reconcile', path, plan, request, journal): pass
+        return journal
+    if birth['allocation'] is not None:
+        context = _recovery_context(birth['allocation']['authority'])
+        with evidence._context_database(context) as db:
+            baseline = task_state._source_baseline(None, db, context=context)
+            rows = sorted(db.execute('select * from checkouts').fetchall())
+            _birth_store_inventory(context,db)
+            d3._require(baseline is not None and rows == _birth_seed(db, intent), 'Incomplete birth stays protected; manual reconciliation required')
+            for table in task_state.CANONICAL_TABLE_SQL:
+                if table not in ('checkouts', 'evidence_metadata'): d3._require(db.execute('select 1 from '+table+' limit 1').fetchone() is None, 'Incomplete birth contains later state')
+        original = {key: _canonical_plain(baseline[key]) for key in ('reference', 'content')}
+        certificate = dict(version=1, intent=intent, allocation=birth['allocation'], baseline=original, seed_digest=d3._digest(rows))
+        _birth_certificate_shape(certificate)
+        birth.update(committed=dict(baseline=original, seed_digest=certificate['seed_digest']), certificate=certificate)
+        with _authority_guards(all_directories,owner), _birth_grant(host, 'reconcile', path, plan, request, journal):
+            birth['phase']='committed'; _save(path,journal)
+        return journal
+    with _authority_guards(all_directories, owner) as markers:
+        for marker in markers: _atomic(marker.parent, marker.name+'.json', json.dumps(owner, sort_keys=True).encode())
+        with _birth_grant(host, 'directories', path, plan, request, journal):
+            for name in intent['destination']['missing_directories']:
+                target = Path(name)
+                receipt = next((row for row in birth['directories'] if row['path'] == name), None)
+                if receipt is None:
+                    d3._require(not os.path.lexists(target), 'Unowned birth directory stays protected')
+                    receipt = dict(path=name, parents=review_storage._parents(target), preimage='absent', status='prepared', binding=None)
+                    birth['directories'].append(receipt); _save(path,journal)
+                    target.mkdir(mode=0o700)
+                    review_storage._sync_directory(target.parent)
+                    receipt.update(status='owned', binding=evidence._binding(target)); _save(path,journal)
+                    _checkpoint('birth-directory')
+                d3._require(receipt['status']=='owned' and evidence._binding(target)==receipt['binding'], 'Incomplete birth directory stays protected')
+            birth['phase']='directories_owned'; _save(path,journal)
+    with _authority_guards(all_directories, owner):
+        d3._require(_held_authority_guards(all_directories), 'Birth physical authority guards are incomplete')
+        d3._require(not os.path.lexists(directory/'runtime.sqlite3') and next(directory.iterdir(),None) is None, 'Unknown partial authority stays protected')
+        directory_binding=evidence._binding(directory)
+        with _birth_grant(host, 'allocate', path, plan, request, journal) as grant, review_storage._capture_birth_history(record) as (initial_history, reobserve_history):
+            _check_d4_grant(grant)
+            d3._require(initial_history==intent['history'],'Birth history changed before initialization')
+            d3._require(evidence._binding(directory)==directory_binding,'Birth directory changed during allocation admission')
+            def initialize(db, creation):
+                _check_d4_grant(grant); task_state._check_creation(directory/'runtime.sqlite3',creation,db)
+                birth.update(phase='allocated', allocation=dict(authority=_canonical_plain(creation.authority), created_at=creation.created_at))
+                _save(path,journal); _checkpoint('birth-allocated')
+                with _birth_grant(host, 'commit', path, plan, request, journal) as commit_grant:
+                    _birth_current_history(record,intent['history'])
+                    context=evidence._existing_authority_context(_canonical_plain(creation.authority),db=db)
+                    evidence._register_source_baseline(None,db,creation,context=context,grant=commit_grant)
+                    db.executemany('insert into checkouts values(?,?,?,?,?,?)',_birth_seed(db,intent))
+                    reobserve_history()
+                    _checkpoint('birth-before-commit')
+            creation=task_state._initialize(directory/'runtime.sqlite3',version=3,expected_directory=directory_binding,initialize_metadata=initialize)
+            try:
+                task_state._check_creation(directory/'runtime.sqlite3',creation)
+                reobserve_history()
+            finally: os.close(creation.descriptor)
+        _checkpoint('birth-committed')
+        context=_recovery_context(birth['allocation']['authority'])
+        with evidence._context_database(context) as db:
+            baseline=task_state._source_baseline(None,db,context=context); rows=sorted(db.execute('select * from checkouts').fetchall())
+            d3._require(rows==_birth_seed(db,intent),'Birth physical seed changed')
+        original={key:_canonical_plain(baseline[key]) for key in ('reference','content')}
+        certificate=dict(version=1,intent=intent,allocation=birth['allocation'],baseline=original,seed_digest=d3._digest(rows))
+        _birth_certificate_shape(certificate)
+        birth.update(phase='committed',committed=dict(baseline=original,seed_digest=certificate['seed_digest']),certificate=certificate)
+        _save(path,journal)
+    return journal
+
+
+def _public_existing_authorities(locations, contexts, plan, manifest, *, journal=None):
     """Require every selected store and every discovered original baseline."""
     from runtime import evidence
     _, prior = _scoped_prior(plan)
-    if not prior or prior.get('schema_version') != 2 or not locations:
+    birth = journal.get('birth') if journal else None
+    if (not prior or prior.get('schema_version') != 2) and not (birth and birth['certificate']) or not locations:
         raise Pending('Canonical runtime preparation is required before mutation')
     observed = {context.directory: context for context in contexts}
     if not set(locations) <= set(observed) or any(version != 3 for _, version in locations.values()):
@@ -1549,7 +1854,7 @@ def _public_existing_authorities(locations, contexts, plan, manifest):
         key = tuple(member[name] for name in ('repository_id', 'checkout_id', 'client'))
         entry = previous.get(key)
         config = entry[2]['configuration'] if entry else None
-        if not config or not config['runtime'] or config['runtime']['schema_version'] != 3:
+        if (not config or not config['runtime'] or config['runtime']['schema_version'] != 3) and not (birth and birth['certificate']):
             raise Pending('Canonical runtime preparation is required for an affected subject')
     authorities = []
     for context in contexts:
@@ -1558,6 +1863,11 @@ def _public_existing_authorities(locations, contexts, plan, manifest):
         if baseline is None or baseline['content']['source_contract'] != 2:
             raise Pending('An original source-contract-2 baseline is required before mutation')
         project_id = baseline['content']['project_id']
+        if baseline['content'].get('birth_expectation') is not None and not (birth and birth['certificate']
+                and birth['certificate']['allocation']['authority']==_canonical_plain(context.authority_set[0])):
+            from runtime import review_storage
+            with evidence._context_database(context) as db: handoff=evidence._read_birth_handoff(context,db)
+            review_storage._retained_birth_history(handoff['certificate'])
         if context.directory in locations and project_id != manifest['enrollment']['record']['project_id']:
             raise Pending('Selected canonical authority belongs to another Project')
         authorities.append(dict(authority=_canonical_plain(context.authority_set[0]), project_id=project_id))
@@ -1917,6 +2227,7 @@ class _RecoverySourceObservation:
     release: object = None
     ready_inputs: object = None
     provenance: object = None
+    birth_certificate: object = None
 
 
 def _stop_revision(task):
@@ -2827,7 +3138,8 @@ def _observe_recovery_source(path, journal, contexts, task_refs):
     created_at=_existing_recovery_age(contexts,content['identity'])
     if created_at is None: created_at=task_state._owner_time()
     return _RecoverySourceObservation(_canonical_freeze(content),contexts,_canonical_freeze(generations),created_at,_RECOVERY_ISSUER,
-        ready_inputs=_recovery_ready_inputs(content,contexts))
+        ready_inputs=_recovery_ready_inputs(content,contexts),
+        birth_certificate=_canonical_freeze(journal['birth']['certificate']) if journal.get('birth',{}).get('certificate') else None)
 
 
 def _check_recovery_source(source,context,db,*,writer=None):
@@ -3282,6 +3594,8 @@ def _d4_publication_lifetime(source):
         d3._require(approved['registration_projections']==lifetime['registration_projections'] and
             approved['local_chain_inputs']==lifetime['local_chain_inputs'],
             'Recovery registration inputs differ from actual approved acquisition')
+        d3._require(approved.get('birth_certificate')==(_canonical_plain(source.birth_certificate) if source.birth_certificate is not None else None),
+            'Birth observation differs from actual host acquisition')
         d3._require(approved['source']==_canonical_plain(source.content) and approved['generations']==_canonical_plain(source.generations)
             and approved['created_at']==source.created_at,'D4 source content differs from actual approved acquisition')
     return lifetime
@@ -3289,12 +3603,13 @@ def _d4_publication_lifetime(source):
 
 def _taskless_chain_content(content):
     return content['version']==1 and all(content[key]==[] for key in ('tasks','assignments','artifacts')) and not any(
-        key in content for key in ('stopped','supersedes','use_contract'))
+        key in content for key in ('stopped','supersedes','use_contract','birth_handoff'))
 
 
 def _taskless_publication(source,lifetime):
     """Select only the acquired complete local-chain family; this is not permission."""
     from runtime import evidence
+    if source.birth_certificate is not None or any('birth_handoff' in row['content'] for row in lifetime.get('registration_projections',{}).values()):return False
     if lifetime['kind']!='operation' or source.release is not None or not _taskless_chain_content(_canonical_plain(source.content)):return False
     acquired=lifetime['local_chain_inputs']
     if acquired is None:return False
@@ -3345,6 +3660,7 @@ def _check_local_chain_inputs(source,context,db,lifetime):
 def _check_d4_current_facts(source,lifetime):
     d3._require(_d4_publication_lifetime(source) is lifetime,'Recovery publication lifetime changed')
     if lifetime['kind']=='operation':
+        if lifetime.get('birth_reobserve') is not None:lifetime['birth_reobserve']()
         d3._require(_d4_permission_facts(lifetime['journal'],source)==lifetime['permissions'],
             'Current D4 subject, source or owned enrollment transition changed')
         for location in lifetime['markers']:
@@ -3410,6 +3726,8 @@ def _d4_publication_batch(path,journal,contexts,request,host,owner,markers):
         yield None
         return
     if not isinstance(host,_D4HostCapability):raise Pending('Actual trusted D4 host authority is unavailable; bookkeeping remains pending')
+    if journal.get('birth',{}).get('certificate'):
+        _birth_current_history(journal['manifest']['enrollment']['record'], journal['birth']['intent']['history'])
     source=_observe_recovery_source(path,journal,contexts,())
     permissions=_d4_permission_facts(journal,source)
     baselines=[];projections={};local_chains={};chain_rows=0
@@ -3434,21 +3752,29 @@ def _d4_publication_batch(path,journal,contexts,request,host,owner,markers):
             heads=[edge['reference']['artifact'] for edge in baseline['dependencies'] if _canonical_plain(edge['reference']['identity'])==content['identity']]
             d3._require(len(heads)<=1,'Recovery original baseline head is ambiguous')
             inputs=evidence._recovery_use_inputs(context,db,_canonical_plain(heads[0]) if heads else None,content['identity'],content=content)
-            projections[str(context.database)]=evidence._recovery_registration_projection(content,source.created_at,inputs)
+            projections[str(context.database)]=evidence._recovery_registration_projection(content,source.created_at,inputs,birth_certificate=_canonical_plain(source.birth_certificate) if source.birth_certificate is not None else None)
     facts=dict(operation='protective-recovery-bookkeeping',request=request,plan=journal['plan'],identity=_canonical_plain(source.content)['identity'],
         journal=_canonical_plain(source.content)['journal'],permissions=permissions,baselines=baselines,
         source=_canonical_plain(source.content),generations=_canonical_plain(source.generations),created_at=source.created_at,
-        registration_projections=projections,local_chain_inputs=local_chains)
-    with _acquire_d4_grant(host,facts) as grant:
-        for location in markers:_atomic(location.parent,location.name+'.json',json.dumps(owner,sort_keys=True).encode())
-        lifetime=dict(active=True,kind='operation',source=source,grant=grant,permissions=permissions,journal=deepcopy(journal),
-            guards=tuple(getattr(_authority_context,'held',())),markers=tuple(markers),owner=owner,registrations={},
-            baselines={str(context.database):item['baseline'] for context,item in zip(contexts,baselines)},
-            registration_projections=_canonical_plain(grant.facts)['registration_projections'],
-            local_chain_inputs=_canonical_plain(grant.facts)['local_chain_inputs'],writer=None)
-        previous=getattr(_authority_context,'publication',None);_authority_context.publication=lifetime
-        try:yield lifetime
-        finally:lifetime['active']=False;_authority_context.publication=previous
+        registration_projections=projections,local_chain_inputs=local_chains,
+        birth_certificate=_canonical_plain(source.birth_certificate) if source.birth_certificate is not None else None)
+    with ExitStack() as history_guard:
+        reobserve_birth=None
+        if source.birth_certificate is not None:
+            from runtime import review_storage
+            history,reobserve_birth=history_guard.enter_context(review_storage._capture_birth_history(journal['manifest']['enrollment']['record']))
+            d3._require(history==journal['birth']['intent']['history'],'Birth history changed before host acquisition')
+        with _acquire_d4_grant(host,facts) as grant:
+            if reobserve_birth is not None:reobserve_birth()
+            for location in markers:_atomic(location.parent,location.name+'.json',json.dumps(owner,sort_keys=True).encode())
+            lifetime=dict(active=True,kind='operation',source=source,grant=grant,permissions=permissions,journal=deepcopy(journal),
+                guards=tuple(getattr(_authority_context,'held',())),markers=tuple(markers),owner=owner,registrations={},
+                baselines={str(context.database):item['baseline'] for context,item in zip(contexts,baselines)},
+                registration_projections=_canonical_plain(grant.facts)['registration_projections'],
+                local_chain_inputs=_canonical_plain(grant.facts)['local_chain_inputs'],writer=None,birth_reobserve=reobserve_birth)
+            previous=getattr(_authority_context,'publication',None);_authority_context.publication=lifetime
+            try:yield lifetime
+            finally:lifetime['active']=False;_authority_context.publication=previous
 
 
 def _scoped_register_sources(path,journal,contexts):
@@ -3766,10 +4092,24 @@ def inspect_lifecycle_recovery(authorities,task_refs):
 
 
 def _scoped_journal_shape(journal):
-    d3._object(journal, ("schema_version", "transaction_id", "manifest_digest", "manifest", "approval", "plan", "state", "receipts", "enrollment", "blocked", "directories", "observations"))
+    d3._object(journal, ("schema_version", "transaction_id", "manifest_digest", "manifest", "approval", "plan", "state", "receipts", "enrollment", "blocked", "directories", "observations"), ("birth",))
     d3._require(type(journal["schema_version"]) is int and journal["schema_version"] == 2 and journal["manifest_digest"] == d3._digest(journal["manifest"])
                 and journal["state"] in ("prepared", "applying", "interrupted", "applied", "blocked", "rollback_partial", "rolled_back"), "Invalid scoped journal")
     d3._require(isinstance(journal["receipts"], dict) and isinstance(journal["directories"], dict) and isinstance(journal["observations"], list), "Invalid scoped recovery containers")
+    if 'birth' in journal:
+        birth = journal['birth']
+        d3._object(birth, ('version','intent','intent_digest','phase','directories','allocation','committed','certificate'))
+        _birth_intent_shape(birth['intent'])
+        d3._require(type(birth['version']) is int and birth['version']==1 and birth['intent_digest']==d3._digest(birth['intent'])
+            and birth['phase'] in ('intent','directories_owned','allocated','committed','registered','retained'), 'Invalid original birth journal')
+        for row in birth['directories']:
+            d3._object(row, ('path','parents','preimage','status','binding'))
+            d3._require(row['path'] in birth['intent']['destination']['missing_directories'] and row['preimage']=='absent'
+                and row['status'] in ('prepared','owned'), 'Invalid birth directory receipt')
+        if birth['certificate'] is not None:
+            _birth_certificate_shape(birth['certificate'])
+            d3._require(birth['certificate']['intent']==birth['intent'] and birth['allocation']==birth['certificate']['allocation']
+                and birth['committed']==dict(baseline=birth['certificate']['baseline'],seed_digest=birth['certificate']['seed_digest']), 'Birth completion receipt changed')
     actions = {a["id"]: a for a in journal["manifest"]["actions"]}
     d3._require(set(journal["receipts"]) <= set(actions), "Unknown scoped receipt")
     for observation in journal["observations"]: _scoped_observation_shape(observation,journal["manifest"])
@@ -4284,10 +4624,12 @@ def _run_scoped(plan_dir, request, operation, *, host=None, entry_authorizer=Non
                 if prior:
                     raw = d3._read_file(root / PROJECT_FILE, 128 * 1024)
                     d3._require(hashlib.sha256(raw).hexdigest() == m["enrollment"]["before"]["raw_sha256"] and d3.read_request(raw) == prior, "Canonical approved bytes changed")
+            if entry_authorizer is not None and getattr(host.owner, '_creation', None) is not None:
+                journal = _prepare_birth(path, plan, request, host, owner, journal)
             source_guards = _public_source_guards if entry_authorizer is not None else _scoped_source_guards
             with source_guards(locations, owner, m) as (authority_locations,source_contexts):
                 if entry_authorizer is not None:
-                    authorities = _public_existing_authorities(locations, source_contexts, plan, m)
+                    authorities = _public_existing_authorities(locations, source_contexts, plan, m, journal=journal)
                     entry_authorizer(path, plan, request, operation, authorities=authorities)
                     locks.enter_context(_scoped_failure_guard(path, ownership, operation))
                     ownership['journal'] = journal
@@ -4313,6 +4655,8 @@ def _run_scoped(plan_dir, request, operation, *, host=None, entry_authorizer=Non
                     ownership["journal"]=journal
                 with _d4_publication_batch(path,journal,source_contexts,request,host,owner,[canonical_location,*authority_locations]):
                     _scoped_register_sources(path,journal,source_contexts)
+                if journal.get('birth'):
+                    journal['birth']['phase']='registered'; _save(path,journal)
             def settle_sources():
                 d3._require(not any(r.get("command") and not r["command"]["stopped"] for r in journal["receipts"].values()),
                     "Scoped command descendants remain uncertain; preserve recovery markers")
@@ -4353,6 +4697,7 @@ def _run_scoped(plan_dir, request, operation, *, host=None, entry_authorizer=Non
             if operation == "rollback":
                 _scoped_restore(path, journal, current_record, authority_owned, observation)
                 journal["state"] = "rollback_partial" if journal["blocked"] else "rolled_back"
+                if journal.get('birth'):journal['birth']['phase']='retained'
             else:
                 d3._require(journal["state"] not in ("rolled_back", "rollback_partial"), "Rolled back transaction cannot resume application")
                 if not authority_owned: raise Pending("Canonical authority changed outside owned postimages")
@@ -4373,6 +4718,7 @@ def _run_scoped(plan_dir, request, operation, *, host=None, entry_authorizer=Non
                     try:
                         if originals[action["id"]]["target"] != str(PROJECT_FILE):
                             _scoped_writers(writer_locations, affected_roots, affected_git, changed_paths=changed_paths)
+                            if journal.get('birth'):_birth_current_history(m['enrollment']['record'],journal['birth']['intent']['history'])
                             _scoped_apply_action(path, journal, action, originals[action["id"]], observation, descriptors.get(action["owner"].get("git_dir")))
                         completed.add(action["id"])
                     except Pending as error:

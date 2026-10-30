@@ -152,6 +152,7 @@ class _LinkedPublicationPlan:
 class _BaselineOwner:
     project_id: str
     creation: object
+    grant: object = None
 
 
 @dataclass(frozen=True)
@@ -176,7 +177,7 @@ class _RecoveryOwner:
 def _recovery_source_shape(value, identity):
     version=value.get('version')
     state._fields(value,('version','kind','identity','journal','authorities','tasks','assignments','artifacts','previous',
-        *(['stopped','supersedes'] if version==2 else [])))
+        *(['stopped','supersedes'] if version==2 else [])), ('birth_handoff',))
     _require(type(version) is int and version in (1,2) and value['kind']=='d4-recovery-source'
         and value['identity']==identity,'Recovery source history binding changed')
     state._fields(identity,('plan_dir','transaction_id','manifest_digest'))
@@ -200,7 +201,66 @@ def _recovery_source_shape(value, identity):
             state._fields(prior,('authority','artifact','identity','journal_sha256'))
             state._artifact_reference(prior['artifact']); state._canonical_hash(prior['journal_sha256'])
             _require(prior['identity']==identity and prior['authority'] in value['authorities'],'Recovery supersession identity differs')
+    if 'birth_handoff' in value:
+        _birth_handoff_shape(value['birth_handoff'], identity)
     return value
+
+
+def _birth_handoff_shape(handoff, identity):
+    from runtime import changes
+    state._fields(handoff, ('version','certificate','origin_journal_sha256','origin_source'))
+    _require(type(handoff['version']) is int and handoff['version']==1, 'Unsupported birth handoff')
+    certificate = changes._birth_certificate_shape(handoff['certificate'])
+    _require(certificate['intent']['identity']==identity, 'Birth handoff transaction changed')
+    state._canonical_hash(handoff['origin_journal_sha256'])
+    origin = handoff['origin_source']
+    if origin is not None:
+        state._fields(origin, ('authority','artifact')); state._artifact_reference(origin['artifact'])
+        _require(origin['authority']==certificate['allocation']['authority'], 'Foreign birth origin')
+    return handoff
+
+
+def _read_birth_handoff(context, db):
+    baseline = state._source_baseline(None,db,context=context)
+    _require(baseline is not None, 'Original birth baseline is missing')
+    baseline = _canonical_plain(baseline); expectation=baseline['content'].get('birth_expectation')
+    if expectation is None: return None
+    matches=[edge for edge in baseline['dependencies'] if edge['reference']['identity']==expectation['identity']]
+    _require(len(matches)==1, 'Expected birth handoff source is unavailable')
+    reference=matches[0]['reference']['artifact']
+    history=_recovery_source_history(context,db,reference,expectation['identity'])
+    handoffs=[body['birth_handoff'] for _,body in history if 'birth_handoff' in body]
+    _require(handoffs, 'Expected birth certificate is unavailable')
+    certificate=handoffs[0]['certificate']
+    _require(all(row['certificate']==certificate for row in handoffs)
+        and certificate['allocation']['authority']==_canonical_plain(context.authority_set[0])
+        and certificate['baseline']=={key:baseline[key] for key in ('reference','content')}
+        and expectation==dict(version=1,identity=certificate['intent']['identity'],intent_digest=state._digest(certificate['intent'])), 'Original birth handoff changed')
+    return dict(certificate=certificate,source=dict(authority=_canonical_plain(context.authority_set[0]),artifact=reference))
+
+
+def _validate_birth_origin(context, db, content, *, source_metadata=None):
+    handoff=content.get('birth_handoff')
+    if handoff is None:return
+    _birth_handoff_shape(handoff,content['identity'])
+    authority=_canonical_plain(context.authority_set[0])
+    baseline=state._source_baseline(None,db,context=context)
+    _require(baseline is not None and {key:_canonical_plain(baseline[key]) for key in ('reference','content')}==handoff['certificate']['baseline'],
+        'Birth source lacks its original local expectation')
+    _require(handoff['certificate']['allocation']['authority']==authority, 'Birth handoff belongs to another authority')
+    origin=handoff['origin_source']
+    if origin is None:
+        _require(content['previous'] is None and content['journal']['sha256']==handoff['origin_journal_sha256'], 'Initial birth source origin changed')
+    else:
+        _require(origin['authority']==authority, 'Foreign birth source origin')
+        metadata,raw=_managed_artifact(None,origin['artifact'],context=context,db=db)
+        body=json.loads(raw);_recovery_source_shape(body,content['identity'])
+        original=body.get('birth_handoff')
+        _require(original is not None and original['origin_source'] is None and body['previous'] is None
+            and original['certificate']==handoff['certificate'] and original['origin_journal_sha256']==handoff['origin_journal_sha256']
+            and body['journal']['sha256']==handoff['origin_journal_sha256'] and metadata['class']=='compact'
+            and metadata['owner']==dict(kind='project',project_id=handoff['certificate']['intent']['project_id'],task=None)
+            and (source_metadata is None or metadata['created_at']==source_metadata['created_at']), 'Retained birth origin changed')
 
 
 def _recovery_source_dependencies(content,authority):
@@ -209,6 +269,10 @@ def _recovery_source_dependencies(content,authority):
     dependencies += [dict(kind='artifact',reference=a) for a in content['artifacts']]
     if content['previous']:
         dependencies.append(dict(kind='recovery',reference=dict(authority=authority,artifact=content['previous'])))
+    handoff=content.get('birth_handoff')
+    if handoff and handoff['origin_source'] is not None:
+        edge=dict(kind='recovery',reference=handoff['origin_source'])
+        if edge not in dependencies:dependencies.append(edge)
     _require(len(dependencies)<=4096,'Recovery source dependency bound exceeded')
     return dependencies
 
@@ -223,6 +287,7 @@ def _recovery_source_history(context,db,reference,identity,*,validate_stops=True
         metadata,raw=_managed_artifact(None,reference,context=context,db=db)
         value=json.loads(raw)
         _recovery_source_shape(value,identity)
+        _validate_birth_origin(context,db,value,source_metadata=metadata)
         _require(metadata['class']=='compact','Recovery source history binding changed')
         _require(metadata['dependencies']==_recovery_source_dependencies(value,_canonical_plain(context.authority_set[0])),
             'Recovery typed metadata dependencies differ from owner source')
@@ -254,6 +319,12 @@ def _recovery_use_inputs(context,db,reference,identity,*,content=None):
         _require(key not in seen and len(seen)<4096,'Recovery source history is cyclic or excessive');seen.add(key)
         actual,raw=_managed_artifact(None,current,context=context,db=db);body=json.loads(raw)
         _recovery_source_shape(body,identity)
+        _validate_birth_origin(context,db,body,source_metadata=actual)
+        origin=body.get('birth_handoff',{}).get('origin_source')
+        if origin is not None:
+            origin_metadata,_=_managed_artifact(None,origin['artifact'],context=context,db=db)
+            original=dict(reference=origin['artifact'],metadata=origin_metadata)
+            if original not in local_sources:local_sources.append(original)
         _require(actual['class']=='compact' and actual['owner']==dict(kind='project',project_id=baseline['content']['project_id'],task=None)
             and actual['closed_at'] is None and not actual['targets'] and actual['export'] is None,
             'Recovery use source owner differs from original baseline')
@@ -269,9 +340,11 @@ def _recovery_use_inputs(context,db,reference,identity,*,content=None):
         if item['authority']!=authority:
             jobs.append(dict(kind='managed-source',reference=item));continue
         actual,_=_managed_artifact(None,item['artifact'],context=context,db=db)
-        local_sources.append(dict(reference=item['artifact'],metadata=actual))
+        original=dict(reference=item['artifact'],metadata=actual)
+        if original not in local_sources:local_sources.append(original)
         from runtime import recovery_uses
         metadata[recovery_uses.key(item)]=[recovery_uses.qualify_dependency(edge,authority) for edge in actual['dependencies']]
+    _require(len(local_sources)<=4096,'Recovery local source comparison bound exceeded')
     return dict(authority=authority,baseline=baseline,identity=identity,reference=reference,history=history,jobs=jobs,
         metadata=metadata,local_sources=local_sources)
 
@@ -340,6 +413,7 @@ def _recovery_history_inputs(context, db, reference, source, manifest, budget):
         require(name not in seen and name in records,'History source chain is cyclic or incomplete');seen.add(name)
         row = records[name]; body = row['content']; metadata = row['metadata']
         _recovery_source_shape(body,identity)
+        _validate_birth_origin(context,db,body,source_metadata=metadata)
         require(metadata['class']=='compact' and metadata['owner']==dict(kind='project',project_id=baseline['content']['project_id'],task=None)
             and metadata['closed_at'] is None and not metadata['targets'] and metadata['export'] is None,
             'History source owner differs from original baseline')
@@ -419,7 +493,7 @@ def _recovery_admission_projection(inputs):
     return result
 
 
-def _recovery_registration_projection(content,created_at,inputs):
+def _recovery_registration_projection(content,created_at,inputs, *, birth_certificate=None):
     """Derive the actual local body/replay from approved source and baseline comparisons."""
     from runtime import recovery_uses
     content=deepcopy(content);original=deepcopy(content);baseline=inputs['baseline'];identity=content['identity']
@@ -430,6 +504,18 @@ def _recovery_registration_projection(content,created_at,inputs):
     previous=heads[0] if heads else None
     _require(previous==inputs['reference'] and (not inputs['history'] if previous is None else
         bool(inputs['history']) and inputs['history'][0]['reference']==previous),'Recovery projection original head changed')
+    handoff = inputs['history'][0]['content'].get('birth_handoff') if previous is not None else None
+    if birth_certificate is not None and inputs['authority']==birth_certificate['allocation']['authority']:
+        _require({key:baseline[key] for key in ('reference','content')}==birth_certificate['baseline'], 'Destination birth baseline changed')
+        if handoff is None:
+            _require(previous is None, 'Birth origin predecessor is unavailable')
+            handoff=dict(version=1,certificate=deepcopy(birth_certificate),origin_journal_sha256=content['journal']['sha256'],origin_source=None)
+        else:_require(handoff['certificate']==birth_certificate,'Birth certificate changed')
+    if handoff is not None:
+        handoff=deepcopy(handoff)
+        if handoff['origin_source'] is None and previous is not None:
+            handoff['origin_source']=dict(authority=inputs['authority'],artifact=previous)
+        content['birth_handoff']=handoff
     reference=None
     if previous is not None:
         prior=inputs['history'][0];_require(prior['metadata']['created_at']==created_at,'Original D4 source age differs from observed first source')
@@ -466,7 +552,7 @@ def _check_recovery_projection(context,db,source,lifetime):
         if item['reference']==inputs['baseline']['reference'] and registration is not None:
             expected_metadata['dependencies']=registration['expected']['dependencies']
         _require(actual==expected_metadata,'Recovery projection managed source changed')
-    actual=_recovery_registration_projection(_canonical_plain(source.content),source.created_at,inputs)
+    actual=_recovery_registration_projection(_canonical_plain(source.content),source.created_at,inputs,birth_certificate=_canonical_plain(source.birth_certificate) if source.birth_certificate is not None else None)
     _require(actual==expected,'Recovery registration projection changed')
     return actual
 
@@ -559,11 +645,25 @@ def _verify_recovery_registration(context,db,source,lifetime,owner=None):
     return registration
 
 
-def _register_source_baseline(scope, db, creation):
+def _birth_baseline_grant(context, creation, grant):
+    from runtime import changes
+    changes._check_d4_grant(grant)
+    facts = _canonical_plain(grant.facts)
+    _require(facts['operation']=='canonical-authority-birth' and facts['stage']=='commit', 'Fresh baseline requires actual commit-stage authority')
+    intent = changes._birth_intent_shape(facts['intent'])
+    _require(_canonical_plain(creation.authority)==facts['allocation']['authority']
+        and creation.created_at==facts['allocation']['created_at']
+        and context.database==Path(intent['destination']['database']), 'Fresh baseline scope changed')
+    return intent
+
+
+def _register_source_baseline(scope, db, creation, *, context=None, grant=None):
     """Initializer-only compact provenance; no D4 source completeness is implied."""
-    path = state._path(scope)
+    _require((scope is None) != (context is None), 'Select exactly one fresh authority')
+    path = context.database if context is not None else state._path(scope)
     state._check_creation(path, creation, db)
-    _require(db.in_transaction and state._scope_version(scope) == 3, 'Baseline requires the fresh schema3 transaction')
+    project = scope.project_id if scope is not None else _birth_baseline_grant(context, creation, grant)['project_id']
+    _require(db.in_transaction and (scope is None or state._scope_version(scope) == 3), 'Baseline requires the fresh schema3 transaction')
     for table in state.CANONICAL_TABLE_SQL:
         _require(db.execute('select 1 from ' + table + ' limit 1').fetchone() is None,
                  'Existing authority records cannot acquire a creation baseline')
@@ -572,9 +672,12 @@ def _register_source_baseline(scope, db, creation):
         state._private(folder, True)
         _require(next(folder.iterdir(), None) is None, 'Unknown evidence content protects this authority from bootstrap')
     content = dict(version=1, kind='authority-source-baseline', source_contract=2,
-        authority=_canonical_plain(creation.authority), project_id=scope.project_id,
+        authority=_canonical_plain(creation.authority), project_id=project,
         created_at=creation.created_at, runtime_digest=state.runtime_fingerprint())
-    reference = _artifact(scope, content, owner=_BaselineOwner(scope.project_id, creation), db=db)
+    if grant is not None:
+        intent = _birth_baseline_grant(context, creation, grant)
+        content['birth_expectation'] = dict(version=1, identity=intent['identity'], intent_digest=state._digest(intent))
+    reference = _artifact(scope, content, context=context, owner=_BaselineOwner(project, creation, grant), db=db)
     state._check_creation(path, creation, db)
     os.fsync(creation.descriptor)
     directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -2817,7 +2920,11 @@ def _registered_owner(scope, context, owner, db):
         _require(baseline is not None and baseline['content']['project_id'] == owner.project_id, 'Recovery Project owner changed')
         return dict(kind='project', project_id=owner.project_id, task=None), None
     if isinstance(owner, _BaselineOwner):
-        _require(scope is not None and owner.project_id == scope.project_id, 'Baseline Project owner changed')
+        if scope is None:
+            intent = _birth_baseline_grant(context, owner.creation, owner.grant)
+            _require(owner.project_id==intent['project_id'], 'Baseline Project owner changed')
+        else:
+            _require(owner.project_id == scope.project_id and owner.grant is None, 'Baseline Project owner changed')
         state._check_creation(context.database, owner.creation, db)
         return dict(kind='project', project_id=owner.project_id, task=None), None
     _require(isinstance(owner, _ArtifactOwner) and scope is not None and owner.project_id == scope.project_id,
@@ -3485,6 +3592,9 @@ def _artifact_registered(scope, value, context, owner, db):
         expected = dict(version=1, kind='authority-source-baseline', source_contract=2,
             authority=_canonical_plain(owner.creation.authority), project_id=owner.project_id,
             created_at=created, runtime_digest=state.runtime_fingerprint())
+        if owner.grant is not None:
+            intent = _birth_baseline_grant(context, owner.creation, owner.grant)
+            expected['birth_expectation'] = dict(version=1, identity=intent['identity'], intent_digest=state._digest(intent))
         _require(value == expected and not dependencies, 'Baseline content differs from fresh owner provenance')
         state._check_creation(context.database, owner.creation, db)
     closed=value['closed_at'] if isinstance(owner,_ClosureOwner) and value.get('kind')=='retained-task-closure' else None

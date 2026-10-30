@@ -1045,13 +1045,16 @@ class D4RecoveryFixture:
             self.recovery_fixtures.append((other, other_request))
         self.recovery_index = 0
         # Internal scope from actual configured publication; no native activation is claimed.
-        return AcceptedScope(published['project_id'], repository['repository_id'], checkout['checkout_id'],
+        scope = AcceptedScope(published['project_id'], repository['repository_id'], checkout['checkout_id'],
             Path(published['project_root']), authority, _canonical_freeze(changes._scoped_target(d4.repo, str(authority.relative_to(d4.repo)))),
             published['revision'], d4.repo, Path(repository['primary_root']), Path(checkout['git_dir']),
             Path(repository['git_common_dir']), _canonical_freeze(repository['binding'] | checkout['binding']), 'codex',
             identity['configuration']['policy_digest'], identity['configuration']['runtime_digest'], RuntimeSettings(3, storage),
             identity, onboarding._digest(_canonical_plain(identity)),
             _canonical_freeze(dict(kind='trusted-coordinator', **request['approval']['evidence'][0])))
+        with state._database(scope,write=True,initialize=True) as db:
+            state._checkout_row(db,scope,initialize=True)
+        return scope
 
     def recovery(self,task):
         from runtime import changes

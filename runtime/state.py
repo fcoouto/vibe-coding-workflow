@@ -1016,8 +1016,11 @@ def _prepare_directory(directory):
     _private(directory, True)
 
 
-def _initialize(path, *, version=SCHEMA_VERSION, expected_directory=None):
-    _prepare_directory(path.parent)
+def _initialize(path, *, version=SCHEMA_VERSION, expected_directory=None, initialize_metadata=None):
+    if initialize_metadata is None:
+        _prepare_directory(path.parent)
+    else:
+        _private(path.parent, True)
     if version == 3:
         parent_descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
@@ -1041,6 +1044,9 @@ def _initialize(path, *, version=SCHEMA_VERSION, expected_directory=None):
                 database_binding=dict(device=info.st_dev, inode=info.st_ino))
             creation = _AuthorityCreation(_canonical_freeze(authority), _owner_time(), descriptor, _CREATION_ISSUER)
             _check_creation(path, creation)
+            if initialize_metadata is not None:
+                from runtime.changes import _checkpoint
+                _checkpoint('birth-unreceipted')
         else:
             os.close(descriptor)
             descriptor = None
@@ -1055,6 +1061,14 @@ def _initialize(path, *, version=SCHEMA_VERSION, expected_directory=None):
             db.execute('pragma user_version=' + str(version))
             if creation is not None:
                 _check_creation(path, creation, db)
+            if initialize_metadata is not None:
+                initialize_metadata(db, creation)
+                _check_creation(path, creation, db)
+        if creation is not None:
+            os.fsync(creation.descriptor)
+            directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try: os.fsync(directory)
+            finally: os.close(directory)
         return creation
     except BaseException:
         if descriptor is not None:
@@ -1083,7 +1097,7 @@ def _source_baseline(scope, db, *, context=None):
         return None
     reference = dict(name=name, digest=metadata['managed']['sha256'])
     content = evidence._read(None if selected else scope, reference, context=selected, db=db)
-    _fields(content, ('version', 'kind', 'source_contract', 'authority', 'project_id', 'created_at', 'runtime_digest'))
+    _fields(content, ('version', 'kind', 'source_contract', 'authority', 'project_id', 'created_at', 'runtime_digest'), ('birth_expectation',))
     if (type(content['version']) is not int or content['version'] != 1 or content['kind'] != 'authority-source-baseline'
             or type(content['source_contract']) is not int or content['source_contract'] not in (1, 2)
             or content['authority'] != authority or metadata['class'] != 'compact'
@@ -1091,6 +1105,16 @@ def _source_baseline(scope, db, *, context=None):
             or metadata['created_at'] != content['created_at'] or metadata['closed_at'] is not None
             or metadata['targets'] or metadata['export'] is not None):
         raise StateError('Authority source baseline provenance is invalid')
+    if 'birth_expectation' in content:
+        expectation = content['birth_expectation']
+        _fields(expectation, ('version', 'identity', 'intent_digest'))
+        _fields(expectation['identity'], ('plan_dir', 'transaction_id', 'manifest_digest'))
+        if expectation['version'] != 1 or type(expectation['version']) is not int or content['source_contract'] != 2:
+            raise StateError('Unsupported original birth expectation')
+        _canonical_path(expectation['identity']['plan_dir'])
+        _text(expectation['identity']['transaction_id'], 'birth transaction')
+        _canonical_hash(expectation['identity']['manifest_digest'])
+        _canonical_hash(expectation['intent_digest'])
     _canonical_hash(content['runtime_digest'])
     _integer(content['created_at'], 'original authority creation time')
     for dependency in metadata['dependencies']:
@@ -1106,7 +1130,7 @@ def _source_baseline(scope, db, *, context=None):
 
 
 @contextmanager
-def _database(scope, write=False, initialize=False):
+def _database(scope, write=False, initialize=False, *, guard_existing=False):
     db = creation = None
     with ExitStack() as guards:
         try:
@@ -1123,6 +1147,15 @@ def _database(scope, write=False, initialize=False):
                 info = path.parent.lstat()
                 if dict(device=info.st_dev, inode=info.st_ino) != directory_binding:
                     raise StateError('Authority directory changed before bootstrap guard')
+            elif guard_existing and version == 3:
+                if not write:
+                    raise StateError('Existing canonical task guard requires its write transaction')
+                _private(path.parent, True)
+                authority = _authority_identity(path)
+                from runtime.changes import _authority_guards
+                guards.enter_context(_authority_guards([path.parent]))
+                if _authority_identity(path) != authority:
+                    raise StateError('Existing authority physical identity changed before task guard')
             if not os.path.lexists(path):
                 if initialize:
                     try:
@@ -1358,7 +1391,14 @@ def start_task(scope, request):
     if isinstance(scope, AcceptedScope) and request["client"] != scope.client:
         raise StateError("Task client differs from accepted scope")
     pins = _pins(scope)
-    with _database(scope, write=True, initialize=True) as db:
+    if isinstance(scope, AcceptedScope) and not _path(scope).exists():
+        raise StateError('Canonical authority birth requires the owned D4 operation')
+    with _database(scope, write=True, initialize=not isinstance(scope, AcceptedScope),
+                   guard_existing=isinstance(scope, AcceptedScope)) as db:
+        if db is None:
+            raise StateError('Canonical authority is unavailable')
+        if isinstance(scope, AcceptedScope) and _source_baseline(scope, db) is None:
+            raise StateError('Canonical authority original baseline is unavailable')
         scope_id = _scope_id(scope)
         if _retired(db, "task", dict(scope_id=scope_id, **{k:request[k] for k in ("client", "session_id", "task_id")})):
             raise StateError("Retired task identity cannot start again; evidence is unavailable or expired")
