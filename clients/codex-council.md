@@ -1,7 +1,7 @@
 # Codex Council
 
 Use on the supported enrolled Codex POSIX surface after the
-[Council procedure](../skills/council/references/procedure.md). Read host identity
+[Council procedure](../skills/llm-council/references/procedure.md). Read host identity
 and, for version 3, isolated supervisor ownership before inference in every group.
 Read native admission, dispatch and receipt sections only for a native participant
 in Frontier/Balanced. Shared decisions, schemas and recovery are routed by the
@@ -77,7 +77,7 @@ actual stop is known; do not terminate unrelated host work.
 
 `record-native` takes exactly `{run, phase, member: "<selected native member ID>", receipt}`. The receipt
 has these required fields, plus optional Boolean `controls_verified` and
-[verification findings](../skills/council/references/protocol.md#verification-findings):
+[verification findings](../skills/llm-council/references/protocol.md#verification-findings):
 
 ```json
 {
@@ -114,12 +114,12 @@ without accepting that answer. An observed refusal before any child existed uses
 null, confirmed local stop and checks explaining the refusal. Never fabricate a
 child/settings to release ownership. Late or cancelled native evidence remains
 rejected. Receipts attest coordinator observations, not independently authenticated
-worker statements. Closed phases carry the [anonymous execution observations](../skills/council/references/protocol.md#execution-observations) into later fresh contexts; raw private diagnostics stay out.
+worker statements. Closed phases carry the [anonymous execution observations](../skills/llm-council/references/protocol.md#execution-observations) into later fresh contexts; raw private diagnostics stay out.
 
-For lost responses, apply [recovery](../skills/council/references/recovery.md#lost-responses-and-interrupted-preparation);
+For lost responses, apply [recovery](../skills/llm-council/references/recovery.md#lost-responses-and-interrupted-preparation);
 native ownership still follows the admission rules above. Use the common
-[verification gate](../skills/council/references/procedure.md#4-verify-reports-and-phase-completion)
-and [delivery step](../skills/council/references/procedure.md#6-deliver-the-result)
+[verification gate](../skills/llm-council/references/procedure.md#4-verify-reports-and-phase-completion)
+and [delivery step](../skills/llm-council/references/procedure.md#6-deliver-the-result)
 for acceptance and reduced-panel reporting.
 
 ## Isolated recovery supervisors
@@ -148,11 +148,11 @@ Obtain the selected model's contribution; do not answer substantively yourself.
 ```
 
 Add the actual remaining deadline, original token/step envelope, ranked approved
-shortlist, the [selection contract](../skills/council/references/selection.md#task-aware-selection)'s task priorities and per-candidate selection
+shortlist, the [selection contract](../skills/llm-council/references/selection.md#task-aware-selection)'s task priorities and per-candidate selection
 rationales, and applicable privacy/transmission scope. Keep these coordinator
 selection notes out of anonymous participant packets. Supply the selected
-phase's relevant common contract and [recovery sections](../skills/council/references/recovery.md) when their trigger applies; do not include peer responses before the barrier.
-Use the [supervisor action schema](../skills/council/references/recovery.md#actions)
+phase's relevant common contract and [recovery sections](../skills/llm-council/references/recovery.md) when their trigger applies; do not include peer responses before the barrier.
+Use the [supervisor action schema](../skills/llm-council/references/recovery.md#actions)
 to register each actual supervisor handle with `record-supervisor`; the coordinator
 observes progress at least every 60 seconds, independently inspects returned
 operational/source evidence, then records actual supervisor stop. Register a new

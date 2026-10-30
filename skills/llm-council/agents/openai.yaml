@@ -1,0 +1,6 @@
+interface:
+  display_name: "LLM Council"
+  short_description: "Independent answers, critique and fresh synthesis"
+  default_prompt: "Use $llm-council to investigate this question, critique the evidence and synthesize the findings."
+policy:
+  allow_implicit_invocation: false

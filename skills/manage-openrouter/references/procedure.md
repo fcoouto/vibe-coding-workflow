@@ -3,8 +3,8 @@
 Use these controls when requested. They save checkout consent for proposal,
 OpenCode worker and Council routes. Ordinary tasks use their executor procedures;
 they do not load this management procedure or enable a route automatically.
-An explicit [Council](../../council/SKILL.md) invocation uses the separately saved
-Council consent and [deliberation procedure](../../council/references/procedure.md);
+An explicit [LLM Council](../../llm-council/SKILL.md) invocation uses the separately saved
+Council consent and [deliberation procedure](../../llm-council/references/procedure.md);
 invocation and activation are distinct requests.
 
 ## Select scope and inspect status

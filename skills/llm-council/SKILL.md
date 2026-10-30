@@ -1,9 +1,9 @@
 ---
-name: council
-description: Use when the user explicitly requests $council or a Council deliberation on a question. Ordinary coding, reviews and questions do not invoke Council.
+name: llm-council
+description: Use when the user explicitly requests $llm-council or an LLM Council deliberation on a question. Ordinary coding, reviews and questions do not invoke Council.
 ---
 
-# Council
+# LLM Council
 
 Investigate a question independently, exchange one evidence-based critique round,
 then produce a fresh synthesis with uncertainty and meaningful dissent intact.

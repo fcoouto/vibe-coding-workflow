@@ -37,7 +37,7 @@
 - Modify: `runtime/council.py`, `scripts/council.py`, `scripts/openrouter_workers.py`.
 - Create if needed: `runtime/council_recovery.py` for bounded recovery state helpers, avoiding a generic framework.
 - Modify if compatible reuse needs it: `scripts/openrouter_proposals.py` for private operational history.
-- Modify: `skills/council/references/procedure.md`, `clients/codex-council.md`, `docs/policy-sources.md`, `docs/council-validation.md`.
+- Modify: `skills/llm-council/references/procedure.md`, `clients/codex-council.md`, `docs/policy-sources.md`, `docs/council-validation.md`.
 - Test: `tests/test_council_flow.py`, `tests/test_openrouter_workers.py`, `tests/council_fixtures.py`; add `tests/test_council_recovery.py` for recovery-specific scenarios.
 
 **Interfaces:**

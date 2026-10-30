@@ -46,7 +46,7 @@ pinned OpenCode 1.19.5 and the user's existing OpenRouter setup.
 **Files:** `runtime/council.py`, `scripts/council.py`,
 `scripts/openrouter_workers.py`, `tests/test_council_flow.py`,
 `tests/test_openrouter_workers.py`, owning snapshot tests/fixtures where needed,
-`skills/council/references/procedure.md`, `clients/codex-council.md`,
+`skills/llm-council/references/procedure.md`, `clients/codex-council.md`,
 `docs/policy-sources.md`, `README.md` and Council validation only if needed.
 
 **Interfaces:** Grouped `prepare` adds `group` and `chair`; roster keys exactly

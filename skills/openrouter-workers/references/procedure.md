@@ -5,7 +5,7 @@ investigation over copied UTF-8 files. OpenCode owns the external tool loop; Cod
 owns original files, integration and acceptance. The original proposal route remains
 separate. Its successful tests do not qualify tool use or autonomous editing.
 
-An explicitly requested [Council](../../council/SKILL.md) uses its own saved route,
+An explicitly requested [LLM Council](../../llm-council/SKILL.md) uses its own saved route,
 snapshot limits, endpoint-aware allowances and three-phase procedure. Load that
 procedure instead of this ordinary pilot's prepare/run instructions; do not apply
 its one-supervisor, 16-file, 1–8-step, 300-second or 2048-output defaults to Council.

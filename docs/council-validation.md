@@ -800,3 +800,11 @@ instruction checks, not a new live provider run or an installed-package update.
 Comparative evaluation remains deferred. Source truth, anonymity and safe
 transmission still require actual coordinator review; the runtime validates
 structure and recorded findings, not arbitrary factual correctness.
+
+## Skill rename
+
+At the user's request, the skill is now **LLM Council**, with directory/name
+`llm-council` and explicit invocation `$llm-council`. UI metadata, current links and
+invocation guidance use that name. Earlier validation records above retain their
+original `council` command and display name as historical evidence. Runtime route
+keys, run identities, consent and deliberation behavior are unchanged.
