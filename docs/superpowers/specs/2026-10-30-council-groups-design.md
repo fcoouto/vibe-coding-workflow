@@ -33,7 +33,7 @@ The user's subsequent vendor clarification requires seeking three eligible model
 developers first, with developer reuse allowed when bounded discovery cannot find
 three. Native membership and replacements follow the same rule; hosting providers
 are separate from model developers. The complete rule is maintained in the common
-procedure's [vendor selection contract](../../../skills/council/references/procedure.md#model-vendor-diversity).
+procedure's [vendor selection contract](../../../skills/council/references/selection.md#model-vendor-diversity).
 Use maximum supported reasoning when selectable, or documented fixed behavior.
 The user clarified during implementation that capability and the Intelligence,
 Coding and Agentic indexes are primary; missing scores remain unknown, and task

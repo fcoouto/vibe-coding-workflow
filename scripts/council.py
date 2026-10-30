@@ -65,7 +65,8 @@ def main():
                                   ('replace-candidate', 'seat'), ('record-supervisor', 'supervisor')):
                 if args.action == action: expected.add(field)
             if args.action == 'verify-external': expected |= {'disposition', 'checks'}
-            council._require(expected <= set(request) and not set(request) - expected - ({'native_receipt'} if args.action == 'member' else set()), 'invalid_council_request')
+            optional = {'native_receipt'} if args.action == 'member' else {'findings'} if args.action == 'verify-external' else set()
+            council._require(expected <= set(request) and not set(request) - expected - optional, 'invalid_council_request')
             report = settings.status(args.cwd)
             run = Path(request['run'])
             council._require(run.is_absolute() and run.resolve() == run and run.parent == Path(report['council_root']), 'council_checkout_mismatch')
@@ -85,7 +86,7 @@ def main():
                          'replace-candidate': 'seat', 'record-supervisor': 'supervisor'}[args.action]
                 result = getattr(council, args.action.replace('-', '_'))(run, request['phase'], request['member'], request[field])
             elif args.action == 'verify-external':
-                result = council.verify_external(run, request['phase'], request['member'], request['disposition'], request['checks'])
+                result = council.verify_external(run, request['phase'], request['member'], request['disposition'], request['checks'], findings=request.get('findings'))
             elif args.action == 'record-native':
                 council.record_native(run, request['phase'], request['member'], request['receipt'])
                 result = council.status(run)

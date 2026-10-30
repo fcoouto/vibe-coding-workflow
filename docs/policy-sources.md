@@ -6,17 +6,54 @@ Vibe Coding Toolkit remains the workflow authority. The contracts express its ap
 
 ## Reviewed sources
 
+### Council instruction ownership
+
+The user approved a behavior-preserving reorganization on 30 October 2026, before
+considering the pending verification-feedback change. These are the authoritative
+runtime locations; the tables below retain the original requirements and proof.
+
+| Contract | Authoritative location |
+| --- | --- |
+| Readiness, transmission scope, original budgets, three phases, verification gates and delivery | [Procedure](../skills/council/references/procedure.md) |
+| Runtime groups, task fit, developer diversity, reasoning, tool qualification and preapproved replacements | [Selection](../skills/council/references/selection.md) |
+| Exact preparation/seat/verification schemas, legacy compatibility, anonymous observations, consent/cancellation and accounting | [Protocol](../skills/council/references/protocol.md) |
+| Interrupted work, recovery actions and limits, supported corrections, generation/chair replacement and bounded learning | [Recovery](../skills/council/references/recovery.md) |
+| Actual host identity, native member admission/dispatch/receipts and isolated supervisor ownership | [Codex controls](../clients/codex-council.md) |
+
+The entry point and procedure route required reads by stage. Shortlists, ownership
+and cancellation guards remain available before inference; native member details
+are conditional on paid-group membership. The duplicated client `resume-member`
+restriction now links to the existing common contract, including version 3's
+verified still-prepared lost-response case. This does not expand runtime admission.
+Before/after instruction coverage and representative loading decisions are recorded
+in [validation](council-validation.md#instruction-reorganization).
+
+### Council verification feedback
+
+The user approved the pending correction-handoff fix after the instruction
+reorganization on 30 October 2026. The [verification gate](../skills/council/references/procedure.md#4-verify-reports-and-phase-completion)
+separates consequential false claims from presentation warnings and requires source
+checks before acceptance. [Protocol](../skills/council/references/protocol.md#verification-findings)
+owns bounded anonymous findings, privacy review and immutable packet transport;
+[recovery](../skills/council/references/recovery.md#phase-specific-replacement) owns
+replacement-chair use, and Codex controls carry native feedback/receipts. The
+existing rounds, original budgets, correction/replacement limits and provider
+permissions remain unchanged. Local regression evidence belongs in Council
+validation; no automatic semantic truth or privacy classifier is claimed.
+
+### Council amendments
+
 The user-approved [Council reliability amendment](superpowers/specs/2026-10-29-council-design.md#reliability-amendment-30-october-2026)
 adds bounded local recovery and useful reduced-panel delivery. Its contract coverage
 is maintained here for authoring, outside routine loading paths:
 
 | Approved requirement | Local contract and proof |
 | --- | --- |
-| Three control-admission acquisitions within five seconds, locks released during waits; only proven pre-spawn busy may resume the same identity, consent and absolute deadline | Council procedure's supervision/recovery section; shared executor and `resume-member`; focused worker/flow tests cover contention, cancellation, lost responses and unchanged guards |
-| Resume critique artifacts from frozen bytes; verify full inventories, hashes and permissions, preserve conflicts and never recapture source | Council procedure's recovery section; runtime snapshot reconciliation; flow interruption/conflict tests |
-| Allowlisted diagnostic evidence without raw text or inferred upstream cause | Council procedure's observations section; executor classifier/projection and status; sentinel-secret worker/flow tests |
+| Three control-admission acquisitions within five seconds, locks released during waits; only proven pre-spawn busy may resume the same identity, consent and absolute deadline | Council recovery's lost-response section; shared executor and `resume-member`; focused worker/flow tests cover contention, cancellation, lost responses and unchanged guards |
+| Resume critique artifacts from frozen bytes; verify full inventories, hashes and permissions, preserve conflicts and never recapture source | Council recovery's lost-response section; runtime snapshot reconciliation; flow interruption/conflict tests |
+| Allowlisted diagnostic evidence without raw text or inferred upstream cause | Council protocol's execution-observations section; executor classifier/projection and status; sentinel-secret worker/flow tests |
 | Preserve completeness labels and nullable accounting; distinguish accepted participation and fresh synthesis, deliver supported answers or labeled evidence summaries with consequential gaps and evidence-based confidence | Council procedure's delivery section and Codex client routing; reduced-panel and failed-synthesis flow tests |
-| Advisory presentation preferences, explicit hard limits, retained originals; ordinary briefs exclude permission probes and historical qualification stays unchanged | Council procedure's report verification/readiness sections and Codex client routing; Task 7 representative instruction-path walkthroughs |
+| Advisory presentation preferences, explicit hard limits, retained originals; ordinary briefs exclude permission probes and historical qualification stays unchanged | Council procedure's verification gate and selection's tool-qualification section and Codex client routing; Task 7 representative instruction-path walkthroughs |
 
 OpenAI skill-creator guides this narrow procedure update: retain essential bounds,
 define shared rules once, route host-specific supervision to the common contract,
@@ -29,13 +66,13 @@ and its 120-second clarification amend newly prepared recovery-enabled runs only
 
 | Approved recovery requirement | Local contract and proof |
 | --- | --- |
-| One investigation per candidate tenure; at most 120 seconds excluding application, 3 searches/5 page reads; two distinct source-supported corrections; three replacements per original seat across phases/restarts | Common procedure's version-3 recovery action/schema/limit contract; `council_recovery` guarded state and recovery behavior tests prove expiry, application after research closure, duplicate fixes, fourth replacement and durable counters |
+| One investigation per candidate tenure; at most 120 seconds excluding application, 3 searches/5 page reads; two distinct source-supported corrections; three replacements per original seat across phases/restarts | Recovery action/schema/limit contract; `council_recovery` guarded state and recovery behavior tests prove expiry, application after research closure, duplicate fixes, fourth replacement and durable counters |
 | Same selected group, canonical independence, maximum/default reasoning, pinned providers, approved transmission and original phase/seat/spending envelope | Common preparation/shortlist/selection contract; original eligibility validator reused for every predeclared replacement; atomic claim, Free/paid rejection, canonical alias, deadline and request-representation checks |
 | Isolated parallel native supervisors, capacity for participants, no substantive native Free fallback, coordinator verification, actual progress and cleanup | Codex isolated supervisor brief and common ownership procedure; actual two-process synthetic overlap plus CLI recovery-to-verdict fixture; normal host verification and exact supervisor stop/cancel tests |
 | Immutable attempt ownership, lost-response reconciliation, all-prior-owner phase barriers, cancellation/admission checks, nullable aggregate cost across every generation/attempt | Common supervisor/recovery/status contract; existing guards plus v3 history; lost packet, uncertain owner, before-spawn failure, replaced native receipt, reused sessions and all-attempt accounting checks |
 | Independent critic catch-up, batched immutable critique generations, superseded evidence excluded, coherent reduced panel at deadline and fresh synthesis-only chair replacement using original allowance | Common phase recovery contract; generation rebuild, deadline reduced-panel and synthesis role-transfer tests; separate role bindings and retained immutable generation hashes |
 | Bounded private source-backed learning with exact route/profile/configuration matching; provisional success, failure invalidation, no permissions from support text | Common learning/security contract; existing private-file locking/atomic helpers reused beside discovery; malicious correction rejection, expired sources and failed-correction reuse tests |
-| Preserve safe transport facts and original assistant text; final-step report separation; do not claim malformed final text was repaired or a uniform marker denial was established | Executor machine-code projection and v3 final-response fixture; common procedure explicitly discloses unchanged read/grep marker inconsistency. Pinned [grep permissions](https://github.com/anomalyco/opencode/blob/v1.19.5/packages/opencode/src/tool/grep.ts) apply to the pattern, so an ignore rule is not accepted as a security boundary. |
+| Preserve safe transport facts and original assistant text; final-step report separation; do not claim malformed final text was repaired or a uniform marker denial was established | Executor machine-code projection and v3 final-response fixture; selection's tool-qualification section explicitly discloses unchanged read/grep marker inconsistency. Pinned [grep permissions](https://github.com/anomalyco/opencode/blob/v1.19.5/packages/opencode/src/tool/grep.ts) apply to the pattern, so an ignore rule is not accepted as a security boundary. |
 
 Pinned [provider output-limit transformation](https://github.com/anomalyco/opencode/blob/v1.19.5/packages/opencode/src/provider/transform.ts)
 and [request preparation](https://github.com/anomalyco/opencode/blob/v1.19.5/packages/opencode/src/session/llm.ts)
@@ -53,6 +90,7 @@ extends selection and execution without a fixed roster or ranking engine:
 | Approved group requirement | Local contract and proof |
 | --- | --- |
 | Ask the group first; resolve only its eligible runtime participants using current native guidance and bounded discovery/cache; reuse scope authorization | Council readiness/selection and scope sections; representative group loading walkthroughs retained in Task 1 authoring proof |
+| Explain task-specific capability priorities before inference; retain model-specific fit, evidence and gaps for initial choices and replacements without a combined score | User-approved task-aware selection refinement, 30 October 2026: selection's task-aware contract, existing `selection` records and Codex supervisor handoff; life-situation/Python application proof recorded in `docs/council-validation.md`. No new ranking engine or runtime schema. |
 | Seek three eligible model developers; permit developer reuse when bounded discovery cannot find three, record evidence/gaps, retain distinct canonical models; count native membership and apply to replacements; retain qualified same-developer backups within the existing shortlist capacity | Common model-vendor selection contract; focused fictional selection scenarios cover available third vendor, ineligible third vendor, incomplete discovery, replacement ranking and native/hosting distinctions. This is the user's subsequent clarification, not a claim that earlier live selection proved this policy. |
 | Group-specific native selection and native chair for Frontier/Balanced; three distinct zero-rate free variants and fresh external chair for Free, no native fallback | Common roster/selection contract and Codex host boundary; grouped topology, pricing, canonical identity and per-group native flow tests |
 | Version-2 neutral slots and pinned chair; keep legacy semantics | Common request/phases/delivery contract; legacy flow tests plus grouped complete/incomplete/partial and chair rejection checks |

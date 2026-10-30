@@ -622,3 +622,181 @@ this plan's `live-vendor-final/` directory. Earlier complete normal-path and
 controlled-recovery runs retain their original meaning. Final source/package
 validation is separate from observed live availability; comparative evaluation
 remains deferred, and no more endpoint calls followed this verdict.
+
+## Task-aware selection, 30 October 2026
+
+The user approved a small instruction change: state the question's capability
+priorities, retain each model's fit/evidence/gaps in its existing `selection`
+record, and use those priorities for preapproved backups and actual replacements.
+The common procedure owns this rule; the Codex handoff supplies the private notes
+to seat supervisors. No scoring engine, schema change or executor change was added.
+The coordinator checks semantic fit; the runtime still validates selection text
+structurally rather than judging its quality.
+
+The retained last live request used an identical generic rationale for its three
+initial seats, without explicit task priorities or model-specific fit. A fresh
+baseline application of the former instructions nevertheless chose suitable models
+in both fictional scenarios. Thus this change addresses explicit, auditable
+selection behavior; it does not demonstrate improved model quality or accuracy.
+
+Fresh independent native applications used the same fictional eligible Free
+catalog, with three developers and contrasting reasoning/Python evidence:
+
+| Scenario | Observed selection behavior |
+| --- | --- |
+| Move closer to family versus remain near career/social network | Selected A1/B1/C1 for reasoning, uncertainty and assumption checking despite other candidates' higher broad/coding scores. Stored task priorities, per-model evidence references and unmeasured communication/domain/personal-judgment gaps. |
+| Review a Python service's concurrent SQLite writes, transaction boundaries and recovery | Selected A2/B2/C2 for Python debugging and repository evidence. Treated architectural reasoning as supporting and Agentic evidence as relevant to source inspection, not permission to implement. |
+| Failed life-task seat, unchanged question | Ranked and selected preapproved A3 over A4 using the original reasoning/uncertainty priorities; preserved A/B/C developer diversity and original bounds. |
+| Failed Python seat, missing replacement Coding/Agentic scores | Selected preapproved A4 on retained independent Python evidence; kept missing scores unknown and disclosed weaker coverage instead of excluding it or inventing a score. |
+| Synthesis-only chair failure | Both applications preserved the existing preference for an eligible successful external participant, applying task fit to that choice before considering a new shortlisted model. |
+| Ordinary list-comprehension question | Both applications kept Council unloaded and selected no models for the ordinary request. |
+
+The coordinator inspected the actual outputs, including refreshed fallback
+`selection` records and private supervisor handoff. Independent focused review
+found no material issue. Three existing replacement compatibility tests passed
+(3.926 seconds): Free/paid/native and deadline preservation, predeclared routes,
+and synthesis-only replacement retaining prior rounds and original allowance.
+Package validation and OpenAI skill validation passed; the entry point remains
+107 words. These checks are separate from observed client execution.
+
+Private cases, baseline, application outputs, review and checks are retained under
+`.superpowers/sdd/2026-10-30-council-task-selection/`. No live provider call, current
+model ranking or end-to-end Council run was performed for this change. Fictional
+selection evidence is not a comparative evaluation. Earlier incomplete live
+qualification remains incomplete; comparative evaluation stays deferred.
+
+### Subsequent real Free validation
+
+The user then authorized real validation of both questions. Separate immutable
+synthetic inputs were used on the existing enrolled disposable checkout; no real
+personal data or project source was transmitted. Current exact routes and zero
+listed inference rates were checked. Initial rosters differed: life used Inkling
+Small/max, Nemotron Super/documented default and Xing4/documented default; Python
+used Inkling Small/max, Nemotron Ultra/high and Laguna S/documented default.
+Default maximum mappings and actual upstream model/effort remained unverified.
+Initial, fallback and actual replacement records retained task-specific priorities,
+per-model evidence and gaps. Three backups were declared for each seat.
+
+| Test | Observed result | Elapsed |
+| --- | --- | --- |
+| Life situation | Operationally complete: 3 investigations, 3 critiques, fresh synthesis. Core reversible-trial advice supported; final report's peer-report absence and critique-count claims failed factual verification. Not a clean answer-quality pass. | 698.748 seconds |
+| Python service | Partial: 2 investigations, 2 critiques, no accepted synthesis. Unsafe SQLite transaction advice caused rejection of both fresh syntheses; final chair alternative timed out. | Original 1,200-second budget exhausted |
+
+Xing returned 429 and Poolside failed without an established cause in both runs.
+Bounded investigations found no new applicable remedy; a matching previously
+failed delayed retry was not repeated. Life recovered through the preapproved
+Inkling alternative, establishing a real successful same-developer fallback.
+Python rejected Ultra's unsupported `SELECT FOR UPDATE` and natural-idempotency
+recommendations, then accepted Super's replacement investigation. Its third-seat
+Inkling attempt timed out. Small and transferred Super chairs both repeated the
+unsafe claim that setting `isolation_level='IMMEDIATE'` alone protects a preceding
+`SELECT`; both syntheses were rejected. This was model-answer contamination, not
+an established adapter or response-schema failure. No native verdict substituted.
+
+Twenty distinct real external sessions, all local workers and nine isolated
+supervisors were observed stopped. Source and frozen hashes verified; the root
+coordinator independently checked source hashes, distinct session IDs and retained
+result stop flags. Each run's known reported external subtotal was 0 USD; totals
+and upstream cancellation remained unknown after failed/timed-out calls. Native
+usage was separate. A life critique supervisor read full roster configuration
+rather than only its seat subset; no peer-answer/authentication access or external
+disclosure was established, limiting the context-minimization claim.
+
+Private exact evidence and reports are in the authoring workspace's
+`2026-10-30-council-task-selection/live/` directory. These runs establish live
+task-aware selection and recovery behavior, with important answer-quality failures;
+they do not establish correctness or comparative quality. No product fix or
+comparative evaluation was added during validation. Original clocks, sealed
+shortlists and historical outcomes were preserved.
+
+## Instruction reorganization
+
+The user approved reorganizing the Council instructions without changing behavior,
+then reviewing the pending verification fix separately. The exact before-copy
+included the already-approved, uncommitted task-aware selection rules; comparison
+against HEAD alone would have omitted that baseline.
+
+The main procedure now owns readiness, scope/budgets, the three phases, an explicit
+verification gate, supervision and delivery. Selection owns groups/task fit and
+preapproved replacements; protocol owns schemas and shared operational details;
+recovery owns interrupted work, supported corrections, replacement and learning.
+The Codex adapter retains host controls and routes shared rules to these owners.
+Native member details load only for paid-group membership. Shortlists, supervisor
+ownership and cancellation/consent remain available before inference in every group.
+
+| Check | Observed result |
+| --- | --- |
+| Exact baseline coverage | Every substantive original procedure/adapter requirement retained. Split boundaries and rewritten routing checked; existing v3 prepared-attempt resume rule remains authoritative. |
+| Independent native review | No actionable omission, semantic drift, unsafe unloading or broken link; all 52 local links in the six runtime instruction files resolve. Requested Astra/high, with execution telemetry not independently attested. |
+| Six independent instruction applications | Free life selection/replacements, paid Python selection, supported community correction, lost prepared packet with uncertain ownership, failed Free synthesis near deadline and ordinary coding routing all passed as paper scenarios. |
+| Package and skill checks | `python3 -B scripts/validate.py` passed before and after; OpenAI skill validation and `git diff --check` passed. Entry point is 112 words, below 150. |
+| Main procedure size | 583 lines / 5,377 words before; 169 lines / 1,425 words after. |
+| Whole instruction set | 6,858 to 7,229 words including entry point, references and adapter; routing adds text while allowing applicable sections to load separately. No measured token or latency savings claimed. |
+
+Private before-copies, the source-to-contract coverage map, candidate hashes and
+independent application/review results are retained in
+`.superpowers/sdd/2026-10-30-council-structure/`. The coordinator inspected the
+review and checked the final candidate hashes. Source coverage is also mapped in
+[policy sources](policy-sources.md#council-instruction-ownership).
+
+No runtime code, installed package, inference schema, default, recovery allowance
+or verification behavior changed. No live Council/provider execution was performed
+for this reorganization; package validation reports `client_execution: not_checked`.
+Paper applications establish discoverability and preserved decisions, not model
+obedience. Comparative evaluation remains deferred.
+
+The separate [pending verification review](superpowers/plans/2026-10-30-council-structure.md#pending-verification-fix-review-after-reorganization)
+recommends passing reviewed anonymous correction evidence to later phases and
+replacement chairs, then checking flagged issues before acceptance. It was unimplemented at this reorganization checkpoint. The subsequent approved
+implementation and its validation are recorded below.
+
+## Verification feedback fix
+
+The user approved implementing the pending fix without extra rounds or budget.
+New grouped runs accept bounded, reviewed `findings` through the existing external
+verification and native receipt paths. Nonempty outstanding findings block
+acceptance; presentation warnings remain advisory. Later phases receive anonymous
+correction evidence. A replacement chair receives its earlier rejection feedback
+in a separately sealed attempt packet, preserving the shared phase evidence.
+Independent investigators and critic catch-ups still receive source only.
+
+The coordinator checked the archived live reports before creating sanitized local
+regressions. The life synthesis claimed no anonymous phase reports existed and
+called three listed critiques two. Both rejected Python syntheses offered setting
+`isolation_level='IMMEDIATE'` as an alternative to explicit `BEGIN IMMEDIATE` before
+the SELECT. No historical result was changed.
+
+| Regression | Observed local proof |
+| --- | --- |
+| SQLite transaction claim | Executed sqlite3: SELECT under the connection option leaves `in_transaction` false; explicit `BEGIN IMMEDIATE` makes it true. Rejection findings reach critique and synthesis while the independent replacement sees no prior answer. |
+| Missing peers and wrong critique count | Rejected the false synthesis, transferred to an already-successful eligible chair and verified its new packet contains the correction. Original packet bytes, generation, total/phase deadlines and start times remain unchanged; the existing replacement allowance is consumed normally. |
+| Known error treated as warning | External and native acceptance with outstanding findings fail. Independent instruction review rejects both factual errors and accepts the substantively verified advisory 809-word case. |
+| Isolation, integrity and privacy | Peers retain their original critique packet; a corrected attempt receives only its own same-phase findings. Resume reuses its original identity; changed sealed feedback blocks launch. Raw private checks and worker/vendor identities are absent from generated feedback. |
+| Bounds and compatibility | Invalid/oversized findings and old-run feedback upgrades are rejected. Timing-uncertain rejection settles but its findings remain private. CLI uses the existing verification action. |
+
+Three initial regression failures were observed before implementation. The first
+broader Council run found a prompt-length regression; the existing boundary test
+then passed after shortening phase instructions without raising the 16,000-character
+limit. Final checks passed:
+
+- Council: **146 tests**, 144.303 seconds.
+- OpenRouter: **105 tests**, 54.993 seconds.
+- Package validation, OpenAI skill validation, affected instruction links and
+  `git diff --check` passed. Council entry remains 112 words.
+- One independent native review found no actionable correctness/security issue;
+  all three verification instruction walkthroughs passed. Reviewed implementation,
+  tests and instruction hashes were checked unchanged afterward.
+
+The full repository suite was started and deliberately interrupted with exit 130
+after discovering the previously recorded 96-minute run and its unrelated baseline
+failures. No current full-suite pass or failure count is claimed. Completed Council
+and OpenRouter suites cover the changed runtime and shared executor boundaries.
+
+Private regression logs, exact before-copies, live-claim grounding, candidate hashes
+and independent review remain under
+`.superpowers/sdd/2026-10-30-council-verification/`. Package validation reports
+`client_execution: not_checked`: these are local synthetic/runtime and native
+instruction checks, not a new live provider run or an installed-package update.
+Comparative evaluation remains deferred. Source truth, anonymity and safe
+transmission still require actual coordinator review; the runtime validates
+structure and recorded findings, not arbitrary factual correctness.
