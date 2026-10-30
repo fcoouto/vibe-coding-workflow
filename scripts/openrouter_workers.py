@@ -46,7 +46,7 @@ def _validate_brief(brief, council=False):
     if set(brief) != required: raise ValueError('invalid_brief_fields')
     for key in required - {'files', 'timeout_seconds', 'steps', 'council', 'capabilities', 'input_tokens', 'output_tokens', 'permission_qualification'}:
         if not isinstance(brief[key], str) or not brief[key].strip() or len(brief[key]) > 16000:
-            raise ValueError('invalid_brief_value')
+            raise ValueError('invalid_brief_value: ' + key + ' must be nonempty text within 16000 characters')
     if not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,63}', brief['task_id']): raise ValueError('invalid_task_id')
     if brief['role'] not in ROLES: raise ValueError('invalid_role')
     if brief['effort'] not in (('minimal', 'low', 'medium', 'high', 'xhigh', 'max') if council else ('low', 'medium', 'high', 'max')): raise ValueError('invalid_effort')
@@ -183,16 +183,22 @@ def _verify_council_copy(workspace, manifest):
     if observed != expected: raise ValueError('council_workspace_files_missing')
 
 
-def prepare_council(root: Path, brief: dict, snapshot: Path, manifest: dict) -> Path:
+def _validate_council_brief(brief):
     brief, source = _validate_brief(brief, council=True)
     _council_contract(brief)
-    council_snapshot.verify(snapshot, manifest)
     if any(not isinstance(name, str) for name in brief['files']): raise ValueError('invalid_council_input')
-    if len(brief['files']) != len(set(brief['files'])) or set(brief['files']) != set(manifest['files']):
+    if len(brief['files']) != len(set(brief['files'])):
         raise ValueError('council_snapshot_files_mismatch')
     if any(re.search(r'[*?\[\]{}\\]', name) for name in brief['files']):
         raise ValueError('unsafe_permission_pattern')
-    with settings.admission(source, 'council', root=root) as report:
+    return brief, source
+
+
+def prepare_council(root: Path, brief: dict, snapshot: Path, manifest: dict, *, revision=None, scope_id=None) -> Path:
+    brief, source = _validate_council_brief(brief)
+    council_snapshot.verify(snapshot, manifest)
+    if set(brief['files']) != set(manifest['files']): raise ValueError('council_snapshot_files_mismatch')
+    with settings.admission(source, 'council', root=root, revision=revision, scope_id=scope_id) as report:
         brief = dict(brief, management=dict(scope_id=report['scope_id'], revision=report['revision']))
     run = _new_run(root, brief)
     workspace = run / 'workspace'

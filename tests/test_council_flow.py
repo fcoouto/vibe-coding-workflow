@@ -141,6 +141,72 @@ class CouncilFlowTests(CouncilCase):
         openrouter_settings.disable(self.repo, {'expected_revision': self.settings['revision']})
         with self.assertRaises(Exception): council.packet(self.run, 'investigate', 'external-one')
 
+    def test_unprepared_external_members_retain_original_consent_across_phases(self):
+        for phase in ('investigate', 'critique'):
+            for changed_auth in (False, True):
+                with self.subTest(phase=phase, changed_auth=changed_auth):
+                    self.request['run_id'] = phase + '-' + str(changed_auth).lower()
+                    self.prepare()
+                    if phase == 'critique':
+                        self.investigations()
+                    disabled = openrouter_settings.disable(self.repo, {'expected_revision': self.settings['revision']})
+                    if changed_auth:
+                        auth = self.temporary / ('auth-' + phase)
+                        auth.mkdir(mode=0o700)
+                        disabled = openrouter_settings.configure(self.repo, dict(expected_revision=disabled['revision'],
+                            routes=['council'], opencode=str(self.executable), auth_data=str(auth)))
+                    self.settings = openrouter_settings.enable(self.repo, {'expected_revision': disabled['revision']})
+                    with patch.object(council.workers.subprocess, 'Popen', wraps=council.workers.subprocess.Popen) as spawn:
+                        with self.assertRaisesRegex(openrouter_settings.SettingsError, 'openrouter_preparation_stale'):
+                            council.packet(self.run, phase, 'external-one')
+                    self.assertEqual([call for call in spawn.call_args_list if call.args[0][0] == str(self.executable)], [])
+                    self.assertFalse((self.root / (self.request['run_id'] + '-' + phase + '-external-one')).exists())
+                    self.assertEqual(council.status(self.run)['outcome'], 'partial')
+
+    def test_prepare_rejects_invalid_executable_external_briefs_before_work(self):
+        cases = [('steps', 0, 'invalid_bounds'), ('steps', 65, 'invalid_bounds'),
+                 ('steps', True, 'invalid_bounds'), ('model', 'no-slash', 'invalid_model'),
+                 ('provider', 'bad provider', 'invalid_provider'),
+                 ('model_display_name', '', 'invalid_brief_value'),
+                 ('model_display_name', [], 'invalid_brief_value'),
+                 ('model_display_name', 'x' * 16001, 'invalid_brief_value')]
+        original = copy.deepcopy(self.request['roster']['external-one'])
+        for number, (field, value, reason) in enumerate(cases):
+            with self.subTest(field=field, value=str(value)[:32]):
+                self.request['run_id'] = 'invalid-' + str(number)
+                seat = copy.deepcopy(original)
+                seat[field] = value
+                if field in ('model', 'provider'):
+                    seat['capabilities'][field] = value
+                self.request['roster']['external-one'] = seat
+                with self.assertRaisesRegex(ValueError, reason):
+                    self.prepare()
+                self.assertFalse((self.root / ('council-' + self.request['run_id']) / 'manifest.json').exists())
+
+    def test_prepare_checks_combined_objectives_for_both_external_phases(self):
+        for size in (8000, 7820):
+            with self.subTest(constraint_length=size):
+                self.request.update(run_id='long-' + str(size), question='q' * 8000, constraints='c' * size)
+                with self.assertRaisesRegex(ValueError, 'invalid_brief_value'):
+                    self.prepare()
+                self.assertFalse((self.root / ('council-' + self.request['run_id']) / 'manifest.json').exists())
+
+    def test_prepare_accepts_exact_worker_objective_boundary_without_truncation(self):
+        self.request.update(question='q' * 8000, constraints='c' * 7812)
+        self.prepare(); self.investigations()
+        packet = council.packet(self.run, 'critique', 'external-one')
+        brief = json.loads((Path(packet['worker_run']) / 'brief.json').read_text())
+        self.assertEqual(len(brief['objective']), 16000)
+        self.assertIn(self.request['question'], brief['objective'])
+        self.assertIn(self.request['constraints'], brief['objective'])
+
+    def test_prepare_rejects_external_permission_patterns_before_work(self):
+        (self.repo / 'pattern*.txt').write_text('Reviewed evidence with an unsafe permission pattern.')
+        self.request['approved_files'] = self.approved(['pattern*.txt'])
+        with self.assertRaisesRegex(ValueError, 'unsafe_permission_pattern'):
+            self.prepare()
+        self.assertFalse((self.root / 'council-round-one/manifest.json').exists())
+
     def test_unknown_costs_remain_unknown_after_local_stop(self):
         self.prepare(); self.investigations()
         report = council.status(self.run)

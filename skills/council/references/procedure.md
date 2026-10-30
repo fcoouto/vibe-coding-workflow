@@ -100,7 +100,12 @@ are rejected. `ACTION` is exactly `prepare`, `member`, `record-native`, `status`
 | `timeout_seconds` | Optional integer 1..2**31-1, default 1200 |
 
 Question, constraints, approval, selection and supervisor text are at most 16,000
-UTF-8 bytes. File paths must satisfy snapshot safety checks: canonical checkout,
+UTF-8 bytes each. Every generated external objective, including the combined question,
+constraints and phase instructions, must also fit the worker's 16,000-character
+limit. Preparation validates both investigation and critique briefs before any
+member work. If either objective exceeds that limit, shorten the question/constraints
+or move supporting context into explicitly approved evidence files; never truncate it.
+File paths must satisfy snapshot safety checks: canonical checkout,
 reviewed relative files, no symlinks or unsafe segments. External permission
 patterns additionally reject wildcard names. Reserved credential/runtime paths and
 nested repositories are excluded; inspect capture coverage rather than assume every
@@ -242,6 +247,10 @@ releasing ownership. The executor acquires saved-settings admission before a sho
 Council launch guard held through spawn only. Cancellation before that boundary
 prevents launch; an admitted process needs owner termination. Disable blocks new
 external admission and retains historical results and settlement.
+External preparation and launch retain the Council's original consent revision and
+checkout scope. Disable/re-enable or reconfiguration makes old runs stale for new
+external work, including unprepared later members. Use a fresh run identity under
+the approved current configuration; never refresh an old run's authorization.
 
 Recover lost responses from original identities: an external worker remains at its
 deterministic existing path; a lost native brief remains issued. Inspect original

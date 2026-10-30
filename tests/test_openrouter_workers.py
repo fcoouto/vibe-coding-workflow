@@ -619,6 +619,33 @@ class CouncilWorkerTests(CouncilCase):
         self.assertEqual(result['failure']['reason'], 'openrouter_disabled')
         with self.assertRaisesRegex(ValueError, 'already_started'): self.api.execute(run, self.executable, self.auth)
 
+    def test_council_preparation_checks_supplied_original_management_binding(self):
+        stamp = dict(scope_id=self.settings['scope_id'], revision=self.settings['revision'])
+        with self.assertRaisesRegex(settings.SettingsError, 'openrouter_scope_changed'):
+            self.api.prepare_council(self.root, self.brief, self.snapshot, self.manifest,
+                                     **dict(stamp, scope_id='another-checkout'))
+        disabled = settings.disable(self.repo, {'expected_revision': stamp['revision']})
+        settings.enable(self.repo, {'expected_revision': disabled['revision']})
+        with patch.object(self.api.subprocess, 'Popen', wraps=self.api.subprocess.Popen) as spawn:
+            with self.assertRaisesRegex(settings.SettingsError, 'openrouter_preparation_stale'):
+                self.api.prepare_council(self.root, self.brief, self.snapshot, self.manifest, **stamp)
+        self.assertFalse((self.root / self.brief['task_id']).exists())
+        self.assertEqual([call for call in spawn.call_args_list if call.args[0][0] == str(self.executable)], [])
+
+    def test_council_prepared_worker_cannot_launch_under_changed_auth(self):
+        run = self.prepare()
+        disabled = settings.disable(self.repo, {'expected_revision': self.settings['revision']})
+        auth = self.temporary / 'changed-auth'
+        auth.mkdir(mode=0o700)
+        configured = settings.configure(self.repo, dict(expected_revision=disabled['revision'],
+            routes=['council'], opencode=str(self.executable), auth_data=str(auth)))
+        settings.enable(self.repo, {'expected_revision': configured['revision']})
+        with patch.object(self.api.subprocess, 'Popen', wraps=self.api.subprocess.Popen) as spawn:
+            result = self.api.execute(run, self.executable, auth)
+        self.assertEqual(result['failure']['reason'], 'openrouter_preparation_stale')
+        self.assertEqual([call for call in spawn.call_args_list if call.args[0][0] == str(self.executable)], [])
+        self.assertTrue(result['local_execution_stopped'])
+
     def test_council_real_fixture_single_spawn_and_qualified_binary_binding(self):
         count = self.temporary / 'spawns'
         self.executable.write_text('#!/usr/bin/env python3\nimport json\nfrom pathlib import Path\n'
