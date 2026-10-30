@@ -1378,3 +1378,52 @@ class CouncilFlowTests(CouncilCase):
             self.assertLessEqual(item['result']['deadline_monotonic'], packet['deadline_monotonic'])
             self.assertTrue(item['result']['local_execution_stopped'])
         self.assertEqual(len(set(item['result']['session_id'] for item in results)), 3)
+
+    def test_external_council_phase_guidance_reaches_execution_with_existing_bounds(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        script = '''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+config = json.loads(os.environ['OPENCODE_CONFIG_CONTENT'])
+prompt = config['agent']['pilot']['prompt']
+objective = sys.stdin.read()
+title = sys.argv[sys.argv.index('--title') + 1]
+phase = next(phase for phase in ('investigate', 'critique', 'synthesis') if '-' + phase + '-' in title)
+assert 'copied workspace' in prompt
+assert all(word in prompt for word in ('.council-snapshot.json', 'internal', 'denied', 'unnecessary', 'glob'))
+assert len(prompt) <= 1500
+paths = {'investigate': (), 'critique': ('__council__/initial-*.md', '__council__/research.md'),
+    'synthesis': ('__council__/initial-*.md', '__council__/critique-*.md', '__council__/research.md', '__council__/execution-observations.md')}
+for path in paths[phase]:
+    assert path in prompt
+    assert list(Path('.').glob(path))
+if phase == 'investigate': assert '__council__/' not in prompt
+read = config['permission']['read']
+assert read['*'] == 'deny' and '.council-snapshot.json' not in read
+assert config['permission']['*'] == 'deny'
+assert config['permission']['glob'] == config['permission']['grep'] == 'allow'
+assert config['agent']['pilot']['steps'] == 12
+model = next(iter(config['provider']['openrouter']['models'].values()))
+assert model['options']['maxOutputTokens'] == 4096
+assert model['options']['provider']['allow_fallbacks'] is False
+assert 0 < len(objective) <= 16000 and 'Read only; explain uncertainty.' in objective
+assert 'copied workspace' not in objective
+print(json.dumps({'type': 'text', 'sessionID': title, 'part': {'text': 'Synthetic phase guidance and boundaries verified.'}}))
+print(json.dumps({'type': 'step_finish', 'sessionID': title, 'part': {'reason': 'stop', 'cost': 0, 'tokens': {}}}))
+'''
+        self.executable.write_text(script)
+        self.grouped_request()
+        digest = hashlib.sha256(self.executable.read_bytes()).hexdigest()
+        for seat in self.request['roster'].values(): seat['permission_qualification']['opencode_sha256'] = digest
+        self.prepare()
+        for phase in council.PHASES:
+            packet = council.packet(self.run, phase, 'member-one')
+            with redirect_stdout(StringIO()):
+                result = council.workers.execute(Path(packet['worker_run']), self.executable, self.auth,
+                    deadline_monotonic=packet['deadline_monotonic'])
+            self.assertEqual(result['state'], 'awaiting_verification', (phase, result))
+            self.assertLessEqual(result['deadline_monotonic'], packet['deadline_monotonic'])
+            council.verify_external(self.run, phase, 'member-one', 'accepted', ['Synthetic prompt/permission checks passed'])
+            if phase != 'synthesis':
+                for member in ('member-two', 'member-three'): self.grouped_external(phase, member)

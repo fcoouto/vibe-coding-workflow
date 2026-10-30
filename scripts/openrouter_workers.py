@@ -291,6 +291,15 @@ def configuration(brief, workspace=None):
 
     if 'council' in brief:
         _council_contract(brief)
+        phase_inputs = {
+            'investigate': 'This investigation has original source evidence only, with no peer reports.',
+            'critique': 'Read supplied __council__/initial-*.md reports and __council__/research.md alongside source evidence.',
+            'synthesis': 'Read supplied __council__/initial-*.md and __council__/critique-*.md reports, __council__/research.md and __council__/execution-observations.md alongside source evidence.',
+        }[brief['council']['phase']]
+        config['agent']['pilot']['prompt'] += (
+            ' Work only in the copied workspace, not the source checkout. Use glob to discover approved evidence paths, then read relevant approved source files. '
+            + phase_inputs + ' ' + council_snapshot.MARKER
+            + ' is an internal marker, denied and unnecessary for the answer. Ignore it even if glob lists it; do not read it or request a bypass.')
         model = config['provider']['openrouter']['models'][brief['model']]
         model.update(limit={'context': brief['capabilities']['context_length'],
                             'input': brief['input_tokens'], 'output': brief['output_tokens']}, tool_call=True)

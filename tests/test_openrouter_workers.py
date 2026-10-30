@@ -332,6 +332,8 @@ print(json.dumps({{'type':'step_finish','part':{{'reason':'stop','cost':0,'token
 
     def test_permissions_deny_shell_writes_network_and_other_agents(self):
         config = self.api.configuration(self.brief)
+        self.assertNotIn('.council-snapshot.json', config['agent']['pilot']['prompt'])
+        self.assertNotIn('__council__/', config['agent']['pilot']['prompt'])
         permissions = config['permission']
         self.assertEqual(permissions['*'], 'deny')
         self.assertEqual(permissions['read']['*'], 'deny')
@@ -975,6 +977,19 @@ class CouncilWorkerTests(CouncilCase):
             with self.subTest(brief=brief), self.assertRaises(ValueError): self.api._validate_council_brief(brief)
         with self.assertRaisesRegex(ValueError, 'council_maximum_effort_required'):
             self.api._validate_council_brief(dict(self.brief, effort='low'))
+
+    def test_council_guidance_is_bounded_without_truncating_approved_paths(self):
+        files = ['approved/' + 'source-' * 10 + str(number) + '.txt' for number in range(1000)]
+        for phase in ('investigate', 'critique', 'synthesis'):
+            brief = self.default_reasoning_brief()
+            brief['council']['phase'] = phase
+            original = self.api.configuration(brief)
+            expanded = self.api.configuration(dict(brief, files=files))
+            self.assertEqual(expanded['agent']['pilot']['prompt'], original['agent']['pilot']['prompt'])
+            self.assertLessEqual(len(expanded['agent']['pilot']['prompt']), 1500)
+            self.assertEqual(expanded['permission']['read'], dict({'*': 'deny'}, **{name: 'allow' for name in files}))
+            self.assertNotIn('.council-snapshot.json', expanded['permission']['read'])
+            self.assertEqual(expanded['agent']['pilot']['steps'], brief['steps'])
 
 
 if __name__ == '__main__': unittest.main()
