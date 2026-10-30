@@ -17,7 +17,7 @@ PACKAGE = Path(__file__).resolve().parents[1]
 RPC_TIMEOUT = 5
 TOTAL_TIMEOUT = 15
 MAX_OUTPUT = 512 * 1024
-KNOWN_VERSIONS = {"0.163.0", "0.164.0-alpha.11.1"}
+KNOWN_VERSIONS = {"0.163.0", "0.164.0-alpha.11.1", "0.165.0"}
 HASH = re.compile(r"sha256:[0-9a-f]{64}(?:/sha256:[0-9a-f]{64})?\Z")
 SOURCES = {"system", "user", "project", "mdm", "sessionFlags", "plugin", "cloudRequirements",
            "cloudManagedConfig", "legacyManagedConfigFile", "legacyManagedConfigMdm", "unknown"}

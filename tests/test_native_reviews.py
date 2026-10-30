@@ -156,6 +156,16 @@ for line in sys.stdin:
             with self.subTest(label=label), self.assertRaises(StartupError):
                 self.collect(responses)
 
+    def test_cli_0165_worker_and_review_readers_remain_closed(self):
+        for methods in (codex.WORKER_METHODS, codex.REVIEW_METHODS):
+            executable = self.executable(version="0.165.0")
+            with self.subTest(methods=methods), patch.object(codex.shutil, "which", return_value=executable), \
+                    patch.object(codex, "NativeProcess", side_effect=AssertionError("reader launched")) as process, \
+                    self.assertRaisesRegex(doctor.ObservationError, "unsupported_version"):
+                with codex._native_reader(methods):
+                    self.fail("unsupported version entered native reader")
+            process.assert_not_called()
+
     def test_malformed_envelopes_and_unknown_versions_are_not_provenance(self):
         for text in ("not JSON", '{"version":1,"version":1}', "{}", self.text.replace('"findings": []', '"findings": true')):
             responses = copy.deepcopy(self.responses)

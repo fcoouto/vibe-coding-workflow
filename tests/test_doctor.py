@@ -157,6 +157,15 @@ for line in sys.stdin:
         methods = [json.loads(line)["method"] for line in (self.base / "requests.jsonl").read_text().splitlines()]
         self.assertEqual(methods, ["initialize", "initialized", "hooks/list"])
 
+    def test_cli_0165_discovery_remains_execution_unverified(self):
+        report = self.inspect(self.executable(version="0.165.0"))
+        self.assertEqual(report["native"], {"status": "passed", "version": "0.165.0"})
+        self.assertEqual(report["package"]["status"], "passed")
+        self.assertEqual(report["state"]["status"], "passed")
+        self.assertEqual(report["hooks"]["status"], "passed")
+        self.assertEqual(report["execution"]["status"], "unverified")
+        self.assertEqual(report["execution"]["desktop_loaded_definition"], "unknown")
+
     def test_disabled_untrusted_and_modified_candidates_fail_separately(self):
         for field, value, expected in (("enabled", False, "disabled"),
                 ("trustStatus", "untrusted", "untrusted"), ("trustStatus", "modified", "modified")):
