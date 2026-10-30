@@ -36,7 +36,7 @@ def protocol_server():
         fixture = SimpleNamespace(requests=[], span=None, project_id='lf-project', projects_status=200,
             post_status=200, partial={}, read_status=200, read_delay=0, mismatch=False, redirect=False,
             private_response=False, raw_response=None, content_type='application/json', response_delay=0,
-            resource_metadata={}, metadata_extra={}, on_projects=None)
+            resource_metadata={}, metadata_extra={}, row_extra={}, on_projects=None)
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):
@@ -80,8 +80,12 @@ def protocol_server():
                         rows = [dict(id='wrong' if fixture.mismatch else span['spanId'],
                             traceId=span['traceId'], projectId=fixture.project_id, type='SPAN',
                             name=span['name'], input='PRIVATE_INPUT' if fixture.private_response else None,
-                            output=None, metadata={'vibe_synthetic': 'true', 'vibe_probe_id': span['spanId'],
-                                'resourceAttributes': fixture.resource_metadata} | fixture.metadata_extra)]
+                            output=None, userId='', sessionId='', metadata={
+                                'attributes.langfuse.observation.type': 'span',
+                                'resourceAttributes.service.name': fixture.resource_metadata['service.name'],
+                                'scope.name': 'vibe-coding-workflow.observability',
+                                'vibe_synthetic': True, 'vibe_probe_id': span['spanId']}
+                                | fixture.metadata_extra) | fixture.row_extra]
                     fixture.read_delay = max(0, fixture.read_delay - 1)
                     self.reply(fixture.read_status, {'data': rows, 'meta': {'cursor': None}})
                 else:
@@ -155,14 +159,43 @@ class LangfuseTests(unittest.TestCase):
     def test_unexpected_resource_or_extra_metadata_is_never_verified(self):
         from runtime import langfuse
         with protocol_server() as server, patch.object(langfuse, 'READ_ATTEMPTS', 1):
-            for extra in ({'resourceAttributes': {'service.name': 'PRIVATE_SERVICE'}},
-                          {'resourceAttributes': {'service.name': 'vibe-coding-workflow', 'host.name': 'PRIVATE_HOST'}},
+            for extra in ({'resourceAttributes.service.name': 'PRIVATE_SERVICE'},
+                          {'resourceAttributes.host.name': 'PRIVATE_HOST'},
                           {'private_text': 'PRIVATE_CONTENT'}):
                 server.metadata_extra = extra
                 result = langfuse.synthetic_probe(server.url, 'lf-project', before_ingest=lambda: None)
                 self.assertTrue(result['accepted'])
                 self.assertFalse(result['verified'])
                 self.assertNotIn('PRIVATE', json.dumps(result))
+
+    def test_observed_metadata_requires_exact_types_and_empty_identifiers(self):
+        from runtime import langfuse
+        with protocol_server() as server, patch.object(langfuse, 'READ_ATTEMPTS', 1):
+            for extra in ({'vibe_synthetic': 1}, {'vibe_synthetic': 'true'},
+                          {'vibe_probe_id': 'foreign'}, {'scope.name': 'PRIVATE_SCOPE'},
+                          {'attributes.langfuse.observation.type': 'generation'},
+                          {'unexpected': 'PRIVATE_CONTENT'}):
+                with self.subTest(metadata_fields=tuple(extra)):
+                    server.metadata_extra = extra
+                    result = langfuse.synthetic_probe(server.url, 'lf-project', before_ingest=lambda: None)
+                    self.assertFalse(result['verified'])
+                    self.assertEqual(result['status'], 'pending')
+                    self.assertNotIn('PRIVATE', json.dumps(result))
+            server.metadata_extra = {}
+            for extra in ({'metadata': {}}, {'metadata': None},
+                          {'userId': 'PRIVATE_USER'}, {'sessionId': 'PRIVATE_SESSION'},
+                          {'userId': 0}, {'sessionId': False},
+                          {'input': ''}, {'output': {}}, {'projectId': 'foreign'},
+                          {'traceId': 'foreign'}, {'type': 'GENERATION'}, {'name': 'foreign'}):
+                with self.subTest(row_fields=tuple(extra)):
+                    server.row_extra = extra
+                    result = langfuse.synthetic_probe(server.url, 'lf-project', before_ingest=lambda: None)
+                    self.assertFalse(result['verified'])
+                    self.assertEqual(result['status'], 'pending')
+                    self.assertNotIn('PRIVATE', json.dumps(result))
+            server.row_extra = {'userId': None, 'sessionId': None}
+            self.assertTrue(langfuse.synthetic_probe(server.url, 'lf-project',
+                before_ingest=lambda: None)['verified'])
 
     def test_verifies_exact_project_without_returning_account_content(self):
         from runtime import langfuse
