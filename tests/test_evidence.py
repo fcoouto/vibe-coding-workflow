@@ -2331,6 +2331,21 @@ class LinkedVerificationTests(D4RecoveryFixture, unittest.TestCase):
         d4_recovery = self._testMethodName in {
             'test_linked_non_success_mixed_required_merged_history_survives_d4_retirement',
             'test_linked_no_verifier_native_history_survives_d4_retirement_and_guidance',
+            'test_linked_preparation_compacts_precede_d4_cut_without_closure_or_raw_retirement',
+            'test_linked_preparation_post_release_observation_substitution_keeps_raw_source',
+            'test_linked_safe_closure_second_transaction_failure_reuses_registered_candidate',
+            'test_linked_retirement_sequential_members_preserve_markers_and_recovery',
+            'test_linked_safe_closure_recovery_progress_accepts_exact_prior_closure',
+            'test_linked_safe_closure_foreign_recovery_raw_root_stays_protected',
+            'test_linked_safe_closure_changed_prior_lifecycle_envelope_rejects',
+            'test_linked_safe_closure_sequential_members_preserves_raw_history_and_recovery',
+            'test_preparation_reuse_inspection_captures_once_and_preserves_requirements_and_rows',
+            'test_linked_preparation_component_owned_source_keeps_explicit_foreign_raw_demand',
+            'test_linked_safe_closure_late_peer_change_preserves_committed_history',
+            'test_linked_safe_closure_late_source_change_preserves_committed_history',
+            'test_linked_safe_closure_stale_pending_candidate_stays_protected',
+            'test_linked_safe_closure_substituted_pending_candidate_stays_protected',
+            'test_linked_safe_closure_unregistered_candidate_lookalike_stays_protected',
         }
         for number in range(2):
             f = EvidenceTests(methodName='runTest'); f.setUp(); self.addCleanup(f.doCleanups)
@@ -2338,8 +2353,12 @@ class LinkedVerificationTests(D4RecoveryFixture, unittest.TestCase):
             if d4_recovery and number == 0:
                 self.current_record(f)
                 self.fixture = f
-                f.scope = self.enroll_recovery()
-                if self._testMethodName == 'test_linked_non_success_mixed_required_merged_history_survives_d4_retirement':
+                f.scope = self.enroll_recovery(shared=self._testMethodName == 'test_linked_preparation_compacts_precede_d4_cut_without_closure_or_raw_retirement')
+                if self._testMethodName in {
+                    'test_linked_non_success_mixed_required_merged_history_survives_d4_retirement',
+                    'test_linked_preparation_compacts_precede_d4_cut_without_closure_or_raw_retirement',
+                }:
+                    (f.scope.git_dir / 'info').mkdir(exist_ok=True)
                     with (f.scope.git_dir / 'info/exclude').open('a') as exclude:
                         exclude.write('\n/AGENTS.md\n')
                 self.scope = f.scope
@@ -3080,8 +3099,7 @@ class LinkedVerificationTests(D4RecoveryFixture, unittest.TestCase):
         self.assertTrue(phase['moved']);self.assertEqual(scenario.task(f),before)
 
     def preparation_fixture(self, *, delivery=None, delivery_status='merged', stopped=True):
-        from runtime import changes,onboarding
-        from tests.test_changes import ScopedChangesTests
+        from types import SimpleNamespace
         if delivery is not None:self.establish(delivery)
         from runtime.engine import RuntimeEvent
         for f in self.members:
@@ -3089,17 +3107,14 @@ class LinkedVerificationTests(D4RecoveryFixture, unittest.TestCase):
                 state.process_event(f.scope,RuntimeEvent(kind,'codex','parent',f.repo,turn_id='turn',tool_call_id='preparation-read',tool_name='read_file',receipt_fingerprint='a'*64))
         pointer=self.verify(self.observations(delivery=delivery,delivery_status=delivery_status))['verification']
         contexts=tuple(self.api._evidence_context(f.scope) for f in self.members);refs=tuple(self.reference(f) for f in self.members)
-        d4=ScopedChangesTests(methodName='runTest');d4.setUp();self.addCleanup(d4.doCleanups)
-        request=d4.scoped_request()
-        for repository in request['manifest']['enrollment']['record']['repositories']:
-            for checkout in repository['checkouts']:checkout['clients'][0]['configuration']['runtime']=dict(schema_version=3,state_dir=str(contexts[0].directory))
-        request['approval']['manifest_digest']=onboarding._digest(request['manifest'])
-        self.assertEqual(changes._run_scoped(d4.directory,request,'apply')['exit_code'],0)
-        source=changes._observe_recovery_source(d4.directory,changes._load_journal(d4.directory),contexts,refs)
-        for context in contexts:
-            with self.api._context_database(context,write=True) as db:self.api._register_recovery_source(None,db,source,context=context)
         if stopped:
             for f in self.members:state._retain_ready_stop(f.scope,self.stop_request(f,pointer))
+        d4,request=self.recovery_fixtures[0]
+        applied=_run_d4_fixture(d4,request,'resume');self.assertEqual(applied['exit_code'],0,applied)
+        _,content=self.recovery_head(d4,contexts[0])
+        for context in contexts:self.assertEqual(self.recovery_head(d4,context)[1],content)
+        self.assertTrue(all(any(row['reference']==ref for row in content['tasks']) for ref in refs))
+        source=SimpleNamespace(content=self.api._canonical_freeze(content))
         return pointer,d4,source,contexts,refs
 
     def raw_rows(self,contexts):
@@ -3450,14 +3465,12 @@ class LinkedVerificationTests(D4RecoveryFixture, unittest.TestCase):
         self.assertTrue(rejected, 'Preparation reports complete with receipts despite a late participant input change')
 
     def test_linked_preparation_component_owned_source_keeps_explicit_foreign_raw_demand(self):
-        from runtime import changes, onboarding
-        from tests.test_state import canonical_scope
-        from tests.test_changes import ScopedChangesTests
+        from runtime import changes
         api = self.api
-        extra = EvidenceTests(methodName='runTest')
-        extra.setUp()
-        self.addCleanup(extra.doCleanups)
-        extra.scope = canonical_scope(extra.scope)
+        foreign_fixture = CanonicalEvidenceTests(methodName='runTest')
+        foreign_fixture.setUp(d4_recovery=True)
+        self.addCleanup(foreign_fixture.doCleanups)
+        extra = foreign_fixture.fixture
         task = state.start_task(extra.scope, extra.identity | dict(mode='editable', decision_ref='user:accepted'))['task']
         proof = dict(version=1, kind='stopped-writer-reconciliation', identity=extra.identity, expected_revision=task['revision'], expected_pins=task['pins'], observed_turn_id=task['turn_id'], stopped=True, descendants_stopped=True, attempt_ids=[], observation_ref='fixture:independent-extra-stop', coordinator_ref='fixture:checked')
         raw = json.dumps(proof).encode()
@@ -3483,31 +3496,27 @@ class LinkedVerificationTests(D4RecoveryFixture, unittest.TestCase):
         pointer = self.verify(observations)['verification']
         contexts = tuple((api._evidence_context(f.scope) for f in [*self.members, extra]))
         refs = tuple((self.reference(f) for f in self.members))
-        d4 = ScopedChangesTests(methodName='runTest')
-        d4.setUp()
-        self.addCleanup(d4.doCleanups)
-        request = d4.scoped_request()
-        for repository in request['manifest']['enrollment']['record']['repositories']:
-            for checkout in repository['checkouts']:
-                checkout['clients'][0]['configuration']['runtime'] = dict(schema_version=3, state_dir=str(contexts[0].directory))
-        request['approval']['manifest_digest'] = onboarding._digest(request['manifest'])
-        self.assertEqual(changes._run_scoped(d4.directory, request, 'apply')['exit_code'], 0)
-        source = changes._observe_recovery_source(d4.directory, changes._load_journal(d4.directory), contexts, (*refs, foreign))
-        for context in contexts:
-            with api._context_database(context, write=True) as db:
-                api._register_recovery_source(None, db, source, context=context)
         for member in self.members:
             state._retain_ready_stop(member.scope, self.stop_request(member, pointer))
-        prepared = api._prepare_linked_closure(api._observe_linked_preparation(pointer, api._canonical_plain(source.content['authorities'])))
+        d4, request = self.recovery_fixtures[0]
+        applied = _run_d4_fixture(d4, request, 'resume')
+        self.assertEqual(applied['exit_code'], 0, applied)
+        _, source = self.recovery_head(d4, contexts[0])
+        for context in contexts:
+            self.assertEqual(self.recovery_head(d4, context)[1], source)
+        self.assertTrue(all(any(row['reference'] == ref for row in source['tasks']) for ref in (*refs, foreign)))
+        prepared = api._prepare_linked_closure(api._observe_linked_preparation(pointer, api._canonical_plain(source['authorities'])))
         self.assertTrue(prepared['complete'])
-        observed = changes._observe_recovery_release(source.content['authorities'], dict(source.content['identity']))
+        observed = changes._observe_recovery_release(source['authorities'], dict(source['identity']))
         semantic = dict(authority=retained[0]['authority'], artifact=retained[0]['reference'])
-        original = next((row for row in source.content['tasks'] if dict(row['reference']) == foreign))
+        original = next((row for row in source['tasks'] if dict(row['reference']) == foreign))
         present = any((dict(row['reference']) == foreign for row in observed.content['tasks']))
         print('EXPLICIT_FOREIGN_RAW_REFERENCE ' + json.dumps(foreign), flush=True)
         print('SEMANTIC_SOURCE_RETAINED ' + str(any((api._canonical_plain(row) == semantic for row in observed.content['artifacts']))), flush=True)
         print('FOREIGN_RAW_TASK_RETAINED ' + str(present), flush=True)
         print('ORIGINAL_SOURCE_REQUIRED_FOREIGN_RAW_TASK ' + str(bool(original)), flush=True)
+        self.assertTrue(any(api._canonical_plain(row) == semantic for row in observed.content['artifacts']))
+        self.assertTrue(original)
         self.assertTrue(present, 'D4 erases an explicit foreign raw-task demand merely because its semantic source owner belongs to the prepared component')
 
     def linked_closure_fixture(self):
