@@ -1,5 +1,6 @@
 """Pure, bounded annotations of recovery dependency uses; these functions grant no permission."""
 from copy import deepcopy
+from collections.abc import Mapping
 import json
 from pathlib import PurePosixPath
 import re
@@ -242,3 +243,236 @@ def legacy_projection(origin, content):
         'Legacy origin differs from observed source')
     destinations = sorted({key(authority): authority for authority in content['authorities']}.values(), key=key)
     return build([], [], [dict(origin=origin, destinations=destinations)])['legacy_routes'][0]
+
+
+class CaptureBudget:
+    """One explicit acquisition-wide comparison budget; this object grants no authority."""
+    def __init__(self, *, parents=MAX_ROWS, edges=MAX_ROWS, jobs=MAX_ROWS, bytes=MAX_BYTES):
+        self.limits = dict(parents=parents, edges=edges, jobs=jobs, bytes=bytes)
+        ceilings = dict(parents=MAX_ROWS,edges=MAX_ROWS,jobs=MAX_ROWS,bytes=MAX_BYTES)
+        _require(all(type(value) is int and 0 <= value <= ceilings[name] for name,value in self.limits.items()))
+        self.used = dict.fromkeys(self.limits, 0)
+
+    def take(self, **amounts):
+        _require(set(amounts) <= set(self.limits))
+        _require(all(type(value) is int and value >= 0 for value in amounts.values()))
+        _require(all(self.used[name] + value <= self.limits[name] for name, value in amounts.items()),
+            'Recovery capture aggregate bound exceeded')
+        for name, value in amounts.items(): self.used[name] += value
+
+    def retain(self, value):
+        # Count before copying, including immutable source mappings, without a whole JSON copy.
+        pending = [(value, False)]; active = set()
+        while pending:
+            item, leaving = pending.pop()
+            if leaving:
+                active.remove(id(item)); continue
+            if isinstance(item, Mapping) or isinstance(item, (list, tuple)):
+                _require(id(item) not in active, 'Recovery capture JSON is cyclic')
+                active.add(id(item)); pending.append((item, True))
+                self.take(bytes=2 + max(0, len(item)-1))
+                if isinstance(item, Mapping):
+                    for name, child in item.items():
+                        _require(type(name) is str)
+                        self.take(bytes=len(json.dumps(name,ensure_ascii=True).encode())+1)
+                        pending.append((child,False))
+                else: pending.extend((child,False) for child in item)
+            else: self.take(bytes=len(json.dumps(item,ensure_ascii=True,allow_nan=False).encode()))
+
+
+
+def _history_body(body):
+    _require(type(body) is dict and type(body.get('version')) is int and body['version'] in (1,2))
+    _fields(body, ('version','kind','identity','journal','authorities','tasks','assignments','artifacts','previous',
+        *(['stopped','supersedes'] if body['version']==2 else []), *(['use_contract'] if 'use_contract' in body else [])))
+    _require(body['kind']=='d4-recovery-source'); _identity(body['identity'])
+    _fields(body['journal'],('sha256','observed_at','state')); _hash(body['journal']['sha256'])
+    _require(type(body['journal']['observed_at']) is int and body['journal']['observed_at']>=0)
+    _require(body['journal']['state'] in ('prepared','applying','interrupted','applied','blocked','rollback_partial','rolled_back'))
+    for name in ('authorities','tasks','assignments','artifacts',*(['stopped','supersedes'] if body['version']==2 else [])):
+        _require(type(body[name]) is list and len(body[name])<=MAX_ROWS)
+    for authority in body['authorities']: _authority(authority)
+    if body['previous'] is not None:_artifact(body['previous'])
+    if body['version']==2:_require(body['previous'] is None)
+    if 'use_contract' in body:validate(body['use_contract'])
+
+
+def _history_dependencies(body, authority):
+    rows = [dict(kind='task', reference=row['reference']) for row in body['tasks']]
+    rows.extend(dict(kind='assignment', reference=row) for row in body['assignments'])
+    rows.extend(dict(kind='artifact', reference=row) for row in body['artifacts'])
+    if body['previous']:
+        rows.append(dict(kind='recovery', reference=dict(authority=authority, artifact=body['previous'])))
+    for row in rows: _dependency(row)
+    _require(len(rows) <= MAX_ROWS)
+    return rows
+
+
+def _history_pointer(edge):
+    if edge['kind'] == 'task': return None
+    ref = edge['reference']
+    return dict(authority=ref['authority'], artifact=ref['assignment']) if edge['kind']=='assignment' else ref
+
+
+def _history_walk(head, metadata):
+    """Account for every parent once while retaining every typed child; reject cycles."""
+    if head is None:
+        _require(not metadata, 'Recovery history has extra observed parents')
+        return []
+    colors = {}; order = []; pending = [(pointer, False) for pointer in head] if isinstance(head,list) else [(head,False)]
+    while pending:
+        pointer, leaving = pending.pop(); name = key(pointer); _pointer(pointer)
+        if leaving:
+            colors[name] = 2
+            continue
+        _require(colors.get(name) != 1, 'Recovery history graph is cyclic')
+        if colors.get(name) == 2: continue
+        _require(name in metadata, 'Recovery history is missing an observed parent')
+        _require(len(colors) < MAX_ROWS, 'Recovery history parent bound exceeded')
+        colors[name] = 1; order.append(pointer); pending.append((pointer, True))
+        rows = metadata[name]
+        _require(type(rows) in (list, tuple))
+        _require(len({key(row) for row in rows}) == len(rows), 'Recovery history has duplicate typed edges')
+        for row in rows:
+            _dependency(row); child = _history_pointer(row)
+            if child is not None: pending.append((child, False))
+    return order
+
+
+def project_history(inputs, created_at, budget):
+    """Pure, incomplete-by-design candidate comparison; never a registration or permission."""
+    _require(isinstance(budget, CaptureBudget), 'Recovery history needs its shared capture budget')
+    _require(type(created_at) is int and created_at >= 0)
+    authority = inputs['authority']; _authority(authority)
+    template = inputs['template']; _history_body(template); identity = inputs['identity']; _identity(identity)
+    _require(template['identity'] == identity and authority in template['authorities'] and template['previous'] is None,
+        'Recovery candidate differs from captured identity or authority')
+    _require(template['version'] in (1, 2) and template['kind']=='d4-recovery-source')
+    _require('use_contract' in template,'History comparison requires its actual current root program')
+    program = validate(template['use_contract'])
+    direct = _history_dependencies(template, authority)
+    head = inputs['reference']; history = inputs['history']; baseline = inputs['baseline']
+    _require(type(history) is list and len(history)<=MAX_ROWS)
+    _require(type(inputs['anchors']) is list and len(inputs['anchors'])<=MAX_ROWS)
+    for graph in (inputs['metadata'],inputs['history_metadata']):
+        _require(type(graph) is dict and len(graph)<=MAX_ROWS)
+        _require(all(type(rows) in (list,tuple) for rows in graph.values()))
+        _require(sum(len(rows) for rows in graph.values())<=MAX_ROWS,'Recovery observed edge bound exceeded')
+    heads = [row['reference']['artifact'] for row in baseline['dependencies']
+        if row['kind']=='recovery' and row['reference']['identity']==identity]
+    _require(len(heads)<=1 and head==(heads[0] if heads else None), 'Recovery previous differs from captured baseline')
+    _require((head is None and not history) or (history and history[0]['reference']==head), 'Recovery previous head differs')
+    expected = head; legacy = {}; restricted = set()
+    def retain_legacy(row):
+        name = key(row['origin'])
+        if name in legacy:
+            _require(legacy[name]==row, 'Conflicting legacy route origin')
+            return
+        _require(len(legacy)<MAX_ROWS,'Recovery merged legacy origin bound exceeded')
+        budget.take(bytes=len(name.encode())); budget.retain(row)
+        legacy[name] = deepcopy(row)
+    for item in history:
+        body = item['content']; _history_body(body); metadata = item['metadata']; ref = item['reference']; _artifact(ref)
+        _require(ref == expected and body['identity']==identity and authority in body['authorities'], 'Recovery history chain, identity or authority differs')
+        _require(metadata['created_at']==created_at and metadata['owner']==dict(kind='project',
+            project_id=baseline['content']['project_id'],task=None) and metadata['class']=='compact',
+            'Recovery history original owner or age differs')
+        dependencies = _history_dependencies(body, authority)
+        _require(metadata['dependencies']==dependencies, 'Recovery history typed metadata differs')
+        pointer = dict(authority=authority,artifact=ref)
+        _require(inputs['history_metadata'].get(key(pointer))==[qualify_dependency(row,authority) for row in dependencies],
+            'Recovery captured head metadata differs')
+        budget.retain((authority,ref,identity,body['journal']['sha256']))
+        origin = dict(authority=authority,artifact=ref,identity=identity,journal_sha256=body['journal']['sha256'])
+        if 'use_contract' in body:
+            contract = validate(body['use_contract']); restricted.add(key(origin))
+            rows = contract['legacy_routes']
+        else:
+            _require(key(origin) in legacy or len(legacy)<MAX_ROWS,'Recovery merged legacy origin bound exceeded')
+            # The old helper stays unchanged; reserve its generated facts before it copies them.
+            budget.retain(dict(origin=None,destinations=None))
+            budget.retain(origin); budget.retain(body['authorities'])
+            rows = [legacy_projection(origin, body)]
+        for row in rows: retain_legacy(row)
+        expected = body['previous']
+    _require(expected is None, 'Recovery previous chain is incomplete')
+    _require(not (set(legacy) & restricted), 'Recovery origin cannot be both legacy and restricted')
+    for row in program['legacy_routes']:
+        _require(key(row['origin']) in legacy and legacy[key(row['origin'])]==row,
+            'Recovery candidate has an unobserved legacy origin')
+    jobs = inputs['jobs']
+    _require(type(jobs) is list and len(jobs)<=MAX_ROWS)
+    if jobs:
+        budget.retain(jobs)
+        return dict(comparison_only=True,content=None,reference=None,created_at=created_at,
+            pending_jobs=deepcopy(jobs),obligations=[])
+    check_coverage(program, direct, inputs['metadata'])
+    payload = [pointer for edge in direct if (pointer:=_history_pointer(edge)) is not None]
+    observed_payload = _history_walk(payload,inputs['metadata'])
+    _require({key(row) for row in observed_payload}==set(inputs['metadata']), 'Recovery payload has extra observed parents')
+    pointer = dict(authority=authority,artifact=head) if head else None
+    order = _history_walk(pointer,inputs['history_metadata'])
+    _require({key(row) for row in order} == set(inputs['history_metadata']), 'Recovery history has extra observed parents')
+    for name in set(inputs['metadata']) & set(inputs['history_metadata']):
+        _require(inputs['metadata'][name]==inputs['history_metadata'][name], 'Recovery payload/history metadata differs')
+    anchors = inputs['anchors']; seen_anchors=set()
+    for row in anchors:
+        _fields(row,('root','support'))
+        _require(row['root'] in program['roots'] and row['root']['purpose']=='historical-stop',
+            'Recovery history has an unjustified anchor')
+        allowed=[row['root']['reference'],dict(kind='artifact',reference=row['root']['proof'])]
+        _require(type(row['support']) is list and len(row['support'])==2 and set(map(key,row['support']))==set(map(key,allowed)),
+            'Recovery historical support is not exact')
+        name=key(row['root']);_require(name not in seen_anchors,'Recovery history has duplicate anchors');seen_anchors.add(name)
+    if head and template['version']==1:
+        _require(anchors, 'Recovery previous has no independently justified historical anchor')
+    anchor = min(anchors,key=lambda row:key(row['root'])) if anchors else None
+    def candidate(previous, observed_at=None):
+        _require(len(key(template).encode())<=MAX_BYTES,'Recovery candidate whole-body byte bound exceeded')
+        budget.retain(template); budget.take(edges=len(program['edges']))
+        body = deepcopy(template); body['previous'] = previous
+        if observed_at is not None: body['journal']['observed_at'] = observed_at
+        edges = deepcopy(program['edges']); roots = program['roots']
+        if previous:
+            index = roots.index(anchor['root']); start = dict(authority=authority,artifact=previous)
+            seed = dict(root=index,parent=None,dependency=dict(kind='recovery',reference=start),purpose='retention-only')
+            budget.take(edges=1); budget.retain(seed); edges.append(seed)
+            for parent in _history_walk(start,inputs['history_metadata']):
+                for dependency in inputs['history_metadata'][key(parent)]:
+                    row = dict(root=index,parent=parent,dependency=dependency,purpose='retention-only')
+                    budget.take(edges=1); budget.retain(row); edges.append(row)
+                    _require(len(edges)<=MAX_ROWS, 'Recovery history use occurrence bound exceeded')
+        # Reserve every merged contract copy before constructing its list or canonical form.
+        budget.retain(roots); budget.retain(edges)
+        budget.take(bytes=2+max(0,len(legacy)-1))
+        for row in legacy.values(): budget.retain(row)
+        body['use_contract'] = build(roots,edges,list(legacy.values()))
+        _require(len(key(body).encode())<=MAX_BYTES,'Recovery candidate whole-body byte bound exceeded')
+        dependencies = _history_dependencies(body,authority)
+        actual = {key(row['dependency']) for row in body['use_contract']['edges'] if row['parent'] is None}
+        _require(actual=={key(row) for row in dependencies},'Recovery history direct coverage differs')
+        return body,dependencies
+    reused = None
+    if history:
+        prior = history[0]['content']
+        replay,deps = candidate(prior['previous'] if template['version']==1 else None,prior['journal']['observed_at'])
+        if replay==prior:
+            _require(deps==history[0]['metadata']['dependencies'],'Recovery replay metadata differs')
+            reused = head
+    if reused is None: body,dependencies = candidate(head if template['version']==1 else None)
+    else: body,dependencies = replay,deps
+    budget.retain(body)
+    support = set(map(key,anchor['support'])) if anchor else set()
+    obligations = []
+    for row in body['use_contract']['edges']:
+        waiver = anchor is not None and row['root']==program['roots'].index(anchor['root']) and row['purpose']=='retention-only' and key(row['dependency']) in support
+        obligations.append(dict(row,requirement='validated-stop-support' if waiver else 'current-permission'))
+    return dict(comparison_only=True,content=body,reference=reused,dependencies=dependencies,created_at=created_at,
+        pending_jobs=[],obligations=obligations)
+
+
+def check_history_coverage(candidate, created_at, inputs, budget):
+    """Recompute every payload/history occurrence; caller labels cannot exempt a parent."""
+    result = project_history(inputs,created_at,budget)
+    _require(result['content'] is not None and candidate==result['content'], 'Recovery history candidate or rooted coverage differs')
+    return candidate
