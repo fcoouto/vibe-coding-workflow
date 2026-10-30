@@ -6,6 +6,32 @@ Vibe Coding Toolkit remains the workflow authority. The contracts express its ap
 
 ## Reviewed sources
 
+The user-approved [Council reliability amendment](superpowers/specs/2026-10-29-council-design.md#reliability-amendment-30-october-2026)
+adds bounded local recovery and useful reduced-panel delivery. Its contract coverage
+is maintained here for authoring, outside routine loading paths:
+
+| Approved requirement | Local contract and proof |
+| --- | --- |
+| Three control-admission acquisitions within five seconds, locks released during waits; only proven pre-spawn busy may resume the same identity, consent and absolute deadline | Council procedure's supervision/recovery section; shared executor and `resume-member`; focused worker/flow tests cover contention, cancellation, lost responses and unchanged guards |
+| Resume critique artifacts from frozen bytes; verify full inventories, hashes and permissions, preserve conflicts and never recapture source | Council procedure's recovery section; runtime snapshot reconciliation; flow interruption/conflict tests |
+| Allowlisted diagnostic evidence without raw text or inferred upstream cause | Council procedure's observations section; executor classifier/projection and status; sentinel-secret worker/flow tests |
+| Preserve completeness labels and nullable accounting; distinguish accepted participation and fresh synthesis, deliver supported answers or labeled evidence summaries with consequential gaps and evidence-based confidence | Council procedure's delivery section and Codex client routing; reduced-panel and failed-synthesis flow tests |
+| Advisory presentation preferences, explicit hard limits, retained originals; ordinary briefs exclude permission probes and historical qualification stays unchanged | Council procedure's report verification/readiness sections and Codex client routing; Task 7 representative instruction-path walkthroughs |
+
+OpenAI skill-creator guides this narrow procedure update: retain essential bounds,
+define shared rules once, route host-specific supervision to the common contract,
+and test representative decisions as well as package structure. The earlier paid
+qualification remains historical evidence; this amendment adds no live inference
+qualification, model replacement or comparative evaluation.
+
+Official [OpenRouter error semantics](https://openrouter.ai/docs/api_reference/errors-and-debugging)
+(checked 30 October 2026) place stable Chat Completions policy/refusal types in
+`error.metadata.error_type` while `error.code` is numeric. The executor retains
+only allowlisted `content_policy_violation`/`refusal` values as normalized
+`router_code` diagnostics; numeric-code fixtures include secret raw metadata to
+prove it is discarded. This identifies observed machine evidence, not an upstream
+origin or explanation of the trigger.
+
 These contracts were checked against Toolkit revision `790a895304e0c08b70a5b215c9d334f1c86b816c`. This records the reviewed basis, not a claim that it is still the latest revision.
 
 On 26 October 2026, rechecked orchestration Parts B/C and the parallel execution rule against that revision, which still matched `main`. They preserve the coordinator, select workers from official client guidance, retain test-first implementation and review task changes between waves. They prescribe no cache location or refresh interval. The user's local-cache extension uses concise JSON guidance and maintenance/change-driven refresh; fixed daily expiry and hourly retries are not requirements.

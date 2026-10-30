@@ -232,7 +232,7 @@ def _observations(value, phase):
 
 
 def _settled(observed):
-    return all(item.get('state') in ('accepted', 'rejected', 'failed', 'unresolved', 'unavailable', 'late')
+    return all(item.get('state') in ('accepted', 'rejected', 'failed', 'unresolved', 'unavailable', 'late', 'not_launched')
                and item.get('local_execution_stopped') is True for item in observed.values())
 
 
@@ -249,20 +249,22 @@ def _execution_summary(phase, observed):
         'issued': 'dispatch remains unsettled; no verified evidence included',
         'prepared': 'execution remains unsettled; no verified evidence included',
         'running': 'execution remains unsettled; no verified evidence included',
+        'not_launched': 'known pre-spawn contention; no model launched; no verified evidence included',
     }
-    categories = {'context', 'unknown', 'authentication', 'budget', 'permission', 'rate_limit',
-                  'service', 'invalid_request', 'runtime', 'incomplete_output', 'deadline',
-                  'integration', 'runtime_or_output', 'interrupted'}
+    categories = workers.FAILURE_CATEGORIES
     lines = ['## ' + phase + ' execution observations']
     for number, member in enumerate(MEMBERS, 1):
         item = observed.get(member, {})
         state = item.get('state')
         state = state if isinstance(state, str) and state in descriptions else 'unresolved'
         facts = [descriptions[state]]
-        failure = item.get('failure')
+        failure = workers.safe_failure(item.get('failure'))
         category = failure.get('category') if isinstance(failure, dict) else None
         if isinstance(category, str) and category in categories:
             facts.append('failure category: ' + category)
+        if failure:
+            for key in ('error_class', 'router_code', 'terminal_reason', 'launch_stage', 'reason', 'status_code', 'retry_after_seconds', 'limit_source'):
+                if key in failure: facts.append(key + ': ' + str(failure[key]))
         if state not in ('unavailable', 'missing'):
             for key in ('model', 'effort'):
                 if item.get('observed_' + key) is None:
@@ -315,6 +317,66 @@ def _phase(run, value, phase):
     _check_frozen(run, value)
 
 
+def _reconcile_inputs(directory, inputs, *, sealed=False):
+    """Finish only known frozen files; changed or unfamiliar artifacts stay untouched."""
+    if not os.path.lexists(directory): directory.mkdir(mode=0o700)
+    expected_directories = {str(parent) for name in inputs for parent in Path(name).parents if str(parent) != '.'}
+    signatures, folders, observed = {}, [], set()
+    for folder, directories, files in os.walk(directory, followlinks=False):
+        folder = Path(folder)
+        snapshot._directory(folder, private=True)
+        _require(folder.lstat().st_mode & 0o777 in ((0o700, 0o500) if sealed else (0o700,)), 'critique_artifact_conflict')
+        folders.append(folder)
+        for name in directories:
+            _require(str((folder / name).relative_to(directory)) in expected_directories, 'critique_artifact_conflict')
+        for name in files:
+            path = folder / name
+            relative = str(path.relative_to(directory))
+            _require(relative in inputs, 'critique_artifact_conflict')
+            before = path.lstat()
+            snapshot._safe(before)
+            _require(before.st_mode & 0o777 == (0o400 if sealed else 0o600)
+                     and onboarding._read_file(path, snapshot.MAX_FILE, private=True, expected_binding=snapshot._identity(before)) == inputs[relative]
+                     and snapshot._signature(path.lstat()) == snapshot._signature(before), 'critique_artifact_conflict')
+            signatures[path] = snapshot._signature(before)
+            observed.add(relative)
+    bindings = {folder: snapshot._directory(folder, private=True) for folder in folders}
+    def guard():
+        _require(all(snapshot._directory(folder, private=True) == binding for folder, binding in bindings.items())
+                 and all(snapshot._signature(path.lstat()) == signature for path, signature in signatures.items()),
+                 'critique_artifact_conflict')
+    if sealed and observed != set(inputs):
+        for folder in folders:
+            descriptor = onboarding._open_path(folder, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                _require(snapshot._identity(os.fstat(descriptor)) == bindings[folder], 'critique_artifact_conflict')
+                os.fchmod(descriptor, 0o700)
+            finally: os.close(descriptor)
+    for name, raw in inputs.items():
+        if name in observed: continue
+        guard()
+        dest = directory / name
+        folder = directory
+        for part in Path(name).parts[:-1]:
+            folder /= part
+            if folder not in bindings:
+                _require(not os.path.lexists(folder), 'critique_artifact_conflict')
+                folder.mkdir(mode=0o700)
+                bindings[folder] = snapshot._directory(folder, private=True)
+        _require(not os.path.lexists(dest), 'critique_artifact_conflict')
+        changes._atomic(dest.parent, dest.name, raw, mode=0o400 if sealed else 0o600, guard=guard)
+        signatures[dest] = snapshot._signature(dest.lstat())
+    guard()
+    if sealed:
+        for folder in sorted(bindings, key=lambda path: len(path.parts), reverse=True):
+            descriptor = onboarding._open_path(folder, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                _require(snapshot._identity(os.fstat(descriptor)) == bindings[folder], 'critique_artifact_conflict')
+                os.fchmod(descriptor, 0o500)
+                os.fsync(descriptor)
+            finally: os.close(descriptor)
+
+
 def _critique_snapshot(run, value):
     target = run / 'critique-snapshot'
     if 'critique_manifest' in value:
@@ -323,20 +385,62 @@ def _critique_snapshot(run, value):
     original = run / 'snapshot'
     snapshot.verify(original, value['snapshot_manifest'])
     staging = run / 'critique-inputs'
-    staging.mkdir(mode=0o700)
-    approved = {}
     inputs = {name: onboarding._read_file(original / name, snapshot.MAX_FILE) for name in value['snapshot_manifest']['files']}
     inputs.update({'__council__/' + name: _read(run / name, REPORT_LIMIT) for name in value['frozen']})
-    for name, raw in inputs.items():
-        dest = staging / name
-        dest.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        changes._atomic(dest.parent, dest.name, raw)
-        approved[name] = dict(sha256=_digest(raw), size=len(raw))
-    value['critique_manifest'] = snapshot.capture(staging, target, approved)
+    approved = {name: dict(sha256=_digest(raw), size=len(raw)) for name, raw in inputs.items()}
+    expected = dict(version=1, files=approved, exclusions=[], coverage=dict(approved=len(approved),
+        captured=len(approved), excluded=0, gaps=list(snapshot.GAPS)))
+    expected['digest'] = _digest(snapshot._json(expected))
+    _reconcile_inputs(staging, inputs)
+    if os.path.lexists(target):
+        # A complete marker must match the full expected frozen inventory, not itself.
+        if not os.path.lexists(target / snapshot.MARKER):
+            _reconcile_inputs(target, dict(inputs, **{snapshot.MARKER: snapshot._json(expected)}), sealed=True)
+        snapshot.verify(target, expected)
+        manifest = expected
+    else:
+        manifest = snapshot.capture(staging, target, approved)
+        _require(manifest == expected, 'critique_artifact_conflict')
     snapshot.verify(original, value['snapshot_manifest'])
     _check_frozen(run, value)
+    value['critique_manifest'] = manifest
     _save(run, value)
     return target, value['critique_manifest']
+
+
+def resume_member(run: Path, phase: str, member: str) -> dict:
+    run = Path(run)
+    with _locked(run) as value:
+        _require(phase in PHASES[:2] and member in MEMBERS[1:], 'invalid_council_member')
+        _remaining(value, phase)
+        _require(value['phase'] == phase, 'phase_already_closed')
+        _check_frozen(run, value)
+        path = _worker_path(value, phase, member)
+        item = value['members'].get(_key(phase, member), {})
+        _require(not item or item == dict(kind='external', worker_run=str(path)), 'council_worker_identity_changed')
+        result = onboarding.read_request(_read(path / 'result.json', workers.LIMIT), workers.LIMIT)
+        _require(workers.resumable(result), 'member_not_resumable')
+        brief = onboarding.read_request(_read(path / 'brief.json', workers.LIMIT), workers.LIMIT)
+        _require(brief.get('council') == dict(run_id=value['run_id'], phase=phase, member_id=member)
+                 and brief.get('management') == value['management'] and brief.get('source_root') == value['source_root'],
+                 'council_worker_identity_changed')
+        source, manifest = ((run / 'snapshot', value['snapshot_manifest']) if phase == 'investigate'
+                            else _critique_snapshot(run, value))
+        snapshot.verify(source, manifest)
+        _require(brief.get('evidence', {}).get('snapshot') == str(source)
+                 and brief['evidence']['manifest'] == manifest, 'council_worker_evidence_changed')
+        copied = dict(version=1, files=manifest['files'], exclusions=[], coverage=dict(approved=len(manifest['files']),
+            captured=len(manifest['files']), excluded=0, gaps=list(snapshot.GAPS)))
+        copied['digest'] = _digest(snapshot._json(copied))
+        expected = dict(_external_brief(value, phase, member, list(manifest['files']), brief['timeout_seconds']),
+                        management=value['management'], evidence=dict(snapshot=str(source), manifest=manifest, workspace_manifest=copied))
+        _require(brief == expected, 'council_worker_brief_changed')
+        deadline = min(result['deadline_monotonic'], value['started_monotonic'] + _end(value, phase))
+        _require(deadline > time.monotonic(), 'deadline_exhausted')
+        packet = dict(run=str(run), phase=phase, member=member, kind='external', worker_run=str(path),
+                      deadline_monotonic=deadline, timeout_seconds=int(_remaining(value, phase)))
+    with settings.admission(value['source_root'], 'council', root=Path(value['root']), **value['management']): pass
+    return packet
 
 
 def packet(run: Path, phase: str, member: str, *, native_receipt=None) -> dict:
@@ -463,8 +567,11 @@ def _status(run, value):
                                  **({'child_id': item['child_id']} if 'child_id' in item else {})))
     return dict(run=str(run), phase=value['phase'], cancelled=value['cancelled'],
                 outcome='complete' if complete else 'incomplete' if incomplete else 'partial',
+                accepted_participation={phase: dict(accepted=len(accepted[phase]), expected=1 if phase == 'synthesis' else 3) for phase in PHASES},
+                fresh_synthesis_available='native' in accepted['synthesis'],
                 remaining_seconds=remaining, timing_certain=timing,
-                members={phase: {member: {key: item[key] for key in ('state', 'local_execution_stopped', 'on_time', 'observed_model', 'observed_effort', 'limitations') if key in item}
+                members={phase: {member: dict({key: item[key] for key in ('state', 'local_execution_stopped', 'on_time', 'observed_model', 'observed_effort', 'limitations') if key in item},
+                                             **({'failure': workers.safe_failure(item['failure'])} if item.get('failure') is not None else {}))
                                  for member, item in observed.items()} for phase, observed in phases.items()},
                 external_total_usd=sum(costs) if external and all(valid(x) for x in costs)
                 and all(item.get('accounting_complete') is True for item in external) else None,

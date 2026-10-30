@@ -22,9 +22,44 @@ PACKAGE = Path(__file__).resolve().parents[1]
 if str(PACKAGE) not in sys.path: sys.path.insert(0, str(PACKAGE))
 from runtime import openrouter_settings as settings
 from runtime import council_snapshot
+from runtime.startup import StartupError
 
 ROLES = {'Scout', 'Builder', 'Tester', 'Reviewer', 'Scribe', 'Investigator'}
 LIMIT = 4 * 1024 * 1024
+BUSY_REASONS = {'openrouter_operation_busy', 'Onboarding plan busy; retry the same expected revision'}
+PREREQUISITE_REASONS = BUSY_REASONS | {
+    'openrouter_disabled', 'openrouter_preparation_stale', 'openrouter_preparation_unmanaged',
+    'openrouter_configuration_mismatch', 'openrouter_not_configured', 'openrouter_route_disabled',
+    'openrouter_scope_changed', 'openrouter_configuration_unavailable', 'openrouter_storage_or_scope_unavailable',
+    'council_runtime_qualification_mismatch', 'cancelled', 'phase_already_closed',
+    'deadline_exhausted', 'timing_uncertain', 'frozen_evidence_changed',
+    'unsafe_worker_preparation_directory', 'output_limit', 'council_report_limit',
+    'invalid_event', 'invalid_part', 'unsupported_event', 'unexpected_tool', 'session_mismatch',
+    'malformed_event', 'unterminated_event'}
+ERROR_CLASSES = {'ContentFilterError': 'policy', 'ContextOverflowError': 'context'}
+TERMINAL_REASONS = {'length', 'content-filter', 'content_filter', 'stop', 'tool-calls', 'unknown', 'error'}
+FAILURE_CATEGORIES = {'context', 'policy', 'unknown', 'authentication', 'budget', 'permission',
+    'rate_limit', 'service', 'invalid_request', 'runtime', 'incomplete_output', 'deadline',
+    'integration', 'runtime_or_output', 'interrupted'}
+
+
+def safe_failure(value):
+    """Project only known machine facts, including when reading retained worker state."""
+    if not isinstance(value, dict): return None
+    category = value.get('category')
+    result = {'category': category if isinstance(category, str) and category in FAILURE_CATEGORIES else 'unknown'}
+    allowed = {'error_class': set(ERROR_CLASSES), 'router_code': {'content_policy_violation', 'refusal'},
+               'terminal_reason': TERMINAL_REASONS, 'launch_stage': {'before_spawn', 'spawn', 'launched'},
+               'reason': PREREQUISITE_REASONS,
+               'limit_source': {'openrouter_credits', 'openrouter_key_limit', 'openrouter_in_flight_budget',
+                                'openrouter_guardrail_budget', 'openrouter_workspace_budget'}}
+    for key, options in allowed.items():
+        if isinstance(value.get(key), str) and value[key] in options: result[key] = value[key]
+    status = value.get('status_code')
+    if type(status) is int and 400 <= status <= 599: result['status_code'] = status
+    hint = value.get('retry_after_seconds')
+    if type(hint) in (int, float) and math.isfinite(hint) and hint >= 0: result['retry_after_seconds'] = hint
+    return result
 
 
 def save(path, value):
@@ -264,7 +299,7 @@ def habblaud_publisher(plugin_root, run, endpoint, account):
                 client.event(account, module._event(binding, 'SubagentStart'))
                 started = True
             client.event(account, module._event(binding, 'PreToolUse', phase))
-            if phase in ('accepted', 'rejected', 'failed', 'unresolved'):
+            if phase in ('accepted', 'rejected', 'failed', 'unresolved', 'not_launched'):
                 client.event(account, module._event(binding, 'SubagentStop'))
             save(run / 'visibility.json', {'delivered': True, 'agent_id': binding['agent_id'], 'phase': phase,
                                           'account': account, 'parent': binding['parent'], 'observed_at': time.time()})
@@ -278,7 +313,9 @@ def terminal_failure(error):
     error = error if isinstance(error, dict) else {}
     data = error.get('data')
     data = data if isinstance(data, dict) else {}
-    result = {'category': 'context' if error.get('name') == 'ContextOverflowError' else 'unknown'}
+    name = error.get('name')
+    result = {'category': ERROR_CLASSES.get(name, 'unknown') if isinstance(name, str) else 'unknown'}
+    if isinstance(name, str) and name in ERROR_CLASSES: result['error_class'] = name
     status = data.get('statusCode')
     if type(status) is int and 400 <= status <= 599:
         result['status_code'] = status
@@ -291,6 +328,12 @@ def terminal_failure(error):
             value = json.loads(body)
             provider_error = value.get('error') if isinstance(value, dict) else None
             metadata = provider_error.get('metadata') if isinstance(provider_error, dict) else None
+            error_type = metadata.get('error_type') if isinstance(metadata, dict) else None
+            code = provider_error.get('code') if isinstance(provider_error, dict) else None
+            if isinstance(error_type, str) and error_type in ('content_policy_violation', 'refusal'):
+                code = error_type
+            if isinstance(code, str) and code in ('content_policy_violation', 'refusal'):
+                result.update(category='policy', router_code=code)
             source = metadata.get('limit_source') if isinstance(metadata, dict) else None
             if status in (402, 403) and isinstance(source, str) and source in {
                     'openrouter_credits', 'openrouter_key_limit', 'openrouter_in_flight_budget',
@@ -340,35 +383,54 @@ def stop_process(proc):
         time.sleep(.01)
 
 
-def execute(run, executable, auth_data, publish=None, *, launch_guard=None):
+def execute(run, executable, auth_data, publish=None, *, launch_guard=None, deadline_monotonic=None):
     run = Path(run)
     brief = json.loads((run / 'brief.json').read_text())
     with (run / 'execution.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        if json.loads((run / 'result.json').read_text())['state'] != 'prepared': raise ValueError('already_started')
+        previous = json.loads((run / 'result.json').read_text())
+        if previous['state'] != 'prepared' and not resumable(previous): raise ValueError('already_started')
+        deadline = previous.get('deadline_monotonic', time.monotonic() + brief['timeout_seconds'])
+        wall_deadline = previous.get('deadline_wall', time.time() + deadline - time.monotonic())
+        if deadline_monotonic is not None:
+            bounded = min(deadline, deadline_monotonic)
+            wall_deadline -= deadline - bounded
+            deadline = bounded
         original = signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
         try:
-            return _execute(run, brief, Path(executable), Path(auth_data), publish, launch_guard=launch_guard)
+            return _execute(run, brief, Path(executable), Path(auth_data), publish,
+                            launch_guard=launch_guard, deadline=deadline, wall_deadline=wall_deadline,
+                            resume=previous['state'] == 'not_launched')
         finally:
             signal.signal(signal.SIGTERM, original)
 
 
-def _execute(run, brief, executable, auth_data, publish, *, launch_guard=None):
+def resumable(result):
+    failure = result.get('failure')
+    deadline = result.get('deadline_monotonic')
+    wall_deadline = result.get('deadline_wall')
+    return (result.get('state') == 'not_launched' and result.get('local_execution_stopped') is True
+            and result.get('session_id') is None and isinstance(failure, dict)
+            and failure.get('launch_stage') == 'before_spawn' and isinstance(failure.get('reason'), str)
+            and failure['reason'] in BUSY_REASONS
+            and type(deadline) in (int, float) and math.isfinite(deadline)
+            and type(wall_deadline) in (int, float) and math.isfinite(wall_deadline))
+
+
+def _execute(run, brief, executable, auth_data, publish, *, launch_guard=None, deadline, wall_deadline, resume=False):
     workspace = run / 'workspace'
     config = configuration(brief, workspace)
     auth_data = auth_data.resolve()
     # OpenCode 1.19.5 otherwise appends an allow for shared truncated output.
     config['permission']['external_directory'] = {'*': 'deny', str(auth_data / 'opencode/tool-output/*'): 'deny'}
     env = {k: v for k, v in os.environ.items() if k in ('PATH', 'HOME', 'TMPDIR', 'LANG', 'OPENROUTER_API_KEY')}
-    for name in ('config', 'cache', 'state'):
-        (run / name).mkdir(mode=0o700)
-        env['XDG_' + name.upper() + '_HOME'] = str(run / name)
     env.update(XDG_DATA_HOME=str(auth_data), OPENCODE_CONFIG_CONTENT=json.dumps(config),
                OPENCODE_DISABLE_PROJECT_CONFIG='true', OPENCODE_DISABLE_CLAUDE_CODE='true',
                OPENCODE_DISABLE_AUTOUPDATE='true', OPENCODE_DISABLE_DEFAULT_PLUGINS='true',
                OPENCODE_DISABLE_LSP_DOWNLOAD='true', OPENCODE_DISABLE_AUTOCOMPACT='true',
                OPENCODE_DISABLE_MODELS_FETCH='true')
     result = {'state': 'running', 'task_id': brief['task_id'], 'requested_model': brief['model'],
+              'deadline_monotonic': deadline, 'deadline_wall': wall_deadline,
               'session_id': None, 'tools': [], 'reported_cost_usd': None, 'reported_tokens': {},
               'known_cost_subtotal_usd': 0, 'accounting_complete': False,
               'accounting_source': 'opencode', 'response': '', 'upstream_cancellation_confirmed': False,
@@ -385,30 +447,59 @@ def _execute(run, brief, executable, auth_data, publish, *, launch_guard=None):
     last_presence = time.monotonic()
     total = 0
     buffer = b''
+    launch_stage = 'before_spawn'
     try:
+        if abs((deadline - time.monotonic()) - (wall_deadline - time.time())) > 5:
+            raise ValueError('timing_uncertain')
+        council_snapshot._directory(run, private=True)
+        for name in ('config', 'cache', 'state'):
+            directory = run / name
+            if resume and os.path.lexists(directory):
+                try: council_snapshot._directory(directory, private=True)
+                except (OSError, ValueError, StartupError):
+                    raise ValueError('unsafe_worker_preparation_directory') from None
+                if directory.lstat().st_mode & 0o777 != 0o700 or any(directory.iterdir()):
+                    raise ValueError('unsafe_worker_preparation_directory')
+            else: directory.mkdir(mode=0o700)
+            env['XDG_' + name.upper() + '_HOME'] = str(directory)
         stamp = brief.get('management')
         settings.require(isinstance(stamp, dict) and set(stamp) == {'scope_id', 'revision'}
                          and isinstance(stamp['scope_id'], str) and settings.integer(stamp['revision']),
                          'openrouter_preparation_unmanaged')
-        deadline = time.monotonic() + brief['timeout_seconds']
         route = 'council' if 'council' in brief else 'workers'
         if route == 'council':
             _council_contract(brief)
             evidence = brief['evidence']
-            council_snapshot.verify(Path(evidence['snapshot']), evidence['manifest'])
-            _verify_council_copy(workspace, evidence['workspace_manifest'])
-            if hashlib.sha256(executable.read_bytes()).hexdigest() != brief['permission_qualification']['opencode_sha256']:
-                raise ValueError('council_runtime_qualification_mismatch')
         elif any(key in brief for key in ('evidence', 'permission_qualification', 'capabilities', 'input_tokens', 'output_tokens')):
             raise ValueError('forged_council_marker')
-        with settings.admission(brief['source_root'], route, root=run.parent, opencode=executable,
-                                auth_data=auth_data, revision=stamp['revision'], scope_id=stamp['scope_id']), (
-                                    launch_guard() if launch_guard else nullcontext()):
-            if time.monotonic() >= deadline: raise TimeoutError()
-            proc = subprocess.Popen([str(executable), 'run', '--pure', '--format', 'json', '--agent', 'pilot',
+        admission_end = min(deadline, time.monotonic() + 5)
+        for attempt in range(3):
+            try:
+                with settings.admission(brief['source_root'], route, root=run.parent, opencode=executable,
+                                        auth_data=auth_data, revision=stamp['revision'], scope_id=stamp['scope_id']), (
+                                            launch_guard() if launch_guard else nullcontext()):
+                    if route == 'council':
+                        council_snapshot.verify(Path(evidence['snapshot']), evidence['manifest'])
+                        _verify_council_copy(workspace, evidence['workspace_manifest'])
+                        if hashlib.sha256(executable.read_bytes()).hexdigest() != brief['permission_qualification']['opencode_sha256']:
+                            raise ValueError('council_runtime_qualification_mismatch')
+                    if time.monotonic() >= deadline: raise TimeoutError()
+                    launch_stage = 'spawn'
+                    proc = subprocess.Popen([str(executable), 'run', '--pure', '--format', 'json', '--agent', 'pilot',
                                      '--model', 'openrouter/' + brief['model'], '--title', brief['task_id']],
                                     cwd=workspace, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                     stderr=subprocess.DEVNULL, start_new_session=True)
+                    launch_stage = 'launched'
+                break
+            except (settings.SettingsError, StartupError) as exc:
+                if launch_stage != 'before_spawn' or str(exc) not in BUSY_REASONS: raise
+                if attempt < 2 and time.monotonic() < admission_end:
+                    # Both admission contexts have exited before the bounded wait.
+                    time.sleep(min(attempt + 1, max(0, admission_end - time.monotonic())))
+                    if time.monotonic() < admission_end: continue
+                result['state'] = 'not_launched'
+                result['failure'] = dict(category='integration', reason=str(exc))
+                return result
         emit('Starting')
         pending = memoryview(brief['objective'].encode('utf-8'))
         os.set_blocking(proc.stdin.fileno(), False)
@@ -467,6 +558,11 @@ def _execute(run, brief, executable, auth_data, publish, *, launch_guard=None):
                         elif kind == 'step_finish':
                             finished_steps += 1
                             terminal = part.get('reason') == 'stop'
+                            reason = part.get('reason')
+                            if isinstance(reason, str) and reason in ('length', 'content-filter', 'content_filter'):
+                                if result['failure'] is None:
+                                    result['failure'] = dict(category='policy' if reason != 'length' else 'incomplete_output')
+                                result['failure']['terminal_reason'] = reason
                             cost = part.get('cost')
                             if type(cost) in (int, float) and math.isfinite(cost) and cost >= 0:
                                 result['known_cost_subtotal_usd'] += cost
@@ -487,19 +583,25 @@ def _execute(run, brief, executable, auth_data, publish, *, launch_guard=None):
                            'awaiting_verification' if terminal and result['response'].strip() and not buffer.strip() else 'unresolved')
         if result['state'] != 'awaiting_verification' and result['failure'] is None:
             result['failure'] = {'category': 'runtime' if proc.returncode else 'incomplete_output'}
-    except settings.SettingsError as exc:
+            if buffer.strip(): result['failure']['reason'] = 'unterminated_event'
+    except (settings.SettingsError, StartupError) as exc:
         result['state'] = 'failed'
-        result['failure'] = {'category': 'integration', 'reason': str(exc)}
+        result['failure'] = dict(category='integration', **({'reason': str(exc)} if str(exc) in PREREQUISITE_REASONS else {}))
     except (TimeoutError, subprocess.TimeoutExpired):
         result['state'] = 'unresolved'
         if result['failure'] is None: result['failure'] = {'category': 'deadline'}
     except KeyboardInterrupt:
         result['state'] = 'unresolved'
         if result['failure'] is None: result['failure'] = {'category': 'interrupted'}
-    except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError) as exc:
         result['state'] = 'unresolved'
         if result['failure'] is None: result['failure'] = {'category': 'runtime_or_output'}
+        if str(exc) in PREREQUISITE_REASONS: result['failure']['reason'] = str(exc)
+        elif isinstance(exc, (json.JSONDecodeError, UnicodeError, RecursionError)):
+            result['failure']['reason'] = 'malformed_event'
     finally:
+        if result['failure'] is not None:
+            result['failure'] = safe_failure(dict(result['failure'], launch_stage=launch_stage))
         if proc:
             # Retire all owned descendants, including a server left after CLI exit.
             result['local_execution_stopped'] = stop_process(proc)

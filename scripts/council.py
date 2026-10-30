@@ -39,7 +39,7 @@ def _execute(run, phase, packet, report):
     try:
         signal.setitimer(signal.ITIMER_REAL, remaining)
         return workers.execute(Path(packet['worker_run']), Path(report['opencode']), Path(report['auth_data']),
-                               launch_guard=lambda: _launch_guard(run, phase))
+                               launch_guard=lambda: _launch_guard(run, phase), deadline_monotonic=packet['deadline_monotonic'])
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous_handler)
@@ -51,7 +51,7 @@ def main():
             raise ValueError('invalid_council_arguments')
     try:
         parser = Parser(description=__doc__)
-        parser.add_argument('action', choices=('prepare', 'member', 'record-native', 'status', 'cancel'))
+        parser.add_argument('action', choices=('prepare', 'member', 'resume-member', 'record-native', 'status', 'cancel'))
         parser.add_argument('--cwd', type=Path, required=True)
         args = parser.parse_args()
         request = onboarding.read_request(sys.stdin.buffer.read(council.REQUEST_LIMIT + 1), council.REQUEST_LIMIT)
@@ -66,8 +66,9 @@ def main():
             council._require(run.is_absolute() and run.resolve() == run and run.parent == Path(report['council_root']), 'council_checkout_mismatch')
             with council._locked(run) as value:
                 council._require(value['source_root'] == report['checkout'] and value['management']['scope_id'] == report['scope_id'], 'council_checkout_mismatch')
-            if args.action == 'member':
-                result = council.packet(run, request['phase'], request['member'], native_receipt=request.get('native_receipt'))
+            if args.action in ('member', 'resume-member'):
+                result = (council.resume_member(run, request['phase'], request['member']) if args.action == 'resume-member' else
+                          council.packet(run, request['phase'], request['member'], native_receipt=request.get('native_receipt')))
                 if result['kind'] == 'external':
                     result = _execute(run, request['phase'], result, report)
             elif args.action == 'record-native':

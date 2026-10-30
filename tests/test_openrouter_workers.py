@@ -8,6 +8,7 @@ import os
 import signal
 import sys
 import time
+from contextlib import contextmanager
 from unittest.mock import patch
 from runtime import openrouter_settings as settings
 from runtime import council_snapshot
@@ -54,7 +55,7 @@ class WorkerTests(unittest.TestCase):
         with self.assertRaisesRegex(settings.SettingsError, 'openrouter_disabled'):
             self.api.prepare(self.runs, dict(self.brief, task_id='blocked'))
         result = self.api.execute(run, self.root / 'worker', self.root / 'auth')
-        self.assertEqual(result['failure'], {'category': 'integration', 'reason': 'openrouter_disabled'})
+        self.assertEqual(result['failure'], {'category': 'integration', 'reason': 'openrouter_disabled', 'launch_stage': 'before_spawn'})
         self.assertIs(result['native_fallback_ready'], True)
         self.assertIs(result['local_execution_stopped'], True)
         with self.assertRaisesRegex(ValueError, 'already_started'):
@@ -66,6 +67,156 @@ class WorkerTests(unittest.TestCase):
         settings.enable(self.source, {'expected_revision': report['revision']})
         result = self.api.execute(run, self.root / 'worker', self.root / 'auth')
         self.assertEqual(result['failure']['reason'], 'openrouter_preparation_stale')
+
+    def test_busy_admission_retries_without_launch_and_resumes_original_deadline(self):
+        exe = self.fixture("print(json.dumps({'type':'text','part':{'text':'Finding'}}))\n"
+                           "print(json.dumps({'type':'step_finish','part':{'reason':'stop','cost':0,'tokens':{}}}))\n")
+        run = self.api.prepare(self.runs, self.brief)
+        real_admission = self.api.settings.admission
+        @contextmanager
+        def busy(*args, **kwargs):
+            raise settings.SettingsError('openrouter_operation_busy')
+            yield
+        with patch.object(self.api.settings, 'admission', busy), patch.object(self.api.time, 'sleep') as wait, patch.object(self.api.subprocess, 'Popen') as spawn:
+            result = self.api.execute(run, exe, self.root / 'auth')
+        self.assertEqual(result['state'], 'not_launched')
+        self.assertEqual(wait.call_count, 2)
+        spawn.assert_not_called()
+        deadline = result['deadline_monotonic']
+        with patch.object(self.api.settings, 'admission', real_admission), patch.object(self.api.subprocess, 'Popen', wraps=self.api.subprocess.Popen) as spawn:
+            resumed = self.api.execute(run, exe, self.root / 'auth')
+        self.assertEqual(resumed['state'], 'awaiting_verification')
+        self.assertEqual(resumed['deadline_monotonic'], deadline)
+        self.assertEqual(len([call for call in spawn.call_args_list if call.args[0][0] == str(exe)]), 1)
+        with self.assertRaisesRegex(ValueError, 'already_started'):
+            self.api.execute(run, exe, self.root / 'auth')
+
+    def test_short_busy_releases_admission_before_backoff_and_launches_once(self):
+        run = self.api.prepare(self.runs, self.brief)
+        real_admission = self.api.settings.admission
+        held, calls = [], []
+        @contextmanager
+        def admission(*args, **kwargs):
+            with real_admission(*args, **kwargs) as report:
+                held.append(True)
+                try: yield report
+                finally: held.pop()
+        @contextmanager
+        def guard():
+            calls.append(True)
+            if len(calls) < 3:
+                from runtime.startup import StartupError
+                raise StartupError('Onboarding plan busy; retry the same expected revision')
+            yield
+        def wait(_): self.assertFalse(held)
+        with patch.object(self.api.settings, 'admission', admission), patch.object(self.api.time, 'sleep', side_effect=wait), patch.object(self.api.subprocess, 'Popen', wraps=self.api.subprocess.Popen) as spawn:
+            result = self.api.execute(run, self.root / 'worker', self.root / 'auth', launch_guard=guard)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(len([call for call in spawn.call_args_list if call.args[0][0] == str(self.root / 'worker')]), 1)
+        self.assertNotEqual(result['state'], 'not_launched')
+
+    def test_interrupted_backoff_and_ambiguous_spawn_cannot_resume(self):
+        for index, interrupted in enumerate((True, False)):
+            run = self.api.prepare(self.runs, dict(self.brief, task_id='interrupted-' + str(index)))
+            launch = self.api.subprocess.Popen
+            def ambiguous(command, **kwargs):
+                if command[0] == str(self.root / 'worker'): raise OSError('SECRET')
+                return launch(command, **kwargs)
+            with patch.object(self.api.settings, 'admission', side_effect=settings.SettingsError('openrouter_operation_busy')) if interrupted else patch.object(self.api.subprocess, 'Popen', side_effect=ambiguous), patch.object(self.api.time, 'sleep', side_effect=KeyboardInterrupt):
+                result = self.api.execute(run, self.root / 'worker', self.root / 'auth')
+            self.assertEqual(result['state'], 'unresolved')
+            with self.assertRaisesRegex(ValueError, 'already_started'):
+                self.api.execute(run, self.root / 'worker', self.root / 'auth')
+
+    def test_allowlisted_policy_context_and_router_diagnostics(self):
+        for name, category in [('ContentFilterError', 'policy'), ('ContextOverflowError', 'context')]:
+            result = self.api.terminal_failure({'name': name, 'data': {'message': 'SECRET'}})
+            self.assertEqual(result, dict(category=category, error_class=name))
+        for code in ('content_policy_violation', 'refusal'):
+            result = self.api.terminal_failure({'data': {'responseBody': json.dumps({'error': {'code': code, 'message': 'SECRET'}})}})
+            self.assertEqual(result, dict(category='policy', router_code=code))
+        for error_type in ('content_policy_violation', 'refusal'):
+            result = self.api.terminal_failure({'name': 'APIError', 'data': {'statusCode': 403,
+                'responseBody': json.dumps({'error': {'code': 403, 'message': 'SECRET',
+                    'metadata': {'error_type': error_type, 'raw': 'SECRET', 'provider_name': 'SECRET'}}})}})
+            self.assertEqual(result, dict(category='policy', router_code=error_type, status_code=403))
+            self.assertNotIn('SECRET', json.dumps(result))
+
+    def test_terminal_finish_reasons_are_safe_and_do_not_accept_truncated_answers(self):
+        for index, reason in enumerate(('length', 'content-filter', 'SECRET')):
+            exe = self.fixture("print(json.dumps({'type':'text','part':{'text':'Partial finding'}}))\n"
+                + "print(json.dumps({'type':'step_finish','part':{'reason':%r,'cost':0,'tokens':{}}}))\n" % reason)
+            run = self.api.prepare(self.runs, dict(self.brief, task_id='finish-' + str(index)))
+            result = self.api.execute(run, exe, self.root / 'auth')
+            self.assertEqual(result['state'], 'unresolved')
+            self.assertEqual(result['failure'].get('terminal_reason'), reason if reason != 'SECRET' else None)
+            self.assertNotIn('SECRET', (run / 'result.json').read_text() + (run / 'progress.jsonl').read_text())
+
+    def test_resumption_never_renews_expired_deadline_or_accepts_unsafe_preparation(self):
+        for index, change in enumerate(('deadline', 'clock', 'symlink', 'permissions', 'unexpected_file')):
+            run = self.api.prepare(self.runs, dict(self.brief, task_id='resume-check-' + str(index)))
+            with patch.object(self.api.settings, 'admission', side_effect=settings.SettingsError('openrouter_operation_busy')), patch.object(self.api.time, 'sleep'):
+                before = self.api.execute(run, self.root / 'worker', self.root / 'auth')
+            self.assertEqual(before['state'], 'not_launched')
+            if change == 'symlink':
+                (run / 'cache').rmdir(); (run / 'cache').symlink_to(self.root / 'auth', target_is_directory=True)
+            elif change == 'permissions': (run / 'cache').chmod(0o755)
+            elif change == 'unexpected_file': (run / 'cache/stranger').write_text('preserve')
+            launch = self.api.subprocess.Popen
+            clock = patch.object(self.api.time, 'monotonic', return_value=before['deadline_monotonic'] + 1) if change == 'deadline' else patch.object(self.api.time, 'monotonic', wraps=time.monotonic)
+            wall = patch.object(self.api.time, 'time', return_value=time.time() + 100) if change == 'clock' else patch.object(self.api.time, 'time', wraps=time.time)
+            with clock, wall, patch.object(self.api.subprocess, 'Popen', wraps=launch) as spawn:
+                result = self.api.execute(run, self.root / 'worker', self.root / 'auth')
+            self.assertEqual(result['state'], 'unresolved')
+            self.assertEqual(result['deadline_monotonic'], before['deadline_monotonic'])
+            self.assertEqual([call for call in spawn.call_args_list if call.args[0][0] == str(self.root / 'worker')], [])
+            if change == 'unexpected_file': self.assertEqual((run / 'cache/stranger').read_text(), 'preserve')
+            if change in ('permissions', 'unexpected_file'):
+                self.assertEqual(result['failure'].get('reason'), 'unsafe_worker_preparation_directory')
+
+    def test_safe_projection_ignores_malformed_nested_and_unrecognized_local_errors(self):
+        for failure in ({'category': ['SECRET'], 'reason': {'SECRET': 'SECRET'}},
+                        {'category': 'policy', 'error_class': ['SECRET'], 'status_code': True, 'retry_after_seconds': float('nan')}):
+            projected = self.api.safe_failure(failure)
+            self.assertNotIn('SECRET', json.dumps(projected))
+        run = self.api.prepare(self.runs, self.brief)
+        with patch.object(self.api.settings, 'admission', side_effect=settings.SettingsError('SECRET')):
+            self.api.execute(run, self.root / 'worker', self.root / 'auth')
+        self.assertNotIn('SECRET', (run / 'result.json').read_text() + (run / 'progress.jsonl').read_text())
+
+    def test_admission_never_reacquires_after_five_second_control_budget(self):
+        run = self.api.prepare(self.runs, self.brief)
+        clock = [100.0]
+        def busy(*args, **kwargs):
+            clock[0] += 4
+            raise settings.SettingsError('openrouter_operation_busy')
+        with patch.object(self.api.time, 'monotonic', side_effect=lambda: clock[0]), patch.object(self.api.time, 'time', return_value=200), patch.object(self.api.time, 'sleep', side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)), patch.object(self.api.settings, 'admission', side_effect=busy) as admission:
+            result = self.api.execute(run, self.root / 'worker', self.root / 'auth')
+        self.assertEqual(result['state'], 'not_launched')
+        self.assertEqual(admission.call_count, 1)
+        self.assertEqual(clock[0], 105)
+
+    def test_not_launched_settles_existing_visibility_owner(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        run = self.api.prepare(self.runs, self.brief)
+        client = Mock()
+        module = SimpleNamespace(Client=lambda _: client, _event=lambda _, event, *args: event)
+        with patch.object(self.api.importlib, 'import_module', return_value=module):
+            publish = self.api.habblaud_publisher(self.root, run, 'fixture', 'fixture')
+            publish('not_launched')
+        self.assertIn('SubagentStop', [call.args[1] for call in client.event.call_args_list])
+
+    def test_output_limits_and_malformed_streams_retain_fixed_safe_reasons(self):
+        for index, reason in enumerate(('output_limit', 'malformed_event', 'unterminated_event')):
+            body = ("print('x' * 100)\n" if reason == 'output_limit' else
+                    "print('{SECRET')\n" if reason == 'malformed_event' else "sys.stdout.write('{SECRET')\n")
+            exe = self.fixture(body)
+            run = self.api.prepare(self.runs, dict(self.brief, task_id='output-reason-' + str(index)))
+            with patch.object(self.api, 'LIMIT', 64 if reason == 'output_limit' else 4 * 1024 * 1024):
+                result = self.api.execute(run, exe, self.root / 'auth')
+            self.assertEqual(result['failure'].get('reason'), reason)
+            self.assertNotIn('SECRET', (run / 'result.json').read_text() + (run / 'progress.jsonl').read_text())
 
     def test_worker_rejects_alternate_runtime_and_unmanaged_preparation(self):
         for index, change in enumerate(('executable', 'auth', 'stamp')):
@@ -262,7 +413,7 @@ for event in [
             with self.subTest(error_type=type(error).__name__):
                 self.assertEqual(self.api.terminal_failure(error), {'category': 'unknown'})
         self.assertEqual(self.api.terminal_failure({'name': 'ContextOverflowError',
-                         'data': {'message': 'SECRET'}}), {'category': 'context'})
+                         'data': {'message': 'SECRET'}}), {'category': 'context', 'error_class': 'ContextOverflowError'})
         result = self.api.terminal_failure({'data': {'statusCode': 403,
             'responseBody': json.dumps({'error': {'metadata': {'limit_source': 'SECRET'}}})}})
         self.assertEqual(result, {'category': 'permission', 'status_code': 403})
@@ -287,7 +438,7 @@ for event in [
         run = self.api.prepare(self.runs, self.brief)
         result = self.api.execute(run, exe, self.root / 'auth')
         self.assertEqual(launches.read_text().splitlines(), ['launch'])
-        self.assertEqual(result.get('failure'), {'category': 'service', 'status_code': 503})
+        self.assertEqual(result.get('failure'), {'category': 'service', 'status_code': 503, 'launch_stage': 'launched'})
         self.assertIs(result.get('local_execution_stopped'), True)
         self.assertIs(result.get('native_fallback_ready'), True)
         self.assertEqual(result['state'], 'failed')
@@ -306,7 +457,7 @@ for event in [
 """)
         run = self.api.prepare(self.runs, self.brief)
         result = self.api.execute(run, exe, self.root / 'auth')
-        self.assertEqual(result.get('failure'), {'category': 'budget', 'status_code': 402})
+        self.assertEqual(result.get('failure'), {'category': 'budget', 'status_code': 402, 'launch_stage': 'launched'})
         self.assertEqual(result['known_cost_subtotal_usd'], 0.02)
         self.assertEqual(result['reported_tokens']['input'], 20)
         self.assertIsNone(result['reported_cost_usd'])
@@ -323,7 +474,7 @@ for event in [
         result = self.api.execute(run, exe, self.root / 'auth')
         self.assertLess(time.monotonic() - started, 5)
         self.assertEqual(launches.read_text().splitlines(), ['launch'])
-        self.assertEqual(result.get('failure'), {'category': 'deadline'})
+        self.assertEqual(result.get('failure'), {'category': 'deadline', 'launch_stage': 'launched'})
         self.assertEqual(result['state'], 'unresolved')
         self.assertIs(result.get('local_execution_stopped'), True)
         self.assertIs(result.get('native_fallback_ready'), True)
@@ -347,7 +498,7 @@ for event in [
         started = time.monotonic()
         result, processes = self.execute_with_backpressure(run, exe)
         self.assertLess(time.monotonic() - started, 2.5)
-        self.assertEqual(result.get('failure'), {'category': 'deadline'})
+        self.assertEqual(result.get('failure'), {'category': 'deadline', 'launch_stage': 'launched'})
         self.assertEqual(len(processes), 1)
         self.assertIsNotNone(processes[0].poll())
         self.assertIs(result.get('local_execution_stopped'), True)
@@ -405,7 +556,7 @@ for event in [
             return process
         with patch.object(self.api.subprocess, 'Popen', side_effect=delayed):
             result = self.api.execute(run, exe, self.root / 'auth')
-        self.assertEqual(result['failure'], {'category': 'deadline'})
+        self.assertEqual(result['failure'], {'category': 'deadline', 'launch_stage': 'launched'})
         self.assertEqual(len(processes), 1)
         self.assertIsNotNone(processes[0].poll())
         self.assertIs(result['local_execution_stopped'], True)
@@ -428,7 +579,7 @@ for event in [
         with patch.object(self.api.settings, 'admission', slow), patch.object(self.api.subprocess, 'Popen', observed):
             result = self.api.execute(run, self.root / 'worker', self.root / 'auth')
         self.assertEqual(processes, [])
-        self.assertEqual(result['failure'], {'category': 'deadline'})
+        self.assertEqual(result['failure'], {'category': 'deadline', 'launch_stage': 'before_spawn'})
         self.assertIs(result['local_execution_stopped'], True)
         self.assertIs(result['native_fallback_ready'], True)
 
@@ -446,7 +597,7 @@ for event in [
             except RecursionError:
                 self.fail('Malformed nested output must remain an unresolved recoverable result')
         self.assertEqual(result['state'], 'unresolved')
-        self.assertEqual(result.get('failure'), {'category': 'runtime_or_output'})
+        self.assertEqual(result.get('failure'), {'category': 'runtime_or_output', 'launch_stage': 'launched', 'reason': 'malformed_event'})
         self.assertIs(result.get('native_fallback_ready'), True)
 
     def test_cli_interruption_retires_the_worker_before_native_takeover(self):
@@ -476,7 +627,7 @@ for event in [
             self.assertEqual(process.returncode, 0, error)
             result = json.loads(output.splitlines()[-1])
             self.assertEqual(result['state'], 'unresolved')
-            self.assertEqual(result.get('failure'), {'category': 'interrupted'})
+            self.assertEqual(result.get('failure'), {'category': 'interrupted', 'launch_stage': 'launched'})
             self.assertIs(result.get('local_execution_stopped'), True)
             self.assertIs(result.get('native_fallback_ready'), True)
             self.assertEqual(result['known_cost_subtotal_usd'], 0.02)
@@ -706,6 +857,7 @@ class CouncilWorkerTests(CouncilCase):
         self.assertEqual(result['state'], 'unresolved')
         self.assertLessEqual(len(result['response'].encode()), 128 * 1024)
         self.assertTrue(result['local_execution_stopped'])
+        self.assertEqual(result['failure'].get('reason'), 'council_report_limit')
 
 
 if __name__ == '__main__': unittest.main()

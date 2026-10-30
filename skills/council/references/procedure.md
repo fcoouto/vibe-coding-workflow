@@ -46,6 +46,8 @@ keeping its ordinary pilot prepare/run instructions unloaded.
 Permissions and POSIX modes are not an OS sandbox against another same-user process.
 A version/hash/profile change needs new controlled tool qualification. Such
 qualification does not prove actual endpoint model/reasoning behavior.
+Keep permission-denial probes in controlled qualification tests. Ordinary Council
+briefs ask participants to obey the qualified boundary; they contain no probe.
 
 ## Scope, deadlines and preparation
 
@@ -82,8 +84,9 @@ python3 -B <plugin-root>/scripts/council.py ACTION --cwd /canonical/enrolled/che
 ```
 
 Feed one JSON object on stdin, at most 2 MiB; duplicate keys and nonfinite numbers
-are rejected. `ACTION` is exactly `prepare`, `member`, `record-native`, `status` or
-`cancel`. There is no general source, research, advance, admit or record action.
+are rejected. `ACTION` is exactly `prepare`, `member`, `resume-member`,
+`record-native`, `status` or `cancel`. There is no general source, research,
+advance, admit or record action.
 
 `prepare` accepts exactly these fields plus optional `timeout_seconds`:
 
@@ -193,6 +196,12 @@ count. Settle through existing Python
 `openrouter_workers.verify(Path(worker_run), "accepted"|"rejected", checks)` or
 the worker CLI below. The exact worker path is returned by the Python packet API and
 retained in Council status/manifest; do not create another attempt to recover it.
+Treat brevity targets, headings and ordinary Markdown preferences as advisory
+unless the user explicitly makes them hard requirements. Accept a substantively
+verified complete report with a presentation warning when needed, and shorten chat
+delivery while preserving the saved original. For example, 809 words may exceed an
+advisory 800-word target without losing acceptance; an explicit hard 800-word limit
+still applies. This does not change historical qualification outcomes.
 
 ```text
 python3 -I -B <plugin-root>/scripts/openrouter_workers.py verify --root <saved-council-root>
@@ -215,6 +224,12 @@ reports/research for critique and synthesis. Excluded reports are not evidence;
 private raw reasons/checks and model/provider/child/session identities do not enter
 these allowlisted observations. Unavailable reasons are generic in deliberation;
 exact details remain in private audit records. Observations add no snapshot file.
+Known machine error classes, typed router codes, terminal reasons, launch stage,
+fixed prerequisite reasons, HTTP status and retry hints are diagnostic evidence.
+They do not establish upstream origin or trigger. A client `ContentFilterError`
+supports saying the client reported a content-filter stop; it does not explain why.
+Never copy raw provider messages, response bodies, headers, prompts or tool output
+into diagnostics or progress. Retry hints do not authorize another inference.
 
 ## Supervision, cancellation and recovery
 
@@ -258,12 +273,33 @@ host/worker state and preserve unresolved ownership when unknown. Do not obtain 
 second permit, replay a round, delete unknown files or reset deadlines. No upstream
 cancellation or billing result is inferred from a local stop.
 
+The executor retries known pre-spawn settings/Council contention at most three
+times within five seconds, releasing other admission locks before waiting. If
+contention persists, `not_launched` proves this original dispatch did not spawn.
+Only then use `resume-member` with exactly `{run, phase, member}` for that external
+seat. It reuses the original worker path, consent revision, evidence and durable
+absolute worker deadline, also bounded by the unchanged phase/total ceiling.
+Current checkout, phase, cancellation, consent, snapshot, qualified executable,
+duplicate and stop guards still apply. Never resume an ordinary terminal,
+ambiguous or running attempt; missing session telemetry proves no such permission.
+Interrupted critique artifact construction resumes only from frozen bytes after
+full inventory/hash/permission checks. Unfamiliar or changed artifacts remain for
+inspection and block recovery; do not recapture source or delete conflicts.
+
 ## Deliver the result
 
-Use status's outcome faithfully. **Complete** requires all three investigations,
+When `fresh_synthesis_available` is true, lead with the supported synthesized
+answer. Follow with status's `accepted_participation` counts by round, for example
+“reduced panel: 2/3 investigations, 2/3 critiques; fresh synthesis completed.”
+Explain consequential evidence gaps and confidence in the specific conclusion
+from sources and objections, never from member count. When fresh synthesis is
+unavailable, label the delivery **evidence summary**, give unresolved questions,
+and claim no Council verdict.
+
+Keep status's outcome alongside these separate facts. **Complete** requires all three investigations,
 all three critiques and accepted fresh native synthesis. **Incomplete** requires
 native plus at least one same external member in both rounds and accepted fresh
-synthesis. Everything else is **partial evidence**, including missing synthesis.
+synthesis. Everything else is **partial**, including missing synthesis.
 Explain rejected, failed, unavailable, late and unverified participation and how it
 limits the answer. Useful partial evidence is not a completed deliberation.
 

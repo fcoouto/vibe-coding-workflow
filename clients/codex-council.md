@@ -110,3 +110,11 @@ child/settings to release ownership. Late or cancelled native evidence remains
 rejected. Receipts attest coordinator observations, not independently authenticated
 worker statements. Closed phases carry the common procedure's anonymous execution
 observations into later fresh contexts; raw private diagnostics stay out.
+
+Use the common procedure's recovery and delivery sections when supervising status:
+`resume-member` is external-only and requires durable `not_launched` proof. Native
+lost-response ownership still follows the admission rules above. Carry safe
+diagnostics into fresh contexts; use `accepted_participation` and
+`fresh_synthesis_available` to deliver a supported answer with reduced-panel counts,
+or a labeled evidence summary when synthesis failed. Apply the common advisory
+presentation checks while preserving original reports and explicit hard limits.

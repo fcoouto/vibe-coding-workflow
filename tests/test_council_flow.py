@@ -101,6 +101,222 @@ class CouncilFlowTests(CouncilCase):
         self.native('synthesis', 'Synthesis preserves dissent and limitations.')
         self.assertEqual(council.status(self.run)['outcome'], 'complete')
 
+    def test_reduced_panel_distinguishes_fresh_synthesis_from_evidence_only(self):
+        self.prepare(); self.native('investigate', accepted=False)
+        self.external('investigate', 'external-one'); self.external('investigate', 'external-two')
+        self.native('critique', accepted=False)
+        self.external('critique', 'external-one'); self.external('critique', 'external-two')
+        before = council.status(self.run)
+        self.assertFalse(before['fresh_synthesis_available'])
+        self.native('synthesis', 'Supported conclusion with gaps.')
+        report = council.status(self.run)
+        self.assertEqual(report['outcome'], 'partial')
+        self.assertEqual(report['accepted_participation'], dict(investigate=dict(accepted=2, expected=3), critique=dict(accepted=2, expected=3), synthesis=dict(accepted=1, expected=1)))
+        self.assertTrue(report['fresh_synthesis_available'])
+
+    def test_failed_synthesis_exposes_no_verdict(self):
+        self.prepare(); self.investigations(); self.critiques(); self.native('synthesis', accepted=False)
+        self.assertFalse(council.status(self.run)['fresh_synthesis_available'])
+
+    def test_critique_build_recovers_staging_and_completed_snapshot_publication(self):
+        for index, after_capture in enumerate((False, True)):
+            (self.repo / 'evidence.txt').write_text('Shared reviewed evidence\n')
+            self.request['run_id'] = 'snapshot-resume-' + str(index)
+            self.prepare(); self.investigations()
+            capture = council.snapshot.capture
+            def interrupted(*args, **kwargs):
+                if after_capture: capture(*args, **kwargs)
+                raise OSError('interrupted local publication')
+            with patch.object(council.snapshot, 'capture', side_effect=interrupted), self.assertRaises(OSError):
+                council.packet(self.run, 'critique', 'native')
+            (self.repo / 'evidence.txt').write_text('Changed live source must stay excluded')
+            packet = council.packet(self.run, 'critique', 'native')
+            self.assertEqual((Path(packet['snapshot']) / 'evidence.txt').read_text(), 'Shared reviewed evidence\n')
+            self.assertIn('Decisive minority objection.', packet['reports'])
+
+    def test_critique_recovery_preserves_changed_or_unfamiliar_artifacts(self):
+        self.prepare(); self.investigations()
+        with patch.object(council.snapshot, 'capture', side_effect=OSError('interrupted')), self.assertRaises(OSError):
+            council.packet(self.run, 'critique', 'native')
+        stranger = self.run / 'critique-inputs' / 'unfamiliar.txt'
+        stranger.write_text('keep this file'); stranger.chmod(0o600)
+        with self.assertRaisesRegex(ValueError, 'critique.*conflict'):
+            council.packet(self.run, 'critique', 'native')
+        self.assertEqual(stranger.read_text(), 'keep this file')
+
+    def test_busy_worker_resumes_exact_owner_and_status_projects_safe_failure(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from scripts import council as cli
+        self.prepare(); packet = council.packet(self.run, 'investigate', 'external-one')
+        with patch.object(council.workers.settings, 'admission', side_effect=openrouter_settings.SettingsError('openrouter_operation_busy')), patch.object(council.workers.time, 'sleep'), redirect_stdout(StringIO()):
+            result = cli._execute(self.run, 'investigate', packet, self.settings)
+        self.assertEqual(result['state'], 'not_launched')
+        report = council.status(self.run)
+        failure = report['members']['investigate']['external-one']['failure']
+        self.assertEqual(failure['reason'], 'openrouter_operation_busy')
+        resumed = council.resume_member(self.run, 'investigate', 'external-one')
+        self.assertEqual(resumed['worker_run'], packet['worker_run'])
+        self.assertEqual(resumed['deadline_monotonic'], result['deadline_monotonic'])
+        with redirect_stdout(StringIO()): cli._execute(self.run, 'investigate', resumed, self.settings)
+        with self.assertRaisesRegex(ValueError, 'not_resumable'):
+            council.resume_member(self.run, 'investigate', 'external-one')
+        with self.assertRaisesRegex(ValueError, 'already_issued'):
+            council.packet(self.run, 'investigate', 'external-one')
+
+    def test_failure_projection_drops_arbitrary_diagnostics_in_status_and_anonymous_context(self):
+        self.prepare(); self.native('investigate')
+        packet = self.external('investigate', 'external-one', state='failed')
+        path = Path(packet['worker_run']) / 'result.json'
+        item = json.loads(path.read_text())
+        item['failure'] = dict(category='policy', error_class='ContentFilterError', terminal_reason='content-filter', launch_stage='launched', reason='SECRET', message='SECRET', origin='SECRET')
+        path.write_text(json.dumps(item))
+        self.external('investigate', 'external-two')
+        report = council.status(self.run)
+        failure = report['members']['investigate']['external-one']['failure']
+        self.assertEqual(failure, dict(category='policy', error_class='ContentFilterError', terminal_reason='content-filter', launch_stage='launched'))
+        packet = council.packet(self.run, 'critique', 'native')
+        self.assertIn('ContentFilterError', packet['execution_observations'])
+        self.assertNotIn('SECRET', json.dumps(report) + packet['execution_observations'])
+
+    def test_staging_creation_and_partial_capture_interruptions_resume_frozen_bytes(self):
+        for index, target_partial in enumerate((False, True)):
+            self.request['run_id'] = 'partial-artifacts-' + str(index)
+            self.prepare(); self.investigations()
+            atomic = council.changes._atomic
+            def interrupted(directory, name, *args, **kwargs):
+                wanted = 'critique-snapshot' if target_partial else 'critique-inputs'
+                if wanted in Path(directory).parts and name == 'evidence.txt':
+                    raise KeyboardInterrupt()
+                return atomic(directory, name, *args, **kwargs)
+            with patch.object(council.changes, '_atomic', side_effect=interrupted), self.assertRaises(KeyboardInterrupt):
+                council.packet(self.run, 'critique', 'native')
+            packet = council.packet(self.run, 'critique', 'native')
+            council.snapshot.verify(Path(packet['snapshot']), packet['snapshot_manifest'])
+
+    def test_completed_snapshot_recovery_rejects_changed_inventory_hashes_and_permissions(self):
+        for index, change in enumerate(('extra', 'bytes', 'directory_mode')):
+            self.request['run_id'] = 'snapshot-conflict-' + str(index)
+            self.prepare(); self.investigations()
+            capture = council.snapshot.capture
+            def interrupted(*args, **kwargs):
+                capture(*args, **kwargs)
+                raise KeyboardInterrupt()
+            with patch.object(council.snapshot, 'capture', side_effect=interrupted), self.assertRaises(KeyboardInterrupt):
+                council.packet(self.run, 'critique', 'native')
+            target = self.run / 'critique-snapshot'
+            target.chmod(0o700)
+            if change == 'extra':
+                path = target / 'extra.txt'; path.write_text('preserve'); path.chmod(0o400); target.chmod(0o500)
+            elif change == 'bytes':
+                path = target / 'evidence.txt'; path.chmod(0o600); path.write_text('changed'); path.chmod(0o400); target.chmod(0o500)
+            with self.assertRaises(ValueError): council.packet(self.run, 'critique', 'native')
+            if change == 'extra': self.assertEqual(path.read_text(), 'preserve')
+
+    def busy_packet(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from scripts import council as cli
+        packet = council.packet(self.run, 'investigate', 'external-one')
+        with patch.object(council.workers.settings, 'admission', side_effect=openrouter_settings.SettingsError('openrouter_operation_busy')), patch.object(council.workers.time, 'sleep'), redirect_stdout(StringIO()):
+            cli._execute(self.run, 'investigate', packet, self.settings)
+        return packet
+
+    def test_resume_cli_uses_same_owner_and_blocks_native_recovery(self):
+        from contextlib import redirect_stdout
+        from io import BytesIO, StringIO, TextIOWrapper
+        from scripts import council as cli
+        self.prepare(); packet = self.busy_packet()
+        request = dict(run=str(self.run), phase='investigate', member='external-one')
+        output = StringIO()
+        with patch('sys.argv', ['council', 'resume-member', '--cwd', str(self.repo)]), patch('sys.stdin', TextIOWrapper(BytesIO(json.dumps(request).encode()))), redirect_stdout(output):
+            self.assertEqual(cli.main(), 0)
+        self.assertNotEqual(json.loads(output.getvalue().splitlines()[-1])['state'], 'not_launched')
+        with self.assertRaisesRegex(ValueError, 'invalid_council_member'): council.resume_member(self.run, 'investigate', 'native')
+        self.assertTrue(Path(packet['worker_run']).is_dir())
+
+    def test_resume_does_not_refresh_consent_or_evidence_and_blocks_changed_executable(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from scripts import council as cli
+        for index, change in enumerate(('consent', 'snapshot', 'executable', 'cancel')):
+            self.request['run_id'] = 'resume-guard-' + str(index)
+            self.prepare(); packet = self.busy_packet()
+            if change == 'consent':
+                disabled = openrouter_settings.disable(self.repo, {'expected_revision': self.settings['revision']})
+                self.settings = openrouter_settings.enable(self.repo, {'expected_revision': disabled['revision']})
+            elif change == 'snapshot':
+                path = self.run / 'snapshot/evidence.txt'; path.chmod(0o600); path.write_text('changed'); path.chmod(0o400)
+            elif change == 'executable': self.executable.write_text('#!/bin/sh\nexit 1\n')
+            else: council.cancel(self.run)
+            with patch.object(council.workers.subprocess, 'Popen', wraps=council.workers.subprocess.Popen) as spawn, redirect_stdout(StringIO()):
+                if change == 'executable':
+                    resumed = council.resume_member(self.run, 'investigate', 'external-one')
+                    result = cli._execute(self.run, 'investigate', resumed, self.settings)
+                    self.assertEqual(result['failure']['reason'], 'council_runtime_qualification_mismatch')
+                else:
+                    with self.assertRaises((ValueError, openrouter_settings.SettingsError)):
+                        council.resume_member(self.run, 'investigate', 'external-one')
+            self.assertEqual([call for call in spawn.call_args_list if call.args[0][0] == str(self.executable)], [])
+            if change == 'executable': self.executable.write_text('#!/bin/sh\nexit 0\n')
+
+    def test_cancel_during_busy_backoff_prevents_launch(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from scripts import council as cli
+        from runtime.startup import StartupError
+        self.prepare(); packet = council.packet(self.run, 'investigate', 'external-one')
+        guard = cli._launch_guard
+        calls = []
+        def busy_then_guard(run, phase):
+            calls.append(True)
+            if len(calls) == 1: raise StartupError('Onboarding plan busy; retry the same expected revision')
+            return guard(run, phase)
+        with patch.object(cli, '_launch_guard', side_effect=busy_then_guard), patch.object(council.workers.time, 'sleep', side_effect=lambda _: council.cancel(self.run)), patch.object(council.workers.subprocess, 'Popen', wraps=council.workers.subprocess.Popen) as spawn, redirect_stdout(StringIO()):
+            result = cli._execute(self.run, 'investigate', packet, self.settings)
+        self.assertEqual(result['state'], 'unresolved')
+        self.assertEqual(result['failure']['reason'], 'cancelled')
+        self.assertEqual([call for call in spawn.call_args_list if call.args[0][0] == str(self.executable)], [])
+
+    def test_presentation_verification_preserves_original_report_for_advisory_and_hard_limits(self):
+        report = ' '.join(['evidence'] * 809)
+        for index, hard in enumerate((False, True)):
+            self.request['run_id'] = 'presentation-' + str(index)
+            self.request['constraints'] = 'Read only. ' + ('Hard maximum: 800 words.' if hard else 'Aim for 800 words.')
+            self.prepare()
+            packet = council.packet(self.run, 'investigate', 'external-one')
+            path = Path(packet['worker_run']) / 'result.json'
+            value = dict(state='awaiting_verification', response=report, local_execution_stopped=True)
+            path.write_text(json.dumps(value)); path.chmod(0o600)
+            checked = council.workers.verify(Path(packet['worker_run']), 'rejected' if hard else 'accepted',
+                ['Substantive evidence checked. ' + ('Explicit hard 800-word limit exceeded.' if hard else 'Presentation warning: 809 words exceeds advisory 800-word target; shorten chat delivery.')])
+            self.assertEqual(checked['response'], report)
+            self.assertEqual(council.status(self.run)['accepted_participation']['investigate']['accepted'], 0 if hard else 1)
+
+    def test_snapshot_and_executable_are_rechecked_after_busy_backoff(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from scripts import council as cli
+        from runtime.startup import StartupError
+        for index, change in enumerate(('snapshot', 'executable')):
+            self.request['run_id'] = 'backoff-recheck-' + str(index)
+            self.prepare(); packet = council.packet(self.run, 'investigate', 'external-one')
+            guard = cli._launch_guard
+            calls = []
+            def busy_then_guard(run, phase):
+                calls.append(True)
+                if len(calls) == 1: raise StartupError('Onboarding plan busy; retry the same expected revision')
+                return guard(run, phase)
+            def changed(_):
+                if change == 'executable': self.executable.write_text('#!/bin/sh\nexit 1\n')
+                else:
+                    path = self.run / 'snapshot/evidence.txt'; path.chmod(0o600); path.write_text('changed'); path.chmod(0o400)
+            with patch.object(cli, '_launch_guard', side_effect=busy_then_guard), patch.object(council.workers.time, 'sleep', side_effect=changed), patch.object(council.workers.subprocess, 'Popen', wraps=council.workers.subprocess.Popen) as spawn, redirect_stdout(StringIO()):
+                result = cli._execute(self.run, 'investigate', packet, self.settings)
+            self.assertEqual(result['state'], 'unresolved')
+            self.assertEqual([call for call in spawn.call_args_list if call.args[0][0] == str(self.executable)], [])
+            self.executable.write_text('#!/bin/sh\nexit 0\n')
+
     def test_missing_model_with_reciprocal_critique_is_incomplete(self):
         self.request['roster']['external-two'] = dict(kind='external', unavailable_reason='No supported endpoint', selection='native:discovery')
         self.prepare(); self.investigations(second=False); self.critiques(); self.native('synthesis')

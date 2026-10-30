@@ -182,6 +182,43 @@ or delivery gate. Initial qualification proves operation, not superiority over a
 strong single model. Preserve the earlier builder-check decisions on evidence
 freezes, honest native isolation limits and reciprocal critique for degraded results.
 
+## Reliability amendment, 30 October 2026
+
+The user approved the Astra/xhigh reliability recommendations after the first
+paid qualification. Recover local control contention and interrupted artifact
+construction without buying another inference attempt. A known pre-launch busy
+failure retains its original identity, consent revision, immutable evidence and
+deadline. Retry admission at most three times within five seconds, releasing
+other admission locks while waiting. If still busy, expose an explicit
+`not_launched` state and allow resuming only that original dispatch. An absent
+session ID or lost response never proves that launch did not occur.
+
+Resume critique snapshot construction from frozen bytes. Verify complete existing
+snapshots against the expected manifest, full inventory and permissions before
+publishing their manifest. Reconcile only verified run-owned partial staging;
+preserve unfamiliar or changed artifacts and report the conflict. No new source
+capture, phase reset or inference replay is permitted.
+
+Retain allowlisted machine error classes, terminal reasons, launch stage, safe
+local prerequisite reasons, HTTP status and retry hints. Project these through
+status and anonymous phase observations without copying raw provider messages,
+bodies, headers, prompts or tool output. Observed policy/refusal classes do not
+establish their upstream origin or trigger.
+
+Keep existing completeness labels. Separately expose accepted participation by
+round and availability of accepted fresh synthesis. Deliver a supported answer
+when synthesis exists, explain reduced coverage and consequential gaps, and base
+confidence on evidence. Without accepted fresh synthesis, deliver an explicitly
+labeled evidence summary and unresolved questions, not a Council verdict.
+
+Brevity, headings and ordinary Markdown preferences are advisory unless the user
+explicitly makes them hard requirements. Preserve original reports; accept
+substantively verified complete reports with a presentation warning where needed.
+Permission qualification probes belong in controlled tests, not ordinary Council
+questions. The earlier qualification's explicit hard limit and outcome remain
+unchanged. Automatic extra inference, model/provider replacement, model-group
+selection and comparative evaluation remain outside this amendment.
+
 ## References
 
 - [Revised implementation plan](../plans/2026-10-29-council.md).
