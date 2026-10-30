@@ -3117,11 +3117,15 @@ class LifecycleFoundationTests(unittest.TestCase):
 
     def test_lifecycle_assignment_date_is_owner_assigned_once_and_replay_preserves_it(self):
         f=self.f
-        with patch('runtime.state._owner_time',return_value=100): prepared=f.prepare()
+        with state._database(f.scope) as db:
+            task_created_at=state._task(db,state._scope_id(f.scope),f.identity['client'],f.identity['session_id'],f.identity['task_id'])['lifecycle']['created_at']
+        owner_time=task_created_at+100
+        self.assertGreater(owner_time,task_created_at)
+        with patch('runtime.state._owner_time',return_value=owner_time): prepared=f.prepare()
         with state._database(f.scope) as db:
             record=f.api._ledger(f.scope,db)[0]
-        self.assertEqual(record['data']['lifecycle'],dict(created_at=100))
-        self.assertEqual(record['body']['lifecycle'],dict(created_at=100))
+        self.assertEqual(record['data']['lifecycle'],dict(created_at=owner_time))
+        self.assertEqual(record['body']['lifecycle'],dict(created_at=owner_time))
         with patch('runtime.state._owner_time',side_effect=AssertionError('replay reset assignment age')):
             replay=f.prepare()
         self.assertFalse(replay['launch_admitted'])
