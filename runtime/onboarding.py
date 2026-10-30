@@ -12,7 +12,7 @@ import stat
 import subprocess
 import uuid
 
-from runtime.startup import PROJECT_FILE, StartupError, checkout, decode_project_record, json_object, policy_digest, runtime_settings, _check_observation_deadline
+from runtime.startup import PROJECT_FILE, StartupError, checkout, _checkout_identity, decode_project_record, json_object, policy_digest, runtime_settings, _check_observation_deadline
 from runtime.state import runtime_fingerprint
 
 
@@ -642,13 +642,13 @@ def _checkout_observation(value, budget):
         _check_observation_deadline(budget)
         _require(str(root.resolve(strict=True)) == str(root), "Member boundary contains a link or noncanonical root")
         observed["binding"]["root"] = _filesystem_binding(root)
-        identity = checkout(root, limit=min(MAX_FILE, max(0, MAX_TOTAL - budget["bytes"])), deadline=budget.get("deadline"), budget=budget)
+        identity = _checkout_identity(root, include_git_dir=True, limit=min(MAX_FILE, max(0, MAX_TOTAL - budget["bytes"])), total_limit=max(0, MAX_TOTAL - budget["bytes"]), deadline=budget.get("deadline"), budget=budget)
         _require(identity is not None and identity[0] == root, "Member must select an existing checkout root")
         common = identity[1]
         observed["git_common_dir"] = str(common)
         observed["binding"]["git_common_dir"] = _filesystem_binding(common)
-        code, raw = git(root, "rev-parse", "--absolute-git-dir")
-        _require(code == 0 and len(raw.splitlines()) == 1, "Cannot resolve selected worktree Git directory")
+        raw = identity[2]
+        _require(len(raw.splitlines()) == 1, "Cannot resolve selected worktree Git directory")
         git_dir = Path(os.fsdecode(raw.rstrip(b"\n")))
         _require(git_dir.is_absolute() and git_dir.resolve(strict=True) == git_dir,
                  "Noncanonical worktree Git directory")
@@ -675,11 +675,10 @@ def _checkout_observation(value, budget):
                 _require(not any(f == b"bare" or f.startswith(b"prunable") for f in fields)
                          and sum(f.startswith(b"HEAD ") for f in fields) == 1,
                          "Unsupported primary or selected worktree metadata")
-        primary_identity = checkout(primary, limit=min(MAX_FILE, max(0, MAX_TOTAL - budget["bytes"])), deadline=budget.get("deadline"), budget=budget)
+        primary_identity = _checkout_identity(primary, include_git_dir=True, limit=min(MAX_FILE, max(0, MAX_TOTAL - budget["bytes"])), total_limit=max(0, MAX_TOTAL - budget["bytes"]), deadline=budget.get("deadline"), budget=budget)
         _require(budget["bytes"] <= MAX_TOTAL, "Project aggregate byte limit exceeded")
-        code, raw = git(primary, "rev-parse", "--absolute-git-dir")
-        _require(primary_identity == (primary, common) and code == 0
-                 and os.fsdecode(raw.rstrip(b"\n")) == str(common), "Primary worktree identity is ambiguous")
+        _require(primary_identity is not None and primary_identity[:2] == (primary, common)
+                 and os.fsdecode(primary_identity[2].rstrip(b"\n")) == str(common), "Primary worktree identity is ambiguous")
         observed["binding"]["primary_root"] = _filesystem_binding(primary)
         observed["primary_root"] = str(primary)
         _check_observation_deadline(budget)

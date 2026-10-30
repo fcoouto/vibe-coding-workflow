@@ -94,10 +94,14 @@ def _check_observation_deadline(budget):
         raise StartupError("Canonical acquisition deadline exceeded")
 
 
-def _entry_budget_check(budget):
+def _entry_budget_check(budget, *, allow_full_bytes=False):
     _check_observation_deadline(budget)
+    byte_limit = 8 * 1024 * 1024
+    if not allow_full_bytes:
+        byte_limit -= 1
     if (type(budget.get("paths")) is not int or type(budget.get("bytes")) is not int
-            or not 0 <= budget["paths"] <= 4096 or not 0 <= budget["bytes"] < 8 * 1024 * 1024):
+            or not 0 <= budget["paths"] <= 4096
+            or not 0 <= budget["bytes"] <= byte_limit):
         raise StartupError("Entry observation budget exhausted")
 
 
@@ -171,6 +175,11 @@ def read_git(root, *args, limit=1024 * 1024, discovery=False, timeout=5, with_st
 
 def checkout(cwd, *, limit=1024 * 1024, deadline=None, budget=None):
     """Resolve checkout identity; never inherit a Git selector from the caller."""
+    return _checkout_identity(cwd, limit=limit, deadline=deadline, budget=budget)
+
+
+def _checkout_identity(cwd, *, include_git_dir=False, limit=1024 * 1024, total_limit=None, deadline=None, budget=None):
+    """Read one identity window; the public default retains its two-field query."""
     boundary = repository_root(cwd, budget=budget)
     if boundary is None:
         return None
@@ -178,23 +187,46 @@ def checkout(cwd, *, limit=1024 * 1024, deadline=None, budget=None):
         _entry_budget_check(budget)
         deadline = min(deadline, budget["deadline"]) if deadline is not None and budget.get("deadline") is not None else budget.get("deadline", deadline)
         limit = min(limit, 8 * 1024 * 1024 - budget["bytes"])
+    args = ("rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir")
+    read_limit = limit
+    if include_git_dir:
+        args += ("--absolute-git-dir",)
+        read_limit += 1024 * 1024
+        if budget is not None:
+            read_limit = min(read_limit, 8 * 1024 * 1024 - budget["bytes"])
+    if total_limit is not None:
+        if type(total_limit) is not int or total_limit < 0:
+            raise StartupError("Invalid owner identity byte limit")
+        read_limit = min(read_limit, total_limit)
     try:
-        code, raw = read_git(cwd, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir",
-                             limit=limit, timeout=2, deadline=deadline)
+        # Consolidate the old 2s+5s caps only here; owner deadline and transport stay unchanged.
+        code, raw = read_git(cwd, *args, limit=read_limit,
+                             timeout=7 if include_git_dir else 2, deadline=deadline)
     except (StartupError, subprocess.SubprocessError, OSError):
         if budget is not None:
             budget["bytes"] = max(budget["bytes"], 8 * 1024 * 1024)
         raise
     if budget is not None:
         budget["bytes"] += len(raw)
-        _entry_budget_check(budget)
-    lines = os.fsdecode(raw).splitlines()
+        _entry_budget_check(budget, allow_full_bytes=include_git_dir)
+    identity_raw, git_raw = raw, None
+    if include_git_dir:
+        parts = raw.split(b"\n", 2)
+        if code or len(parts) != 3:
+            raise StartupError("Cannot resolve checkout identity")
+        identity_raw = b"\n".join(parts[:2]) + b"\n"
+        git_raw = parts[2]
+        if len(identity_raw) > limit or len(git_raw) > 1024 * 1024 or len(git_raw.splitlines()) != 1:
+            if budget is not None:
+                budget["bytes"] = max(budget["bytes"], 8 * 1024 * 1024)
+            raise StartupError("Checkout identity component is over limit or malformed")
+    lines = os.fsdecode(identity_raw).splitlines()
     if code or len(lines) != 2:
         raise StartupError("Cannot resolve checkout identity")
     root, common = (Path(line).resolve(strict=True) for line in lines)
     if root != boundary or not common.is_dir():
         raise StartupError("Checkout identity does not match the nearest repository")
-    return root, common
+    return (root, common, git_raw) if include_git_dir else (root, common)
 
 
 def _read_record_snapshot(root, *, budget=None):

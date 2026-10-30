@@ -1560,3 +1560,137 @@ class EntrySelectorTests(unittest.TestCase):
             return result
         with patch.object(startup, 'resolve_project', side_effect=add):
             self.assertEqual(self.entry().resolution.status, 'conflict')
+
+
+class GitIdentityBatchTests(unittest.TestCase):
+    """Real Git identities; timeout consolidation is a local seven-second contract."""
+    setUp = StartupTests.setUp
+    git = StartupTests.git
+
+    def combined(self, cwd=None, **kwargs):
+        from runtime import startup
+        return startup._checkout_identity(cwd or self.repo, include_git_dir=True, **kwargs)
+
+    def test_combined_matches_real_pair_matrix(self):
+        from runtime import startup
+        linked = self.base/'linked'
+        self.git(self.repo, 'worktree', 'add', '-q', '-b', 'batch', str(linked))
+        sub = linked/'sub'; sub.mkdir()
+        bare = self.base/'bare'; self.git(self.base, 'init', '--bare', '-q', str(bare))
+        separate = self.base/'separate'; separate.mkdir()
+        self.git(separate, 'init', '--template=', '--separate-git-dir='+str(self.base/'separate-git'))
+        primary_sub = self.repo/'primary-sub'; primary_sub.mkdir()
+        nested = self.repo/'nested'; nested.mkdir(); self.git(nested, 'init', '--template=')
+        cases = [self.repo, primary_sub, linked, sub, separate, nested]
+        for name in ('space name', 'unicode-é', 'tab\tname', 'back\\slash', '-leading', 'newline\nname'):
+            root = self.base/name; root.mkdir(); self.git(root, 'init', '--template='); cases.append(root)
+        for cwd in cases:
+            first_code, first = startup.read_git(cwd, 'rev-parse', '--path-format=absolute', '--show-toplevel', '--git-common-dir')
+            second_code, second = startup.read_git(cwd, 'rev-parse', '--absolute-git-dir')
+            if len(os.fsdecode(first).splitlines()) != 2:
+                with self.assertRaises(StartupError): self.combined(cwd)
+                continue
+            expected = startup.checkout(cwd)
+            budget = dict(paths=3, bytes=17)
+            result = self.combined(cwd, budget=budget)
+            self.assertEqual((first_code, second_code), (0, 0))
+            self.assertEqual(result, (*expected, second))
+            self.assertEqual(budget['bytes'], 17+len(first)+len(second))
+        self.assertIsNone(self.combined(self.base))
+        self.assertIsNone(self.combined(bare))
+        with self.assertRaises(StartupError): self.combined(self.repo/'.git')
+        alias = self.base/'repo-alias'; alias.symlink_to(self.repo, target_is_directory=True)
+        self.assertEqual(self.combined(alias)[:2], startup.checkout(alias))
+        with self.assertRaises((StartupError, OSError)): self.combined(self.base/'missing')
+
+    def test_default_query_and_combined_seven_second_cap(self):
+        from runtime import startup
+        import time
+        actual = startup.read_git
+        deadline = time.monotonic()+30
+        with patch.object(startup, 'read_git', wraps=actual) as reader:
+            startup.checkout(self.repo, deadline=deadline)
+        self.assertEqual(reader.call_args.args[1:], ('rev-parse', '--path-format=absolute', '--show-toplevel', '--git-common-dir'))
+        self.assertEqual(reader.call_args.kwargs['timeout'], 2)
+        with patch.object(startup, 'read_git', wraps=actual) as reader:
+            self.combined(deadline=deadline)
+        self.assertEqual(reader.call_count, 1)
+        self.assertEqual(reader.call_args.kwargs['timeout'], 7)
+        self.assertEqual(reader.call_args.kwargs['deadline'], deadline)
+        budget = dict(paths=0, bytes=0, deadline=time.monotonic()-1)
+        with patch.object(startup, 'read_git', side_effect=AssertionError('expired child')):
+            with self.assertRaises(StartupError): self.combined(budget=budget)
+
+    def test_combined_actual_near_exhaustion_and_component_limits(self):
+        from runtime import startup
+        _, first = startup.read_git(self.repo, 'rev-parse', '--path-format=absolute', '--show-toplevel', '--git-common-dir')
+        _, second = startup.read_git(self.repo, 'rev-parse', '--absolute-git-dir')
+        total = len(first)+len(second); maximum = 8*1024*1024
+        budget = dict(paths=0, bytes=maximum-total-1)
+        self.assertEqual(self.combined(budget=budget)[2], second)
+        self.assertEqual(budget['bytes'], maximum-1)
+        budget = dict(paths=0, bytes=maximum-total)
+        self.assertEqual(self.combined(budget=budget)[2], second)
+        self.assertEqual(budget['bytes'], maximum)
+        for remaining in (total-1, len(first)-1):
+            budget = dict(paths=0, bytes=maximum-remaining)
+            with self.assertRaises(StartupError): self.combined(budget=budget)
+            self.assertGreaterEqual(budget['bytes'], maximum)
+        with self.assertRaises(StartupError): self.combined(limit=len(first)-1)
+        # A third echoed option is never accepted as part of git_dir.
+        with patch.object(startup, 'read_git', return_value=(0, first+second+b'--unsupported\n')):
+            with self.assertRaises(StartupError): self.combined()
+
+    def test_combined_partial_failure_and_late_deadline_cannot_be_reused(self):
+        from runtime import startup
+        actual = startup.read_git
+        budget = dict(paths=0, bytes=5)
+        with patch.object(startup, 'read_git', side_effect=StartupError('partial output over limit')):
+            with self.assertRaises(StartupError): self.combined(budget=budget)
+        self.assertEqual(budget['bytes'], 8*1024*1024)
+        with patch.object(startup, 'read_git', side_effect=AssertionError('terminal budget launched child')):
+            with self.assertRaises(StartupError): self.combined(budget=budget)
+        clock = [100.0]
+        budget = dict(paths=0, bytes=5, deadline=101.0)
+        def late(*args, **kwargs):
+            result = actual(*args, **kwargs)
+            clock[0] = 102.0
+            return result
+        with patch.object(startup.time, 'monotonic', side_effect=lambda: clock[0]), \
+                patch.object(startup, 'read_git', side_effect=late) as reader:
+            with self.assertRaises(StartupError): self.combined(budget=budget)
+        self.assertEqual(reader.call_count, 1)
+        self.assertEqual(reader.call_args.kwargs['timeout'], 7)
+        self.assertEqual(reader.call_args.kwargs['deadline'], 101.0)
+        self.assertGreater(budget['bytes'], 5)
+
+    def test_combined_owner_total_cap_is_distinct_from_first_component_cap(self):
+        from runtime import startup
+        actual = startup.read_git
+        _, first = actual(self.repo, 'rev-parse', '--path-format=absolute', '--show-toplevel', '--git-common-dir')
+        _, second = actual(self.repo, 'rev-parse', '--absolute-git-dir')
+        total = len(first)+len(second)
+        budget = dict(paths=4, bytes=17)
+        with patch.object(startup, 'read_git', wraps=actual) as reader:
+            self.assertEqual(self.combined(budget=budget, total_limit=total)[2], second)
+        self.assertEqual(reader.call_args.kwargs['limit'], total)
+        self.assertEqual(budget['bytes'], 17+total)
+        budget = dict(paths=4, bytes=17)
+        with patch.object(startup, 'read_git', wraps=actual) as reader:
+            with self.assertRaises(StartupError): self.combined(budget=budget, total_limit=total-1)
+        self.assertEqual(reader.call_count, 1)
+        self.assertEqual(reader.call_args.kwargs['limit'], total-1)
+        self.assertGreaterEqual(budget['bytes'], 8*1024*1024)
+
+    def test_combined_post_read_preserves_path_and_counter_type_guards(self):
+        from runtime import startup
+        actual = startup.read_git
+        for field, value in (('paths', 4097), ('paths', -1), ('paths', 1.5), ('paths', True), ('bytes', 1.5)):
+            with self.subTest(field=field, value=value):
+                budget = dict(paths=4, bytes=17)
+                def corrupt(*args, **kwargs):
+                    result = actual(*args, **kwargs)
+                    budget[field] = value
+                    return result
+                with patch.object(startup, 'read_git', side_effect=corrupt):
+                    with self.assertRaises(StartupError): self.combined(budget=budget)

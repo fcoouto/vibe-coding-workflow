@@ -251,6 +251,62 @@ class OnboardingTests(unittest.TestCase):
             self.module().inspect_project(self.base, self.directory, request)
         self.assertFalse((self.directory / "plan.json").exists())
 
+    def test_checkout_identity_batches_keep_full_record_bytes_and_later_window(self):
+        from runtime import startup
+        import time
+        module = self.module()
+        root, common = startup.checkout(self.repo)
+        _, git_raw = startup.read_git(self.repo, "rev-parse", "--absolute-git-dir")
+        git_dir = Path(os.fsdecode(git_raw.rstrip(b"\n")))
+        expected = dict(root=str(root), primary_root=str(root), git_dir=str(git_dir),
+            git_common_dir=str(common), binding={name: module._filesystem_binding(path)
+            for name, path in (("root", root), ("primary_root", root), ("git_dir", git_dir), ("git_common_dir", common))},
+            membership="unknown", snapshot=None)
+        calls = []
+        actual = startup.read_git
+        def observe(*args, **kwargs):
+            result = actual(*args, **kwargs)
+            calls.append((args, kwargs, result))
+            return result
+        budget = dict(paths=9, bytes=123, deadline=time.monotonic()+30)
+        with patch.object(startup, "read_git", side_effect=observe):
+            observed, error = module._checkout_observation(str(self.repo), budget)
+        self.assertIsNone(error)
+        self.assertEqual(observed, expected)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual([call[0][1] for call in calls], ["rev-parse", "worktree", "rev-parse"])
+        self.assertEqual([call[1].get("timeout", 5) for call in calls], [7, 5, 7])
+        self.assertEqual(budget["bytes"], 123+sum(len(call[2][1]) for call in calls))
+        self.assertTrue(all(call[1]["deadline"] == budget["deadline"] for call in calls))
+        # Changing the physical primary during the list window must not reuse selected facts.
+        calls.clear()
+        displaced = self.repo.with_name("displaced-primary")
+        def replace_after_list(*args, **kwargs):
+            result = actual(*args, **kwargs)
+            if args[1] == "worktree":
+                self.repo.rename(displaced)
+                self.repo.mkdir()
+            return result
+        with patch.object(startup, "read_git", side_effect=replace_after_list):
+            _, error = module._checkout_observation(str(self.repo), dict(paths=0, bytes=0))
+        self.assertIsNotNone(error)
+
+    def test_combined_identity_transport_obeys_smaller_owner_remainder(self):
+        from runtime import startup
+        module = self.module()
+        actual = startup.read_git
+        calls = []
+        def observe(*args, **kwargs):
+            calls.append(kwargs["limit"])
+            return actual(*args, **kwargs)
+        budget = dict(paths=3, bytes=17)
+        with patch.object(module, "MAX_TOTAL", 80), patch.object(startup, "read_git", side_effect=observe):
+            _, error = module._checkout_observation(str(self.repo), budget)
+        self.assertIsNotNone(error)
+        self.assertEqual(calls, [63])
+        self.assertIn("aggregate", error)
+        self.assertGreaterEqual(budget["bytes"], 80)
+
     def test_checkout_observer_accepts_paths_only_and_preserves_used_budget_and_deadline(self):
         from runtime import startup
         import time
