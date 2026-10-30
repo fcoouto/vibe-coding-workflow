@@ -1,18 +1,33 @@
-"""Bounded D7 fixture decisions, without source authentication or merge authority.
+"""Bounded D7 fixture decisions and read-only GitHub metadata, without merge authority.
 
 Policy must eventually come from a protected configuration and observations from
 qualified sources. Neither requirement is established by passing Python/JSON data.
 This module intentionally has no publishing or production authorization path.
 """
 
+from datetime import datetime, timezone
+from email.parser import BytesParser
+from email.utils import parsedate_to_datetime
+import hashlib
 import json
+from pathlib import Path
 import re
+import shutil
+import stat
+import subprocess
+import time
+from urllib.parse import quote
+
+from runtime.doctor import NativeProcess, ObservationError
+from runtime.startup import StartupError, json_object
 
 
 MAX_INPUT = 512 * 1024
 MAX_ITEMS = 128
 COVERAGE = {'general', 'security', 'behavior'}
 COMMON = ('id', 'run_id', 'source', 'binding', 'observed_at', 'conclusion')
+GITHUB_SECONDS = 15
+GITHUB_API_VERSION = '2026-03-10'
 
 
 class GateError(ValueError):
@@ -71,15 +86,19 @@ def _pins(value, version=1):
     _digest(value['runtime_digest'])
 
 
+def _target_ref(value):
+    _text(value)
+    _require(value.startswith('refs/heads/') and len(value) > len('refs/heads/'))
+    _require(not any(char.isspace() or char in '~^:?*[\\' for char in value) and
+             '..' not in value and '@{' not in value and not value.endswith('.') and
+             all(part and not part.startswith('.') and not part.endswith('.lock') for part in value.split('/')))
+
+
 def _binding(value, version=1):
     _fields(value, ('repository', 'target', 'head', 'base', 'candidate_digest', 'queue', 'pins', 'definitions_digest'))
     _text(value['repository'])
     _require(re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', value['repository']) is not None)
-    _text(value['target'])
-    _require(value['target'].startswith('refs/heads/') and len(value['target']) > len('refs/heads/'))
-    _require(not any(char.isspace() or char in '~^:?*[\\' for char in value['target']) and
-             '..' not in value['target'] and '@{' not in value['target'] and not value['target'].endswith('.') and
-             all(part and not part.startswith('.') and not part.endswith('.lock') for part in value['target'].split('/')))
+    _target_ref(value['target'])
     for key in ('head', 'base'):
         _digest(value[key], commit=True)
     _digest(value['candidate_digest'])
@@ -380,3 +399,134 @@ def read_envelope(raw):
         return validate_envelope(value)
     except (ValueError, TypeError, UnicodeError, RecursionError):
         raise GateError('Invalid repository gate input') from None
+
+
+def _github_output(executable, arguments, deadline, limit=512 * 1024):
+    child = NativeProcess([str(executable), *arguments], deadline, stdin=subprocess.DEVNULL)
+    try:
+        raw = b''
+        while True:
+            chunk = child.read(deadline)
+            if not chunk:
+                break
+            raw += chunk
+            if len(raw) > limit:
+                raise ObservationError('github_output_limit')
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ObservationError('timeout')
+        return raw, child.process.wait(timeout=remaining)
+    finally:
+        child.close()
+
+
+def _github_request(executable, endpoint, deadline):
+    raw, code = _github_output(executable, ['api', '--hostname', 'github.com', '--method', 'GET', '--include',
+        '-H', 'Accept: application/vnd.github+json', '-H', 'X-GitHub-Api-Version: ' + GITHUB_API_VERSION,
+        '-H', 'Cache-Control: no-cache', endpoint], deadline)
+    header, separator, body = raw.replace(b'\r\n', b'\n').partition(b'\n\n')
+    lines = header.split(b'\n')
+    _require(separator and re.fullmatch(rb'HTTP/(?:1\.[01]|2(?:\.0)?) [0-9]{3}(?: [\x20-\x7e]*)?', lines[0]))
+    _require(all(re.fullmatch(rb'[A-Za-z0-9-]+:[\x20-\x7e]*', line) for line in lines[1:]))
+    status = int(lines[0].split()[1])
+    headers = BytesParser().parsebytes(b'\n'.join(lines[1:]) + b'\n\n')
+    _require(not headers.defects and all(len(headers.get_all(key, [])) == 1
+        for key in ('Content-Type', 'Date', 'X-GitHub-Request-Id')) and len(headers.get_all('ETag', [])) <= 1)
+    _require(headers.get_content_type() == 'application/json')
+    date, request_id, etag = (headers.get(key) for key in ('Date', 'X-GitHub-Request-Id', 'ETag'))
+    for value in (date, request_id, etag):
+        if value is not None:
+            _text(value)
+    _require(parsedate_to_datetime(date).tzinfo is not None)
+    if status != 200:
+        raise ObservationError('github_http_' + str(status))
+    if code != 0:
+        raise ObservationError('github_request_failed')
+    return json_object(body), dict(endpoint=endpoint, status=status, server_date=date, etag=etag, request_id=request_id)
+
+
+def _github_branch(value):
+    _target_ref('refs/heads/' + value['ref'])
+    _digest(value['sha'], commit=True)
+    repository = value['repo']
+    _integer(repository['id'], 1)
+    _integer(repository['owner']['id'], 1)
+    return dict(repository_id=repository['id'], owner_id=repository['owner']['id'], ref=value['ref'], sha=value['sha'])
+
+
+def observe_github(repository, target_ref, pull_number):
+    """Read selected server metadata through existing gh authentication; never issue authority.
+
+    Responses are sequential observations, not an atomic snapshot or native D5/D6
+    evidence. Executable hashes and HTTP metadata establish no protected custody.
+    """
+    started = time.monotonic()
+    deadline = started + GITHUB_SECONDS
+    started_at = datetime.now(timezone.utc).isoformat()
+    try:
+        _text(repository)
+        _require(re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository) is not None and
+                 all(part not in ('.', '..') for part in repository.split('/')))
+        _target_ref(target_ref)
+        _integer(pull_number, 1)
+        selected = shutil.which('gh')
+        if selected is None:
+            raise ObservationError('github_executable_unavailable')
+        executable = Path(selected).resolve(strict=True)
+        _require(stat.S_ISREG(executable.stat().st_mode))
+        fingerprint = hashlib.sha256()
+        with executable.open('rb') as stream:
+            while True:
+                if time.monotonic() >= deadline:
+                    raise ObservationError('timeout')
+                chunk = stream.read(64 * 1024)
+                if not chunk:
+                    break
+                fingerprint.update(chunk)
+        raw, code = _github_output(executable, ['--version'], deadline, limit=4096)
+        version = raw.decode('ascii').splitlines()[0]
+        _require(code == 0 and re.fullmatch(r'gh version [0-9]+\.[0-9]+\.[0-9]+[^\r\n]*', version) is not None)
+        _text(version)
+        prefix = '/repos/' + repository
+        endpoints = ['/user', prefix, prefix + '/pulls/' + str(pull_number),
+                     prefix + '/git/ref/' + quote(target_ref[len('refs/'):], safe='/')]
+        values, requests = [], []
+        for endpoint in endpoints:
+            value, provenance = _github_request(executable, endpoint, deadline)
+            values.append(value)
+            requests.append(provenance)
+        account, repo, pull, target = values
+        _text(account['login'])
+        _integer(account['id'], 1)
+        _integer(repo['id'], 1)
+        _integer(repo['owner']['id'], 1)
+        _text(repo['node_id'])
+        _text(repo['full_name'])
+        _text(repo['owner']['login'])
+        _require(repo['full_name'].casefold() == repository.casefold() and
+                 repo['owner']['login'].casefold() == repository.split('/')[0].casefold())
+        _integer(pull['id'], 1)
+        _integer(pull['number'], 1)
+        _require(pull['number'] == pull_number and pull['state'] in ('open', 'closed') and
+                 type(pull['merged']) is bool and type(pull['draft']) is bool)
+        base, head = _github_branch(pull['base']), _github_branch(pull['head'])
+        _require(base['repository_id'] == repo['id'] and base['owner_id'] == repo['owner']['id'] and
+                 base['ref'] == target_ref[len('refs/heads/'):])
+        _require(target['ref'] == target_ref and target['object']['type'] == 'commit')
+        _digest(target['object']['sha'], commit=True)
+        if time.monotonic() >= deadline:
+            raise ObservationError('timeout')
+        return dict(account=dict(login=account['login'], id=account['id']),
+            repository=dict(id=repo['id'], node_id=repo['node_id'], full_name=repo['full_name'], owner_id=repo['owner']['id']),
+            target=dict(ref=target['ref'], sha=target['object']['sha']),
+            pull_request=dict(id=pull['id'], number=pull['number'], state=pull['state'], merged=pull['merged'],
+                              draft=pull['draft'], base=base, head=head),
+            provenance=dict(mechanism='github-rest-via-gh', host='github.com', api_version=GITHUB_API_VERSION,
+                resolved_path=str(executable), version=version, sha256=fingerprint.hexdigest(),
+                started_at=started_at, finished_at=datetime.now(timezone.utc).isoformat(),
+                duration=time.monotonic() - started, requests=requests), merge_authority=False)
+    except ObservationError:
+        raise
+    except (GateError, StartupError, OSError, ValueError, TypeError, KeyError, IndexError,
+            UnicodeError, RecursionError, OverflowError, subprocess.SubprocessError):
+        raise ObservationError('github_observation_unavailable') from None
