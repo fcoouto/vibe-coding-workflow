@@ -6299,12 +6299,12 @@ def _linked_preparation_facts(pointer,authorities,*,writer=None,read_context=Non
     except StopIteration as done:return done.value
 
 
-def _linked_preparation_read_facts(pointer,authorities,*,read_context=None,read_roster=None):
+def _linked_preparation_read_facts(pointer,authorities,*,read_context=None,read_roster=None,serial_members=False):
     """Only the read-only observation owner schedules member jobs outside its readers."""
     if read_context is None and read_roster is None:
         with _linked_preparation_read_roster(pointer,authorities) as current:
-            return _linked_preparation_read_facts(pointer,authorities,read_context=None,read_roster=current)
-    steps=_linked_preparation_steps(pointer,authorities,read_context=read_context,read_roster=read_roster)
+            return _linked_preparation_read_facts(pointer,authorities,read_context=None,read_roster=current,serial_members=serial_members)
+    steps=_linked_preparation_steps(pointer,authorities,read_context=read_context,read_roster=read_roster,serial_members=serial_members)
     try:
         job=next(steps)
         while True:
@@ -6314,7 +6314,77 @@ def _linked_preparation_read_facts(pointer,authorities,*,read_context=None,read_
     except StopIteration as done:return done.value
 
 
-def _linked_preparation_steps(pointer,authorities,*,writer=None,read_context=None,read_roster=None):
+def _linked_preparation_member_inputs(context,ref,task,basis,certificate,*,read_context=None,read_roster=None):
+    """Collect complete ordinary live-member inputs; unsupported families retain full validation."""
+    from runtime import changes,delegation
+    with _preparation_database(context,None) as db:
+        actual=state._task(db,ref['scope_id'],ref['client'],ref['session_id'],ref['task_id'])
+        _require(actual==task and _read(None,task['writer_stop']['linked'],context=context,db=db)==basis,
+            'Linked preparation member changed during certificate validation')
+        changes._stopped_certificate_shape(certificate)
+        all_records=delegation._ledger(None,db,context=context)
+        guidance=delegation._closure_guidance_inputs(context,db,all_records)
+        rows=_evidence_inventory_rows(db)
+        if basis['version']!=2 or not task.get('lifecycle') or task['lifecycle']['safe_closed_at'] is not None:return None
+        if any(row['metadata']['status']!='live' for row in rows) or db.execute('select 1 from retired_identities limit 1').fetchone():return None
+        if os.path.lexists(context.directory/'model-guidance') or guidance['cache']['files'] or guidance['cache']['folder'] is not None:return None
+        owners=[row['task'] for row in basis['members'] if row['task']['authority']==ref['authority']]
+        for record in all_records:
+            data=record['data']
+            if data['role']!='check' or data['status']!='settled' or data['result']!=dict(outcome='completed'):return None
+            owner=next((owner for owner in owners if all(record['owner'][key]==owner[key]
+                for key in ('scope_id','client','session_id','task_id'))),None)
+            if owner is None:return None
+            current=state._task(db,owner['scope_id'],owner['client'],owner['session_id'],owner['task_id'])
+            if current is None or not current.get('lifecycle') or current['lifecycle']['safe_closed_at'] is not None:return None
+            attempt=next((attempt for attempt in current.get('evidence',{}).get('attempts',[]) if attempt['id']==record['id']),None)
+            if attempt is None or attempt['kind']!='check' or attempt['status']!='passed':return None
+            reconciliation=_read(None,data['reconciliation'],context=context,db=db)
+            _require(data.get('lifecycle') and reconciliation.get('version')==2 and
+                reconciliation.get('proof',{}).get('kind')=='check-writer-reconciliation' and
+                data['observation'] is not None and reconciliation.get('current_candidate') is not None,
+                'Release ordinary check lacks actual dated reconciliation/execution support')
+        for row in guidance['rows']:
+            metadata=guidance['metadata'].get(row[0]);owner=metadata['owner'].get('task') if metadata is not None else None
+            if owner is None:continue
+            body=guidance['bodies'][_raw(dict(name=row[0],digest=row[1])).decode()]
+            if owner not in owners or body.get('kind') not in {'linked-closure-preparation','source-import-mandate'}:return None
+        local=changes._linked_live_certificate_inputs(context,db,dict(reference=ref,pins=task['pins']),basis)
+        if local is None:return None
+        _require(changes._stopped_certificate_from_inputs(_canonical_plain(local)['certificate_inputs'])==certificate,
+            'Linked preparation member certificate changed')
+        records=delegation._closure_assignments(context,db,ref,task,certificate,read_context=read_context,read_roster=read_roster)
+        if not records:return None
+        projection=_closure_assignment_projection(context,db,task,records)
+        physical=_historical_inventory(context,db,rows);folder=context.directory/'evidence'
+        files=sorted(path.name for path in folder.iterdir())
+        _require(files==sorted(row['reference']['name'] for row in physical if row['stat'] is not None),
+            'Unaccounted evidence content protects preparation')
+        generation=changes._recovery_generation(db,[dict(reference=owner) for owner in owners],all_records)
+        return dict(task=actual,basis=basis,certificate=certificate,local=local,records=records,ledger=all_records,
+            guidance=guidance,projection=projection,physical=physical,files=files,folder_binding=_binding(folder),generation=generation)
+
+
+def _observe_linked_preparation_member(context,ref,task,basis,certificate,*,read_context=None,read_roster=None):
+    """Close the owned member reader before each original guidance job, then recollect."""
+    from runtime import delegation
+    inputs=_linked_preparation_member_inputs(context,ref,task,basis,certificate,read_context=read_context,read_roster=read_roster)
+    if inputs is None:return None
+    assembly=delegation._closure_guidance_assembly(inputs['guidance'])
+    try:
+        job=next(assembly)
+        while True:
+            with _context_database(context) as db:
+                response=delegation._resolve_closure_guidance_job(context,db,job,read_context=read_context,read_roster=read_roster)
+            job=assembly.send(response)
+    except StopIteration as done:guidance=done.value
+    current=_linked_preparation_member_inputs(context,ref,task,basis,certificate,read_context=read_context,read_roster=read_roster)
+    _require(current is not None and current==inputs,'Linked preparation member inputs changed during guidance validation')
+    return dict(records=inputs['records'],projection=inputs['projection'],
+        guidance=_finish_linked_read_context(guidance,read_context,read_roster=read_roster))
+
+
+def _linked_preparation_steps(pointer,authorities,*,writer=None,read_context=None,read_roster=None,serial_members=False):
     """Complete semantic/source facts; recovery interpretation belongs to the outer acquisition."""
     from runtime import changes,delegation
     content=_linked_contract(pointer)
@@ -6343,6 +6413,17 @@ def _linked_preparation_steps(pointer,authorities,*,writer=None,read_context=Non
         _require(isinstance(response,dict) and set(response)=={'job','result'} and response['job']==job and
             isinstance(response['result'],dict),'Preparation member certificate is unresolved or mismatched')
         certificate=response['result']
+        observed=(_observe_linked_preparation_member(context,ref,task,basis,certificate,read_context=read_context,read_roster=read_roster)
+            if serial_members and writer is None else None)
+        if observed is not None:
+            records=observed['records'];projection=observed['projection'];guidance=observed['guidance'];ids={r['id'] for r in records}
+            projection.update(native_guidance=[item for item in guidance['native'] if item['reference']['id'] in ids],scope_guidance=guidance['sources'])
+            local=deepcopy(task);local.pop('lifecycle',None);local['evidence'].pop('linked_verification',None)
+            refs=[edge['reference'] for edge in _artifact_dependencies(local)]+guidance['references']
+            for record in records:refs.extend(edge['reference'] for edge in _artifact_dependencies(record))
+            pending.extend(dict(authority=ref['authority'],artifact=source) for source in refs)
+            members.append(dict(reference=ref,task=dict(task,lifecycle=dict(created_at=task['lifecycle']['created_at'],safe_closed_at=None,closure=None,compact=None)),certificate=certificate,projection=projection,guidance=guidance))
+            continue
         with _preparation_database(context,writer) as db:
             _require(state._task(db,ref['scope_id'],ref['client'],ref['session_id'],ref['task_id'])==task and
                 _read(None,task['writer_stop']['linked'],context=context,db=db)==basis,
@@ -6730,7 +6811,7 @@ def _prepared_certificate_facts(certificates,facts,receipts):
             required<={_raw(a) for a in prepared['authorities']},'Release actual preparation pointer/component/authority changed')
 
 
-def _resolve_prepared_certificate_job(job,*,read_context=None,read_roster=None):
+def _resolve_prepared_certificate_job(job,*,read_context=None,read_roster=None,serial_members=False):
     """Run original full jobs only after the release owner closes its outer readers."""
     from runtime import changes
     _require(job['kind']=='release-preparation','Unknown release preparation job')
@@ -6743,7 +6824,7 @@ def _resolve_prepared_certificate_job(job,*,read_context=None,read_roster=None):
         else:raise state.StateError('Release linked certificate has unresolved obligations')
         _require(certificate==member['prepared']['content']['stopped'],
             'Release full basis result differs from registered stopped owner')
-    facts=_linked_preparation_read_facts(job['pointer'],job['authorities'],read_context=read_context,read_roster=read_roster)
+    facts=_linked_preparation_read_facts(job['pointer'],job['authorities'],read_context=read_context,read_roster=read_roster,serial_members=serial_members)
     _require(not facts.get('discovered_authorities'),'Release preparation discovered an unheld authority')
     receipts={_raw(m['reference']).decode():_preparation_receipt(facts,m['reference']) for m in facts['members']}
     _prepared_certificate_facts(job['certificates'],facts,receipts)

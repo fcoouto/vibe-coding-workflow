@@ -3393,7 +3393,7 @@ def _check_release_source_preflight(source):
     for group in groups:
         group['members']=[m for inputs in captured for m in _canonical_plain(inputs)['members']
             if any(m['reference']==c['reference'] for c in group['certificates'])]
-        response=evidence._resolve_prepared_certificate_job(group,read_context=evidence._bind_linked_read_context(group['pointer'],group['authorities'],basis=group['certificates'][0]['linked']))
+        response=evidence._resolve_prepared_certificate_job(group,read_context=evidence._bind_linked_read_context(group['pointer'],group['authorities'],basis=group['certificates'][0]['linked']),serial_members=True)
         d3._require(isinstance(response,dict) and set(response)=={'job','result'} and response['job']==group and
             isinstance(response['result'],dict) and set(response['result'])=={'facts','receipts'},
             'Release preparation job is unresolved or mismatched')
