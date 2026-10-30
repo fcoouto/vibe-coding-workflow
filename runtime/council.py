@@ -255,7 +255,7 @@ def _external_brief(value, phase, member, files, timeout_seconds):
         brief['objective'] = recovery.objective(value, phase, member, brief['objective'])
         fix = value['recovery'][member].get('active_correction', {})
         brief['council'].update(recovery_version=3, candidate_id=recovery.current(value, member)['candidate_id'],
-            attempt_id=recovery.attempt_identity(value, phase, member), generation=value['critique_generation'],
+            attempt_id=recovery.attempt_identity(value, phase, member), generation=recovery.evidence_generation(value, phase),
             catch_up=recovery.catch_up(value, phase, member),
             request_representation=fix.get('representation', 'original'))
     return brief
@@ -404,6 +404,8 @@ def _phase(run, value, phase):
             _require(recovery.prior_stopped(value, current), 'phase_not_ready')
         _require(_settled(observed) or expired and stopped, 'phase_not_ready')
         _freeze(run, value, current, observed)
+        if value.get('version') == 3 and phase == 'synthesis':
+            recovery.select_generation(value, expired=expired)
         value['phase'] = phase
         _save(run, value)
     _check_frozen(run, value)
@@ -515,7 +517,7 @@ def _reconcile_inputs(directory, inputs, *, sealed=False):
 
 
 def _critique_snapshot(run, value, phase='critique'):
-    suffix = '-g' + str(value['critique_generation']) if value.get('version') == 3 else ''
+    suffix = '-g' + str(recovery.evidence_generation(value, phase)) if value.get('version') == 3 else ''
     target = run / (phase + suffix + '-snapshot')
     key = phase + suffix + '_manifest'
     if key in value:
@@ -552,6 +554,8 @@ def _critique_snapshot(run, value, phase='critique'):
 
 def resume_member(run: Path, phase: str, member: str) -> dict:
     run = Path(run)
+    prepared = _resume_preparation(run, phase, member)
+    if prepared is not None: return prepared
     with _locked(run) as value:
         _identity(value, phase, member)
         _require(_external(value, member) and (phase != 'synthesis' or value.get('version', 1) >= 2), 'invalid_council_member')
@@ -648,31 +652,68 @@ def _packet(run: Path, phase: str, member: str, *, native_receipt=None) -> dict:
         _require(native_receipt is None, 'native_admission_for_external')
         brief = _external_brief(value, phase, member, list(manifest['files']), _remaining(value, phase))
         if value.get('version') == 3:
-            value['members'][key] = dict(kind='external', worker_run=str(_worker_path(value, phase, member)))
+            value['members'][key] = dict(kind='external', worker_run=str(_worker_path(value, phase, member)),
+                                         preparation_timeout_seconds=brief['timeout_seconds'])
             recovery.bind_attempt(value, phase, member)
             _save(run, value)
     # Existing worker identity owns exclusivity; settings admission never nests under this lock.
+    worker_run = _prepare_external(run, value, phase, member, brief, source, manifest)
+    return dict(base, kind='external', worker_run=str(worker_run), timeout_seconds=brief['timeout_seconds'])
+
+
+def _prepare_external(run, value, phase, member, brief, source, manifest):
+    key = _key(phase, member)
     try:
         worker_run = workers.prepare_council(Path(value['root']), brief, source, manifest, **value['management'])
-    except (OSError, ValueError):
+    except (OSError, ValueError) as error:
         if value.get('version') == 3:
             with _locked(run) as failed:
                 owner = failed['members'][key]
-                owner['preparation_failure'] = dict(state='failed', local_execution_stopped=True,
-                    failure=dict(category='integration', launch_stage='before_spawn'),
+                busy = str(error) in workers.BUSY_REASONS
+                deadline = value['started_monotonic'] + _end(value, phase)
+                owner['preparation_failure'] = dict(state='not_launched' if busy else 'failed',
+                    local_execution_stopped=True, session_id=None, deadline_monotonic=deadline,
+                    deadline_wall=value['started_wall'] + _end(value, phase),
+                    failure=dict(category='integration', launch_stage='before_spawn',
+                                 **({'reason': str(error)} if busy else {})),
                     reported_cost_usd=0, known_cost_subtotal_usd=0, accounting_complete=True)
                 _save(run, failed)
         raise
     with _locked(run) as value:
         if value.get('version') == 3:
             _require(value['members'].get(key, {}).get('worker_run') == str(worker_run), 'council_worker_identity_changed')
+            value['members'][key].pop('preparation_failure', None)
         else:
             value['members'][key] = dict(kind='external', worker_run=str(worker_run))
         if value.get('version', 1) >= 2:
             value['members'][key]['brief_sha256'] = _digest(_json(onboarding.read_request(_read(worker_run / 'brief.json', workers.LIMIT), workers.LIMIT)))
         _save(run, value)
         _remaining(value, phase)
-    return dict(base, kind='external', worker_run=str(worker_run), timeout_seconds=brief['timeout_seconds'])
+    return worker_run
+
+
+def _resume_preparation(run, phase, member):
+    with _locked(run) as value:
+        item = value['members'].get(_key(phase, member), {})
+        failure = item.get('preparation_failure', {})
+        if value.get('version') != 3 or not workers.resumable(failure): return None
+        _identity(value, phase, member)
+        _require(_external(value, member, phase) and value['phase'] == phase, 'phase_already_closed')
+        _remaining(value, phase)
+        _check_frozen(run, value)
+        path = _worker_path(value, phase, member)
+        _require(item.get('worker_run') == str(path) and not os.path.lexists(path), 'council_worker_identity_changed')
+        source, manifest = ((run / 'snapshot', value['snapshot_manifest']) if phase == 'investigate' or recovery.catch_up(value, phase, member)
+                            else _critique_snapshot(run, value, phase))
+        brief = _external_brief(value, phase, member, list(manifest['files']), item['preparation_timeout_seconds'])
+        # Claim this preparation once before dropping the lock; concurrent resumes cannot duplicate it.
+        item.pop('preparation_failure')
+        _save(run, value)
+        deadline = min(failure['deadline_monotonic'], value['started_monotonic'] + _end(value, phase))
+        base = dict(run=str(run), phase=phase, member=member, kind='external', worker_run=str(path),
+                    deadline_monotonic=deadline, timeout_seconds=int(_remaining(value, phase)))
+    _prepare_external(run, value, phase, member, brief, source, manifest)
+    return base
 
 
 def _check_external_brief(run, value, phase, member, brief):
@@ -680,7 +721,7 @@ def _check_external_brief(run, value, phase, member, brief):
     _require(_external(value, member, phase), 'invalid_council_member')
     _check_frozen(run, value)
     independent = phase == 'investigate' or recovery.catch_up(value, phase, member)
-    suffix = '-g' + str(value['critique_generation']) if value.get('version') == 3 else ''
+    suffix = '-g' + str(recovery.evidence_generation(value, phase)) if value.get('version') == 3 else ''
     source = run / ('snapshot' if independent else phase + suffix + '-snapshot')
     manifest = value['snapshot_manifest' if independent else phase + suffix + '_manifest']
     snapshot.verify(source, manifest)

@@ -355,6 +355,10 @@ contention persists, `not_launched` proves this original dispatch did not spawn.
 Then use `resume-member` with exactly `{run, phase, member}` for that external
 seat. Version 3 additionally permits a provably still-`prepared` owned attempt
 whose packet response was lost; it verifies the exact brief/copy before reusing it.
+Known before-spawn preparation contention may leave no worker directory yet;
+`resume-member` claims that same reserved identity and prepares it with its original
+brief allowance, consent and absolute deadline. Genuine preparation defects remain
+blockers. A concurrent resume cannot claim a second preparation.
 It reuses the original worker path, consent revision, evidence and durable
 absolute worker deadline, also bounded by the unchanged phase/total ceiling.
 Current checkout, phase, cancellation, consent, snapshot, qualified executable,
@@ -451,7 +455,9 @@ through `publish-generation`. Rerun every critique whose packet changed. Same
 candidate corrections reuse the same generation. Accepted superseded critiques
 remain private evidence and accounted usage, never mixed into the active round.
 At the critique deadline, an unsettled-but-stopped catch-up is excluded and the
-previous unchanged coherent generation may support a reduced panel; no running
+newest retained qualifying coherent generation supplies the entire synthesis
+packet and its participant bindings, even if a published successor did not obtain
+a usable critique. Reports from different generations never combine; no running
 owner can be ignored. No recovery borrows the synthesis reserve.
 
 A failed chair can be corrected or replaced during synthesis only, in a fresh
@@ -462,7 +468,7 @@ allowance even on role transfer. This does not rebuild valid earlier rounds;
 status discloses separate investigation/critique/synthesis identities.
 
 Version-3 `status` adds candidate/attempt lineage, remaining per-tenure allowances,
-role bindings, `critique_generation`, superseded generations, all-owner stop
+role bindings, `critique_generation`, selected `synthesis_generation`, superseded generations, all-owner stop
 requests and accounting across accepted, failed, rejected and superseded attempts.
 Cancellation stops new research and inference; terminate every returned exact
 supervisor/participant handle and retain uncertainty until observed stopped.

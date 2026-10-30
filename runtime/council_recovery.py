@@ -61,11 +61,15 @@ def attempt_identity(value, phase, member):
     return str(uuid.uuid5(uuid.NAMESPACE_URL, value['run'] + ':' + phase + ':' + member + ':' + str(value['recovery'][member]['serial'])))
 
 
+def evidence_generation(value, phase):
+    return value.get('synthesis_generation', value['critique_generation']) if phase == 'synthesis' else value['critique_generation']
+
+
 def bind_attempt(value, phase, member):
     item = value['members'][c._key(phase, member)]
     item.update(attempt_id=attempt_identity(value, phase, member), candidate_id=current(value, member)['candidate_id'],
                 phase=phase, member=member, seat=copy.deepcopy(c._seat(value, member, phase)),
-                generation=value['critique_generation'], catch_up=catch_up(value, phase, member))
+                generation=evidence_generation(value, phase), catch_up=catch_up(value, phase, member))
     correction = value['recovery'][member].get('active_correction')
     if correction: item['correction'] = copy.deepcopy(correction)
     binding = dict(candidate_id=item['candidate_id'], model=item['seat']['model'],
@@ -368,7 +372,9 @@ def publish_generation(run):
         for member in pending:
             owner = value['members'].get(c._key('critique', member))
             c._require(owner is not None and observe(value, owner).get('state') == 'accepted', 'catch_up_not_accepted')
-        value['generations'].append(dict(generation=value['critique_generation'], frozen=copy.deepcopy(value['frozen']), superseded=True))
+        freeze(run, value, 'critique', c._observations(value, 'critique'))
+        value['generations'].append(dict(generation=value['critique_generation'], frozen=copy.deepcopy(value['frozen']),
+            role_bindings=copy.deepcopy(value['role_bindings']), phase_execution=copy.deepcopy(value['phase_execution']), superseded=True))
         value['retained_frozen'].update(value['frozen'])
         value['frozen'] = {}
         value['critique_generation'] += 1
@@ -384,6 +390,29 @@ def publish_generation(run):
         freeze(run, value, 'investigate', c._observations(value, 'investigate'))
         c._save(run, value)
         return dict(critique_generation=value['critique_generation'], state='critique_ready')
+
+
+def _coherent_members(frozen, bindings):
+    names = {Path(name).name for name in frozen}
+    return {member for number, member in enumerate(c.GROUP_MEMBERS, 1)
+            if 'initial-' + str(number) + '.md' in names and 'critique-' + str(number) + '.md' in names
+            and bindings.get('investigate', {}).get(member, {}).get('candidate_id') is not None
+            and bindings['investigate'][member]['candidate_id'] == bindings.get('critique', {}).get(member, {}).get('candidate_id')}
+
+
+def select_generation(value, *, expired):
+    value['synthesis_generation'] = value['critique_generation']
+    if not expired or len(_coherent_members(value['frozen'], value['role_bindings'])) >= 2: return
+    for generation in reversed(value['generations']):
+        bindings = generation.get('role_bindings', {})
+        if len(_coherent_members(generation['frozen'], bindings)) < 2: continue
+        value['retained_frozen'].update(value['frozen'])
+        value['frozen'] = copy.deepcopy(generation['frozen'])
+        value['role_bindings']['investigate'] = copy.deepcopy(bindings['investigate'])
+        value['role_bindings']['critique'] = copy.deepcopy(bindings['critique'])
+        value['phase_execution'] = copy.deepcopy(generation['phase_execution'])
+        value['synthesis_generation'] = generation['generation']
+        break
 
 
 def fresh_session(value, session, path):
@@ -466,7 +495,7 @@ def status(run, value):
         accepted_participation={phase: dict(accepted=len(accepted[phase]), expected=1 if phase == 'synthesis' else 3) for phase in c.PHASES},
         fresh_synthesis_available=chair in accepted['synthesis'], remaining_seconds=remaining, timing_certain=timing,
         recovery=recovery, attempts=attempts, role_bindings=value['role_bindings'], critique_generation=value['critique_generation'],
-        generations=value['generations'], members={phase: {m: {k: row[k] for k in ('state', 'local_execution_stopped') if k in row}
+        synthesis_generation=value.get('synthesis_generation'), generations=value['generations'], members={phase: {m: {k: row[k] for k in ('state', 'local_execution_stopped') if k in row}
                                                for m, row in rows.items()} for phase, rows in phases.items()},
         external_total_usd=sum(costs) if external and all(valid(x) for x in costs) and all(x.get('accounting_complete') is True for x in external) else None,
         known_external_subtotal_usd=sum(x for x in known if valid(x)), upstream_cancellation_confirmed=False,

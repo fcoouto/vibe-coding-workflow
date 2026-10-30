@@ -483,3 +483,95 @@ else:
             council.replace_candidate(self.run, 'investigate', 'member-two', alias)
         with self.assertRaisesRegex(ValueError, 'fresh_external_session_required'):
             self.finish('investigate', 'member-one', session=old)
+
+    def test_real_prepare_contention_resumes_original_attempt_and_executes_once(self):
+        self.executable.write_text('''#!/usr/bin/env python3
+import json
+print(json.dumps({'type':'text','sessionID':'prepared-once','part':{'text':'Cited source finding'}}), flush=True)
+print(json.dumps({'type':'step_finish','part':{'reason':'stop','cost':0,'tokens':{}}}), flush=True)
+''')
+        for seat in list(self.request['roster'].values()) + [s for rows in self.request['fallbacks'].values() for s in rows]:
+            seat['permission_qualification']['opencode_sha256'] = hashlib.sha256(self.executable.read_bytes()).hexdigest()
+        self.prepare()
+        with council.settings.admission(self.repo, 'council'):
+            with self.assertRaisesRegex(council.settings.SettingsError, 'openrouter_operation_busy'):
+                council.packet(self.run, 'investigate', 'member-one')
+        before = council.status(self.run)
+        self.assertEqual(before['attempts'][0]['state'], 'not_launched')
+        with council._locked(self.run) as value:
+            owner = copy.deepcopy(value['members']['investigate:member-one'])
+            deadline = value['started_monotonic'] + 600
+            stamp = copy.deepcopy(value['management'])
+        self.assertFalse(Path(owner['worker_run']).exists())
+        packet = council.resume_member(self.run, 'investigate', 'member-one')
+        self.assertEqual(packet['worker_run'], owner['worker_run'])
+        self.assertEqual(packet['deadline_monotonic'], deadline)
+        result = council.workers.execute(Path(packet['worker_run']), self.executable, self.auth,
+            deadline_monotonic=packet['deadline_monotonic'])
+        self.assertEqual(result['state'], 'awaiting_verification')
+        council.verify_external(self.run, 'investigate', 'member-one', 'accepted', ['Verified exact fixture source'])
+        after = council.status(self.run)
+        self.assertEqual(len(after['attempts']), 1)
+        self.assertEqual(after['attempts'][0]['attempt_id'], before['attempts'][0]['attempt_id'])
+        self.assertEqual(after['attempts'][0]['candidate_id'], before['attempts'][0]['candidate_id'])
+        brief = json.loads((Path(packet['worker_run']) / 'brief.json').read_text())
+        self.assertEqual(brief['management'], stamp)
+        with self.assertRaisesRegex(ValueError, 'already_started'):
+            council.workers.execute(Path(packet['worker_run']), self.executable, self.auth)
+
+    def test_preparation_retry_retains_cancel_deadline_and_scope_guards(self):
+        for number, (action, expected) in enumerate((('cancel', 'cancelled'), ('expire', 'deadline_exhausted'),
+                                                    ('disable', 'openrouter_disabled'))):
+            with self.subTest(action=action):
+                self.request['run_id'] = 'prepare-guard-' + str(number)
+                self.prepare()
+                with council.settings.admission(self.repo, 'council'):
+                    with self.assertRaisesRegex(council.settings.SettingsError, 'openrouter_operation_busy'):
+                        council.packet(self.run, 'investigate', 'member-one')
+                if action == 'cancel': council.cancel(self.run)
+                elif action == 'expire':
+                    with council._locked(self.run) as value:
+                        value['started_monotonic'] -= 601; value['started_wall'] -= 601
+                        council._save(self.run, value)
+                else:
+                    council.settings.disable(self.repo, {'expected_revision': self.settings['revision']})
+                with self.assertRaisesRegex(ValueError, expected):
+                    council.resume_member(self.run, 'investigate', 'member-one')
+                self.assertEqual(len(council.status(self.run)['attempts']), 1)
+
+    def test_published_successor_deadline_uses_retained_coherent_generation(self):
+        self.prepare()
+        for member in council.GROUP_MEMBERS: self.finish('investigate', member)
+        for member in ('member-two', 'member-three'): self.finish('critique', member)
+        self.fail_and_diagnose('critique')
+        council.replace_candidate(self.run, 'critique', 'member-one', self.seat(4))
+        self.finish('critique', 'member-one')
+        council.publish_generation(self.run)
+        with council._locked(self.run) as value:
+            retained = value['generations'][0]
+            self.assertTrue(any(name.endswith('/critique-2.md') for name in retained['frozen']))
+            self.assertTrue(any(name.endswith('/critique-3.md') for name in retained['frozen']))
+            self.assertEqual(retained['role_bindings']['investigate']['member-one']['canonical_model'], 'vendor/model-1')
+            import os
+            value['started_monotonic'] -= 961; value['started_wall'] -= 961
+            for owner in council.recovery.owners(value):
+                stamp = value['started_wall'] + (500 if owner['phase'] == 'investigate' else 900)
+                os.utime(Path(owner['worker_run']) / 'result.json', (stamp, stamp))
+            council._save(self.run, value)
+        packet = council.packet(self.run, 'synthesis', 'member-one')
+        self.assertEqual(set(name for name in packet['snapshot_manifest']['files'] if '/critique-' in name),
+                         {'__council__/critique-2.md', '__council__/critique-3.md'})
+        original = self.run / 'generation-1/initial-1.md'
+        self.assertEqual((Path(packet['snapshot']) / '__council__/initial-1.md').read_bytes(), original.read_bytes())
+        path = Path(packet['worker_run']) / 'result.json'
+        council.workers.save(path, dict(state='awaiting_verification', response='Supported reduced-panel synthesis',
+            session_id='fresh-retained-synthesis', local_execution_stopped=True, reported_cost_usd=0,
+            known_cost_subtotal_usd=0, accounting_complete=True))
+        council.verify_external(self.run, 'synthesis', 'member-one', 'accepted', ['Host checked coherent retained evidence'])
+        state = council.status(self.run)
+        self.assertEqual(state['outcome'], 'incomplete')
+        self.assertEqual(state['synthesis_generation'], 1)
+        self.assertEqual(state['critique_generation'], 2)
+        self.assertEqual(state['accepted_participation']['critique']['accepted'], 2)
+        self.assertEqual(state['role_bindings']['investigate']['member-one']['canonical_model'], 'vendor/model-1')
+        self.assertEqual(state['role_bindings']['synthesis']['canonical_model'], 'vendor/model-4')
