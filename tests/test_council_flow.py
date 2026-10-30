@@ -144,6 +144,32 @@ class CouncilFlowTests(CouncilCase):
             council.packet(self.run, 'critique', 'native')
         self.assertEqual(stranger.read_text(), 'keep this file')
 
+    def test_recovery_publication_preserves_destination_created_during_publish(self):
+        for sealed in (False, True):
+            with self.subTest(sealed=sealed):
+                directory = self.root / ('partial-target' if sealed else 'staging-race')
+                directory.mkdir(mode=0o700)
+                retained = directory / 'retained.md'
+                retained.write_bytes(b'retained frozen evidence'); retained.chmod(0o400 if sealed else 0o600)
+                competing = b'concurrent changed artifact: preserve'
+                injected = []
+                def racing(publication):
+                    def publish(source, destination, *args, **kwargs):
+                        if destination == 'report.md':
+                            injected.append(True)
+                            (directory / 'report.md').write_bytes(competing)
+                            (directory / 'report.md').chmod(0o400 if sealed else 0o600)
+                        return publication(source, destination, *args, **kwargs)
+                    return publish
+                with patch.object(council.os, 'replace', side_effect=racing(council.os.replace)), patch.object(council.os, 'link', side_effect=racing(council.os.link)):
+                    with self.assertRaisesRegex(ValueError, 'critique_artifact_conflict'):
+                        council._reconcile_inputs(directory, {'retained.md': b'retained frozen evidence',
+                            'report.md': b'frozen expected report'}, sealed=sealed)
+                self.assertEqual(injected, [True])
+                self.assertEqual((directory / 'report.md').read_bytes(), competing)
+                self.assertEqual(retained.read_bytes(), b'retained frozen evidence')
+                self.assertEqual({path.name for path in directory.iterdir()}, {'retained.md', 'report.md'})
+
     def test_busy_worker_resumes_exact_owner_and_status_projects_safe_failure(self):
         from contextlib import redirect_stdout
         from io import StringIO
@@ -183,13 +209,15 @@ class CouncilFlowTests(CouncilCase):
         for index, target_partial in enumerate((False, True)):
             self.request['run_id'] = 'partial-artifacts-' + str(index)
             self.prepare(); self.investigations()
-            atomic = council.changes._atomic
+            owner = council.changes if target_partial else council
+            helper = '_atomic' if target_partial else '_publish_input'
+            atomic = getattr(owner, helper)
             def interrupted(directory, name, *args, **kwargs):
                 wanted = 'critique-snapshot' if target_partial else 'critique-inputs'
                 if wanted in Path(directory).parts and name == 'evidence.txt':
                     raise KeyboardInterrupt()
                 return atomic(directory, name, *args, **kwargs)
-            with patch.object(council.changes, '_atomic', side_effect=interrupted), self.assertRaises(KeyboardInterrupt):
+            with patch.object(owner, helper, side_effect=interrupted), self.assertRaises(KeyboardInterrupt):
                 council.packet(self.run, 'critique', 'native')
             packet = council.packet(self.run, 'critique', 'native')
             council.snapshot.verify(Path(packet['snapshot']), packet['snapshot_manifest'])

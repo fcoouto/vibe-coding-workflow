@@ -317,6 +317,51 @@ def _phase(run, value, phase):
     _check_frozen(run, value)
 
 
+def _publish_input(directory, name, raw, *, mode, guard):
+    """Durably add frozen bytes without replacing an entry that appeared meanwhile."""
+    descriptor = onboarding._open_path(directory, os.O_RDONLY | os.O_DIRECTORY)
+    temporary = '.council-' + uuid.uuid4().hex
+    created = None
+    try:
+        output = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=descriptor)
+        with os.fdopen(output, 'wb') as stream:
+            created = snapshot._identity(os.fstat(stream.fileno()))
+            stream.write(raw)
+            stream.flush()
+            os.fchmod(stream.fileno(), mode)
+            os.fsync(stream.fileno())
+        guard()
+        _require(snapshot._directory(directory, private=True) == snapshot._identity(os.fstat(descriptor)),
+                 'critique_artifact_conflict')
+        before = os.stat(temporary, dir_fd=descriptor, follow_symlinks=False)
+        snapshot._safe(before)
+        _require(snapshot._identity(before) == created and before.st_mode & 0o777 == mode
+                 and onboarding._read_file(directory / temporary, snapshot.MAX_MANIFEST, private=True,
+                     expected_binding=created) == raw, 'critique_artifact_conflict')
+        try:
+            os.link(temporary, name, src_dir_fd=descriptor, dst_dir_fd=descriptor, follow_symlinks=False)
+        except FileExistsError:
+            raise ValueError('critique_artifact_conflict') from None
+        os.fsync(descriptor)
+    finally:
+        try:
+            if created is not None:
+                try:
+                    before = os.stat(temporary, dir_fd=descriptor, follow_symlinks=False)
+                    _require(snapshot._identity(before) == created and before.st_nlink in (1, 2),
+                             'critique_artifact_conflict')
+                    current = os.open(temporary, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=descriptor)
+                    with os.fdopen(current, 'rb') as stream:
+                        _require(snapshot._identity(os.fstat(stream.fileno())) == created
+                                 and raw.startswith(stream.read(len(raw) + 1)), 'critique_artifact_conflict')
+                    os.unlink(temporary, dir_fd=descriptor)
+                    os.fsync(descriptor)
+                except FileNotFoundError:
+                    pass
+        finally:
+            os.close(descriptor)
+
+
 def _reconcile_inputs(directory, inputs, *, sealed=False):
     """Finish only known frozen files; changed or unfamiliar artifacts stay untouched."""
     if not os.path.lexists(directory): directory.mkdir(mode=0o700)
@@ -364,7 +409,7 @@ def _reconcile_inputs(directory, inputs, *, sealed=False):
                 folder.mkdir(mode=0o700)
                 bindings[folder] = snapshot._directory(folder, private=True)
         _require(not os.path.lexists(dest), 'critique_artifact_conflict')
-        changes._atomic(dest.parent, dest.name, raw, mode=0o400 if sealed else 0o600, guard=guard)
+        _publish_input(dest.parent, dest.name, raw, mode=0o400 if sealed else 0o600, guard=guard)
         signatures[dest] = snapshot._signature(dest.lstat())
     guard()
     if sealed:
