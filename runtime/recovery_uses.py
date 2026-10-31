@@ -347,6 +347,19 @@ def _history_walk(head, metadata):
     return order
 
 
+def _append_history_occurrences(edges, roots, anchor, starts, history_metadata, budget):
+    """Append history rows only; copying, validation and publication remain with the caller."""
+    for start in {key(pointer):pointer for pointer in starts}.values():
+        index = roots.index(anchor['root'])
+        seed = dict(root=index,parent=None,dependency=dict(kind='recovery',reference=start),purpose='retention-only')
+        budget.take(edges=1); budget.retain(seed); edges.append(seed)
+        for parent in _history_walk(start,history_metadata):
+            for dependency in history_metadata[key(parent)]:
+                row = dict(root=index,parent=parent,dependency=dependency,purpose='retention-only')
+                budget.take(edges=1); budget.retain(row); edges.append(row)
+                _require(len(edges)<=MAX_ROWS, 'Recovery history use occurrence bound exceeded')
+
+
 def project_history(inputs, created_at, budget):
     """Pure, incomplete-by-design candidate comparison; never a registration or permission."""
     _require(isinstance(budget, CaptureBudget), 'Recovery history needs its shared capture budget')
@@ -445,15 +458,7 @@ def project_history(inputs, created_at, budget):
         if observed_at is not None: body['journal']['observed_at'] = observed_at
         edges = deepcopy(program['edges']); roots = program['roots']
         starts=([dict(authority=authority,artifact=previous)] if previous else [])+([birth_origin] if birth_origin is not None else [])
-        for start in {key(pointer):pointer for pointer in starts}.values():
-            index = roots.index(anchor['root'])
-            seed = dict(root=index,parent=None,dependency=dict(kind='recovery',reference=start),purpose='retention-only')
-            budget.take(edges=1); budget.retain(seed); edges.append(seed)
-            for parent in _history_walk(start,inputs['history_metadata']):
-                for dependency in inputs['history_metadata'][key(parent)]:
-                    row = dict(root=index,parent=parent,dependency=dependency,purpose='retention-only')
-                    budget.take(edges=1); budget.retain(row); edges.append(row)
-                    _require(len(edges)<=MAX_ROWS, 'Recovery history use occurrence bound exceeded')
+        _append_history_occurrences(edges, roots, anchor, starts, inputs['history_metadata'], budget)
         # Reserve every merged contract copy before constructing its list or canonical form.
         budget.retain(roots); budget.retain(edges)
         budget.take(bytes=2+max(0,len(legacy)-1))

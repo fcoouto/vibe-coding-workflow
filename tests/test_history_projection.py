@@ -41,6 +41,29 @@ class HistoryProjectionTests(unittest.TestCase):
         self.assertTrue(callable(getattr(uses,'project_history',None)), 'history-aware projection is missing')
         return uses.project_history(self.inputs() if inputs is None else inputs, 7, uses.CaptureBudget())
 
+    def with_birth_origin(self, value, origin):
+        binding=dict(device=1,inode=2); project='/project'; repository='repository'; checkout='checkout'
+        physical=dict(version=1,project_id='project',repository_id=repository,checkout_id=checkout,project_root=project,
+            project_binding=binding,primary_root=project,repository_root=project,git_dir=project+'/.git',
+            git_common_dir=project+'/.git',bindings=dict(root=binding,primary_root=binding,git_dir=binding))
+        history=dict(version=1,machine=dict(path='/machine.json',binding=binding,parents={},
+            configuration=dict(version=1,state='ready',private_data_dir='/private',parents={},machine_parents={},authority=A,
+                provenance={},owner={},created_at=7),provenance_metadata={}),inventory=[],related=[],screening_sources=[])
+        intent=dict(identity=IDENTITY,project_id='project',destination=dict(directory=A['directory'],database=A['database'],
+            parents={},missing_directories=[],directory_preimage=dict(status='absent',binding=None),database_preimage='absent'),
+            members=[dict(repository_id=repository,checkout_id=checkout,clients=['codex'],physical_identity=physical)],peers=[],history=history)
+        baseline=dict(version=1,kind='authority-source-baseline',source_contract=2,authority=A,project_id='project',created_at=7,
+            runtime_digest='9'*64,birth_expectation=dict(version=1,identity=IDENTITY,intent_digest=changes.d3._digest(intent)))
+        certificate=dict(version=1,intent=intent,allocation=dict(authority=A,created_at=7),baseline=dict(reference=graph.ARTIFACT,content=baseline),
+            seed_digest=changes.d3._digest(changes._birth_seed(None,intent)))
+        value['template']['birth_handoff']=dict(version=1,certificate=certificate,origin_journal_sha256='8'*64,
+            origin_source=origin)
+        return value
+
+    def retention_starts(self, result):
+        return [row['dependency']['reference'] for row in result['content']['use_contract']['edges']
+            if row['parent'] is None and row['purpose']=='retention-only' and row['dependency']['kind']=='recovery']
+
     def test_previous_is_nested_without_new_direct_raw_demands(self):
         result = self.project()
         self.assertTrue(result['comparison_only'])
@@ -165,6 +188,28 @@ class HistoryProjectionTests(unittest.TestCase):
         value=self.inputs();budget=uses.CaptureBudget(bytes=0)
         with patch.object(uses,'legacy_projection',side_effect=AssertionError('legacy projection materialized before budget')):
             with self.assertRaises(uses.UseContractError):uses.project_history(value,7,budget)
+
+    def test_birth_origin_and_previous_starts_are_preserved_and_deduplicated(self):
+        origin=dict(authority=A,artifact=HEAD);value=self.with_birth_origin(self.inputs(),origin)
+        value['template'].update(version=2,stopped=[],supersedes=[]);result=self.project(value)
+        self.assertIsNone(result['content']['previous']);self.assertEqual(self.retention_starts(result),[origin])
+        value=self.with_birth_origin(self.inputs(),origin);budget=uses.CaptureBudget(edges=8)
+        result=uses.project_history(value,7,budget)
+        self.assertEqual(self.retention_starts(result),[origin]);self.assertEqual(budget.used['edges'],8)
+        distinct=deepcopy(CHILD);result=self.project(self.with_birth_origin(self.inputs(),distinct))
+        self.assertEqual({uses.key(row) for row in self.retention_starts(result)},
+            {uses.key(dict(authority=A,artifact=HEAD)),uses.key(distinct)})
+        parent=dict(authority=A,artifact=HEAD)
+        self.assertTrue(any(row['parent']==parent and row['dependency']==self.inputs()['history'][0]['metadata']['dependencies'][0]
+            for row in result['content']['use_contract']['edges']))
+
+    def test_shared_budget_exhausts_on_generated_history_edge(self):
+        value=self.with_birth_origin(self.inputs(),dict(authority=A,artifact=HEAD))
+        value['template'].update(version=2,stopped=[],supersedes=[])
+        budget=uses.CaptureBudget(edges=3)
+        with self.assertRaisesRegex(uses.UseContractError,'aggregate bound'):
+            uses.project_history(value,7,budget)
+        self.assertEqual(budget.used['edges'],3)
 
     def test_merged_legacy_origin_limit_precedes_route_copy_and_contract_build(self):
         value=self.inputs()
