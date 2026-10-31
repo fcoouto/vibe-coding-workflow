@@ -766,7 +766,6 @@ def _execute(run, brief, executable, auth_data, publish, *, launch_guard=None, d
 
 def verify(run, disposition, checks, *, failure=None):
     run = Path(run)
-    result = json.loads((run / 'result.json').read_text())
     brief = json.loads((run / 'brief.json').read_text())
     guard = nullcontext()
     if 'council' in brief:
@@ -774,6 +773,7 @@ def verify(run, disposition, checks, *, failure=None):
         marker = brief['council']
         guard = council._locked(run.parent / ('council-' + marker['run_id']))
     with guard as value:
+        result = json.loads((run / 'result.json').read_text())
         if value is not None:
             council._require_current_flow(value)
             council._require(value['phase'] == marker['phase'], 'phase_already_closed')
@@ -784,6 +784,11 @@ def verify(run, disposition, checks, *, failure=None):
         if not isinstance(checks, list) or not checks or any(not isinstance(x, str) or not x.strip() for x in checks):
             raise ValueError('native_checks_required')
         if value is not None:
+            if value.get('mode') == 'text':
+                council._require(run == council._worker_path(value, marker['phase'], marker['member_id']),
+                                 'council_worker_identity_changed')
+                council._check_external_brief(run.parent / ('council-' + marker['run_id']), value,
+                                             marker['phase'], marker['member_id'], brief)
             council._require(result.get('local_execution_stopped') is True, 'not_verifiable')
             council._report(result.get('response'))
             if disposition == 'accepted':
@@ -793,7 +798,11 @@ def verify(run, disposition, checks, *, failure=None):
                 failure if failure is not None else result.get('failure'))
         result.update(state=disposition, native_checks=checks,
                       native_fallback_ready=disposition == 'rejected' and result.get('local_execution_stopped') is True)
-        save(run / 'result.json', result)
+        if value is not None and value.get('mode') == 'text':
+            council._seal_external_verification(value, marker['phase'], marker['member_id'], run, result)
+            council._save(run.parent / ('council-' + marker['run_id']), value)
+        else:
+            save(run / 'result.json', result)
         progress(run, disposition)
         return result
 

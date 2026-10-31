@@ -403,6 +403,86 @@ class DirectTests(CouncilCase):
         with self.assertRaisesRegex(ValueError, 'already_started'):
             self.execute(run)
 
+    def ungrouped(self):
+        self.request.pop('group')
+        self.request.pop('chair')
+        self.request['roster'] = dict(zip(council.MEMBERS, self.request['roster'].values()))
+        for seat in self.request['roster'].values():
+            if seat['kind'] == 'external':
+                seat.pop('canonical_model')
+                seat.pop('pricing')
+        self.run = Path(council.prepare(self.repo, self.request)['run'])
+        self.assertEqual(json.loads((self.run / 'manifest.json').read_text())['version'], 1)
+
+    def test_ungrouped_text_verification_seals_reports_through_both_rounds(self):
+        self.ungrouped()
+        reports = {}
+        for phase in ('investigate', 'critique'):
+            for number, member in enumerate(council.MEMBERS, 1):
+                packet = council.packet(self.run, phase, member)
+                if phase == 'critique':
+                    for name, report in reports['investigate'].items():
+                        self.assertEqual((Path(packet['snapshot']) / '__council__' / name).read_bytes(), report)
+                report = f'{phase}: perspective {number}; uncertain, uncited.\n'.encode()
+                reports.setdefault(phase, {})[f'{"initial" if phase == "investigate" else "critique"}-{number}.md'] = report
+                if member == 'native':
+                    council.record_native(self.run, phase, member, self.native_receipt(packet, report.decode()))
+                else:
+                    worker = Path(packet['worker_run'])
+                    self.reply['choices'][0]['message']['content'] = report.decode()
+                    self.execute(worker)
+                    accepted = workers.verify(worker, 'accepted', ['Checked completion, ownership and scope'])
+                    self.assertEqual(accepted['response'].encode(), report)
+                    with self.assertRaisesRegex(ValueError, 'not_verifiable'):
+                        workers.verify(worker, 'accepted', ['Checked again'])
+                    with self.assertRaisesRegex(ValueError, 'already_started'):
+                        self.execute(worker)
+                self.assertEqual(council.status(self.run)['accepted_participation'][phase]['accepted'], number)
+        chair = council.packet(self.run, 'synthesis', 'native')
+        expected = []
+        for phase_reports in reports.values():
+            for name, report in phase_reports.items():
+                self.assertEqual((self.run / name).read_bytes(), report)
+                expected.append(b'## ' + name.encode() + b'\n' + report)
+        self.assertEqual(chair['reports'].encode(), b'\n\n'.join(expected))
+        self.assertEqual(len(self.calls), 4)
+
+    def test_ungrouped_text_verification_rejects_tampering_and_excludes_changed_proof(self):
+        self.ungrouped()
+        packet = council.packet(self.run, 'investigate', 'external-one')
+        worker = Path(packet['worker_run'])
+        result = self.execute(worker)
+        result_path = worker / 'result.json'
+        for key, replacement in (('attempt_id', '00000000-0000-4000-8000-000000000009'),
+                                 ('request_sha256', '0' * 64), ('transport', 'opencode'),
+                                 ('session_id', 'not-a-direct-session')):
+            with self.subTest(stage='before', key=key):
+                workers.save(result_path, dict(result, **{key: replacement}))
+                before = result_path.read_bytes()
+                with self.assertRaisesRegex(ValueError, 'fresh_external_attempt_required'):
+                    workers.verify(worker, 'accepted', ['Checked scope'])
+                self.assertEqual(result_path.read_bytes(), before)
+        workers.save(result_path, result)
+        brief_path = worker / 'brief.json'
+        brief = brief_path.read_bytes()
+        changed = json.loads(brief)
+        changed['objective'] += ' Unapproved request change.'
+        workers.save(brief_path, changed)
+        with self.assertRaisesRegex(ValueError, 'council_worker_brief_changed'):
+            workers.verify(worker, 'accepted', ['Checked scope'])
+        brief_path.write_bytes(brief)
+        accepted = workers.verify(worker, 'accepted', ['Checked completion, ownership and scope'])
+        value = json.loads((self.run / 'manifest.json').read_text())
+        self.assertTrue(council._external_verified(value, value['members']['investigate:external-one'],
+            accepted, result_path.read_bytes()))
+        for key, replacement in (('response', 'Altered answer'), ('request_sha256', '0' * 64),
+                                 ('attempt_id', '00000000-0000-4000-8000-000000000009')):
+            with self.subTest(stage='after', key=key):
+                workers.save(result_path, dict(accepted, **{key: replacement}))
+                self.assertEqual(council.status(self.run)['accepted_participation']['investigate']['accepted'], 0)
+                with self.assertRaisesRegex(ValueError, 'not_verifiable'):
+                    workers.verify(worker, 'accepted', ['Checked again'])
+
     def test_changed_consent_auth_and_free_block_dispatch(self):
         for index, change in enumerate(('consent', 'auth', 'free')):
             self.request['run_id'] = 'binding-' + str(index)

@@ -369,7 +369,7 @@ class CouncilRecoveryTests(CouncilCase):
         with self.assertRaisesRegex(ValueError, 'deadline_exhausted'):
             council.replace_candidate(self.run, 'investigate', 'member-one', self.seat(4))
 
-    def test_real_executor_separates_interim_text_from_final_report(self):
+    def test_real_executor_repository_reports_match_version(self):
         body = """#!/usr/bin/env python3
 import json
 for event in [
@@ -385,18 +385,25 @@ for event in [
         for seat in list(self.request['roster'].values()) + [s for rows in self.request['fallbacks'].values() for s in rows]:
             if seat['kind'] == 'native': continue
             seat['permission_qualification']['opencode_sha256'] = hashlib.sha256(self.executable.read_bytes()).hexdigest()
-        self.prepare()
-        packet = council.packet(self.run, 'investigate', 'member-one')
-        result = council.workers.execute(Path(packet['worker_run']), self.executable, self.auth)
-        self.assertEqual(result['state'], 'awaiting_verification')
-        self.assertEqual(result['final_response'], 'Final cited finding\n')
-        self.assertIn('Interim plan', result['response'])
-        council.verify_external(self.run, 'investigate', 'member-one', 'accepted', ['Host checked final source citation'])
-        for member in ('member-two', 'member-three'): self.finish('investigate', member)
-        packet = council.packet(self.run, 'critique', 'member-two')
-        initial = (Path(packet['snapshot']) / '__council__/initial-1.md').read_text()
-        self.assertEqual(initial, 'Final cited finding\n')
-        self.assertNotIn('Interim', initial)
+        for version in (3, 2):
+            with self.subTest(version=version):
+                self.request['run_id'] = 'repository-v' + str(version)
+                if version == 2:
+                    self.request.pop('recovery')
+                    self.request.pop('fallbacks')
+                self.prepare()
+                self.assertEqual(json.loads((self.run / 'manifest.json').read_text())['version'], version)
+                packet = council.packet(self.run, 'investigate', 'member-one')
+                result = council.workers.execute(Path(packet['worker_run']), self.executable, self.auth)
+                self.assertEqual(result['state'], 'awaiting_verification')
+                self.assertEqual(result['response'], 'Interim plan, not a verdict\nFinal cited finding\n')
+                if version == 3: self.assertEqual(result['final_response'], 'Final cited finding\n')
+                else: self.assertNotIn('final_response', result)
+                council.verify_external(self.run, 'investigate', 'member-one', 'accepted', ['Host checked report scope'])
+                for member in ('member-two', 'member-three'): self.finish('investigate', member)
+                packet = council.packet(self.run, 'critique', 'member-two')
+                initial = (Path(packet['snapshot']) / '__council__/initial-1.md').read_text()
+                self.assertEqual(initial, result['final_response'] if version == 3 else result['response'])
 
     def test_recovery_launch_rechecks_cancel_and_old_attempt_cannot_launch(self):
         self.prepare(); self.fail_and_diagnose()

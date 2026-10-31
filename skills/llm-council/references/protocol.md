@@ -138,9 +138,10 @@ Preserve nullable cost/usage and reported model without inventing observed effor
 Neither a manually accepted flag nor worker verification bypasses grouped proof.
 Keep the existing worker path returned by the packet API/status; do not create
 another attempt to retrieve it. Receipts attest observations, not authenticated
-upstream telemetry. Original assistant text stays private; repository reports use
-final-step text. Failed/truncated direct responses retain bounded message text
-privately with no usable `final_response`.
+upstream telemetry. Version-3 repository reports use final-step text; the aggregate
+assistant text stays private. Version-2 repository reports include aggregate
+assistant text from interim and final steps. Failed/truncated direct responses
+retain bounded message text privately with no usable `final_response`.
 
 ### Technical failure schema
 

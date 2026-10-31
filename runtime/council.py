@@ -340,6 +340,26 @@ def _external_verified(value, owner, result, raw):
     return _text(result.get('session_id')) and verified.get('session_id') == result['session_id']
 
 
+def _seal_external_verification(value, phase, member, path, result):
+    item = value['members'].setdefault(_key(phase, member), dict(kind='external', worker_run=str(path)))
+    if value.get('mode') == 'text':
+        _require(_direct_identity(item, result), 'fresh_external_attempt_required')
+        if result['state'] == 'accepted':
+            others = recovery.owners(value) if value.get('version') == 3 else list(value['members'].values())
+            for other in others:
+                if other.get('worker_run') == str(path) or other.get('kind') != 'external': continue
+                _require(other.get('direct_attempt_id') != result['attempt_id']
+                         and other.get('verification', {}).get('attempt_id') != result['attempt_id'],
+                         'fresh_external_attempt_required')
+    workers.save(path / 'result.json', result)
+    _retain_session(item, result)
+    item['verification'] = dict(sha256=_digest(_read(path / 'result.json', workers.LIMIT + REPORT_LIMIT)),
+                                session_id=result.get('session_id'))
+    if value.get('mode') == 'text':
+        item['verification'].update(transport=result['transport'], attempt_id=result['attempt_id'],
+            request_sha256=result['request_sha256'])
+
+
 def _settled(observed):
     return all(item.get('state') in ('accepted', 'rejected', 'failed', 'unresolved', 'unavailable', 'late', 'not_launched')
                and item.get('local_execution_stopped') is True for item in observed.values())
@@ -859,16 +879,7 @@ def verify_external(run: Path, phase: str, member: str, disposition: str, checks
         if disposition == 'accepted':
             _remaining(value, phase)
             _require(bool(report.strip()), 'external_report_required')
-            if value.get('mode') == 'text':
-                owner = value['members'].get(_key(phase, member), {})
-                _require(_direct_identity(owner, result), 'fresh_external_attempt_required')
-                others = recovery.owners(value) if value.get('version') == 3 else list(value['members'].values())
-                for other in others:
-                    if other.get('worker_run') == str(path) or other.get('kind') != 'external': continue
-                    _require(other.get('direct_attempt_id') != result['attempt_id']
-                             and other.get('verification', {}).get('attempt_id') != result['attempt_id'],
-                             'fresh_external_attempt_required')
-            else:
+            if value.get('mode') != 'text':
                 session = result.get('session_id')
                 _require(_text(session), 'fresh_external_session_required')
                 if value.get('version') == 3: recovery.fresh_session(value, session, path)
@@ -883,14 +894,7 @@ def verify_external(run: Path, phase: str, member: str, disposition: str, checks
                         except FileNotFoundError: continue
                         _require(observed.get('session_id') != session, 'fresh_external_session_required')
         result.update(state=disposition, native_checks=checks, native_fallback_ready=False, failure=failure)
-        workers.save(path / 'result.json', result)
-        item = value['members'].setdefault(_key(phase, member), dict(kind='external', worker_run=str(path)))
-        _retain_session(item, result)
-        item['verification'] = dict(sha256=_digest(_read(path / 'result.json', workers.LIMIT + REPORT_LIMIT)),
-                                    session_id=result.get('session_id'))
-        if value.get('mode') == 'text':
-            item['verification'].update(transport=result['transport'], attempt_id=result['attempt_id'],
-                request_sha256=result['request_sha256'])
+        _seal_external_verification(value, phase, member, path, result)
         if phase == 'synthesis' and (value.get('version') != 3 or disposition == 'accepted'):
             raw = _report(report)
             changes._atomic(run, 'synthesis-external.md', raw)
