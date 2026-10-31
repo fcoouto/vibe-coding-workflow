@@ -2746,6 +2746,23 @@ def _cut_recovery_content(content,certificates,contexts,*,read_context=None):
     certificates=sorted(certificates,key=d3._digest)
     component_routes={(d3._digest(ref['authority']),d3._digest(ref['artifact'])):owners
         for raw,owners in component_routes.items() for ref in [json.loads(raw)]}
+    metadata_by_key={}
+    by_authority={d3._digest(_canonical_plain(c.authority_set[0])):c for c in contexts}
+    for artifact in content['artifacts']:
+        key=(d3._digest(artifact['authority']),d3._digest(artifact['artifact']))
+        with evidence._context_database(by_authority[key[0]]) as db:
+            metadata,_=evidence._managed_artifact(None,artifact['artifact'],context=by_authority[key[0]],db=db)
+        metadata_by_key[key]=(artifact['authority'],metadata)
+    content=_recovery_cut_projection(content,certificates,metadata_by_key,component_routes)
+    if 'use_contract' in content:
+        content['use_contract']=_project_recovery_uses(content,contexts,[content['use_contract']])
+    return content
+
+
+def _recovery_cut_projection(content,certificates,metadata_by_key,component_routes):
+    """Project acquired cut inputs only; this grants no release or provenance authority."""
+    from runtime import evidence
+    content=dict(content)
     certified={d3._digest(a['reference']):a for c in certificates if 'linked' not in c or 'preparation' in c for a in c.get('assignments',[])}
     # Linked raw routes need every exact prepared replacement; no safe closure is implied.
     seeds=[((d3._digest(c['reference']['authority']),d3._digest(_stop_envelope(c)['proof'])),c['reference']) for c in certificates if 'linked' not in c or 'preparation' in c]
@@ -2761,13 +2778,7 @@ def _cut_recovery_content(content,certificates,contexts,*,read_context=None):
         refs += [ref for key,ref in rec['bindings'].items() if key!='native_receipt' and ref is not None]
         owner=dict(authority=authority,**{k:assignment['reference']['owner'][k] for k in ('scope_id','client','session_id','task_id')})
         seeds.extend(((d3._digest(authority),d3._digest(ref)),owner) for ref in refs)
-    raw_tasks=set();metadata_by_key={}
-    by_authority={d3._digest(_canonical_plain(c.authority_set[0])):c for c in contexts}
-    for artifact in content['artifacts']:
-        key=(d3._digest(artifact['authority']),d3._digest(artifact['artifact']))
-        with evidence._context_database(by_authority[key[0]]) as db:
-            metadata,_=evidence._managed_artifact(None,artifact['artifact'],context=by_authority[key[0]],db=db)
-        metadata_by_key[key]=(artifact['authority'],metadata)
+    raw_tasks=set()
     # A route retains its original owner; another certified task is still foreign.
     support=set();foreign=set();seen=set();pending=list(seeds)
     while pending:
@@ -2811,8 +2822,6 @@ def _cut_recovery_content(content,certificates,contexts,*,read_context=None):
     content['tasks']=[t for t in content['tasks'] if d3._digest(t['reference']) not in cut]
     content['artifacts']=[a for a in content['artifacts'] if (d3._digest(a['authority']),d3._digest(a['artifact'])) in retained]
     content.update(version=2,stopped=certificates,previous=None)
-    if 'use_contract' in content:
-        content['use_contract']=_project_recovery_uses(content,contexts,[content['use_contract']])
     return content
 
 
