@@ -96,9 +96,7 @@ def observe(value, owner):
     except FileNotFoundError:
         return dict(state='unresolved', local_execution_stopped=False)
     if result.get('state') == 'accepted':
-        verified = owner.get('verification', {})
-        if (verified.get('sha256') != c._digest(raw) or not c._text(result.get('session_id'))
-                or result['session_id'] != verified.get('session_id')):
+        if not c._external_verified(value, owner, result, raw):
             return dict(result, state='awaiting_verification')
         if (Path(owner['worker_run']) / 'result.json').stat().st_mtime > value['started_wall'] + c._end(value, owner['phase']):
             return dict(result, state='late')
@@ -226,7 +224,9 @@ def _correction(correction, seat, sources):
     c._require(set(correction) == fields and type(correction.get('source')) is int
                and 0 <= correction['source'] < len(sources), 'unsupported_correction')
     if kind == 'request_representation':
-        c._require(seat['kind'] == 'external' and correction['representation'] == 'output_limit_only', 'unsupported_correction')
+        c._require(seat['kind'] == 'external'
+                   and seat['permission_qualification']['profile'] == 'council-readonly-v2'
+                   and correction['representation'] == 'output_limit_only', 'unsupported_correction')
     if kind == 'output_steps':
         c._require(all(type(correction[k]) is int and 1 <= correction[k] <= seat[k] for k in ('output_tokens', 'steps')), 'correction_exceeds_envelope')
         c._require(any(correction[k] != seat[k] for k in ('output_tokens', 'steps')), 'unchanged_correction')

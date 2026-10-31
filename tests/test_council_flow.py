@@ -87,6 +87,11 @@ class CouncilFlowTests(CouncilCase):
 
     def test_text_question_allows_no_files_without_checkout_writes(self):
         self.request.update(mode='text', approved_files={})
+        for seat in self.request['roster'].values():
+            if seat['kind'] != 'external': continue
+            seat['steps'] = 1
+            seat['capabilities']['api'] = 'chat-completions'
+            seat['permission_qualification'] = dict(profile='council-text-v1', evidence='native:controlled-probe')
         before = {str(path.relative_to(self.repo)): path.read_bytes()
                   for path in self.repo.rglob('*') if path.is_file()}
         self.prepare()

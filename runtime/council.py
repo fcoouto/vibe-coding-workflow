@@ -169,7 +169,8 @@ def _validate(request):
             _require(set(seat) == fields and seat['kind'] == 'external', 'invalid_external_member')
             marker = dict(run_id=request['run_id'], phase='investigate', member_id=member)
             if grouped: marker.update(group=request['group'], chair=request['chair'])
-            workers._council_contract(dict(seat, council=marker))
+            workers._council_contract(dict(seat, council=marker,
+                transport='openrouter-chat' if request['mode'] == 'text' else 'opencode'))
     if grouped:
         models = [seat.get('canonical_model', seat['model']) for seat in roster.values()]
         _require(len(set(models)) == 3, 'distinct_council_models_required')
@@ -265,7 +266,7 @@ def _external_brief(value, phase, member, files, timeout_seconds):
     seat = recovery.effective_seat(value, phase, member) if value.get('version') == 3 else _seat(value, member, phase)
     brief = {key: seat[key] for key in ('model', 'model_display_name', 'provider', 'effort', 'input_tokens',
                                       'output_tokens', 'steps', 'capabilities', 'permission_qualification')}
-    brief.update(task_id=_worker_path(value, phase, member).name, role='Investigator', specialty='Independent Council ' + phase,
+    brief.update(transport='openrouter-chat' if value['mode'] == 'text' else 'opencode', task_id=_worker_path(value, phase, member).name, role='Investigator', specialty='Independent Council ' + phase,
                  coordinator_chat_id=value['coordinator_chat_id'], objective=_objective(value, phase),
                  source_root=value['source_root'], files=files, timeout_seconds=min(1200, int(timeout_seconds)),
                  approval_ref=value['approval_ref'], council=dict(run_id=value['run_id'], phase=phase, member_id=member))
@@ -310,10 +311,8 @@ def _observations(value, phase):
                 result = onboarding.read_request(raw, workers.LIMIT + REPORT_LIMIT)
             except FileNotFoundError:
                 result = dict(state='unresolved', local_execution_stopped=False)
-            if result.get('state') == 'accepted' and value.get('version', 1) >= 2:
-                verification = item.get('verification', {})
-                if (verification.get('sha256') != _digest(raw) or not _text(result.get('session_id'))
-                        or verification.get('session_id') != result['session_id']):
+            if result.get('state') == 'accepted' and (value.get('version', 1) >= 2 or value.get('mode') == 'text'):
+                if not _external_verified(value, item, result, raw):
                     result = dict(result, state='awaiting_verification')
             if result.get('state') == 'accepted':
                 _require(result.get('local_execution_stopped') is True and isinstance(result.get('native_checks'), list)
@@ -326,6 +325,26 @@ def _observations(value, phase):
         if item.get('excluded_from_round'): result = dict(result, state='rejected')
         observed[member] = result
     return observed
+
+
+def _direct_identity(owner, result):
+    attempt = result.get('attempt_id')
+    try: uuid.UUID(attempt)
+    except (TypeError, ValueError, AttributeError): return False
+    return (result.get('transport') == 'openrouter-chat' and result.get('session_id') is None
+        and attempt == owner.get('direct_attempt_id')
+        and isinstance(result.get('request_sha256'), str)
+        and re.fullmatch('[0-9a-f]{64}', result['request_sha256']) is not None
+        and result['request_sha256'] == owner.get('direct_request_sha256'))
+
+
+def _external_verified(value, owner, result, raw):
+    verified = owner.get('verification', {})
+    if verified.get('sha256') != _digest(raw): return False
+    if value.get('mode') == 'text':
+        return (_direct_identity(owner, result) and verified.get('transport') == 'openrouter-chat'
+            and all(verified.get(key) == result.get(key) for key in ('attempt_id', 'request_sha256')))
+    return _text(result.get('session_id')) and verified.get('session_id') == result['session_id']
 
 
 def _settled(observed):
@@ -595,6 +614,13 @@ def _critique_snapshot(run, value, phase='critique'):
 
 def _packet_source(run, value, phase, member):
     if phase == 'investigate' or recovery.catch_up(value, phase, member):
+        if value['mode'] == 'text':
+            original = run / 'snapshot'
+            snapshot.verify(original, value['snapshot_manifest'])
+            inputs = {name: onboarding._read_file(original / name, snapshot.MAX_FILE)
+                      for name in value['snapshot_manifest']['files']}
+            inputs['__council__/research.md'] = _read(run / 'research.md', REPORT_LIMIT)
+            return _seal_inputs(run, value, 'text-investigate', inputs)
         return run / 'snapshot', value['snapshot_manifest']
     source, manifest = _critique_snapshot(run, value, phase if value.get('version', 1) >= 2 else 'critique')
     # A failed attempt never rewrites the shared round or another critic's packet.
@@ -665,6 +691,11 @@ def resume_member(run: Path, phase: str, member: str) -> dict:
         expected = dict(_external_brief(value, phase, member, list(manifest['files']), brief['timeout_seconds']),
                         management=value['management'], evidence=dict(snapshot=str(source), manifest=manifest, workspace_manifest=copied))
         _require(brief == expected, 'council_worker_brief_changed')
+        if value.get('mode') == 'text':
+            _require(result.get('attempt_id') == brief['council'].get('attempt_id', item.get('direct_attempt_id'))
+                     and result.get('request_sha256') == _digest(snapshot._json(workers.direct_payload(brief, path / 'workspace')))
+                     and ('direct_attempt_id' not in item or _direct_identity(item, result)), 'fresh_external_attempt_required')
+            item.update(direct_attempt_id=result['attempt_id'], direct_request_sha256=result['request_sha256'])
         deadline = min(result.get('deadline_monotonic', value['started_monotonic'] + _end(value, phase)), value['started_monotonic'] + _end(value, phase))
         if value.get('version') == 3:
             item['brief_sha256'] = _digest(_json(brief))
@@ -770,6 +801,10 @@ def _prepare_external(run, value, phase, member, brief, source, manifest):
             value['members'][key].pop('preparation_failure', None)
         else:
             value['members'][key] = dict(kind='external', worker_run=str(worker_run))
+        if value.get('mode') == 'text':
+            prepared = onboarding.read_request(_read(worker_run / 'result.json', workers.LIMIT), workers.LIMIT)
+            value['members'][key].update(direct_attempt_id=prepared['attempt_id'],
+                direct_request_sha256=prepared['request_sha256'])
         if value.get('version', 1) >= 2:
             value['members'][key]['brief_sha256'] = _digest(_json(onboarding.read_request(_read(worker_run / 'brief.json', workers.LIMIT), workers.LIMIT)))
         _save(run, value)
@@ -820,6 +855,11 @@ def _check_external_brief(run, value, phase, member, brief):
     _require(not item or item.get('kind') == 'external' and item.get('worker_run') == str(_worker_path(value, phase, member)),
              'council_worker_identity_changed')
     _require('brief_sha256' not in item or item['brief_sha256'] == _digest(_json(brief)), 'council_worker_brief_changed')
+    if value.get('mode') == 'text':
+        result = onboarding.read_request(_read(_worker_path(value, phase, member) / 'result.json', workers.LIMIT), workers.LIMIT)
+        _require(_direct_identity(item, result) and result['request_sha256'] == _digest(
+            snapshot._json(workers.direct_payload(brief, _worker_path(value, phase, member) / 'workspace'))),
+            'fresh_external_attempt_required')
 
 
 @contextmanager
@@ -861,19 +901,29 @@ def verify_external(run: Path, phase: str, member: str, disposition: str, checks
         if disposition == 'accepted':
             _remaining(value, phase)
             _require(bool(report.strip()), 'external_report_required')
-            session = result.get('session_id')
-            _require(_text(session), 'fresh_external_session_required')
-            if value.get('version') == 3: recovery.fresh_session(value, session, path)
-            for other_phase in PHASES:
-                for other_member in _members(value, other_phase):
-                    if not _external(value, other_member) or (other_phase, other_member) == (phase, member): continue
-                    owner = value['members'].get(_key(other_phase, other_member), {})
-                    _require(session not in owner.get('session_ids', [])
-                             and owner.get('verification', {}).get('session_id') != session, 'fresh_external_session_required')
-                    other = _worker_path(value, other_phase, other_member) / 'result.json'
-                    try: observed = onboarding.read_request(_read(other, workers.LIMIT + REPORT_LIMIT), workers.LIMIT + REPORT_LIMIT)
-                    except FileNotFoundError: continue
-                    _require(observed.get('session_id') != session, 'fresh_external_session_required')
+            if value.get('mode') == 'text':
+                owner = value['members'].get(_key(phase, member), {})
+                _require(_direct_identity(owner, result), 'fresh_external_attempt_required')
+                others = recovery.owners(value) if value.get('version') == 3 else list(value['members'].values())
+                for other in others:
+                    if other.get('worker_run') == str(path) or other.get('kind') != 'external': continue
+                    _require(other.get('direct_attempt_id') != result['attempt_id']
+                             and other.get('verification', {}).get('attempt_id') != result['attempt_id'],
+                             'fresh_external_attempt_required')
+            else:
+                session = result.get('session_id')
+                _require(_text(session), 'fresh_external_session_required')
+                if value.get('version') == 3: recovery.fresh_session(value, session, path)
+                for other_phase in PHASES:
+                    for other_member in _members(value, other_phase):
+                        if not _external(value, other_member) or (other_phase, other_member) == (phase, member): continue
+                        owner = value['members'].get(_key(other_phase, other_member), {})
+                        _require(session not in owner.get('session_ids', [])
+                                 and owner.get('verification', {}).get('session_id') != session, 'fresh_external_session_required')
+                        other = _worker_path(value, other_phase, other_member) / 'result.json'
+                        try: observed = onboarding.read_request(_read(other, workers.LIMIT + REPORT_LIMIT), workers.LIMIT + REPORT_LIMIT)
+                        except FileNotFoundError: continue
+                        _require(observed.get('session_id') != session, 'fresh_external_session_required')
         result.update(state=disposition, native_checks=checks, native_fallback_ready=False)
         workers.save(path / 'result.json', result)
         item = value['members'].setdefault(_key(phase, member), dict(kind='external', worker_run=str(path)))
@@ -884,6 +934,9 @@ def verify_external(run: Path, phase: str, member: str, disposition: str, checks
             item.update(findings=findings, findings_on_time=on_time)
         item['verification'] = dict(sha256=_digest(_read(path / 'result.json', workers.LIMIT + REPORT_LIMIT)),
                                     session_id=result.get('session_id'))
+        if value.get('mode') == 'text':
+            item['verification'].update(transport=result['transport'], attempt_id=result['attempt_id'],
+                request_sha256=result['request_sha256'])
         if phase == 'synthesis' and (value.get('version') != 3 or disposition == 'accepted'):
             raw = _report(report)
             changes._atomic(run, 'synthesis-external.md', raw)
