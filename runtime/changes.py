@@ -2858,6 +2858,18 @@ def _recovery_generation(db,tasks,assignments):
     return d3._digest(rows)
 
 
+def _historical_effects(accepted_identity,original_proposed_projection,actions):
+    """Compare original removed shared effects; confer no current permission."""
+    if original_proposed_projection is None:return []
+    expected=deepcopy(accepted_identity);expected['shared_policy']=original_proposed_projection['shared_policy']
+    if original_proposed_projection!=expected:return []
+    old={row['path']:row for row in accepted_identity['shared_policy']}
+    if any(old.get(row['path'])!=row for row in original_proposed_projection['shared_policy']):return []
+    removed=set(old)-{row['path'] for row in original_proposed_projection['shared_policy']}
+    return [dict(action_id=action['id'],path=effect['path']) for action in actions for effect in action['effects']
+        if effect['before']!=effect['after'] and str(Path(action['owner']['root'])/effect['path']) in removed]
+
+
 def _historical_recovery_roots(manifest,context,db,task,reference):
     """Recognize only the same physical member's removed, actually changed shared dependency."""
     from runtime import evidence
@@ -2890,11 +2902,7 @@ def _historical_recovery_roots(manifest,context,db,task,reference):
     if evidence._binding(Path(identity['project_root']))!=identity['project_binding']:return []
     if any(evidence._binding(Path(identity[path]))!=identity['bindings'][binding] for path,binding in
             (('repository_root','root'),('primary_root','primary_root'),('git_dir','git_dir'),('git_common_dir','git_common_dir'))):return []
-    old={row['path']:row for row in identity['shared_policy']}
-    if any(old.get(row['path'])!=row for row in projection['shared_policy']):return []
-    removed=set(old)-{row['path'] for row in projection['shared_policy']}
-    effects=[dict(action_id=action['id'],path=effect['path']) for action in manifest['actions'] for effect in action['effects']
-        if effect['before']!=effect['after'] and str(Path(action['owner']['root'])/effect['path']) in removed]
+    effects=_historical_effects(identity,_canonical_plain(proposed),manifest['actions'])
     if not effects or not (task.get('retirement') or task.get('writer_stop')):return []
     certificate=_stopped_certificate(context,db,dict(reference=reference,pins=task['pins']))
     _check_stopped_certificate(context,db,certificate)
