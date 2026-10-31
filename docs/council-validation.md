@@ -50,9 +50,15 @@ passed and reports `client_execution: not_checked`. OpenAI skill-creator
 `quick_validate.py skills/llm-council` passed; the entry is **113 words**. All **180**
 local targets/anchors across the ten guidance files exist; `git diff --check`
 passed. Source-to-contract coverage and actual mode/seat/failure/receipt/proof
-schemas were reviewed. Independent integration review remains with the coordinator.
-Raw logs and the Task 4 report are private authoring artifacts under
-`.superpowers/sdd/2026-10-31-council-simplification/`.
+schemas were reviewed. Independent native Astra/high review and its scoped
+re-review found all reported issues addressed. The verification-seal correction
+has **82 passing affected tests in 113.299 seconds**, including ungrouped text
+handoff, tamper exclusion, no replay, grouped verification and version-specific
+repository reports. The 259-test run and the affected-test run are separate
+results; the full six-module command was not repeated after that correction.
+The reviewed runtime candidate is `4f40cef`. Final package validation passed.
+Raw logs and review reports are retained in a private authoring archive outside
+the package.
 
 These checks do not establish real endpoint/authentication compatibility, actual
 native/model effort, live cancellation, installed-client loading or comparative
