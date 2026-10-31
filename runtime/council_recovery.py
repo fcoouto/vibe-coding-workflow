@@ -51,7 +51,7 @@ def effective_seat(value, phase, member):
 
 
 def objective(value, phase, member, original):
-    if catch_up(value, phase, member): original = c._objective(value, 'investigate')
+    if catch_up(value, phase, member): original = c._objective(value, 'investigate', effective_seat(value, phase, member))
     if value['recovery'][member].get('active_correction', {}).get('kind') == 'workspace_guidance':
         original += '\nUse the copied workspace as root; only supplied relative paths are evidence. Return the required phase findings with citations and uncertainty.'
     return original
@@ -223,6 +223,7 @@ def _correction(correction, seat, sources):
     kind = correction.get('kind')
     fields = {'kind', 'source'}
     if kind == 'output_steps': fields |= {'output_tokens', 'steps'}
+    elif kind == 'output_capacity': fields.add('max_output_tokens')
     elif kind == 'fresh_connection': fields.add('retry_delay_seconds')
     elif kind == 'request_representation': fields.add('representation')
     else: c._require(kind == 'workspace_guidance', 'unsupported_correction')
@@ -233,8 +234,14 @@ def _correction(correction, seat, sources):
                    and seat['permission_qualification']['profile'] == 'council-readonly-v2'
                    and correction['representation'] == 'output_limit_only', 'unsupported_correction')
     if kind == 'output_steps':
-        c._require(all(type(correction[k]) is int and 1 <= correction[k] <= seat[k] for k in ('output_tokens', 'steps')), 'correction_exceeds_envelope')
+        c._require(type(correction['output_tokens']) is int and 1 <= correction['output_tokens'] <= 2**31 - 1
+                   and type(correction['steps']) is int and 1 <= correction['steps'] <= seat['steps'], 'correction_exceeds_envelope')
         c._require(any(correction[k] != seat[k] for k in ('output_tokens', 'steps')), 'unchanged_correction')
+    if kind == 'output_capacity':
+        c._require(seat['kind'] == 'external', 'unsupported_correction')
+        c._require(type(correction['max_output_tokens']) is int and 1 <= correction['max_output_tokens']
+                   <= min(seat['capabilities']['max_output_tokens'], seat['capabilities']['context_length']),
+                   'correction_exceeds_capacity')
     if kind == 'fresh_connection':
         delay = correction['retry_delay_seconds']
         c._require(type(delay) in (int, float) and math.isfinite(delay) and 0 <= delay <= 120, 'invalid_retry_delay')
@@ -290,6 +297,13 @@ def correct_candidate(run, phase, member, correction):
         c._require(correction not in candidate['tried'], 'correction_already_tried')
         c._require(len(candidate['tried']) < 2, 'correction_limit')
         fix = episode['evidence']['corrections'][correction]
+        if fix['kind'] == 'output_capacity':
+            c._require(failure['category'] == 'context' or failure['category'] == 'incomplete_output'
+                       and failure.get('terminal_reason') == 'length', 'capacity_failure_required')
+            seat = candidate['seat']
+            capacity = value['recovery'][member].get('active_correction', {}).get('max_output_tokens',
+                min(seat['capabilities']['max_output_tokens'], seat['capabilities']['context_length']))
+            c._require(fix['max_output_tokens'] != capacity, 'unchanged_correction')
         if fix['kind'] == 'fresh_connection':
             c._require(failure['category'] in ('service', 'rate_limit', 'transport', 'unknown', 'interrupted'), 'transport_correction_required')
             c._require(fix['retry_delay_seconds'] < c._remaining(value, phase), 'deadline_exhausted')
@@ -312,7 +326,7 @@ def replace_candidate(run, phase, member, seat):
         c._require(episode is not None and (episode['state'] == 'diagnosed' or time.monotonic() >= episode['deadline_monotonic']), 'diagnosis_required')
         c._require(isinstance(seat, dict) and seat.get('kind') == c._seat(value, member, phase)['kind'], 'replacement_kind_changed')
         original = state['candidates'][0]['seat']
-        c._require(all(type(seat.get(k)) is int and 1 <= seat[k] <= original[k] for k in ('input_tokens', 'output_tokens', 'steps')), 'replacement_exceeds_envelope')
+        c._require(type(seat.get('steps')) is int and 1 <= seat['steps'] <= original['steps'], 'replacement_exceeds_envelope')
         c._require(_canonical(seat) not in {_canonical(x['seat']) for x in state['candidates']}, 'candidate_already_used')
         permitted = value.get('fallbacks', {}).get(member, [])
         route = lambda row: (_canonical(row), row['model'], row.get('provider'), row['kind'])

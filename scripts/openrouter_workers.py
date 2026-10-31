@@ -157,6 +157,7 @@ def _council_contract(brief):
     recovery = isinstance(council, dict) and 'recovery_version' in council
     if recovery:
         fields |= {'recovery_version', 'candidate_id', 'attempt_id', 'generation', 'catch_up', 'request_representation'}
+        if 'output_capacity' in council: fields.add('output_capacity')
         if (not grouped or council['recovery_version'] != 3 or type(council['generation']) is not int
                 or not 1 <= council['generation'] <= 10 or type(council['catch_up']) is not bool
                 or council['catch_up'] and council['phase'] != 'critique'
@@ -202,9 +203,8 @@ def _council_contract(brief):
     for value in [brief['input_tokens'], brief['output_tokens'], caps['context_length'], caps['max_output_tokens']
                   ] + ([caps['max_input_tokens']] if 'max_input_tokens' in caps else []):
         if type(value) is not int or not 1 <= value <= 2**31 - 1: raise ValueError('invalid_council_allowance')
-    if (brief['output_tokens'] > caps['max_output_tokens']
-            or brief['input_tokens'] > caps.get('max_input_tokens', caps['context_length'])
-            or brief['input_tokens'] + brief['output_tokens'] > caps['context_length']):
+    if ('output_capacity' in council and (type(council['output_capacity']) is not int
+            or not 1 <= council['output_capacity'] <= min(caps['max_output_tokens'], caps['context_length']))):
         raise ValueError('council_endpoint_limit')
     reasoning = caps['reasoning']
     order = ('minimal', 'low', 'medium', 'high', 'xhigh', 'max')
@@ -307,6 +307,11 @@ def prepare_council(root: Path, brief: dict, snapshot: Path, manifest: dict, *, 
     return run
 
 
+def council_output_capacity(brief):
+    caps = brief['capabilities']
+    return brief['council'].get('output_capacity', min(caps['max_output_tokens'], caps['context_length']))
+
+
 def direct_payload(brief, workspace):
     """Build only approved bytes; storage and authentication paths stay local."""
     _council_contract(brief)
@@ -315,14 +320,11 @@ def direct_payload(brief, workspace):
     _verify_council_copy(workspace, manifest)
     inputs = {name: council_snapshot.onboarding._read_file(workspace / name, council_snapshot.MAX_FILE).decode('utf-8')
               for name in sorted(manifest['files'])}
-    payload = dict(model=brief['model'], stream=False, max_tokens=brief['output_tokens'],
+    payload = dict(model=brief['model'], stream=False, max_tokens=council_output_capacity(brief),
         provider=dict(only=[brief['provider']], allow_fallbacks=False, require_parameters=True),
         messages=[dict(role='user', content=brief['objective'] + '\n\nApproved evidence and phase reports (JSON):\n'
             + json.dumps(inputs, ensure_ascii=False, separators=(',', ':')))])
     if 'efforts' in brief['capabilities']['reasoning']: payload['reasoning'] = dict(effort=brief['effort'])
-    # UTF-8 bytes plus envelope reserve conservatively bound tokens without a model tokenizer.
-    if sum(len(item['content'].encode()) for item in payload['messages']) + 1024 > brief['input_tokens']:
-        raise ValueError('council_endpoint_limit')
     return payload
 
 
@@ -352,8 +354,9 @@ def configuration(brief, workspace=None):
             + ' is an internal marker, denied and unnecessary for the answer. Ignore it even if glob lists it; do not read it or request a bypass.')
         model = config['provider']['openrouter']['models'][brief['model']]
         model.update(limit={'context': brief['capabilities']['context_length'],
-                            'input': brief['input_tokens'], 'output': brief['output_tokens']}, tool_call=True)
-        model['options']['maxOutputTokens'] = brief['output_tokens']
+                            'input': brief['capabilities'].get('max_input_tokens', brief['capabilities']['context_length']),
+                            'output': council_output_capacity(brief)}, tool_call=True)
+        model['options']['maxOutputTokens'] = council_output_capacity(brief)
         if brief['council'].get('request_representation') == 'output_limit_only': model['options'].pop('maxOutputTokens')
         if set(brief['capabilities']['reasoning']) & {'fixed', 'default_enabled'}: model['options'].pop('reasoning')
     return config
@@ -417,6 +420,8 @@ def terminal_failure(error):
             metadata = provider_error.get('metadata') if isinstance(provider_error, dict) else None
             error_type = metadata.get('error_type') if isinstance(metadata, dict) else None
             code = provider_error.get('code') if isinstance(provider_error, dict) else None
+            if status in (400, 413) and (code == 'context_length_exceeded' or error_type == 'context_length_exceeded'):
+                result['category'] = 'context'
             if isinstance(error_type, str) and error_type in ('content_policy_violation', 'refusal'):
                 code = error_type
             if isinstance(code, str) and code in ('content_policy_violation', 'refusal'):

@@ -99,14 +99,15 @@ no override. Unknown or unsupported maximum controls block admission; never lowe
 effort or invent a maximum. Actual upstream telemetry remains unknown where
 unobserved. Recovery follows [actions](recovery.md#actions), within the original
 group and bounds. OpenRouter owns monetary limits; no fresh balance check is
-required and token/step/time bounds do not reserve money.
+required and token targets or step/time bounds do not reserve money.
 
 ## Mode eligibility
 
 For **text**, confirm text-only Chat Completions compatibility, supported controls
 and `council-text-v1` qualification. Tools need not be supported. The direct
-requester sends one stateless tool-free request; endpoint input/output allowances
-must fit all approved evidence and phase reports without truncation or mode switch.
+requester sends one stateless tool-free request; actual endpoint capacity
+must support approved evidence and phase reports without truncation or mode switch.
+Advisory token targets do not restrict those inputs.
 Exact seat fields and transport/authentication controls live in
 [protocol](protocol.md#prepare-and-seat-schemas).
 
@@ -143,7 +144,8 @@ three preapproved replacements under the [recovery limits](recovery.md).
 `fallbacks` declares permitted requested/canonical
 model and pinned provider routes, not extra spending authority. Supply refreshed
 capability, price and reasoning observations when selecting a listed replacement;
-unchanged route identity and original token/step envelope remain mandatory. Do not
+unchanged route identity and original step/time/spending bounds remain mandatory.
+Advisory token targets may vary by candidate without changing maximum reasoning. Do not
 probe every fallback in advance. Apply [task-aware selection](#task-aware-selection)
 and [model vendor diversity](#model-vendor-diversity)
 when ranking eligible replacements against the other active seats. Use the

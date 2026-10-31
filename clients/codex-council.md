@@ -65,8 +65,9 @@ evidence. Unsupported maximum reasoning blocks acceptance; never silently lower
 it. Unknown execution model/effort telemetry can remain unknown when actual
 configured controls and supported maximum were independently verified. Disclose
 that distinction instead of calling configured settings observed execution.
-Native resource allowances are supervisor budgets; claim a hard transport or step
-limit only when an observed supported host control enforces it.
+Native input/output token targets are advisory prompt guidance, never acceptance
+gates or fallback triggers. Claim a hard transport or step limit only when an
+observed supported host control enforces it.
 
 Retain the exact supervisor, issued marker, native tool handle and actual child.
 Respect observed capacity and supervise the packet's absolute cumulative deadline;
@@ -178,7 +179,7 @@ Investigators receive no peer answers; a new critic first independently catches 
 Obtain the selected model's contribution; do not answer substantively yourself.
 ```
 
-Add the actual remaining deadline, original token/step envelope, ranked approved
+Add the actual remaining deadline, advisory token targets, original step bounds, ranked approved
 shortlist, the [selection contract](../skills/llm-council/references/selection.md#task-aware-selection)'s task priorities and per-candidate selection
 rationales, and applicable privacy/transmission scope. Keep these coordinator
 selection notes out of anonymous participant packets. Supply the selected

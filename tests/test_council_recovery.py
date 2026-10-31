@@ -83,6 +83,60 @@ class CouncilRecoveryTests(CouncilCase):
             reported_cost_usd=0, known_cost_subtotal_usd=0, accounting_complete=True))
         return packet
 
+    def test_capacity_recovery_preserves_reasoning_targets_and_deadline(self):
+        self.prepare()
+        first = self.finish('investigate', 'member-one', accepted=False)
+        result_path = Path(first['worker_run']) / 'result.json'
+        result = json.loads(result_path.read_text())
+        result['failure'] = dict(category='context', launch_stage='launched')
+        council.workers.save(result_path, result)
+        self.diagnose(corrections=[dict(kind='output_capacity', source=0, max_output_tokens=6000),
+                                  dict(kind='output_capacity', source=0, max_output_tokens=8000)])
+        council.correct_candidate(self.run, 'investigate', 'member-one', 0)
+        second = council.packet(self.run, 'investigate', 'member-one')
+        brief = json.loads((Path(second['worker_run']) / 'brief.json').read_text())
+        self.assertEqual(council.workers.council_output_capacity(brief), 6000)
+        self.assertEqual((brief['output_tokens'], brief['effort']), (4096, 'high'))
+        with council.external_launch_guard(Path(second['worker_run']), brief): pass
+        forged = copy.deepcopy(brief)
+        forged['council']['output_capacity'] = 7000
+        with self.assertRaisesRegex(ValueError, 'council_worker_brief_changed'):
+            with council.external_launch_guard(Path(second['worker_run']), forged): pass
+        council.workers.save(Path(second['worker_run']) / 'result.json', dict(state='failed',
+            local_execution_stopped=True, failure=dict(category='incomplete_output', terminal_reason='length')))
+        council.correct_candidate(self.run, 'investigate', 'member-one', 1)
+        third = council.packet(self.run, 'investigate', 'member-one')
+        brief = json.loads((Path(third['worker_run']) / 'brief.json').read_text())
+        self.assertEqual(council.workers.configuration(brief)['provider']['openrouter']['models'][brief['model']]
+                         ['options']['maxOutputTokens'], 8000)
+        self.assertEqual(third['deadline_monotonic'], first['deadline_monotonic'])
+
+    def test_capacity_correction_rejects_above_provider_limit_and_wrong_failure(self):
+        self.prepare()
+        self.finish('investigate', 'member-one', accepted=False)
+        opened = council.investigate_failure(self.run, 'investigate', 'member-one')
+        evidence = dict(candidate_id=opened['candidate_id'], failure_id=opened['failure_id'], searches=1, reads=1,
+            sources=[dict(url='https://docs.example.org/capacity', checked_at=time.time(), authority='official',
+                          applicability='Observed endpoint context limit')],
+            corrections=[dict(kind='output_capacity', source=0, max_output_tokens=8001)])
+        with self.assertRaisesRegex(ValueError, 'correction_exceeds_capacity'):
+            council.record_investigation(self.run, 'investigate', 'member-one', evidence)
+        evidence['corrections'][0]['max_output_tokens'] = 6000
+        council.record_investigation(self.run, 'investigate', 'member-one', evidence)
+        with self.assertRaisesRegex(ValueError, 'capacity_failure_required'):
+            council.correct_candidate(self.run, 'investigate', 'member-one', 0)
+
+    def test_replacement_can_adjust_advisory_targets(self):
+        self.prepare()
+        self.fail_and_diagnose()
+        seat = copy.deepcopy(self.request['fallbacks']['member-one'][0])
+        seat.update(input_tokens=50000, output_tokens=50000)
+        council.replace_candidate(self.run, 'investigate', 'member-one', seat)
+        packet = council.packet(self.run, 'investigate', 'member-one')
+        brief = json.loads((Path(packet['worker_run']) / 'brief.json').read_text())
+        self.assertEqual(brief['output_tokens'], 50000)
+        self.assertEqual(council.workers.council_output_capacity(brief), 8000)
+
     def test_historical_and_free_recovery_admission_preserves_stop_settlement(self):
         self.prepare()
         self.finish('investigate', 'member-one', accepted=False)
@@ -560,7 +614,7 @@ else:
         brief = json.loads((Path(packet['worker_run']) / 'brief.json').read_text())
         config = council.workers.configuration(brief)
         model = config['provider']['openrouter']['models']['vendor/model-1']
-        self.assertEqual(model['limit']['output'], 4096)
+        self.assertEqual(model['limit']['output'], 8000)
         self.assertNotIn('maxOutputTokens', model['options'])
         self.assertEqual(model['options']['reasoning'], {'effort': 'high'})
         self.assertEqual(model['options']['provider'], {'only': ['fixture'], 'allow_fallbacks': False})

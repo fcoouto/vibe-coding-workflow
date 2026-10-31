@@ -60,9 +60,10 @@ recovery, allocated **600/360/240** to investigate/critique/synthesis. A differe
 total requires an explicit request before preparation and `timeout_seconds`;
 positive integer phase allowances must total it. Cumulative deadlines start at
 preparation; early advancement and restart never renew time. Each external call
-is at most 1200 seconds. Timing discontinuity blocks new work. Choose finite
-per-model input/output/step allowances within observed capabilities and sufficient
-for the actual evidence/reasoning; there is no universal token minimum.
+is at most 1200 seconds. Timing discontinuity blocks new work. Choose finite per-model input/output token targets as advisory prompt guidance;
+exceeding them never rejects an answer or triggers fallback. Size actual API
+ceilings from observed endpoint capacity, independently of those targets. Keep
+maximum reasoning and original step/time/spending bounds.
 
 Before dispatch, show task priorities, roster/chair and per-model fit, requested
 and canonical identities, pinned routes, supported reasoning, sourced/date-stamped
@@ -109,8 +110,8 @@ Keep every usable report byte-for-byte. Mistakes, unsupported inferences, ordina
 refusal text, disagreement, missing citations, presentation preferences and poor
 rankings go to critics/chair; they do not authorize rejection, host correction
 notes or semantic retries. The coordinator may disclose observed concerns to the
-user without silently editing or deleting reports. Explicit hard output limits
-remain binding; advisory brevity/headings do not become gates.
+user without silently editing or deleting reports. Actual provider capacity and original time/spending bounds remain binding;
+advisory tokens, brevity and headings do not become gates.
 
 `member` runs the owned external attempt and streams progress; it cannot accept
 itself. `awaiting_verification` does not count. Settle external reports through

@@ -674,7 +674,7 @@ class CouncilFlowTests(CouncilCase):
                 self.assertFalse((self.root / ('council-' + self.request['run_id']) / 'manifest.json').exists())
 
     def test_prepare_accepts_exact_worker_objective_boundary_without_truncation(self):
-        self.request.update(question='q' * 8000, constraints='c' * 7721)
+        self.request.update(question='q' * 8000, constraints='c' * 7559)
         self.prepare(); self.investigations()
         packet = council.packet(self.run, 'critique', 'external-one')
         brief = json.loads((Path(packet['worker_run']) / 'brief.json').read_text())
@@ -1282,7 +1282,7 @@ class CouncilFlowTests(CouncilCase):
         with self.assertRaisesRegex(ValueError, 'headroom'):
             council._phase_headroom(manifest, self.request['roster'], grouped=True)
         self.request['question'] = 'q' * 7800
-        self.request['constraints'] = 'c' * 7850
+        self.request['constraints'] = 'c' * 7650
         # The longest phase must be validated too, before the first dispatch.
         with patch.object(council.workers, '_validate_council_brief', wraps=council.workers._validate_council_brief) as validate:
             self.prepare()
@@ -1657,7 +1657,7 @@ assert config['permission']['*'] == 'deny'
 assert config['permission']['glob'] == config['permission']['grep'] == 'allow'
 assert config['agent']['pilot']['steps'] == 12
 model = next(iter(config['provider']['openrouter']['models'].values()))
-assert model['options']['maxOutputTokens'] == 4096
+assert model['options']['maxOutputTokens'] == 8000
 assert model['options']['provider']['allow_fallbacks'] is False
 assert 0 < len(objective) <= 16000 and 'Read only; explain uncertainty.' in objective
 assert 'copied workspace' not in objective
