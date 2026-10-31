@@ -3345,7 +3345,7 @@ def _release_source_inputs(source,context,db,groups):
     current=json.loads(head_raw)
     if any(key in current for key in ('birth_handoff','birth_expectation','birth_certificate')):return None
     if head!=expected:
-        comparable=deepcopy(content)
+        comparable=deepcopy(_d4_publication_lifetime(source)['registration_projections'][str(context.database)]['content'])
         comparable['journal']['observed_at']=current['journal']['observed_at']
         d3._require(current==comparable,'Recovery release source head changed')
     rows=evidence._evidence_inventory_rows(db)
@@ -4230,7 +4230,7 @@ def _observe_recovery_release(authorities,identity):
     identity=_canonical_plain(identity)
     with _recovery_release_guards(authorities,identity) as (path,journal,contexts):
         read_context=None
-        heads=[]; supersedes=[]; tasks={};assignments={};artifacts={};certificates={}; generations={};ages=set();contracts=[];legacy_sources=[]
+        heads=[]; supersedes=[]; tasks={};assignments={};artifacts={};certificates={}; generations={};ages=set();contracts=[];legacy_sources=[];local_supersedes={}
         for context in contexts:
             authority=_canonical_plain(context.authority_set[0])
             read_context=None
@@ -4253,6 +4253,7 @@ def _observe_recovery_release(authorities,identity):
             with evidence._context_database(context) as db:
                 ages.add(task_state._metadata(db,reference['name'])['created_at'])
                 history=evidence._recovery_source_history(context,db,reference,identity,read_context=read_context)
+            local_receipts=[]
             for prior_ref,content in history:
                 _validate_recovery_references(content,contexts,read_context=read_context)
                 if 'use_contract' in content:contracts.append(content['use_contract'])
@@ -4261,12 +4262,15 @@ def _observe_recovery_release(authorities,identity):
                     legacy_sources.append((origin,content))
                 if content['version']==2:
                     for row in content['supersedes']: supersedes.append(row)
+                    local_receipts.extend(content['supersedes'])
                     for c in content['stopped']:certificates[d3._digest(c['reference'])]=c
                 else:
                     supersedes.append(dict(authority=authority,artifact=prior_ref,identity=identity,journal_sha256=content['journal']['sha256']))
+                    local_receipts.append(supersedes[-1])
                 for task in content['tasks']:tasks[d3._digest(task['reference'])]=task
                 for assignment in content['assignments']:assignments[d3._digest(assignment)]=assignment
                 for artifact in content['artifacts']:artifacts[d3._digest(artifact)]=artifact
+            local_supersedes[str(context.database)]=sorted({d3._digest(row):row for row in local_receipts}.values(),key=d3._digest)
         d3._require(len(ages)==1,'Recovery release original source ages differ')
         for context in contexts:
             authority=_canonical_plain(context.authority_set[0])
@@ -4292,9 +4296,30 @@ def _observe_recovery_release(authorities,identity):
             try:content['use_contract']=recovery_uses.merge([*contracts,recovery_uses.build([],[],legacy_routes)])
             except recovery_uses.UseContractError as exc:raise Pending(str(exc)) from None
         content=_cut_recovery_content(content,list(certificates.values()),contexts,read_context=read_context)
-        original=dict(heads=heads,tasks=list(tasks.values()),assignments=list(assignments.values()))
+        original=dict(heads=heads,tasks=list(tasks.values()),assignments=list(assignments.values()),supersedes=local_supersedes)
         return _RecoverySourceObservation(_canonical_freeze(content),tuple(contexts),_canonical_freeze(generations),next(iter(ages)),_RECOVERY_ISSUER,_canonical_freeze(original),
             _recovery_ready_inputs(content,contexts,read_context=read_context),_RECOVERY_RELEASE_ISSUER)
+
+
+def _recovery_release_template(source,context,*,planned=True):
+    """Use only issuer-observed local receipts and the active owner's exact replay decision."""
+    content=_canonical_plain(source.content)
+    if source.release is None:return content
+    d3._require(source.issuer is _RECOVERY_ISSUER and source.provenance is _RECOVERY_RELEASE_ISSUER
+        and any(context is actual for actual in source.contexts),'Release template lacks its actual issuer/context')
+    content['supersedes']=_canonical_plain(source.release['supersedes'][str(context.database)])
+    lifetime=getattr(_authority_context,'publication',None)
+    if planned and lifetime is not None and lifetime.get('source') is source:
+        lifetime=_d4_publication_lifetime(source)
+        decision=lifetime.get('release_decisions',{}).get(str(context.database))
+        if decision is not None and decision['reference'] is None:
+            prior=decision['inputs']['history'][0];body=prior['content']
+            if body['version']==2:
+                receipt=dict(authority=_canonical_plain(context.authority_set[0]),artifact=prior['reference'],
+                    identity=body['identity'],journal_sha256=body['journal']['sha256'])
+                content['supersedes']=sorted({d3._digest(row):row for row in [*content['supersedes'],receipt]}.values(),key=d3._digest)
+    d3._require(len(content['supersedes'])<=4096,'Recovery source reference bound exceeded')
+    return content
 
 
 def _register_recovery_release(observation):
@@ -4312,19 +4337,36 @@ def _register_recovery_release(observation):
             lifetime=dict(active=True,kind='release',source=observation,journal=deepcopy(journal),
                 guards=tuple(getattr(_authority_context,'held',())),registrations={},baselines={},registration_projections={})
             budget=recovery_uses.CaptureBudget() if 'use_contract' in content else None
-            captures={str(context.database):_capture_recovery_history(context,observation,journal,budget) for context in contexts} if budget is not None else {}
             lifetime['capture_budget']=budget
-            for context in contexts:
-                with evidence._context_database(context) as db:
-                    lifetime['baselines'][str(context.database)]=_canonical_plain(task_state._source_baseline(None,db,context=context))
-                    baseline=lifetime['baselines'][str(context.database)]
-                    heads=[edge['reference']['artifact'] for edge in baseline['dependencies'] if edge['reference']['identity']==content['identity']]
-                    d3._require(len(heads)==1,'Recovery release source head unavailable')
-                    inputs=evidence._recovery_use_inputs(context,db,heads[0],content['identity'],content=content)
-                    if budget is not None:inputs['history_capture']=captures[str(context.database)]
-                    lifetime['registration_projections'][str(context.database)]=evidence._recovery_registration_projection(content,observation.created_at,inputs,budget=budget)
             previous=getattr(_authority_context,'publication',None);_authority_context.publication=lifetime
             try:
+                def project(context):
+                    template=_recovery_release_template(observation,context)
+                    capture=_capture_recovery_history(context,observation,journal,budget) if budget is not None else None
+                    with evidence._context_database(context) as db:
+                        baseline=_canonical_plain(task_state._source_baseline(None,db,context=context))
+                        key=str(context.database)
+                        if key in lifetime['baselines']:
+                            d3._require(baseline==lifetime['baselines'][key],'Release planning baseline changed')
+                        else:lifetime['baselines'][key]=baseline
+                        heads=[edge['reference']['artifact'] for edge in baseline['dependencies'] if edge['reference']['identity']==content['identity']]
+                        d3._require(len(heads)==1,'Recovery release source head unavailable')
+                        inputs=evidence._recovery_use_inputs(context,db,heads[0],content['identity'],content=template)
+                        if capture is not None:inputs['history_capture']=capture
+                        projection=evidence._recovery_registration_projection(template,observation.created_at,inputs,budget=budget)
+                        d3._require(projection['reference'] in (None,heads[0]),'Release replay selected another head')
+                        if projection['reference'] is not None:
+                            prior=inputs['history'][0]
+                            d3._require(projection['content']==prior['content']
+                                and projection['dependencies']==prior['metadata']['dependencies']
+                                and observation.created_at==prior['metadata']['created_at'],'Release replay differs from exact original head')
+                        return projection
+                decisions={str(context.database):project(context) for context in contexts}
+                lifetime['release_decisions']=decisions
+                for context in contexts:
+                    key=str(context.database);decision=decisions[key]
+                    lifetime['registration_projections'][key]=(project(context) if
+                        _recovery_release_template(observation,context)!=decision['source'] else decision)
                 for context in contexts:
                     _check_recovery_source_global(observation)
                     with evidence._context_database(context,write=True,durable=True,

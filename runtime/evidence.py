@@ -375,9 +375,10 @@ def _recovery_history_inputs(context, db, reference, source, manifest, budget, *
         'History capture requires the actual operation or release observation')
     require(any(observed is context for observed in source.contexts),'History capture borrowed another context')
     _check_context(context,db)
-    budget.take(edges=len(source.content.get('use_contract',{}).get('edges',())))
-    budget.retain(source.content)
-    template = _canonical_plain(source.content); identity = template['identity']
+    template=changes._recovery_release_template(source,context)
+    budget.take(edges=len(template.get('use_contract',{}).get('edges',())))
+    budget.retain(template)
+    identity = template['identity']
     require(changes.d3._digest(manifest)==identity['manifest_digest'],'History capture manifest differs from observed source')
     baseline = state._source_baseline(None,db,context=context)
     require(baseline is not None and baseline['content']['source_contract']==2,'History capture baseline is unavailable')
@@ -588,6 +589,7 @@ def _recovery_registration_projection(content,created_at,inputs, *, birth_certif
 
 def _check_recovery_projection(context,db,source,lifetime):
     """Recheck only actual local reads; the caller has already checked its real lifetime."""
+    from runtime import changes
     expected=lifetime['registration_projections'][str(context.database)];inputs=expected['inputs']
     _require(inputs['baseline']==lifetime['baselines'][str(context.database)],'Recovery projection original baseline changed')
     for item in inputs['history']:
@@ -600,7 +602,19 @@ def _check_recovery_projection(context,db,source,lifetime):
         if item['reference']==inputs['baseline']['reference'] and registration is not None:
             expected_metadata['dependencies']=registration['expected']['dependencies']
         _require(actual==expected_metadata,'Recovery projection managed source changed')
-    actual=_recovery_registration_projection(_canonical_plain(source.content),source.created_at,inputs,
+    decision=lifetime.get('release_decisions',{}).get(str(context.database))
+    if decision is not None:
+        _require(decision['source']==changes._recovery_release_template(source,context,planned=False),
+            'Release original local receipt template changed')
+        original_inputs=deepcopy(decision['inputs'])
+        if 'history_capture' in original_inputs:
+            original_inputs['history_capture']['template']=inputs['history_capture']['template']
+        _require(original_inputs==inputs,'Release replay decision changed its actual acquired inputs')
+        replay=_recovery_registration_projection(decision['source'],source.created_at,decision['inputs'],
+            birth_certificate=_canonical_plain(source.birth_certificate) if source.birth_certificate is not None else None,
+            budget=lifetime.get('capture_budget'))
+        _require(replay==decision,'Release original exact replay decision changed')
+    actual=_recovery_registration_projection(changes._recovery_release_template(source,context),source.created_at,inputs,
         birth_certificate=_canonical_plain(source.birth_certificate) if source.birth_certificate is not None else None,budget=lifetime.get('capture_budget'))
     _require(actual==expected,'Recovery registration projection changed')
     return actual
