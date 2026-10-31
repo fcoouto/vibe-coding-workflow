@@ -5,8 +5,8 @@ description: Use when the user explicitly requests $llm-council or an LLM Counci
 
 # LLM Council
 
-Investigate a question independently, exchange one evidence-based critique round,
-then produce a fresh synthesis with uncertainty and meaningful dissent intact.
+Collect independent answers, exchange one anonymous critique round, then obtain
+fresh chair synthesis with uncertainty and meaningful dissent intact.
 
 Read the [local procedure](references/procedure.md). Follow its stage-specific
 reference links and applicable [Codex controls](../../clients/codex-council.md) on

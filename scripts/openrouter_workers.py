@@ -33,6 +33,7 @@ PREREQUISITE_REASONS = BUSY_REASONS | {
     'openrouter_scope_changed', 'openrouter_configuration_unavailable', 'openrouter_storage_or_scope_unavailable',
     'council_runtime_qualification_mismatch', 'cancelled', 'phase_already_closed',
     'deadline_exhausted', 'timing_uncertain', 'frozen_evidence_changed',
+    'free_council_temporarily_disabled', 'historical_council_read_only',
     'unsafe_worker_preparation_directory', 'output_limit', 'council_report_limit',
     'invalid_event', 'invalid_part', 'unsupported_event', 'unexpected_tool', 'session_mismatch',
     'malformed_event', 'unterminated_event'}
@@ -82,6 +83,7 @@ def _validate_brief(brief, council=False):
         required |= {'council', 'capabilities', 'input_tokens', 'output_tokens', 'permission_qualification'}
         if isinstance(brief.get('council'), dict) and 'group' in brief['council']:
             required |= {'canonical_model', 'pricing'}
+    if council and 'transport' in brief: required.add('transport')
     if set(brief) != required: raise ValueError('invalid_brief_fields')
     for key in required - {'files', 'timeout_seconds', 'steps', 'council', 'capabilities', 'input_tokens', 'output_tokens', 'permission_qualification', 'pricing'}:
         if not isinstance(brief[key], str) or not brief[key].strip() or len(brief[key]) > 16000:
@@ -97,7 +99,7 @@ def _validate_brief(brief, council=False):
     source = Path(brief['source_root'])
     if not source.is_absolute() or source.resolve() != source or not source.is_dir(): raise ValueError('invalid_source')
     files = brief['files']
-    if not isinstance(files, list) or not 1 <= len(files) <= (council_snapshot.MAX_PATHS if council else 16): raise ValueError('invalid_files')
+    if not isinstance(files, list) or not (0 if council else 1) <= len(files) <= (council_snapshot.MAX_PATHS if council else 16): raise ValueError('invalid_files')
     return brief, source
 
 
@@ -184,11 +186,17 @@ def _council_contract(brief):
             raise ValueError('invalid_council_pricing')
         if council['group'] == 'Free' and (not brief['model'].endswith(':free') or any(pricing[key] != 0 for key in rates)):
             raise ValueError('free_council_zero_rate_variant_required')
+    direct = brief.get('transport', 'opencode') == 'openrouter-chat'
+    if brief.get('transport', 'opencode') not in ('opencode', 'openrouter-chat'): raise ValueError('invalid_council_transport')
+    if direct and brief['steps'] != 1: raise ValueError('council_text_single_request_required')
     caps = brief['capabilities']
     required = {'model', 'provider', 'context_length', 'max_output_tokens', 'tools', 'reasoning', 'observed_at', 'source'}
+    if direct: required.add('api')
     if (not isinstance(caps, dict) or not required <= set(caps) or set(caps) - required - {'max_input_tokens'}
             or caps['model'] != brief['model'] or caps['provider'] != brief['provider']
-            or caps['tools'] is not True
+            or type(caps['tools']) is not bool
+            or direct and caps.get('api') != 'chat-completions'
+            or not direct and caps['tools'] is not True
             or any(not isinstance(caps[key], str) or not caps[key].strip() for key in ('observed_at', 'source'))):
         raise ValueError('invalid_council_capabilities')
     for value in [brief['input_tokens'], brief['output_tokens'], caps['context_length'], caps['max_output_tokens']
@@ -214,6 +222,12 @@ def _council_contract(brief):
             raise ValueError('invalid_council_reasoning')
     else: raise ValueError('invalid_council_reasoning')
     qualification = brief['permission_qualification']
+    if direct:
+        if (not isinstance(qualification, dict) or set(qualification) != {'profile', 'evidence'}
+                or qualification['profile'] != 'council-text-v1'
+                or not isinstance(qualification['evidence'], str) or not qualification['evidence'].strip()):
+            raise ValueError('council_permission_qualification_required')
+        return
     if (not isinstance(qualification, dict)
             or set(qualification) != {'opencode_sha256', 'version', 'profile', 'evidence'}
             or qualification['version'] != '1.19.5' or qualification['profile'] != 'council-readonly-v2'
@@ -275,7 +289,8 @@ def prepare_council(root: Path, brief: dict, snapshot: Path, manifest: dict, *, 
         brief = dict(brief, management=dict(scope_id=report['scope_id'], revision=report['revision']))
     run = _new_run(root, brief)
     workspace = run / 'workspace'
-    copied = council_snapshot.capture(snapshot, workspace, manifest['files'])
+    copied = council_snapshot.capture(snapshot, workspace, manifest['files'],
+        allow_empty=brief.get('transport') == 'openrouter-chat')
     workspace.chmod(0o700)
     try: _initialize_git(workspace)
     finally: workspace.chmod(0o500)
@@ -283,9 +298,32 @@ def prepare_council(root: Path, brief: dict, snapshot: Path, manifest: dict, *, 
     council_snapshot.verify(snapshot, manifest)
     brief['evidence'] = dict(snapshot=str(snapshot), manifest=manifest, workspace_manifest=copied)
     save(run / 'brief.json', brief)
-    save(run / 'result.json', dict(state='prepared', task_id=brief['task_id'],
+    direct_identity = {}
+    if brief.get('transport') == 'openrouter-chat':
+        direct_identity = dict(transport='openrouter-chat', attempt_id=brief['council'].get('attempt_id', str(uuid.uuid4())),
+            request_sha256=hashlib.sha256(council_snapshot._json(direct_payload(brief, workspace))).hexdigest())
+    save(run / 'result.json', dict(state='prepared', task_id=brief['task_id'], **direct_identity,
         **({'council_owner': brief['council']} if 'group' in brief['council'] else {})))
     return run
+
+
+def direct_payload(brief, workspace):
+    """Build only approved bytes; storage and authentication paths stay local."""
+    _council_contract(brief)
+    if brief.get('transport') != 'openrouter-chat': raise ValueError('invalid_council_transport')
+    manifest = brief['evidence']['workspace_manifest']
+    _verify_council_copy(workspace, manifest)
+    inputs = {name: council_snapshot.onboarding._read_file(workspace / name, council_snapshot.MAX_FILE).decode('utf-8')
+              for name in sorted(manifest['files'])}
+    payload = dict(model=brief['model'], stream=False, max_tokens=brief['output_tokens'],
+        provider=dict(only=[brief['provider']], allow_fallbacks=False, require_parameters=True),
+        messages=[dict(role='user', content=brief['objective'] + '\n\nApproved evidence and phase reports (JSON):\n'
+            + json.dumps(inputs, ensure_ascii=False, separators=(',', ':')))])
+    if 'efforts' in brief['capabilities']['reasoning']: payload['reasoning'] = dict(effort=brief['effort'])
+    # UTF-8 bytes plus envelope reserve conservatively bound tokens without a model tokenizer.
+    if sum(len(item['content'].encode()) for item in payload['messages']) + 1024 > brief['input_tokens']:
+        raise ValueError('council_endpoint_limit')
+    return payload
 
 
 def configuration(brief, workspace=None):
@@ -444,8 +482,8 @@ def execute(run, executable, auth_data, publish=None, *, launch_guard=None, dead
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         previous = json.loads((run / 'result.json').read_text())
         if previous['state'] != 'prepared' and not resumable(previous): raise ValueError('already_started')
-        if 'council_owner' in previous:
-            if brief.get('council') != previous['council_owner']:
+        if 'council_owner' in previous or 'council' in brief:
+            if 'council_owner' in previous and brief.get('council') != previous['council_owner']:
                 raise ValueError('council_worker_identity_changed')
             from runtime import council
             launch_guard = lambda: council.external_launch_guard(run, brief)
@@ -459,7 +497,8 @@ def execute(run, executable, auth_data, publish=None, *, launch_guard=None, dead
         try:
             return _execute(run, brief, Path(executable), Path(auth_data), publish,
                             launch_guard=launch_guard, deadline=deadline, wall_deadline=wall_deadline,
-                            resume=previous['state'] == 'not_launched')
+                            resume=previous['state'] == 'not_launched', direct_identity={
+                                key: previous.get(key) for key in ('attempt_id', 'request_sha256')})
         finally:
             signal.signal(signal.SIGTERM, original)
 
@@ -476,9 +515,10 @@ def resumable(result):
             and type(wall_deadline) in (int, float) and math.isfinite(wall_deadline))
 
 
-def _execute(run, brief, executable, auth_data, publish, *, launch_guard=None, deadline, wall_deadline, resume=False):
+def _execute(run, brief, executable, auth_data, publish, *, launch_guard=None, deadline, wall_deadline, resume=False, direct_identity=None):
     workspace = run / 'workspace'
-    config = configuration(brief, workspace)
+    direct = brief.get('transport') == 'openrouter-chat'
+    config = configuration(brief, workspace) if not direct else {'permission': {}}
     auth_data = auth_data.resolve()
     # OpenCode 1.19.5 otherwise appends an allow for shared truncated output.
     config['permission']['external_directory'] = {'*': 'deny', str(auth_data / 'opencode/tool-output/*'): 'deny'}
@@ -488,12 +528,17 @@ def _execute(run, brief, executable, auth_data, publish, *, launch_guard=None, d
                OPENCODE_DISABLE_AUTOUPDATE='true', OPENCODE_DISABLE_DEFAULT_PLUGINS='true',
                OPENCODE_DISABLE_LSP_DOWNLOAD='true', OPENCODE_DISABLE_AUTOCOMPACT='true',
                OPENCODE_DISABLE_MODELS_FETCH='true')
+    if direct: env = {key: value for key, value in env.items() if key in ('PATH', 'HOME', 'TMPDIR', 'LANG')}
     result = {'state': 'running', 'task_id': brief['task_id'], 'requested_model': brief['model'],
               'deadline_monotonic': deadline, 'deadline_wall': wall_deadline,
               'session_id': None, 'tools': [], 'reported_cost_usd': None, 'reported_tokens': {},
               'known_cost_subtotal_usd': 0, 'accounting_complete': False,
               'accounting_source': 'opencode', 'response': '', 'upstream_cancellation_confirmed': False,
               'failure': None, 'local_execution_stopped': False, 'native_fallback_ready': False}
+    if 'council' in brief: result['transport'] = 'openrouter-chat' if direct else 'opencode'
+    if direct:
+        result.update(direct_identity or {})
+        result.update(accounting_source='openrouter-chat', generation_id=None, reported_model=None)
     if 'group' in brief.get('council', {}): result['council_owner'] = brief['council']
     save(run / 'result.json', result)
     def emit(phase):
@@ -541,7 +586,7 @@ def _execute(run, brief, executable, auth_data, publish, *, launch_guard=None, d
                 with settings.admission(brief['source_root'], route, root=run.parent, opencode=executable,
                                         auth_data=auth_data, revision=stamp['revision'], scope_id=stamp['scope_id']), (
                                             launch_guard() if launch_guard else nullcontext()) as admission_ceiling:
-                    if 'group' in brief.get('council', {}):
+                    if 'council' in brief:
                         if type(admission_ceiling) not in (int, float) or not math.isfinite(admission_ceiling):
                             raise ValueError('council_worker_identity_changed')
                         bounded = min(deadline, admission_ceiling)
@@ -552,12 +597,19 @@ def _execute(run, brief, executable, auth_data, publish, *, launch_guard=None, d
                     if route == 'council':
                         council_snapshot.verify(Path(evidence['snapshot']), evidence['manifest'])
                         _verify_council_copy(workspace, evidence['workspace_manifest'])
-                        if hashlib.sha256(executable.read_bytes()).hexdigest() != brief['permission_qualification']['opencode_sha256']:
+                        if direct:
+                            payload = direct_payload(brief, workspace)
+                            if hashlib.sha256(council_snapshot._json(payload)).hexdigest() != result['request_sha256']:
+                                raise ValueError('council_worker_identity_changed')
+                        elif hashlib.sha256(executable.read_bytes()).hexdigest() != brief['permission_qualification']['opencode_sha256']:
                             raise ValueError('council_runtime_qualification_mismatch')
                     if time.monotonic() >= deadline: raise TimeoutError()
                     launch_stage = 'spawn'
-                    proc = subprocess.Popen([str(executable), 'run', '--pure', '--format', 'json', '--agent', 'pilot',
-                                     '--model', 'openrouter/' + brief['model'], '--title', brief['task_id']],
+                    command = ([sys.executable, str(PACKAGE / 'scripts/council_direct.py'),
+                        '--auth-data', str(auth_data), '--timeout', str(max(.001, deadline - time.monotonic()))]
+                        if direct else [str(executable), 'run', '--pure', '--format', 'json', '--agent', 'pilot',
+                            '--model', 'openrouter/' + brief['model'], '--title', brief['task_id']])
+                    proc = subprocess.Popen(command,
                                     cwd=workspace, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                     stderr=subprocess.DEVNULL, start_new_session=True)
                     launch_stage = 'launched'
@@ -572,7 +624,7 @@ def _execute(run, brief, executable, auth_data, publish, *, launch_guard=None, d
                 result['failure'] = dict(category='integration', reason=str(exc))
                 return result
         emit('Starting')
-        pending = memoryview(brief['objective'].encode('utf-8'))
+        pending = memoryview(council_snapshot._json(payload) if direct else brief['objective'].encode('utf-8'))
         os.set_blocking(proc.stdin.fileno(), False)
         with selectors.DefaultSelector() as selector:
             selector.register(proc.stdout, selectors.EVENT_READ)
@@ -605,6 +657,22 @@ def _execute(run, brief, executable, auth_data, publish, *, launch_guard=None, d
                         if not line.strip(): continue
                         event = json.loads(line)
                         if not isinstance(event, dict): raise ValueError('invalid_event')
+                        if direct:
+                            if finished_steps: raise ValueError('invalid_event')
+                            finished_steps = 1
+                            response = event.get('response')
+                            if not isinstance(response, str) or len(response.encode()) > 128 * 1024:
+                                raise ValueError('invalid_event')
+                            failure = event.get('failure')
+                            failed = failure is not None
+                            result['failure'] = safe_failure(failure) if failed else None
+                            terminal = not failed and bool(response.strip())
+                            result['response'] = response
+                            result['final_response'] = response if terminal else ''
+                            for field in ('generation_id', 'reported_model', 'reported_tokens', 'reported_cost_usd',
+                                          'known_cost_subtotal_usd', 'accounting_complete'):
+                                if field in event: result[field] = event[field]
+                            continue
                         kind = event['type']; part = event.get('part', {})
                         if not isinstance(part, dict): raise ValueError('invalid_part')
                         session = event.get('sessionID')
@@ -688,28 +756,55 @@ def _execute(run, brief, executable, auth_data, publish, *, launch_guard=None, d
         if not result['local_execution_stopped']: result['state'] = 'unresolved'
         result['native_fallback_ready'] = (result['local_execution_stopped'] and result['state'] in ('failed', 'unresolved')
                                            and 'group' not in brief.get('council', {}))
-        result['accounting_complete'] = bool(finished_steps and not missing_cost and result['state'] == 'awaiting_verification')
-        result['reported_cost_usd'] = result['known_cost_subtotal_usd'] if result['accounting_complete'] else None
+        if not direct:
+            result['accounting_complete'] = bool(finished_steps and not missing_cost and result['state'] == 'awaiting_verification')
+            result['reported_cost_usd'] = result['known_cost_subtotal_usd'] if result['accounting_complete'] else None
         save(run / 'result.json', result)
         emit('Awaiting verification' if result['state'] == 'awaiting_verification' else result['state'])
     return result
 
 
-def verify(run, disposition, checks):
+def verify(run, disposition, checks, *, failure=None):
     run = Path(run)
-    result = json.loads((run / 'result.json').read_text())
     brief = json.loads((run / 'brief.json').read_text())
-    if 'council_owner' in result or 'group' in brief.get('council', {}):
-        raise ValueError('grouped_council_verification_required')
-    if result['state'] != 'awaiting_verification' or disposition not in ('accepted', 'rejected'):
-        raise ValueError('not_verifiable')
-    if not isinstance(checks, list) or not checks or any(not isinstance(x, str) or not x.strip() for x in checks):
-        raise ValueError('native_checks_required')
-    result.update(state=disposition, native_checks=checks,
-                  native_fallback_ready=disposition == 'rejected' and result.get('local_execution_stopped') is True)
-    save(run / 'result.json', result)
-    progress(run, disposition)
-    return result
+    guard = nullcontext()
+    if 'council' in brief:
+        from runtime import council
+        marker = brief['council']
+        guard = council._locked(run.parent / ('council-' + marker['run_id']))
+    with guard as value:
+        result = json.loads((run / 'result.json').read_text())
+        if value is not None:
+            council._require_current_flow(value)
+            council._require(value['phase'] == marker['phase'], 'phase_already_closed')
+        if 'council_owner' in result or 'group' in brief.get('council', {}):
+            raise ValueError('grouped_council_verification_required')
+        if result['state'] != 'awaiting_verification' or disposition not in ('accepted', 'rejected'):
+            raise ValueError('not_verifiable')
+        if not isinstance(checks, list) or not checks or any(not isinstance(x, str) or not x.strip() for x in checks):
+            raise ValueError('native_checks_required')
+        if value is not None:
+            if value.get('mode') == 'text':
+                council._require(run == council._worker_path(value, marker['phase'], marker['member_id']),
+                                 'council_worker_identity_changed')
+                council._check_external_brief(run.parent / ('council-' + marker['run_id']), value,
+                                             marker['phase'], marker['member_id'], brief)
+            council._require(result.get('local_execution_stopped') is True, 'not_verifiable')
+            council._report(result.get('response'))
+            if disposition == 'accepted':
+                council._remaining(value, marker['phase'])
+                council._require(bool(result['response'].strip()), 'external_report_required')
+            result['failure'] = council._technical_failure(result.get('response', ''), disposition == 'accepted',
+                failure if failure is not None else result.get('failure'))
+        result.update(state=disposition, native_checks=checks,
+                      native_fallback_ready=disposition == 'rejected' and result.get('local_execution_stopped') is True)
+        if value is not None and value.get('mode') == 'text':
+            council._seal_external_verification(value, marker['phase'], marker['member_id'], run, result)
+            council._save(run.parent / ('council-' + marker['run_id']), value)
+        else:
+            save(run / 'result.json', result)
+        progress(run, disposition)
+        return result
 
 
 def main():
@@ -737,7 +832,7 @@ def main():
             save(run / 'visibility.json', {'delivered': False, 'reason': 'adapter_unavailable'})
     if args.action == 'run': result = execute(run, args.opencode, args.auth_data, publisher)
     elif args.action == 'verify':
-        result = verify(run, request['disposition'], request['checks'])
+        result = verify(run, request['disposition'], request['checks'], failure=request.get('failure'))
         if publisher: publisher(result['state'])
     else: result = json.loads((run / 'result.json').read_text())
     print(json.dumps(result, allow_nan=False))

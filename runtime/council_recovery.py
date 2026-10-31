@@ -1,7 +1,7 @@
 """Bounded v3 Council recovery. The existing Council lock owns every transition.
 
 Research and inference remain native coordinator operations outside this module.
-Source records are hypotheses; only normal host verification accepts a report.
+Source records guide technical recovery; report content remains for critics and the chair.
 """
 import copy
 from contextlib import contextmanager
@@ -88,16 +88,15 @@ def owners(value):
 def observe(value, owner):
     if owner.get('preparation_failure'): return owner['preparation_failure']
     if owner['kind'] == 'native':
-        return owner.get('receipt', dict(state='issued', local_execution_stopped=False))
+        result = owner.get('receipt', dict(state='issued', local_execution_stopped=False))
+        return dict(result, local_execution_stopped=True) if owner.get('stop_receipt') else result
     try:
         raw = c._read(Path(owner['worker_run']) / 'result.json', c.workers.LIMIT + c.REPORT_LIMIT)
         result = c.onboarding.read_request(raw, c.workers.LIMIT + c.REPORT_LIMIT)
     except FileNotFoundError:
         return dict(state='unresolved', local_execution_stopped=False)
     if result.get('state') == 'accepted':
-        verified = owner.get('verification', {})
-        if (verified.get('sha256') != c._digest(raw) or not c._text(result.get('session_id'))
-                or result['session_id'] != verified.get('session_id')):
+        if not c._external_verified(value, owner, result, raw):
             return dict(result, state='awaiting_verification')
         if (Path(owner['worker_run']) / 'result.json').stat().st_mtime > value['started_wall'] + c._end(value, owner['phase']):
             return dict(result, state='late')
@@ -127,6 +126,7 @@ def phase_guard(value, phase):
 
 
 def launch_guard(value, phase, member):
+    c._require_current_flow(value)
     item = value['members'].get(c._key(phase, member), {})
     c._require(item.get('candidate_id') == current(value, member)['candidate_id'], 'candidate_changed')
     c._require(time.monotonic() >= value['recovery'][member].get('not_before_monotonic', 0), 'retry_delay_pending')
@@ -137,14 +137,17 @@ def launch_guard(value, phase, member):
 @contextmanager
 def _admitted(run):
     with c._locked(run) as before:
+        c._require_current_flow(before)
         root, source, stamp = Path(before['root']), before['source_root'], before['management']
     with c.settings.admission(source, 'council', root=root, **stamp):
         with c._locked(run) as value:
+            c._require_current_flow(value)
             c._require(value['management'] == stamp, 'council_worker_identity_changed')
             yield value
 
 
 def _guard(run, value, phase, member):
+    c._require_current_flow(value)
     c._require(value.get('version') == 3, 'recovery_manifest_required')
     c._identity(value, phase, member)
     c._remaining(value, phase)
@@ -155,7 +158,12 @@ def _guard(run, value, phase, member):
     observed = observe(value, item)
     c._require(observed.get('local_execution_stopped') is True, 'prior_owner_not_stopped')
     c._require(observed.get('state') in ('failed', 'rejected', 'unresolved', 'late', 'not_launched'), 'failed_attempt_required')
-    failure = c.workers.safe_failure(observed.get('failure')) or {'category': 'substantive_rejection'}
+    failure = observed.get('failure')
+    if failure is None and (observed.get('state') == 'late' or observed.get('on_time') is False):
+        failure = dict(category='deadline')
+    report = observed.get('report', observed.get('final_response', observed.get('response', '')))
+    c._report(report)
+    failure = c._technical_failure(report, False, failure)
     c._require(failure['category'] not in BLOCKING, 'shared_harness_or_authorization_blocker')
     return item, failure
 
@@ -221,7 +229,9 @@ def _correction(correction, seat, sources):
     c._require(set(correction) == fields and type(correction.get('source')) is int
                and 0 <= correction['source'] < len(sources), 'unsupported_correction')
     if kind == 'request_representation':
-        c._require(seat['kind'] == 'external' and correction['representation'] == 'output_limit_only', 'unsupported_correction')
+        c._require(seat['kind'] == 'external'
+                   and seat['permission_qualification']['profile'] == 'council-readonly-v2'
+                   and correction['representation'] == 'output_limit_only', 'unsupported_correction')
     if kind == 'output_steps':
         c._require(all(type(correction[k]) is int and 1 <= correction[k] <= seat[k] for k in ('output_tokens', 'steps')), 'correction_exceeds_envelope')
         c._require(any(correction[k] != seat[k] for k in ('output_tokens', 'steps')), 'unchanged_correction')
@@ -314,7 +324,7 @@ def replace_candidate(run, phase, member, seat):
         roster[member] = seat
         if phase != 'synthesis':
             c._require(_canonical(seat) not in {_canonical(s) for m, s in roster.items() if m != member}, 'canonical_model_claimed')
-        # Validate the complete original topology and selected route, including Free/max reasoning.
+        # Validate the complete original topology and selected route, including supported maximum reasoning.
         # A synthesis role transfer may reuse a successful participant's canonical identity.
         validation_roster = copy.deepcopy(roster)
         if phase == 'synthesis':
@@ -323,7 +333,7 @@ def replace_candidate(run, phase, member, seat):
                     c._require(any(binding.get('canonical_model') == _canonical(seat)
                                    for binding in value['role_bindings']['investigate'].values()), 'chair_transfer_not_successful')
                     validation_roster[m] = copy.deepcopy(value['recovery'][member]['candidates'][0]['seat'])
-        request = {key: value[key] for key in ('run_id', 'question', 'constraints', 'coordinator_chat_id', 'approval_ref',
+        request = {key: value[key] for key in ('mode', 'run_id', 'question', 'constraints', 'coordinator_chat_id', 'approval_ref',
                     'phase_seconds', 'timeout_seconds', 'group', 'chair')}
         request.update(roster=validation_roster, research='', approved_files=value['snapshot_manifest']['files'])
         c._validate(request)

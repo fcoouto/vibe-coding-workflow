@@ -21,6 +21,7 @@ from scripts import openrouter_workers as workers
 def _launch_guard(run, phase):
     # Worker settings admission is held first, and this lock ends immediately after Popen.
     with council._locked(run) as value:
+        council._require_current_flow(value)
         council._remaining(value, phase)
         council._require(value['phase'] == phase, 'phase_already_closed')
         council._check_frozen(run, value)
@@ -65,7 +66,7 @@ def main():
                                   ('replace-candidate', 'seat'), ('record-supervisor', 'supervisor')):
                 if args.action == action: expected.add(field)
             if args.action == 'verify-external': expected |= {'disposition', 'checks'}
-            optional = {'native_receipt'} if args.action == 'member' else {'findings'} if args.action == 'verify-external' else set()
+            optional = {'native_receipt'} if args.action == 'member' else {'failure'} if args.action == 'verify-external' else set()
             council._require(expected <= set(request) and not set(request) - expected - optional, 'invalid_council_request')
             report = settings.status(args.cwd)
             run = Path(request['run'])
@@ -86,7 +87,7 @@ def main():
                          'replace-candidate': 'seat', 'record-supervisor': 'supervisor'}[args.action]
                 result = getattr(council, args.action.replace('-', '_'))(run, request['phase'], request['member'], request[field])
             elif args.action == 'verify-external':
-                result = council.verify_external(run, request['phase'], request['member'], request['disposition'], request['checks'], findings=request.get('findings'))
+                result = council.verify_external(run, request['phase'], request['member'], request['disposition'], request['checks'], failure=request.get('failure'))
             elif args.action == 'record-native':
                 council.record_native(run, request['phase'], request['member'], request['receipt'])
                 result = council.status(run)

@@ -1,10 +1,76 @@
 # Council validation
 
-Reviewed on **30 October 2026**, Europe/Amsterdam. The original
-[Council design](superpowers/specs/2026-10-29-council-design.md) is dated
-29 October. Council is a user extension, with
-[source coverage](policy-sources.md) maintained during authoring. This document
-records qualification; it does not authorize a Council run or activate a route.
+Current contract checked on **31 October 2026**, Europe/Amsterdam. Council is a
+user extension with [source coverage](policy-sources.md). Validation authorizes no
+run, route activation, installation or paid inference.
+
+## Current peer-review contract, 31 October 2026
+
+The [approved design](superpowers/specs/2026-10-31-council-simplification-design.md)
+uses runtime Frontier/Balanced selection, fixed text/repository modes, technical
+admission, anonymous critique and fresh native synthesis. Free is unavailable.
+The historical evidence below retains original outcomes and their original gates;
+it does not qualify the current direct transport or reopen old runs.
+
+### Representative instruction checks
+
+These are author-performed instruction walks over the local entry, stage references
+and actual action schemas, **not observed provider or installed-client execution**.
+The completed walks follow:
+
+| Request and starting scope | References loaded by stage | Expected decisions and limits |
+| --- | --- | --- |
+| `$llm-council Should I move closer to my family?`, no repository inspection, approved question only | Entry → procedure readiness/selection → selection group/task fit/discovery/pinning/text eligibility/backups; worker policy cached guidance and proposal **Discover and cache** only; protocol prepare/direct/verify; Codex identity/admission/dispatch/receipts and version-3 supervisor ownership before inference; protocol observations before critique/chair and accounting before delivery | Ask Frontier/Balanced, prioritize reasoning/uncertainty/assumptions over coding, record each initial/backup model's fit and evidence gaps, preserve coordinator settings and maximum supported controls. Set `mode: text`, `approved_files: {}`, internal peer-review flow. Saved Council consent/private API record and pinned setup remain required. External requests have no tools/history; local storage/authentication paths remain private. All safe terminal answers, including ordinary refusal or disputed assumptions, reach one critique; missing ranking remains usable; fresh native chair receives all usable reports unchanged. No host factual filter or semantic recovery. |
+| `$llm-council Inspect this Python retry path`, approved UTF-8 source files | Same stage routing, with selection repository/tool qualification and worker **shared tool-output boundary**; protocol repository seat schema and session proof. Recovery sections load only if an observed technical failure occurs. | Set `mode: repository`; require files and qualified OpenCode 1.19.5 hash/profile, tools and actual API compatibility. Prioritize Python correctness/debugging/repository evidence; use Agentic evidence for inspection. Text-only qualification or a Responses-only tool model on an unqualified Chat Completions route is ineligible. Independently inspect copied sealed bytes through read/glob/grep. Preserve supported maximum effort, anonymity, source immutability, ownership and exact stop evidence. |
+| `$llm-council Free ...`; separately, cancel an existing historical Free run | For new selection: entry → procedure selection → selection group boundary only. For the historical operation: protocol history/status/cancel and applicable recovery cleanup; Codex exact-owner supervision only if native owners require cleanup. | Stop new Free work before preparation/launch; do not discover a paid substitute or activate a route. Historical status/cancel remains available without inference or balance lookup. Stop exact returned owners and retain uncertain upstream billing/cancellation; preserve old reports, feedback, verdicts and accounting. No resume, replacement or semantic verdict mutation. |
+
+Text does not load the worker tool/cache reference; selection routes its tool
+qualification section only to repository mode. Neither normal successful
+walk loads recovery investigation/actions, management activation, authoring sources,
+comparative evaluation or ordinary worker/proposal execution procedures. Technical
+failure would load only relevant recovery sections: one ≤120-second investigation,
+three searches/five reads, two evidenced corrections per tenure and three
+replacements per original seat, all within original phase/session limits. Each
+replacement retains task fit, mode, approved shortlist, scope and maximum controls.
+Consent checks, 1,200-second default with 600/360/240 phases, finite allowances,
+phase barriers and local-stop ownership apply to both successful walks.
+
+### Local verification
+
+The exact relevant gate ran once:
+
+```text
+python3 -B -m unittest tests.test_council_flow tests.test_council_recovery tests.test_council_snapshot tests.test_council_direct tests.test_openrouter_workers tests.test_openrouter_settings
+```
+
+**259 tests passed in 213.273 seconds**, exit 0. This is synthetic/local runtime
+proof, including owned disposable children and fake endpoints. The unchanged
+ordinary worker/settings cases are included. `python3 -B scripts/validate.py`
+passed and reports `client_execution: not_checked`. OpenAI skill-creator
+`quick_validate.py skills/llm-council` passed; the entry is **113 words**. All **180**
+local targets/anchors across the ten guidance files exist; `git diff --check`
+passed. Source-to-contract coverage and actual mode/seat/failure/receipt/proof
+schemas were reviewed. Independent native Astra/high review and its scoped
+re-review found all reported issues addressed. The verification-seal correction
+has **82 passing affected tests in 113.299 seconds**, including ungrouped text
+handoff, tamper exclusion, no replay, grouped verification and version-specific
+repository reports. The 259-test run and the affected-test run are separate
+results; the full six-module command was not repeated after that correction.
+The reviewed runtime candidate is `4f40cef`. Final package validation passed.
+Raw logs and review reports are retained in a private authoring archive outside
+the package.
+
+These checks do not establish real endpoint/authentication compatibility, actual
+native/model effort, live cancellation, installed-client loading or comparative
+quality. No live/paid inference, real credentials, install, merge, release,
+comparative evaluation or full-repository suite was run. Historical unrelated
+baseline failures below were not replayed; no current full-suite pass is claimed.
+
+## Historical qualification records through 30 October 2026
+
+The following records retain the contracts, names, commands and observations at
+their recorded revisions. Current operational instructions are the local skill
+references above.
 
 ## Evidence classes
 
@@ -390,7 +456,7 @@ frozen manifests and SHA256 inventory. Credentials and auth-directory contents
 were neither read nor copied. Existing temporary enrollment and saved consent
 were reused without account, provider-billing or configuration changes.
 
-## Next qualification
+## Historical next-qualification note, 30 October
 
 Full three-member qualification remains open. A further authorized run should retain real model/effort controls,
 context and identity evidence, exact native admission/stop ownership when active,

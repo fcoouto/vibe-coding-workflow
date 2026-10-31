@@ -145,7 +145,7 @@ def _destination(checkout, destination):
     return _directory(destination.parent, private=True)
 
 
-def capture(checkout: Path, destination: Path, approved: dict) -> dict:
+def capture(checkout: Path, destination: Path, approved: dict, *, allow_empty: bool = False) -> dict:
     """Capture reviewed UTF-8 files. Only a final marker plus verify means complete."""
     created = None
     complete = False
@@ -154,7 +154,8 @@ def capture(checkout: Path, destination: Path, approved: dict) -> dict:
         _require(os.name == 'posix', 'council_requires_posix')
         _canonical(checkout)
         _directory(checkout)
-        _approved(approved)
+        _require(type(allow_empty) is bool, 'invalid_council_empty_scope')
+        _approved(approved, empty=allow_empty)
         parent = _destination(checkout, destination)
         contents, observations, exclusions = {}, {}, []
         for name, reviewed in sorted(approved.items()):
