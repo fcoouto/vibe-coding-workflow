@@ -794,6 +794,22 @@ class CouncilWorkerTests(CouncilCase):
         self.assertTrue(callable(getattr(self.api, 'prepare_council', None)), 'Council preparation is required')
         return self.api.prepare_council(self.root, dict(self.brief, **changes), self.snapshot, self.manifest)
 
+    def prepare_current(self, **changes):
+        from runtime import council
+        brief = dict(self.brief, **changes)
+        self.api._validate_council_brief(brief)
+        council_snapshot.verify(self.snapshot, self.manifest)
+        seat = {key: brief[key] for key in ('model', 'model_display_name', 'provider', 'effort',
+            'input_tokens', 'output_tokens', 'steps', 'capabilities', 'permission_qualification')}
+        seat.update(kind='external', selection='Controlled current Council route')
+        request = dict(mode='repository', run_id=brief['task_id'], question=brief['objective'],
+            constraints='Read only', coordinator_chat_id=brief['coordinator_chat_id'], approval_ref=brief['approval_ref'],
+            approved_files=self.manifest['files'], research='Fixture research',
+            phase_seconds=dict(investigate=600, critique=360, synthesis=240),
+            roster={'native': self.native_seat(), 'external-one': seat, 'external-two': dict(seat)})
+        run = Path(council.prepare(self.repo, request)['run'])
+        return Path(council.packet(run, 'investigate', 'external-one')['worker_run'])
+
     def test_two_isolated_council_runs_keep_endpoint_allowances_and_pin(self):
         first = self.prepare()
         second = self.prepare(task_id='council-two', output_tokens=6000,
@@ -872,16 +888,16 @@ class CouncilWorkerTests(CouncilCase):
             + 'print(json.dumps({"type":"text","part":{"text":"fixture result"}}))\n'
             + 'print(json.dumps({"type":"step_finish","part":{"reason":"stop","cost":0,"tokens":{"input":1,"output":1}}}))\n')
         self.brief['permission_qualification']['opencode_sha256'] = hashlib.sha256(self.executable.read_bytes()).hexdigest()
-        run = self.prepare()
+        run = self.prepare_current()
         result = self.api.execute(run, self.executable, self.auth)
         self.assertEqual(result['state'], 'awaiting_verification')
         self.assertTrue(result['local_execution_stopped'])
         with self.assertRaisesRegex(ValueError, 'already_started'): self.api.execute(run, self.executable, self.auth)
         self.assertEqual(count.read_text().splitlines(), ['spawn'])
-        other = self.prepare(task_id='second-run', output_tokens=1024)
+        other = self.prepare_current(task_id='second-run', output_tokens=1024)
         self.assertEqual(self.api.execute(other, self.executable, self.auth)['state'], 'awaiting_verification')
         self.assertNotEqual(run / 'workspace', other / 'workspace')
-        second = self.prepare(task_id='changed-runtime')
+        second = self.prepare_current(task_id='changed-runtime')
         self.executable.write_text('#!/bin/sh\nexit 0\n')
         result = self.api.execute(second, self.executable, self.auth)
         self.assertEqual(result['state'], 'unresolved')
@@ -920,7 +936,7 @@ class CouncilWorkerTests(CouncilCase):
         self.executable.write_text('#!/usr/bin/env python3\nimport json\n'
             + 'print(json.dumps({"type":"text","part":{"text":"x" * (128 * 1024)}}))\n')
         self.brief['permission_qualification']['opencode_sha256'] = hashlib.sha256(self.executable.read_bytes()).hexdigest()
-        run = self.prepare()
+        run = self.prepare_current()
         result = self.api.execute(run, self.executable, self.auth)
         self.assertEqual(result['state'], 'unresolved')
         self.assertLessEqual(len(result['response'].encode()), 128 * 1024)

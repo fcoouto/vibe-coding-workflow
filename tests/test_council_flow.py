@@ -29,7 +29,7 @@ class CouncilFlowTests(CouncilCase):
                 opencode_sha256=hashlib.sha256(self.executable.read_bytes()).hexdigest(),
                 version='1.19.5', profile='council-readonly-v2', evidence='native:controlled-probe'),
             selection='native:benchmark and endpoint observations')
-        self.request = dict(run_id='round-one', question='What follows from the evidence?',
+        self.request = dict(mode='repository', run_id='round-one', question='What follows from the evidence?',
             constraints='Read only; explain uncertainty.', coordinator_chat_id='00000000-0000-4000-8000-000000000001',
             approval_ref='native:explicit-council-consent', approved_files=self.approved(['evidence.txt']),
             research='# Shared research\nPublic source, date and excerpt.\n',
@@ -74,6 +74,171 @@ class CouncilFlowTests(CouncilCase):
         self.external('critique', 'external-one')
         if not self.request['roster']['external-two'].get('unavailable_reason'):
             self.external('critique', 'external-two')
+
+    def test_new_run_requires_mode(self):
+        for index, mode in enumerate((None, '', 'automatic', True)):
+            with self.subTest(mode=mode):
+                self.request['run_id'] = 'invalid-mode-' + str(index)
+                if mode is None: self.request.pop('mode', None)
+                else: self.request['mode'] = mode
+                with self.assertRaisesRegex(ValueError, 'invalid_council_mode'):
+                    council.prepare(self.repo, self.request)
+                self.assertFalse((self.root / ('council-' + self.request['run_id'])).exists())
+
+    def test_text_question_allows_no_files_without_checkout_writes(self):
+        self.request.update(mode='text', approved_files={})
+        before = {str(path.relative_to(self.repo)): path.read_bytes()
+                  for path in self.repo.rglob('*') if path.is_file()}
+        self.prepare()
+        manifest = json.loads((self.run / 'manifest.json').read_text())
+        self.assertEqual((manifest['mode'], manifest['flow']), ('text', 'peer-review'))
+        self.assertEqual(manifest['snapshot_manifest']['files'], {})
+        council.snapshot.verify(self.run / 'snapshot', manifest['snapshot_manifest'])
+        self.assertEqual(before, {str(path.relative_to(self.repo)): path.read_bytes()
+                         for path in self.repo.rglob('*') if path.is_file()})
+
+    def test_repository_requires_approved_files(self):
+        self.request.update(mode='repository', approved_files={})
+        with self.assertRaisesRegex(ValueError, 'repository_approved_files_required'):
+            self.prepare()
+        self.assertFalse((self.root / 'council-round-one').exists())
+
+    def test_repository_requires_captured_approved_files(self):
+        (self.repo / '.env').write_text('SYNTHETIC_PRIVATE_FIXTURE=excluded')
+        self.request['approved_files'] = self.approved(['.env'])
+        with self.assertRaisesRegex(ValueError, 'repository_approved_files_required'):
+            self.prepare()
+        self.assertFalse((self.root / 'round-one-investigate-external-one').exists())
+
+    def test_free_prepare_and_all_inference_paths_blocked(self):
+        self.grouped_request('Free')
+        with self.assertRaisesRegex(ValueError, 'free_council_temporarily_disabled'):
+            self.prepare()
+        self.assertFalse((self.root / 'council-round-one').exists())
+        # Even an on-disk Free marker cannot reopen an otherwise current paid run.
+        self.request['roster']['member-three'] = dict(kind='native', model='native-balanced', effort='max',
+            supported_efforts=['max'], input_tokens=10000, output_tokens=4096, steps=12,
+            selection='Approved native controls', supervisor_id='coordinator')
+        self.request.update(group='Balanced', chair='member-three')
+        self.prepare()
+        packet = council.packet(self.run, 'investigate', 'member-one')
+        brief = json.loads((Path(packet['worker_run']) / 'brief.json').read_text())
+        with council._locked(self.run) as value:
+            value['group'] = 'Free'
+            council._save(self.run, value)
+        from scripts import council as cli
+        from contextlib import redirect_stdout
+        from io import StringIO
+        def launch_guard():
+            with council.external_launch_guard(Path(packet['worker_run']), brief): pass
+        def cli_guard():
+            with cli._launch_guard(self.run, 'investigate'): pass
+        for operation in (lambda: council.packet(self.run, 'investigate', 'member-three'),
+                          lambda: council.resume_member(self.run, 'investigate', 'member-one'),
+                          launch_guard, cli_guard):
+            with self.assertRaisesRegex(ValueError, 'free_council_temporarily_disabled'):
+                operation()
+        with redirect_stdout(StringIO()):
+            result = council.workers.execute(Path(packet['worker_run']), self.executable, self.auth)
+        self.assertEqual(result['state'], 'unresolved')
+        self.assertEqual(result['failure']['reason'], 'free_council_temporarily_disabled')
+        self.assertIsNone(result['session_id'])
+
+    def test_historical_status_cancel_and_settlement_only(self):
+        self.prepare()
+        packet = council.packet(self.run, 'investigate', 'native')
+        accepted = self.external('investigate', 'external-one', report='Historical original report', cost=0)
+        external = council.packet(self.run, 'investigate', 'external-two')
+        with council._locked(self.run) as value:
+            value.pop('flow', None)
+            council._save(self.run, value)
+        originals = {path: path.read_bytes() for path in self.run.rglob('*')
+                     if path.is_file() and path.name not in ('manifest.json', 'lock', 'execution.lock')}
+        accepted_result = Path(accepted['worker_run']) / 'result.json'
+        originals[accepted_result] = accepted_result.read_bytes()
+        for operation in (
+                lambda: council.packet(self.run, 'investigate', 'external-two'),
+                lambda: council.resume_member(self.run, 'investigate', 'external-two'),
+                lambda: council.workers.verify(Path(external['worker_run']), 'accepted', ['Checked'])):
+            with self.assertRaisesRegex(ValueError, 'historical_council_read_only'):
+                operation()
+        from contextlib import redirect_stdout
+        from io import StringIO
+        with redirect_stdout(StringIO()):
+            result = council.workers.execute(Path(external['worker_run']), self.executable, self.auth)
+        self.assertEqual(result['failure']['reason'], 'historical_council_read_only')
+        self.assertTrue(result['local_execution_stopped'])
+        receipt = dict(issued_id=packet['issued_id'], child_id='historical-child', supervisor_id='coordinator',
+            observed_model=None, observed_effort=None, fork_turns=None, local_execution_stopped=True,
+            accepted=True, checks=['Stopped historical child'], report='New historical verdict')
+        with self.assertRaisesRegex(ValueError, 'historical_council_read_only'):
+            council.record_native(self.run, 'investigate', 'native', receipt)
+        council.cancel(self.run)
+        receipt.update(accepted=False, report='')
+        council.record_native(self.run, 'investigate', 'native', receipt)
+        state = council.status(self.run)
+        self.assertTrue(state['cancelled'])
+        self.assertTrue(state['all_local_execution_stopped'])
+        self.assertFalse(state['fresh_synthesis_available'])
+        self.assertEqual(originals, {path: path.read_bytes() for path in originals})
+
+    def test_historical_free_prices_reports_and_hashes_remain_readable(self):
+        current = copy.deepcopy(self.request)
+        historical = copy.deepcopy(self.grouped_request('Free'))
+        self.request = current
+        self.prepare()
+        report = b'Original historical Free report and dissent.'
+        council.changes._atomic(self.run, 'initial-1.md', report)
+        worker = self.root / 'round-one-investigate-member-one'
+        worker.mkdir(mode=0o700)
+        result = dict(state='accepted', response=report.decode(), session_id='historical-free-session',
+            local_execution_stopped=True, reported_cost_usd=0, known_cost_subtotal_usd=0,
+            accounting_complete=True, native_checks=['Original historical check'])
+        council.workers.save(worker / 'result.json', result)
+        original_result = (worker / 'result.json').read_bytes()
+        with council._locked(self.run) as value:
+            value.pop('flow'); value.pop('mode')
+            value.update(version=2, group='Free', chair='member-one', roster=historical['roster'])
+            value['frozen']['initial-1.md'] = hashlib.sha256(report).hexdigest()
+            value['members']['investigate:member-one'] = dict(kind='external', worker_run=str(worker),
+                verification=dict(sha256=hashlib.sha256(original_result).hexdigest(), session_id='historical-free-session'))
+            council._save(self.run, value)
+        self.assertEqual(council.status(self.run)['external_total_usd'], 0)
+        self.assertEqual(council.cancel(self.run)['accepted_participation']['investigate']['accepted'], 1)
+        with self.assertRaisesRegex(ValueError, 'free_council_temporarily_disabled'):
+            council.packet(self.run, 'investigate', 'member-two')
+        after = json.loads((self.run / 'manifest.json').read_text())
+        self.assertEqual(after['roster'], historical['roster'])
+        self.assertEqual(after['frozen']['initial-1.md'], hashlib.sha256(report).hexdigest())
+        self.assertEqual((self.run / 'initial-1.md').read_bytes(), report)
+        self.assertEqual((worker / 'result.json').read_bytes(), original_result)
+
+    def test_legacy_worker_verdict_holds_council_phase_lock(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from runtime.startup import StartupError
+        self.prepare(); self.native('investigate')
+        packet = self.external('investigate', 'external-one', state='awaiting_verification')
+        self.external('investigate', 'external-two')
+        original = council.workers.save
+        blocked = []
+        def save_after_competing_phase_transition(path, result):
+            try: council.packet(self.run, 'critique', 'native')
+            except StartupError: blocked.append(True)
+            else: blocked.append(False)
+            return original(path, result)
+        with redirect_stdout(StringIO()), patch.object(council, '_elapsed', return_value=601), patch.object(council.workers, 'save', side_effect=save_after_competing_phase_transition):
+            council.workers.verify(Path(packet['worker_run']), 'accepted', ['Checked original report'])
+        self.assertEqual(blocked, [True])
+        self.assertEqual(council.status(self.run)['phase'], 'investigate')
+
+    def test_closed_phase_rejects_late_result(self):
+        self.prepare(); self.investigations()
+        council.packet(self.run, 'critique', 'native')
+        original = (self.run / 'initial-1.md').read_bytes()
+        with self.assertRaisesRegex(ValueError, 'native_phase_closed'):
+            council.record_native(self.run, 'investigate', 'native', {})
+        self.assertEqual((self.run / 'initial-1.md').read_bytes(), original)
 
     def test_initial_reports_stay_hidden_and_lost_native_response_is_not_reissued(self):
         self.prepare(); self.native('investigate')
@@ -294,13 +459,13 @@ class CouncilFlowTests(CouncilCase):
         from scripts import council as cli
         from runtime.startup import StartupError
         self.prepare(); packet = council.packet(self.run, 'investigate', 'external-one')
-        guard = cli._launch_guard
+        guard = council.external_launch_guard
         calls = []
         def busy_then_guard(run, phase):
             calls.append(True)
             if len(calls) == 1: raise StartupError('Onboarding plan busy; retry the same expected revision')
             return guard(run, phase)
-        with patch.object(cli, '_launch_guard', side_effect=busy_then_guard), patch.object(council.workers.time, 'sleep', side_effect=lambda _: council.cancel(self.run)), patch.object(council.workers.subprocess, 'Popen', wraps=council.workers.subprocess.Popen) as spawn, redirect_stdout(StringIO()):
+        with patch.object(council, 'external_launch_guard', side_effect=busy_then_guard), patch.object(council.workers.time, 'sleep', side_effect=lambda _: council.cancel(self.run)), patch.object(council.workers.subprocess, 'Popen', wraps=council.workers.subprocess.Popen) as spawn, redirect_stdout(StringIO()):
             result = cli._execute(self.run, 'investigate', packet, self.settings)
         self.assertEqual(result['state'], 'unresolved')
         self.assertEqual(result['failure']['reason'], 'cancelled')
@@ -329,7 +494,7 @@ class CouncilFlowTests(CouncilCase):
         for index, change in enumerate(('snapshot', 'executable')):
             self.request['run_id'] = 'backoff-recheck-' + str(index)
             self.prepare(); packet = council.packet(self.run, 'investigate', 'external-one')
-            guard = cli._launch_guard
+            guard = council.external_launch_guard
             calls = []
             def busy_then_guard(run, phase):
                 calls.append(True)
@@ -339,7 +504,7 @@ class CouncilFlowTests(CouncilCase):
                 if change == 'executable': self.executable.write_text('#!/bin/sh\nexit 1\n')
                 else:
                     path = self.run / 'snapshot/evidence.txt'; path.chmod(0o600); path.write_text('changed'); path.chmod(0o400)
-            with patch.object(cli, '_launch_guard', side_effect=busy_then_guard), patch.object(council.workers.time, 'sleep', side_effect=changed), patch.object(council.workers.subprocess, 'Popen', wraps=council.workers.subprocess.Popen) as spawn, redirect_stdout(StringIO()):
+            with patch.object(council, 'external_launch_guard', side_effect=busy_then_guard), patch.object(council.workers.time, 'sleep', side_effect=changed), patch.object(council.workers.subprocess, 'Popen', wraps=council.workers.subprocess.Popen) as spawn, redirect_stdout(StringIO()):
                 result = cli._execute(self.run, 'investigate', packet, self.settings)
             self.assertEqual(result['state'], 'unresolved')
             self.assertEqual([call for call in spawn.call_args_list if call.args[0][0] == str(self.executable)], [])
@@ -846,7 +1011,7 @@ class CouncilFlowTests(CouncilCase):
         self.assertNotIn('initial-2.md', packet['reports'])
         self.assertNotIn('initial-3.md', packet['reports'])
 
-    def grouped_request(self, group='Free', native_slot='member-two'):
+    def grouped_request(self, group='Balanced', native_slot='member-three'):
         native = self.request['roster']['native']
         external = self.request['roster']['external-one']
         roster = {}
@@ -866,6 +1031,10 @@ class CouncilFlowTests(CouncilCase):
 
     def grouped_external(self, phase, member, *, session=None, disposition='accepted', verify=True):
         packet = council.packet(self.run, phase, member)
+        if packet['kind'] == 'native':
+            council.record_native(self.run, phase, member, self.native_receipt(packet,
+                f'{phase} evidence by anonymous participant', accepted=disposition == 'accepted', child_id=session))
+            return packet
         path = Path(packet['worker_run']) / 'result.json'
         result = dict(state='awaiting_verification', response=f'{phase} evidence by anonymous participant',
             session_id=session if session is not None else phase + '-' + member,
@@ -881,7 +1050,7 @@ class CouncilFlowTests(CouncilCase):
             for member in self.request['roster']:
                 self.grouped_external(phase, member, disposition='rejected' if member in rejected else 'accepted')
 
-    def test_grouped_free_seven_fresh_external_results_complete_and_accounted(self):
+    def test_grouped_balanced_seven_fresh_results_complete_and_accounted(self):
         self.grouped_request(); self.prepare()
         manifest = json.loads((self.run / 'manifest.json').read_text())
         self.assertEqual(manifest['version'], 2)
@@ -913,7 +1082,7 @@ class CouncilFlowTests(CouncilCase):
             else:
                 self.native_fixture = copy.deepcopy(self.request['roster']['native'])
                 self.external_fixture = copy.deepcopy(self.request['roster']['external-one'])
-            self.grouped_request(group); self.prepare()
+            self.grouped_request(group, native_slot='member-two'); self.prepare()
             packet = council.packet(self.run, 'investigate', 'member-two')
             self.assertEqual(packet['kind'], 'native')
             self.assertEqual(packet['model'], 'native-' + group.lower())
@@ -924,7 +1093,7 @@ class CouncilFlowTests(CouncilCase):
             council.record_native(self.run, 'investigate', 'member-two', receipt)
             self.assertEqual(council.status(self.run)['accepted_participation']['investigate']['accepted'], 1)
 
-    def test_grouped_roster_rejects_wrong_topology_free_pricing_and_duplicate_identity(self):
+    def test_grouped_roster_rejects_wrong_topology_free_group_and_duplicate_identity(self):
         base = copy.deepcopy(self.grouped_request())
         cases = []
         def changed(change):
@@ -933,27 +1102,26 @@ class CouncilFlowTests(CouncilCase):
         changed(lambda r: r.update(chair='native'))
         changed(lambda r: r['roster'].pop('member-three'))
         changed(lambda r: r['roster']['member-two'].update(kind='native'))
-        changed(lambda r: r['roster']['member-two']['pricing'].update(prompt_usd_per_million=.1))
         changed(lambda r: r['roster']['member-two']['pricing'].update(completion_usd_per_million=True))
         changed(lambda r: r['roster']['member-two'].update(canonical_model='vendor/model-1'))
         changed(lambda r: r['roster']['member-two'].update(model='vendor/paid'))
         changed(lambda r: r['roster']['member-two'].update(unavailable_reason='No route'))
-        changed(lambda r: r.update(group='Balanced'))
+        changed(lambda r: r.update(group='Free'))
         changed(lambda r: r['roster']['member-two'].pop('pricing'))
         for request in cases:
             with self.subTest(request=request), self.assertRaises(ValueError): council.prepare(self.repo, request)
         self.assertFalse((self.root / 'council-round-one').exists())
 
-    def test_grouped_nonchair_synthesis_and_native_free_are_blocked(self):
+    def test_grouped_nonchair_synthesis_and_native_receipt_for_external_are_blocked(self):
         self.grouped_request(); self.prepare(); self.grouped_rounds()
-        for member in ('native', 'member-two', 'member-three'):
+        for member in ('native', 'member-one', 'member-two'):
             with self.assertRaisesRegex(ValueError, 'invalid_council_member'):
                 council.packet(self.run, 'synthesis', member)
-        with self.assertRaises(ValueError): council.record_native(self.run, 'synthesis', 'member-one', {})
+        with self.assertRaises(ValueError): council.record_native(self.run, 'synthesis', self.request['chair'], {})
 
-    def test_grouped_reduced_coverage_counts_same_external_members(self):
+    def test_grouped_reduced_coverage_counts_same_members(self):
         self.grouped_request(); self.prepare(); self.grouped_rounds(rejected=('member-three',))
-        self.grouped_external('synthesis', 'member-one')
+        self.grouped_external('synthesis', self.request['chair'])
         report = council.status(self.run)
         self.assertEqual(report['outcome'], 'incomplete')
         self.assertEqual(report['accepted_participation']['critique']['accepted'], 2)
@@ -968,12 +1136,14 @@ class CouncilFlowTests(CouncilCase):
         result = json.loads(path.read_text()); result.update(state='accepted', native_checks=['Manual bypass'])
         council.workers.save(path, result)
         self.assertEqual(council.status(self.run)['accepted_participation']['investigate']['accepted'], 1)
-        missing = self.grouped_external('investigate', 'member-three', session='', verify=False)
+        missing = duplicate
+        result.update(state='awaiting_verification', session_id='')
+        council.workers.save(path, result)
         with self.assertRaisesRegex(ValueError, 'fresh_external_session_required'):
-            council.verify_external(self.run, 'investigate', 'member-three', 'accepted', ['Host verified'])
-        council.verify_external(self.run, 'investigate', 'member-three', 'rejected', ['No session observed'])
+            council.verify_external(self.run, 'investigate', 'member-two', 'accepted', ['Host verified'])
+        council.verify_external(self.run, 'investigate', 'member-two', 'rejected', ['No session observed'])
         manifest = json.loads((self.run / 'manifest.json').read_text())
-        self.assertNotIn('session_ids', manifest['members']['investigate:member-three'])
+        self.assertNotIn('session_ids', manifest['members']['investigate:member-two'])
         with self.assertRaisesRegex(ValueError, 'grouped_council_verification_required'):
             council.workers.verify(Path(missing['worker_run']), 'accepted', ['Manual bypass'])
         path = Path(packet['worker_run']) / 'result.json'
@@ -981,11 +1151,12 @@ class CouncilFlowTests(CouncilCase):
         council.workers.save(path, result)
         self.assertEqual(council.status(self.run)['accepted_participation']['investigate']['accepted'], 0)
 
-    def test_grouped_synthesis_session_freshness_and_terminal_stop_owner(self):
-        self.grouped_request(); self.prepare(); self.grouped_rounds()
-        packet = self.grouped_external('synthesis', 'member-one', session='investigate-member-one', verify=False)
+    def test_grouped_critique_session_freshness_and_terminal_stop_owner(self):
+        self.grouped_request(); self.prepare()
+        for member in self.request['roster']: self.grouped_external('investigate', member)
+        packet = self.grouped_external('critique', 'member-one', session='investigate-member-one', verify=False)
         with self.assertRaisesRegex(ValueError, 'fresh_external_session_required'):
-            council.verify_external(self.run, 'synthesis', 'member-one', 'accepted', ['Host verified'])
+            council.verify_external(self.run, 'critique', 'member-one', 'accepted', ['Host verified'])
         path = Path(packet['worker_run']) / 'result.json'
         result = json.loads(path.read_text()); result.update(state='unresolved', session_id=None,
             local_execution_stopped=False, reported_cost_usd=None, known_cost_subtotal_usd=.05,
@@ -995,7 +1166,7 @@ class CouncilFlowTests(CouncilCase):
         self.assertFalse(report['fresh_synthesis_available'])
         self.assertIsNone(report['external_total_usd'])
         self.assertEqual(report['known_external_subtotal_usd'], .05)
-        self.assertEqual(report['stop_requests'], [dict(phase='synthesis', member='member-one', worker_run=packet['worker_run'])])
+        self.assertEqual(report['stop_requests'], [dict(phase='critique', member='member-one', worker_run=packet['worker_run'])])
         result['local_execution_stopped'] = True; council.workers.save(path, result)
         self.assertTrue(council.status(self.run)['all_local_execution_stopped'])
 
@@ -1014,22 +1185,23 @@ class CouncilFlowTests(CouncilCase):
             except ValueError: pass
         self.assertEqual([call for call in spawn.call_args_list if call.args[0][0] == str(self.executable)], [])
 
-    def test_grouped_synthesis_frozen_changes_and_lost_original_response(self):
-        self.grouped_request(); self.prepare(); self.grouped_rounds()
+    def test_grouped_critique_frozen_changes_and_lost_original_response(self):
+        self.grouped_request(); self.prepare()
+        for member in self.request['roster']: self.grouped_external('investigate', member)
         original = council.workers.prepare_council
         def lost(*args, **kwargs):
             original(*args, **kwargs)
             raise OSError('lost packet response')
         with patch.object(council.workers, 'prepare_council', side_effect=lost), self.assertRaises(OSError):
-            council.packet(self.run, 'synthesis', 'member-one')
+            council.packet(self.run, 'critique', 'member-one')
         status = council.status(self.run)
         self.assertFalse(status['all_local_execution_stopped'])
         self.assertEqual(status['stop_requests'][0]['member'], 'member-one')
-        with self.assertRaises(FileExistsError): council.packet(self.run, 'synthesis', 'member-one')
-        path = self.run / 'critique-1.md'; path.write_text('tampered'); path.chmod(0o600)
+        with self.assertRaises(FileExistsError): council.packet(self.run, 'critique', 'member-one')
+        path = self.run / 'initial-1.md'; path.write_text('tampered'); path.chmod(0o600)
         with self.assertRaisesRegex(ValueError, 'frozen_evidence_changed'): council.status(self.run)
 
-    def test_grouped_headroom_and_synthesis_objective_preflight(self):
+    def test_grouped_headroom_and_external_phase_objective_preflight(self):
         self.grouped_request()
         manifest = dict(files={str(i): dict(size=1) for i in range(council.snapshot.MAX_PATHS - 7)})
         with self.assertRaisesRegex(ValueError, 'headroom'):
@@ -1039,7 +1211,7 @@ class CouncilFlowTests(CouncilCase):
         # The longest phase must be validated too, before the first dispatch.
         with patch.object(council.workers, '_validate_council_brief', wraps=council.workers._validate_council_brief) as validate:
             self.prepare()
-        self.assertEqual({call.args[0]['council']['phase'] for call in validate.call_args_list}, set(council.PHASES))
+        self.assertEqual({call.args[0]['council']['phase'] for call in validate.call_args_list}, {'investigate', 'critique'})
 
     def test_grouped_real_seven_attempts_verify_original_sessions_and_cli(self):
         from contextlib import redirect_stdout
@@ -1051,12 +1223,18 @@ class CouncilFlowTests(CouncilCase):
             'print(json.dumps({"type":"step_finish","sessionID":session,"part":{"reason":"stop","cost":0,"tokens":{"input":1,"output":1}}}))\n')
         digest = hashlib.sha256(self.executable.read_bytes()).hexdigest()
         self.grouped_request()
-        for seat in self.request['roster'].values(): seat['permission_qualification']['opencode_sha256'] = digest
+        for seat in self.request['roster'].values():
+            if seat['kind'] == 'external': seat['permission_qualification']['opencode_sha256'] = digest
         self.prepare(); sessions = []
         for phase in council.PHASES:
             members = list(self.request['roster']) if phase != 'synthesis' else [self.request['chair']]
             for member in members:
                 packet = council.packet(self.run, phase, member)
+                if packet['kind'] == 'native':
+                    receipt = self.native_receipt(packet, phase + ' native evidence')
+                    council.record_native(self.run, phase, member, receipt)
+                    sessions.append(receipt['child_id'])
+                    continue
                 with redirect_stdout(StringIO()): result = cli._execute(self.run, phase, packet, self.settings)
                 self.assertEqual(result['state'], 'awaiting_verification')
                 sessions.append(result['session_id'])
@@ -1066,47 +1244,44 @@ class CouncilFlowTests(CouncilCase):
         self.assertEqual(len(set(sessions)), 7)
         self.assertEqual(council.status(self.run)['outcome'], 'complete')
 
-    def test_grouped_failed_external_chair_never_advertises_native_fallback(self):
-        from contextlib import redirect_stdout
-        from io import StringIO
-        from scripts import council as cli
+    def test_grouped_failed_native_chair_keeps_outcome_partial(self):
         self.grouped_request(); self.prepare(); self.grouped_rounds()
-        packet = council.packet(self.run, 'synthesis', 'member-one')
-        # The fixture exits without a report; its actual stop still settles ownership.
-        with redirect_stdout(StringIO()): result = cli._execute(self.run, 'synthesis', packet, self.settings)
-        self.assertTrue(result['local_execution_stopped'])
-        self.assertFalse(result['native_fallback_ready'])
+        packet = council.packet(self.run, 'synthesis', self.request['chair'])
+        council.record_native(self.run, 'synthesis', self.request['chair'],
+            self.native_receipt(packet, '', accepted=False))
         report = council.status(self.run)
         self.assertFalse(report['fresh_synthesis_available'])
         self.assertTrue(report['all_local_execution_stopped'])
-        self.assertIsNone(report['external_total_usd'])
+        self.assertEqual(report['external_total_usd'], 0)
 
-    def test_grouped_external_synthesis_resume_retains_deadline_and_original_consent(self):
+    def test_grouped_external_critique_resume_retains_deadline_and_original_consent(self):
         from contextlib import redirect_stdout
         from io import StringIO
         from scripts import council as cli
-        self.grouped_request(); self.prepare(); self.grouped_rounds()
-        packet = council.packet(self.run, 'synthesis', 'member-one')
+        self.grouped_request(); self.prepare()
+        for member in self.request['roster']: self.grouped_external('investigate', member)
+        packet = council.packet(self.run, 'critique', 'member-one')
         with patch.object(council.workers.settings, 'admission', side_effect=openrouter_settings.SettingsError('openrouter_operation_busy')), patch.object(council.workers.time, 'sleep'), redirect_stdout(StringIO()):
-            result = cli._execute(self.run, 'synthesis', packet, self.settings)
-        resumed = council.resume_member(self.run, 'synthesis', 'member-one')
+            result = cli._execute(self.run, 'critique', packet, self.settings)
+        resumed = council.resume_member(self.run, 'critique', 'member-one')
         self.assertEqual(resumed['worker_run'], packet['worker_run'])
         self.assertEqual(resumed['deadline_monotonic'], result['deadline_monotonic'])
         disabled = openrouter_settings.disable(self.repo, {'expected_revision': self.settings['revision']})
         openrouter_settings.enable(self.repo, {'expected_revision': disabled['revision']})
         with self.assertRaisesRegex(openrouter_settings.SettingsError, 'openrouter_preparation_stale'):
-            council.resume_member(self.run, 'synthesis', 'member-one')
+            council.resume_member(self.run, 'critique', 'member-one')
         council.cancel(self.run)
         with self.assertRaisesRegex(ValueError, 'cancelled'):
-            council.resume_member(self.run, 'synthesis', 'member-one')
+            council.resume_member(self.run, 'critique', 'member-one')
 
-    def test_grouped_synthesis_unknown_session_rejects_but_can_settle_after_cancel(self):
-        self.grouped_request(); self.prepare(); self.grouped_rounds()
-        packet = self.grouped_external('synthesis', 'member-one', session='', verify=False)
+    def test_grouped_critique_unknown_session_rejects_but_can_settle_after_cancel(self):
+        self.grouped_request(); self.prepare()
+        for member in self.request['roster']: self.grouped_external('investigate', member)
+        packet = self.grouped_external('critique', 'member-one', session='', verify=False)
         with self.assertRaisesRegex(ValueError, 'fresh_external_session_required'):
-            council.verify_external(self.run, 'synthesis', 'member-one', 'accepted', ['Host checked'])
+            council.verify_external(self.run, 'critique', 'member-one', 'accepted', ['Host checked'])
         council.cancel(self.run)
-        council.verify_external(self.run, 'synthesis', 'member-one', 'rejected', ['Unknown session, stopped original owner'])
+        council.verify_external(self.run, 'critique', 'member-one', 'rejected', ['Unknown session, stopped original owner'])
         self.assertTrue(council.status(self.run)['all_local_execution_stopped'])
         self.assertFalse(council.status(self.run)['fresh_synthesis_available'])
 
@@ -1114,19 +1289,20 @@ class CouncilFlowTests(CouncilCase):
         from contextlib import redirect_stdout
         from io import StringIO
         from scripts import council as cli
-        self.grouped_request(); self.prepare(); self.grouped_rounds(rejected=('member-two', 'member-three'))
-        packet = council.packet(self.run, 'synthesis', 'member-one')
+        self.grouped_request(); self.prepare()
+        for member in self.request['roster']: self.grouped_external('investigate', member, disposition='accepted' if member == 'member-one' else 'rejected')
+        packet = council.packet(self.run, 'critique', 'member-one')
         path = Path(packet['worker_run']) / 'brief.json'
         brief = json.loads(path.read_text()); brief['canonical_model'] = 'vendor/changed-identity'
         council.workers.save(path, brief)
         with patch.object(council.workers.subprocess, 'Popen', wraps=council.workers.subprocess.Popen) as spawn, redirect_stdout(StringIO()):
-            result = cli._execute(self.run, 'synthesis', packet, self.settings)
+            result = cli._execute(self.run, 'critique', packet, self.settings)
         self.assertEqual([call for call in spawn.call_args_list if call.args[0][0] == str(self.executable)], [])
         self.assertTrue(result['local_execution_stopped'])
         self.assertEqual(council.status(self.run)['outcome'], 'partial')
 
     def test_grouped_paid_full_native_chair_and_wrong_chair(self):
-        self.grouped_request('Balanced')
+        self.grouped_request('Balanced', native_slot='member-two')
         wrong = copy.deepcopy(self.request); wrong['chair'] = 'member-one'
         with self.assertRaisesRegex(ValueError, 'topology'): council.prepare(self.repo, wrong)
         self.prepare()
@@ -1149,43 +1325,47 @@ class CouncilFlowTests(CouncilCase):
             original(*args, **kwargs)
             raise OSError('lost sealed snapshot response')
         with patch.object(council.snapshot, 'capture', side_effect=interrupted), self.assertRaises(OSError):
-            council.packet(self.run, 'synthesis', 'member-one')
-        packet = council.packet(self.run, 'synthesis', 'member-one')
+            council.packet(self.run, 'synthesis', self.request['chair'])
+        packet = council.packet(self.run, 'synthesis', self.request['chair'])
         self.assertIn('critique evidence', (Path(packet['snapshot']) / '__council__/critique-1.md').read_text())
         self.assertEqual(json.loads((self.run / 'manifest.json').read_text())['phase'], 'synthesis')
 
-    def test_grouped_all_seven_stop_owners_and_ambiguous_spawn_are_retained(self):
+    def test_grouped_all_six_phase_stop_owners_and_ambiguous_spawn_are_retained(self):
         from contextlib import redirect_stdout
         from io import StringIO
         from scripts import council as cli
-        self.grouped_request(); self.prepare(); self.grouped_rounds()
-        packet = council.packet(self.run, 'synthesis', 'member-one')
+        self.grouped_request(); self.prepare()
+        for member in self.request['roster']: self.grouped_external('investigate', member)
+        for member in ('member-two', 'member-three'): self.grouped_external('critique', member)
+        packet = council.packet(self.run, 'critique', 'member-one')
         original = council.workers.subprocess.Popen
         def ambiguous(command, *args, **kwargs):
             if command[0] == str(self.executable): raise OSError('ambiguous spawn')
             return original(command, *args, **kwargs)
         with patch.object(council.workers.subprocess, 'Popen', side_effect=ambiguous), redirect_stdout(StringIO()):
-            result = cli._execute(self.run, 'synthesis', packet, self.settings)
+            result = cli._execute(self.run, 'critique', packet, self.settings)
         self.assertFalse(result['local_execution_stopped'])
         self.assertEqual(result['failure']['launch_stage'], 'spawn')
-        self.assertEqual(council.status(self.run)['stop_requests'], [dict(phase='synthesis', member='member-one', worker_run=packet['worker_run'])])
+        self.assertEqual(council.status(self.run)['stop_requests'], [dict(phase='critique', member='member-one', worker_run=packet['worker_run'])])
         for path in self.root.glob('round-one-*/result.json'):
             result = json.loads(path.read_text()); result['local_execution_stopped'] = False
             council.workers.save(path, result)
+        with council._locked(self.run) as value:
+            for item in value['members'].values():
+                if item['kind'] == 'native': item['receipt']['local_execution_stopped'] = False
+            council._save(self.run, value)
         owners = council.cancel(self.run)['stop_requests']
-        self.assertEqual(len(owners), 7)
-        self.assertEqual(len({owner['worker_run'] for owner in owners}), 7)
+        self.assertEqual(len(owners), 6)
         with self.assertRaisesRegex(ValueError, 'not_resumable|cancelled'):
-            council.resume_member(self.run, 'synthesis', 'member-one')
+            council.resume_member(self.run, 'critique', 'member-one')
 
     def test_grouped_expired_synthesis_cannot_be_accepted_or_refreshed(self):
         self.grouped_request(); self.prepare(); self.grouped_rounds()
-        self.grouped_external('synthesis', 'member-one', verify=False)
+        packet = council.packet(self.run, 'synthesis', self.request['chair'])
         with patch.object(council, '_elapsed', return_value=1201):
-            with self.assertRaisesRegex(ValueError, 'deadline_exhausted'):
-                council.verify_external(self.run, 'synthesis', 'member-one', 'accepted', ['Host verified'])
-            council.verify_external(self.run, 'synthesis', 'member-one', 'rejected', ['Late stopped output'])
+            council.record_native(self.run, 'synthesis', self.request['chair'], self.native_receipt(packet))
         self.assertFalse(council.status(self.run)['fresh_synthesis_available'])
+        self.assertTrue(council.status(self.run)['all_local_execution_stopped'])
 
     def test_grouped_verification_rejects_changed_original_worker_copy(self):
         self.grouped_request(); self.prepare()
@@ -1212,22 +1392,17 @@ class CouncilFlowTests(CouncilCase):
         self.assertLessEqual(result['deadline_monotonic'], expected)
 
 
-    def test_grouped_free_documented_default_survives_all_phases_without_maximum_claim(self):
-        self.grouped_request()
+    def test_grouped_free_documented_default_decodes_but_cannot_start(self):
+        self.grouped_request('Free')
         seat = self.request['roster']['member-one']
         seat['effort'] = 'default'
         seat['capabilities'].update(reasoning={'default_enabled': True},
             source='Exact route documentation: reasoning enabled by default; maximum mapping unverified')
-        self.prepare(); self.grouped_rounds()
-        packet = self.grouped_external('synthesis', 'member-one')
-        brief = json.loads((Path(packet['worker_run']) / 'brief.json').read_text())
-        self.assertEqual(brief['effort'], 'default')
-        self.assertEqual(brief['capabilities']['reasoning'], {'default_enabled': True})
-        self.assertNotIn('reasoning', council.workers.configuration(brief)['provider']['openrouter']['models'][seat['model']]['options'])
-        report = council.status(self.run)
-        self.assertEqual(report['outcome'], 'complete')
-        self.assertEqual(report['external_total_usd'], 0)
-        self.assertTrue(report['fresh_synthesis_available'])
+        council.workers._council_contract(dict(seat, council=dict(run_id='round-one', phase='investigate',
+            member_id='member-one', group='Free', chair='member-one')))
+        with self.assertRaisesRegex(ValueError, 'free_council_temporarily_disabled'):
+            self.prepare()
+        self.assertFalse((self.root / 'council-round-one').exists())
 
     def test_grouped_retained_sessions_block_reuse_after_closed_results_change_or_disappear(self):
         base = copy.deepcopy(self.grouped_request())
@@ -1247,7 +1422,7 @@ class CouncilFlowTests(CouncilCase):
                         council.workers.save(path, result)
                     self.grouped_external('investigate', 'member-two')
                     self.grouped_external('investigate', 'member-three')
-                    council.packet(self.run, 'critique', 'member-two')  # Close and retain original observations.
+                    council.packet(self.run, 'critique', 'member-three')  # Close and retain original observations.
                     original_session = 'investigate-member-one'
                     if change == 'deleted': path.unlink()
                     else:
@@ -1271,15 +1446,15 @@ class CouncilFlowTests(CouncilCase):
         result = json.loads(path.read_text()); result.update(state='failed', session_id='second-observed-session')
         council.workers.save(path, result)
         self.grouped_external('investigate', 'member-two'); self.grouped_external('investigate', 'member-three')
-        council.packet(self.run, 'critique', 'member-two')
+        council.packet(self.run, 'critique', 'member-three')
         path.unlink()
         manifest = json.loads((self.run / 'manifest.json').read_text())
         self.assertEqual(manifest['members']['investigate:member-one']['session_ids'],
                          ['investigate-member-one', 'second-observed-session'])
         for session in ('investigate-member-one', 'second-observed-session'):
-            packet = self.grouped_external('critique', 'member-one' if session.startswith('investigate') else 'member-three',
+            packet = self.grouped_external('critique', 'member-one' if session.startswith('investigate') else 'member-two',
                 session=session, verify=False)
-            member = 'member-one' if session.startswith('investigate') else 'member-three'
+            member = 'member-one' if session.startswith('investigate') else 'member-two'
             with self.assertRaisesRegex(ValueError, 'fresh_external_session_required'):
                 council.verify_external(self.run, 'critique', member, 'accepted', ['Host verified'])
 
@@ -1312,7 +1487,7 @@ class CouncilFlowTests(CouncilCase):
         self.assertIsNone(prepared['session_id'])
         self.assertEqual([call for call in spawn.call_args_list if call.args[0][0] == str(self.executable)], [])
 
-    def test_grouped_three_real_processes_share_guard_contention_without_duplicate_launch(self):
+    def test_grouped_external_processes_share_guard_contention_without_duplicate_launch(self):
         import multiprocessing
         from contextlib import contextmanager, redirect_stdout
         from runtime.startup import StartupError
@@ -1324,9 +1499,11 @@ class CouncilFlowTests(CouncilCase):
             + 'print(json.dumps({"type":"step_finish","sessionID":session,"part":{"reason":"stop","cost":0,"tokens":{}}}))\n')
         self.grouped_request()
         digest = hashlib.sha256(self.executable.read_bytes()).hexdigest()
-        for seat in self.request['roster'].values(): seat['permission_qualification']['opencode_sha256'] = digest
+        for seat in self.request['roster'].values():
+            if seat['kind'] == 'external': seat['permission_qualification']['opencode_sha256'] = digest
         self.prepare()
-        packets = [council.packet(self.run, 'investigate', member) for member in self.request['roster']]
+        self.grouped_external('investigate', 'member-three')
+        packets = [council.packet(self.run, 'investigate', member) for member in ('member-one', 'member-two')]
         context = multiprocessing.get_context('fork')
         output = context.Queue()
         start = context.Event()
@@ -1377,7 +1554,7 @@ class CouncilFlowTests(CouncilCase):
             packet = next(packet for packet in packets if packet['member'] == item['member'])
             self.assertLessEqual(item['result']['deadline_monotonic'], packet['deadline_monotonic'])
             self.assertTrue(item['result']['local_execution_stopped'])
-        self.assertEqual(len(set(item['result']['session_id'] for item in results)), 3)
+        self.assertEqual(len(set(item['result']['session_id'] for item in results)), 2)
 
     def test_external_council_phase_guidance_reaches_execution_with_existing_bounds(self):
         from contextlib import redirect_stdout
@@ -1415,9 +1592,10 @@ print(json.dumps({'type': 'step_finish', 'sessionID': title, 'part': {'reason': 
         self.executable.write_text(script)
         self.grouped_request()
         digest = hashlib.sha256(self.executable.read_bytes()).hexdigest()
-        for seat in self.request['roster'].values(): seat['permission_qualification']['opencode_sha256'] = digest
+        for seat in self.request['roster'].values():
+            if seat['kind'] == 'external': seat['permission_qualification']['opencode_sha256'] = digest
         self.prepare()
-        for phase in council.PHASES:
+        for phase in council.PHASES[:2]:
             packet = council.packet(self.run, phase, 'member-one')
             with redirect_stdout(StringIO()):
                 result = council.workers.execute(Path(packet['worker_run']), self.executable, self.auth,
@@ -1427,3 +1605,5 @@ print(json.dumps({'type': 'step_finish', 'sessionID': title, 'part': {'reason': 
             council.verify_external(self.run, phase, 'member-one', 'accepted', ['Synthetic prompt/permission checks passed'])
             if phase != 'synthesis':
                 for member in ('member-two', 'member-three'): self.grouped_external(phase, member)
+        self.grouped_external('synthesis', self.request['chair'])
+        self.assertEqual(council.status(self.run)['outcome'], 'complete')

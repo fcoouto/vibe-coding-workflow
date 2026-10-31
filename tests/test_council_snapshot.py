@@ -49,6 +49,15 @@ class SnapshotTests(CouncilCase):
         self.assertEqual((self.destination / 'dirty.txt').read_bytes(), b'dirty\n')
         self.api.verify(self.destination, result)
 
+    def test_empty_snapshot_requires_explicit_text_mode_opt_in(self):
+        with self.assertRaisesRegex(ValueError, 'invalid_council_approved_files'):
+            self.api.capture(self.repo, self.destination, {})
+        self.assertFalse(self.destination.exists())
+        manifest = self.api.capture(self.repo, self.destination, {}, allow_empty=True)
+        self.assertEqual(manifest['files'], {})
+        self.assertEqual(manifest['coverage']['captured'], 0)
+        self.api.verify(self.destination, manifest)
+
     def test_unapproved_files_are_never_copied(self):
         self.write('approved.txt')
         self.write('private.txt', b'not reviewed\n')

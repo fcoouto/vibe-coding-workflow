@@ -80,7 +80,14 @@ def _end(value, phase):
     return sum(value['phase_seconds'][item] for item in PHASES[:PHASES.index(phase) + 1])
 
 
+def _require_current_flow(value: dict) -> None:
+    _require(value.get('group') != 'Free', 'free_council_temporarily_disabled')
+    _require(value.get('flow') == 'peer-review' and value.get('mode') in ('text', 'repository'),
+             'historical_council_read_only')
+
+
 def _remaining(value, phase):
+    _require_current_flow(value)
     _require(not value['cancelled'], 'cancelled')
     left = min(value['timeout_seconds'], _end(value, phase)) - _elapsed(value)
     _require(left >= 1, 'deadline_exhausted')
@@ -109,7 +116,9 @@ def _identity(value, phase, member):
 
 def _validate(request):
     _require(len(_json(request)) <= REQUEST_LIMIT, 'council_request_limit')
-    required = {'run_id', 'question', 'constraints', 'coordinator_chat_id', 'approval_ref',
+    _require(isinstance(request, dict) and request.get('mode') in ('text', 'repository'), 'invalid_council_mode')
+    _require(request.get('group') != 'Free', 'free_council_temporarily_disabled')
+    required = {'mode', 'run_id', 'question', 'constraints', 'coordinator_chat_id', 'approval_ref',
                 'approved_files', 'research', 'phase_seconds', 'roster'}
     _require(isinstance(request, dict) and required <= set(request)
              and not set(request) - required - {'timeout_seconds', 'group', 'chair', 'recovery', 'fallbacks'}, 'invalid_council_request')
@@ -175,7 +184,8 @@ def _validate(request):
                 nested.pop('fallbacks')
                 _validate(nested)
     approved = request['approved_files']
-    _require(isinstance(approved, dict) and approved and all(not (name == '__council__' or name.startswith('__council__/')) for name in approved),
+    _require(request['mode'] != 'repository' or bool(approved), 'repository_approved_files_required')
+    _require(isinstance(approved, dict) and all(not (name == '__council__' or name.startswith('__council__/')) for name in approved),
              'reserved_council_evidence_path')
 
 
@@ -204,12 +214,13 @@ def prepare(cwd: Path, request: dict) -> dict:
         run = root / ('council-' + request['run_id'])
         try: run.mkdir(mode=0o700)  # Interrupted preparation retains its identity.
         except FileExistsError: raise ValueError('council_identity_already_exists') from None
-        value = dict(request, timeout_seconds=request.get('timeout_seconds', 1200), version=3 if request.get('recovery') else 2 if 'group' in request else 1, run=str(run), source_root=str(cwd), root=str(root),
+        value = dict(request, flow='peer-review', timeout_seconds=request.get('timeout_seconds', 1200), version=3 if request.get('recovery') else 2 if 'group' in request else 1, run=str(run), source_root=str(cwd), root=str(root),
                      started_monotonic=started_monotonic, started_wall=started_wall,
                      management=dict(scope_id=consent['scope_id'], revision=consent['revision']),
                      phase='investigate', members={}, frozen={}, cancelled=False)
     changes._atomic(run, 'research.md', _report(value.pop('research')))
-    value['snapshot_manifest'] = snapshot.capture(cwd, run / 'snapshot', value.pop('approved_files'))
+    value['snapshot_manifest'] = snapshot.capture(cwd, run / 'snapshot', value.pop('approved_files'), allow_empty=value['mode'] == 'text')
+    _require(value['mode'] == 'text' or value['snapshot_manifest']['files'], 'repository_approved_files_required')
     if value['version'] >= 2: value['verification_feedback'] = True
     _phase_headroom(value['snapshot_manifest'], value['roster'], grouped=value['version'] >= 2,
                     feedback=value.get('verification_feedback', False))
@@ -292,6 +303,7 @@ def _observations(value, phase):
             continue
         if item.get('kind') == 'native':
             result = item.get('receipt', dict(state='issued', local_execution_stopped=False))
+            if item.get('stop_receipt'): result = dict(result, local_execution_stopped=True)
         else:
             try:
                 raw = _read(Path(item['worker_run']) / 'result.json', workers.LIMIT + REPORT_LIMIT)
@@ -734,6 +746,7 @@ def _packet(run: Path, phase: str, member: str, *, native_receipt=None) -> dict:
 
 
 def _prepare_external(run, value, phase, member, brief, source, manifest):
+    _require_current_flow(value)
     key = _key(phase, member)
     try:
         worker_run = workers.prepare_council(Path(value['root']), brief, source, manifest, **value['management'])
@@ -766,6 +779,7 @@ def _prepare_external(run, value, phase, member, brief, source, manifest):
 
 def _resume_preparation(run, phase, member):
     with _locked(run) as value:
+        _require_current_flow(value)
         item = value['members'].get(_key(phase, member), {})
         failure = item.get('preparation_failure', {})
         if value.get('version') != 3 or not workers.resumable(failure): return None
@@ -814,7 +828,8 @@ def external_launch_guard(worker_run, brief):
     run = Path(worker_run).parent / ('council-' + marker['run_id'])
     with _locked(run) as value:
         phase, member = marker['phase'], marker['member_id']
-        _require(value.get('version', 1) >= 2 and Path(worker_run) == _worker_path(value, phase, member),
+        _require_current_flow(value)
+        _require(Path(worker_run) == _worker_path(value, phase, member),
                  'council_worker_identity_changed')
         _remaining(value, phase)
         _require(value['phase'] == phase, 'phase_already_closed')
@@ -829,6 +844,7 @@ def verify_external(run: Path, phase: str, member: str, disposition: str, checks
     """Record host verification against the original grouped attempt and fresh session."""
     run = Path(run)
     with _locked(run) as value:
+        _require_current_flow(value)
         _identity(value, phase, member)
         _require(value.get('version', 1) >= 2 and _external(value, member, phase), 'grouped_external_member_required')
         _require(value['phase'] == phase, 'phase_already_closed')
@@ -880,6 +896,23 @@ def record_native(run: Path, phase: str, member: str, receipt: dict) -> None:
     run = Path(run)
     with _locked(run) as value:
         _identity(value, phase, member)
+        try:
+            _require_current_flow(value)
+        except ValueError:
+            _require(isinstance(receipt, dict) and receipt.get('accepted') is False
+                     and receipt.get('report') == '' and not receipt.get('findings'), 'historical_council_read_only')
+            item = value['members'].get(_key(phase, member), {})
+            _require(item.get('kind') == 'native' and receipt.get('issued_id') == item.get('issued_id')
+                     and receipt.get('supervisor_id') == item.get('supervisor_id')
+                     and (receipt.get('child_id') is None or _text(receipt.get('child_id')))
+                     and receipt.get('local_execution_stopped') is True
+                     and isinstance(receipt.get('checks'), list) and receipt['checks']
+                     and all(_text(check) for check in receipt['checks']), 'invalid_native_stop_receipt')
+            _require(not item.get('receipt') or receipt['child_id'] == item['receipt'].get('child_id'),
+                     'invalid_native_stop_receipt')
+            item['stop_receipt'] = {key: receipt[key] for key in ('child_id', 'checks', 'local_execution_stopped')}
+            _save(run, value)
+            return
         _require(not _external(value, member, phase) and value['phase'] == phase, 'native_phase_closed')
         item = value['members'].get(_key(phase, member))
         required = {'issued_id', 'child_id', 'supervisor_id', 'observed_model', 'observed_effort',

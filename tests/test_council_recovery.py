@@ -15,20 +15,23 @@ class CouncilRecoveryTests(CouncilCase):
     def setUp(self):
         super().setUp()
         (self.repo / 'evidence.txt').write_text('Reviewed independent source.\n')
-        self.request = dict(run_id='recovery', question='Explain the evidence', constraints='Read only',
+        self.request = dict(mode='repository', run_id='recovery', question='Explain the evidence', constraints='Read only',
             coordinator_chat_id='00000000-0000-4000-8000-000000000001', approval_ref='native:scope',
             approved_files=self.approved(['evidence.txt']), research='Public research', recovery=True,
-            phase_seconds=dict(investigate=600, critique=360, synthesis=240), group='Free', chair='member-one',
+            phase_seconds=dict(investigate=600, critique=360, synthesis=240), group='Balanced', chair='member-three',
             roster={m: self.seat(i) for i, m in enumerate(council.GROUP_MEMBERS, 1)})
         self.request['fallbacks'] = {member: [self.seat(n) for n in (4, 5, 6)] for member in council.GROUP_MEMBERS}
+        self.request['roster']['member-three'] = self.native_seat()
+        self.request['fallbacks']['member-three'] = [self.native_seat('native-replacement')]
+        self.pending_native = {}
         self.run = None
 
     def seat(self, number):
-        model = f'vendor/model-{number}:free'
+        model = f'vendor/model-{number}'
         return dict(kind='external', model=model, canonical_model=model.removesuffix(':free'),
             model_display_name='Fixture', provider='fixture', effort='high', input_tokens=10000,
             output_tokens=4096, steps=12, selection='native:ranked current metadata and approved transmission',
-            pricing=dict(prompt_usd_per_million=0, completion_usd_per_million=0,
+            pricing=dict(prompt_usd_per_million=1, completion_usd_per_million=2,
                          source='native:discovery', observed_at='2026-10-30'),
             capabilities=dict(model=model, provider='fixture', context_length=20000, max_output_tokens=8000,
                 tools=True, reasoning={'efforts': ['low', 'high']}, observed_at='2026-10-30', source='native:endpoint'),
@@ -39,7 +42,11 @@ class CouncilRecoveryTests(CouncilCase):
         self.run = Path(council.prepare(self.repo, self.request)['run'])
 
     def finish(self, phase, member, *, accepted=True, stopped=True, session=None, cost=0):
+        if phase == 'synthesis': member = self.request['chair']
         packet = council.packet(self.run, phase, member)
+        if packet['kind'] == 'native':
+            council.record_native(self.run, phase, member, self.native_receipt(packet, accepted=accepted, child_id=session))
+            return packet
         path = Path(packet['worker_run']) / 'result.json'
         council.workers.save(path, dict(state='awaiting_verification' if accepted else 'failed',
             response='Cited evidence and uncertainty.', session_id=session or packet['worker_run'],
@@ -51,6 +58,7 @@ class CouncilRecoveryTests(CouncilCase):
         return packet
 
     def diagnose(self, phase='investigate', member='member-one', corrections=None):
+        if phase == 'synthesis': member = self.request['chair']
         opened = council.investigate_failure(self.run, phase, member)
         evidence = dict(candidate_id=opened['candidate_id'], failure_id=opened['failure_id'], searches=1, reads=1,
             sources=[dict(url='https://docs.example.org/client/1.19.5/retry', checked_at=time.time(),
@@ -64,6 +72,12 @@ class CouncilRecoveryTests(CouncilCase):
         return self.diagnose(phase, member, corrections)
 
     def verify_findings(self, phase, member, disposition, checks, **kwargs):
+        if phase == 'synthesis': member = self.request['chair']
+        if (phase, member) in self.pending_native:
+            packet, report = self.pending_native[(phase, member)]
+            receipt = self.native_receipt(packet, report, accepted=disposition == 'accepted')
+            receipt.update(kwargs, checks=checks)
+            return council.record_native(self.run, phase, member, receipt)
         try:
             return council.verify_external(self.run, phase, member, disposition, checks, **kwargs)
         except TypeError as error:
@@ -72,7 +86,11 @@ class CouncilRecoveryTests(CouncilCase):
             raise
 
     def pending_report(self, phase, member, report):
+        if phase == 'synthesis': member = self.request['chair']
         packet = council.packet(self.run, phase, member)
+        if packet['kind'] == 'native':
+            self.pending_native[(phase, member)] = (packet, report)
+            return packet
         council.workers.save(Path(packet['worker_run']) / 'result.json', dict(
             state='awaiting_verification', final_response=report, response=report,
             session_id=packet['worker_run'], local_execution_stopped=True,
@@ -83,6 +101,33 @@ class CouncilRecoveryTests(CouncilCase):
         return dict(claim="isolation_level='IMMEDIATE' protects the preceding SELECT",
                     correction='The SELECT runs before the implicit transaction. Use explicit BEGIN IMMEDIATE before reading.',
                     evidence='evidence.txt:1; Python sqlite3 transaction-control documentation')
+
+    def test_historical_and_free_recovery_admission_preserves_stop_settlement(self):
+        self.prepare()
+        self.finish('investigate', 'member-one', accepted=False)
+        council.record_supervisor(self.run, 'investigate', 'member-one', dict(supervisor_id='owned',
+            local_execution_stopped=False, checks=['Observed owned supervisor']))
+        for historical in (True, False):
+            with self.subTest(historical=historical):
+                with council._locked(self.run) as value:
+                    if historical: value.pop('flow', None)
+                    else: value.update(flow='peer-review', mode='repository', group='Free')
+                    council._save(self.run, value)
+                expected = 'historical_council_read_only' if historical else 'free_council_temporarily_disabled'
+                for operation in (
+                        lambda: council.investigate_failure(self.run, 'investigate', 'member-one'),
+                        lambda: council.record_investigation(self.run, 'investigate', 'member-one', {}),
+                        lambda: council.correct_candidate(self.run, 'investigate', 'member-one', 0),
+                        lambda: council.replace_candidate(self.run, 'investigate', 'member-one', self.seat(4)),
+                        lambda: council.publish_generation(self.run),
+                        lambda: council.verify_external(self.run, 'investigate', 'member-one', 'rejected', ['Checked']),
+                        lambda: council.record_supervisor(self.run, 'investigate', 'member-two', dict(
+                            supervisor_id='new', local_execution_stopped=False, checks=['New owner']))):
+                    with self.assertRaisesRegex(ValueError, expected): operation()
+        council.cancel(self.run)
+        council.record_supervisor(self.run, 'investigate', 'member-one', dict(supervisor_id='owned',
+            local_execution_stopped=True, checks=['Observed original supervisor stop']))
+        self.assertTrue(council.status(self.run)['all_local_execution_stopped'])
 
     def test_known_false_claim_cannot_be_accepted_as_a_warning(self):
         self.prepare()
@@ -121,7 +166,7 @@ class CouncilRecoveryTests(CouncilCase):
             self.assertNotIn('PRIVATE CHECK', feedback)
             self.assertNotIn(first['worker_run'], feedback)
             self.assertNotIn('vendor/model-', feedback)
-        chair = council.packet(self.run, 'synthesis', 'member-one')
+        chair = council.packet(self.run, 'synthesis', 'member-three')
         self.assertIn('explicit BEGIN IMMEDIATE before reading',
                       (Path(chair['snapshot']) / '__council__/verification-feedback.md').read_text())
         self.assertNotIn(self.sqlite_finding()['claim'],
@@ -131,18 +176,18 @@ class CouncilRecoveryTests(CouncilCase):
         self.prepare()
         for phase in ('investigate', 'critique'):
             for member in council.GROUP_MEMBERS: self.finish(phase, member)
-        first = self.pending_report('synthesis', 'member-one', 'No anonymous phase reports exist to cross-check divergent weightings. Three initial reports and two critiques were available.')
+        first = self.pending_report('synthesis', 'member-three', 'No anonymous phase reports exist to cross-check divergent weightings. Three initial reports and two critiques were available.')
         original = json.loads((self.run / 'manifest.json').read_text())
         before = {str(p.relative_to(first['snapshot'])): p.read_bytes()
                   for p in Path(first['snapshot']).rglob('*') if p.is_file()}
         finding = dict(claim='No anonymous phase reports exist to cross-check divergent weightings. Three initial reports and two critiques were available.',
                        correction='All three investigations and all three critiques were accepted. Earlier absence statements describe investigation only.',
                        evidence='__council__/execution-observations.md: investigate and critique')
-        self.verify_findings( 'synthesis', 'member-one', 'rejected',
+        self.verify_findings( 'synthesis', 'member-three', 'rejected',
                                 ['PRIVATE rejection details'], findings=[finding])
         self.diagnose('synthesis')
-        council.replace_candidate(self.run, 'synthesis', 'member-one', self.seat(2))
-        next_packet = self.pending_report('synthesis', 'member-one', 'Three investigations and three critiques informed this synthesis.')
+        council.replace_candidate(self.run, 'synthesis', 'member-three', self.native_seat('native-replacement'))
+        next_packet = self.pending_report('synthesis', 'member-three', 'Three investigations and three critiques informed this synthesis.')
         self.assertNotEqual(first['snapshot'], next_packet['snapshot'])
         feedback = (Path(next_packet['snapshot']) / '__council__/verification-feedback.md').read_text()
         self.assertIn(finding['correction'], feedback)
@@ -153,13 +198,16 @@ class CouncilRecoveryTests(CouncilCase):
         now = json.loads((self.run / 'manifest.json').read_text())
         for key in ('started_monotonic', 'started_wall', 'phase_seconds', 'timeout_seconds', 'critique_generation'):
             self.assertEqual(original[key], now[key])
-        self.assertEqual(council.status(self.run)['recovery']['member-one']['replacements_remaining'], 2)
-        self.verify_findings( 'synthesis', 'member-one', 'accepted',
+        self.assertEqual(council.status(self.run)['recovery']['member-three']['replacements_remaining'], 2)
+        self.verify_findings( 'synthesis', 'member-three', 'accepted',
                                 ['Host checked the correction against all six sealed reports and execution observations.'])
         self.assertEqual(council.status(self.run)['outcome'], 'complete')
 
     def test_native_findings_use_the_same_acceptance_gate_and_phase_handoff(self):
         self.request['group'] = 'Frontier'
+        self.request['chair'] = 'member-one'
+        self.request['roster']['member-three'] = self.seat(3)
+        self.request['fallbacks']['member-three'] = [self.seat(4)]
         self.request['roster']['member-one'] = dict(kind='native', model='native-frontier', effort='max',
             supported_efforts=['max'], input_tokens=10000, output_tokens=4096, steps=12,
             selection='Approved native reasoning', supervisor_id='coordinator')
@@ -354,6 +402,7 @@ class CouncilRecoveryTests(CouncilCase):
             import os
             value['started_monotonic'] -= 650; value['started_wall'] -= 650
             for owner in council.recovery.owners(value):
+                if owner['kind'] == 'native': continue
                 if owner['phase'] == 'investigate':
                     stamp = value['started_wall'] + 500
                     os.utime(Path(owner['worker_run']) / 'result.json', (stamp, stamp))
@@ -366,13 +415,13 @@ class CouncilRecoveryTests(CouncilCase):
             reported_cost_usd=0, known_cost_subtotal_usd=0, accounting_complete=True))
         council.verify_external(self.run, 'critique', 'member-one', 'accepted', ['Host checked original source'])
         with self.assertRaisesRegex(ValueError, 'critique_generation_pending'):
-            council.packet(self.run, 'synthesis', 'member-one')
+            council.packet(self.run, 'synthesis', 'member-three')
         council.publish_generation(self.run)
         state = council.status(self.run)
         self.assertEqual(state['critique_generation'], 2)
         self.assertEqual(state['accepted_participation']['critique']['accepted'], 0)
         for member in council.GROUP_MEMBERS: self.finish('critique', member)
-        self.finish('synthesis', 'member-one')
+        self.finish('synthesis', 'member-three')
         self.assertEqual(council.status(self.run)['outcome'], 'complete')
 
     def test_synthesis_only_replacement_preserves_rounds_and_original_chair_allowance(self):
@@ -380,20 +429,24 @@ class CouncilRecoveryTests(CouncilCase):
         for phase in ('investigate', 'critique'):
             for member in council.GROUP_MEMBERS: self.finish(phase, member)
         self.fail_and_diagnose('synthesis')
-        council.replace_candidate(self.run, 'synthesis', 'member-one', self.seat(2))
-        self.finish('synthesis', 'member-one')
+        council.replace_candidate(self.run, 'synthesis', 'member-three', self.native_seat('native-replacement'))
+        self.finish('synthesis', 'member-three')
         state = council.status(self.run)
         self.assertEqual(state['outcome'], 'complete')
-        self.assertEqual(state['role_bindings']['synthesis']['canonical_model'], 'vendor/model-2')
-        self.assertEqual(state['recovery']['member-one']['replacements_remaining'], 2)
+        self.assertEqual(state['role_bindings']['synthesis']['canonical_model'], 'native-replacement')
+        self.assertEqual(state['recovery']['member-three']['replacements_remaining'], 2)
         self.assertEqual(state['critique_generation'], 1)
 
     def test_free_replacement_cannot_use_paid_or_native_and_deadline_does_not_refresh(self):
         self.prepare(); self.fail_and_diagnose()
-        paid = self.seat(4); paid['pricing']['prompt_usd_per_million'] = 1
-        with self.assertRaisesRegex(ValueError, 'free_council_zero_rate_variant_required'):
-            council.replace_candidate(self.run, 'investigate', 'member-one', paid)
         with council._locked(self.run) as value:
+            value['group'] = 'Free'
+            council._save(self.run, value)
+        for seat in (self.seat(4), self.native_seat()):
+            with self.assertRaisesRegex(ValueError, 'free_council_temporarily_disabled'):
+                council.replace_candidate(self.run, 'investigate', 'member-one', seat)
+        with council._locked(self.run) as value:
+            value['group'] = 'Balanced'
             value['started_monotonic'] -= 1201; value['started_wall'] -= 1201
             council._save(self.run, value)
         with self.assertRaisesRegex(ValueError, 'deadline_exhausted'):
@@ -413,6 +466,7 @@ for event in [
 """
         self.executable.write_text(body)
         for seat in list(self.request['roster'].values()) + [s for rows in self.request['fallbacks'].values() for s in rows]:
+            if seat['kind'] == 'native': continue
             seat['permission_qualification']['opencode_sha256'] = hashlib.sha256(self.executable.read_bytes()).hexdigest()
         self.prepare()
         packet = council.packet(self.run, 'investigate', 'member-one')
@@ -468,12 +522,13 @@ for event in [
             value['started_monotonic'] -= 961; value['started_wall'] -= 961
             # Preserve already observed on-time evidence when simulating elapsed time.
             for owner in council.recovery.owners(value):
+                if owner['kind'] == 'native': continue
                 path = Path(owner['worker_run']) / 'result.json'
                 stamp = value['started_wall'] + (500 if owner['phase'] == 'investigate' else 900)
                 import os
                 os.utime(path, (stamp, stamp))
             council._save(self.run, value)
-        self.finish('synthesis', 'member-one')
+        self.finish('synthesis', 'member-three')
         self.assertEqual(council.status(self.run)['outcome'], 'incomplete')
 
     def test_supervisor_ownership_survives_cancel_and_phase_barrier(self):
@@ -499,7 +554,7 @@ import json, os, uuid
 config = json.loads(os.environ['OPENCODE_CONFIG_CONTENT'])
 model = next(iter(config['provider']['openrouter']['models']))
 session = 'synthetic-' + str(uuid.uuid4())
-if model == 'vendor/model-1:free':
+if model == 'vendor/model-1':
     print(json.dumps({'type':'error','sessionID':session,'error':{'name':'UnknownError','data':{'message':'EPROTO SECRET'}}}), flush=True)
 else:
     print(json.dumps({'type':'text','sessionID':session,'part':{'text':'Verified cited finding and uncertainty'}}), flush=True)
@@ -507,6 +562,7 @@ else:
 '''
         self.executable.write_text(body)
         for seat in list(self.request['roster'].values()) + [s for rows in self.request['fallbacks'].values() for s in rows]:
+            if seat['kind'] == 'native': continue
             seat['permission_qualification']['opencode_sha256'] = hashlib.sha256(self.executable.read_bytes()).hexdigest()
         def invoke(action, request):
             completed = subprocess.run([sys.executable, '-B', str(script), action, '--cwd', str(self.repo)],
@@ -516,6 +572,10 @@ else:
         self.run = Path(invoke('prepare', self.request)['run'])
         for member in ('member-one', 'member-two', 'member-three'):
             result = invoke('member', dict(run=str(self.run), phase='investigate', member=member))
+            if result.get('kind') == 'native':
+                invoke('record-native', dict(run=str(self.run), phase='investigate', member=member,
+                    receipt=self.native_receipt(result)))
+                continue
             if member != 'member-one':
                 self.assertEqual(result['state'], 'awaiting_verification')
                 invoke('verify-external', dict(run=str(self.run), phase='investigate', member=member,
@@ -530,9 +590,13 @@ else:
         self.assertEqual(invoke('member', dict(run=str(self.run), phase='investigate', member='member-one'))['state'], 'failed')
         replacement = self.seat(4)
         invoke('replace-candidate', dict(run=str(self.run), phase='investigate', member='member-one', seat=replacement))
-        for phase, members in (('investigate', ('member-one',)), ('critique', council.GROUP_MEMBERS), ('synthesis', ('member-one',))):
+        for phase, members in (('investigate', ('member-one',)), ('critique', council.GROUP_MEMBERS), ('synthesis', ('member-three',))):
             for member in members:
                 result = invoke('member', dict(run=str(self.run), phase=phase, member=member))
+                if result.get('kind') == 'native':
+                    invoke('record-native', dict(run=str(self.run), phase=phase, member=member,
+                        receipt=self.native_receipt(result)))
+                    continue
                 self.assertEqual(result['state'], 'awaiting_verification')
                 invoke('verify-external', dict(run=str(self.run), phase=phase, member=member,
                     disposition='accepted', checks=['Host checked synthetic source, scope and independent session']))
@@ -571,7 +635,7 @@ else:
         packet = council.packet(self.run, 'investigate', 'member-one')
         brief = json.loads((Path(packet['worker_run']) / 'brief.json').read_text())
         config = council.workers.configuration(brief)
-        model = config['provider']['openrouter']['models']['vendor/model-1:free']
+        model = config['provider']['openrouter']['models']['vendor/model-1']
         self.assertEqual(model['limit']['output'], 4096)
         self.assertNotIn('maxOutputTokens', model['options'])
         self.assertEqual(model['options']['reasoning'], {'effort': 'high'})
@@ -582,6 +646,8 @@ else:
         native = dict(kind='native', model='native-original', effort='high', supported_efforts=['low', 'high'],
             input_tokens=10000, output_tokens=4096, steps=12, selection='native:current guidance', supervisor_id='coordinator')
         self.request.update(group='Balanced', chair='member-two')
+        self.request['roster']['member-three'] = self.seat(3)
+        self.request['fallbacks']['member-three'] = [self.seat(4)]
         self.request['roster']['member-two'] = native
         self.request['fallbacks']['member-two'] = [dict(native, model='native-replacement')]
         self.prepare()
@@ -607,7 +673,7 @@ else:
 import json, os, time, uuid
 config = json.loads(os.environ['OPENCODE_CONFIG_CONTENT'])
 model = next(iter(config['provider']['openrouter']['models']))
-if model == 'vendor/model-1:free':
+if model == 'vendor/model-1':
     time.sleep(2)
     print(json.dumps({'type':'error','error':{'name':'APIError','data':{'statusCode':503}}}), flush=True)
 else:
@@ -616,6 +682,7 @@ else:
 '''
         self.executable.write_text(body)
         for seat in list(self.request['roster'].values()) + [s for rows in self.request['fallbacks'].values() for s in rows]:
+            if seat['kind'] == 'native': continue
             seat['permission_qualification']['opencode_sha256'] = hashlib.sha256(self.executable.read_bytes()).hexdigest()
         self.prepare()
         packets = [council.packet(self.run, 'investigate', m) for m in ('member-one', 'member-two')]
@@ -657,7 +724,7 @@ else:
             council.record_investigation(self.run, 'investigate', 'member-one', evidence)
 
     def test_canonical_alias_and_rejected_session_are_not_independent(self):
-        alias = self.seat(4); alias['model'] = 'vendor/alias-four:free'; alias['capabilities']['model'] = alias['model']
+        alias = self.seat(4); alias['model'] = 'vendor/alias-four'; alias['capabilities']['model'] = alias['model']
         self.request['fallbacks']['member-two'][0] = alias
         self.prepare(); self.fail_and_diagnose()
         self.fail_and_diagnose(member='member-two')
@@ -676,6 +743,7 @@ print(json.dumps({'type':'text','sessionID':'prepared-once','part':{'text':'Cite
 print(json.dumps({'type':'step_finish','part':{'reason':'stop','cost':0,'tokens':{}}}), flush=True)
 ''')
         for seat in list(self.request['roster'].values()) + [s for rows in self.request['fallbacks'].values() for s in rows]:
+            if seat['kind'] == 'native': continue
             seat['permission_qualification']['opencode_sha256'] = hashlib.sha256(self.executable.read_bytes()).hexdigest()
         self.prepare()
         with council.settings.admission(self.repo, 'council'):
@@ -740,26 +808,24 @@ print(json.dumps({'type':'step_finish','part':{'reason':'stop','cost':0,'tokens'
             import os
             value['started_monotonic'] -= 961; value['started_wall'] -= 961
             for owner in council.recovery.owners(value):
+                if owner['kind'] == 'native': continue
                 stamp = value['started_wall'] + (500 if owner['phase'] == 'investigate' else 900)
                 os.utime(Path(owner['worker_run']) / 'result.json', (stamp, stamp))
             council._save(self.run, value)
-        packet = council.packet(self.run, 'synthesis', 'member-one')
+        packet = council.packet(self.run, 'synthesis', 'member-three')
         self.assertEqual(set(name for name in packet['snapshot_manifest']['files'] if '/critique-' in name),
                          {'__council__/critique-2.md', '__council__/critique-3.md'})
         original = self.run / 'generation-1/initial-1.md'
         self.assertEqual((Path(packet['snapshot']) / '__council__/initial-1.md').read_bytes(), original.read_bytes())
-        path = Path(packet['worker_run']) / 'result.json'
-        council.workers.save(path, dict(state='awaiting_verification', response='Supported reduced-panel synthesis',
-            session_id='fresh-retained-synthesis', local_execution_stopped=True, reported_cost_usd=0,
-            known_cost_subtotal_usd=0, accounting_complete=True))
-        council.verify_external(self.run, 'synthesis', 'member-one', 'accepted', ['Host checked coherent retained evidence'])
+        council.record_native(self.run, 'synthesis', 'member-three',
+            self.native_receipt(packet, 'Supported reduced-panel synthesis'))
         state = council.status(self.run)
         self.assertEqual(state['outcome'], 'incomplete')
         self.assertEqual(state['synthesis_generation'], 1)
         self.assertEqual(state['critique_generation'], 2)
         self.assertEqual(state['accepted_participation']['critique']['accepted'], 2)
         self.assertEqual(state['role_bindings']['investigate']['member-one']['canonical_model'], 'vendor/model-1')
-        self.assertEqual(state['role_bindings']['synthesis']['canonical_model'], 'vendor/model-4')
+        self.assertEqual(state['role_bindings']['synthesis']['canonical_model'], 'native-balanced')
 
     def test_expired_failed_correction_settles_once_and_blocks_next_session(self):
         self.prepare()
@@ -798,6 +864,8 @@ print(json.dumps({'type':'step_finish','part':{'reason':'stop','cost':0,'tokens'
             self.diagnose(corrections=[dict(kind='workspace_guidance', source=0)])
 
     def test_native_corrected_receipts_settle_accepted_and_rejected_learning(self):
+        self.request['roster']['member-three'] = self.seat(3)
+        self.request['fallbacks']['member-three'] = [self.seat(4)]
         for accepted in (True, False):
             with self.subTest(accepted=accepted):
                 native = dict(kind='native', model='native-' + str(accepted).lower(), effort='high',

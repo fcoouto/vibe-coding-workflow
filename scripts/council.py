@@ -21,6 +21,7 @@ from scripts import openrouter_workers as workers
 def _launch_guard(run, phase):
     # Worker settings admission is held first, and this lock ends immediately after Popen.
     with council._locked(run) as value:
+        council._require_current_flow(value)
         council._remaining(value, phase)
         council._require(value['phase'] == phase, 'phase_already_closed')
         council._check_frozen(run, value)

@@ -33,6 +33,7 @@ PREREQUISITE_REASONS = BUSY_REASONS | {
     'openrouter_scope_changed', 'openrouter_configuration_unavailable', 'openrouter_storage_or_scope_unavailable',
     'council_runtime_qualification_mismatch', 'cancelled', 'phase_already_closed',
     'deadline_exhausted', 'timing_uncertain', 'frozen_evidence_changed',
+    'free_council_temporarily_disabled', 'historical_council_read_only',
     'unsafe_worker_preparation_directory', 'output_limit', 'council_report_limit',
     'invalid_event', 'invalid_part', 'unsupported_event', 'unexpected_tool', 'session_mismatch',
     'malformed_event', 'unterminated_event'}
@@ -97,7 +98,7 @@ def _validate_brief(brief, council=False):
     source = Path(brief['source_root'])
     if not source.is_absolute() or source.resolve() != source or not source.is_dir(): raise ValueError('invalid_source')
     files = brief['files']
-    if not isinstance(files, list) or not 1 <= len(files) <= (council_snapshot.MAX_PATHS if council else 16): raise ValueError('invalid_files')
+    if not isinstance(files, list) or not (0 if council else 1) <= len(files) <= (council_snapshot.MAX_PATHS if council else 16): raise ValueError('invalid_files')
     return brief, source
 
 
@@ -444,8 +445,8 @@ def execute(run, executable, auth_data, publish=None, *, launch_guard=None, dead
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         previous = json.loads((run / 'result.json').read_text())
         if previous['state'] != 'prepared' and not resumable(previous): raise ValueError('already_started')
-        if 'council_owner' in previous:
-            if brief.get('council') != previous['council_owner']:
+        if 'council_owner' in previous or 'council' in brief:
+            if 'council_owner' in previous and brief.get('council') != previous['council_owner']:
                 raise ValueError('council_worker_identity_changed')
             from runtime import council
             launch_guard = lambda: council.external_launch_guard(run, brief)
@@ -541,7 +542,7 @@ def _execute(run, brief, executable, auth_data, publish, *, launch_guard=None, d
                 with settings.admission(brief['source_root'], route, root=run.parent, opencode=executable,
                                         auth_data=auth_data, revision=stamp['revision'], scope_id=stamp['scope_id']), (
                                             launch_guard() if launch_guard else nullcontext()) as admission_ceiling:
-                    if 'group' in brief.get('council', {}):
+                    if 'council' in brief:
                         if type(admission_ceiling) not in (int, float) or not math.isfinite(admission_ceiling):
                             raise ValueError('council_worker_identity_changed')
                         bounded = min(deadline, admission_ceiling)
@@ -699,17 +700,26 @@ def verify(run, disposition, checks):
     run = Path(run)
     result = json.loads((run / 'result.json').read_text())
     brief = json.loads((run / 'brief.json').read_text())
-    if 'council_owner' in result or 'group' in brief.get('council', {}):
-        raise ValueError('grouped_council_verification_required')
-    if result['state'] != 'awaiting_verification' or disposition not in ('accepted', 'rejected'):
-        raise ValueError('not_verifiable')
-    if not isinstance(checks, list) or not checks or any(not isinstance(x, str) or not x.strip() for x in checks):
-        raise ValueError('native_checks_required')
-    result.update(state=disposition, native_checks=checks,
-                  native_fallback_ready=disposition == 'rejected' and result.get('local_execution_stopped') is True)
-    save(run / 'result.json', result)
-    progress(run, disposition)
-    return result
+    guard = nullcontext()
+    if 'council' in brief:
+        from runtime import council
+        marker = brief['council']
+        guard = council._locked(run.parent / ('council-' + marker['run_id']))
+    with guard as value:
+        if value is not None:
+            council._require_current_flow(value)
+            council._require(value['phase'] == marker['phase'], 'phase_already_closed')
+        if 'council_owner' in result or 'group' in brief.get('council', {}):
+            raise ValueError('grouped_council_verification_required')
+        if result['state'] != 'awaiting_verification' or disposition not in ('accepted', 'rejected'):
+            raise ValueError('not_verifiable')
+        if not isinstance(checks, list) or not checks or any(not isinstance(x, str) or not x.strip() for x in checks):
+            raise ValueError('native_checks_required')
+        result.update(state=disposition, native_checks=checks,
+                      native_fallback_ready=disposition == 'rejected' and result.get('local_execution_stopped') is True)
+        save(run / 'result.json', result)
+        progress(run, disposition)
+        return result
 
 
 def main():

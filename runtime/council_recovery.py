@@ -88,7 +88,8 @@ def owners(value):
 def observe(value, owner):
     if owner.get('preparation_failure'): return owner['preparation_failure']
     if owner['kind'] == 'native':
-        return owner.get('receipt', dict(state='issued', local_execution_stopped=False))
+        result = owner.get('receipt', dict(state='issued', local_execution_stopped=False))
+        return dict(result, local_execution_stopped=True) if owner.get('stop_receipt') else result
     try:
         raw = c._read(Path(owner['worker_run']) / 'result.json', c.workers.LIMIT + c.REPORT_LIMIT)
         result = c.onboarding.read_request(raw, c.workers.LIMIT + c.REPORT_LIMIT)
@@ -127,6 +128,7 @@ def phase_guard(value, phase):
 
 
 def launch_guard(value, phase, member):
+    c._require_current_flow(value)
     item = value['members'].get(c._key(phase, member), {})
     c._require(item.get('candidate_id') == current(value, member)['candidate_id'], 'candidate_changed')
     c._require(time.monotonic() >= value['recovery'][member].get('not_before_monotonic', 0), 'retry_delay_pending')
@@ -137,14 +139,17 @@ def launch_guard(value, phase, member):
 @contextmanager
 def _admitted(run):
     with c._locked(run) as before:
+        c._require_current_flow(before)
         root, source, stamp = Path(before['root']), before['source_root'], before['management']
     with c.settings.admission(source, 'council', root=root, **stamp):
         with c._locked(run) as value:
+            c._require_current_flow(value)
             c._require(value['management'] == stamp, 'council_worker_identity_changed')
             yield value
 
 
 def _guard(run, value, phase, member):
+    c._require_current_flow(value)
     c._require(value.get('version') == 3, 'recovery_manifest_required')
     c._identity(value, phase, member)
     c._remaining(value, phase)
@@ -314,7 +319,7 @@ def replace_candidate(run, phase, member, seat):
         roster[member] = seat
         if phase != 'synthesis':
             c._require(_canonical(seat) not in {_canonical(s) for m, s in roster.items() if m != member}, 'canonical_model_claimed')
-        # Validate the complete original topology and selected route, including Free/max reasoning.
+        # Validate the complete original topology and selected route, including supported maximum reasoning.
         # A synthesis role transfer may reuse a successful participant's canonical identity.
         validation_roster = copy.deepcopy(roster)
         if phase == 'synthesis':
@@ -323,7 +328,7 @@ def replace_candidate(run, phase, member, seat):
                     c._require(any(binding.get('canonical_model') == _canonical(seat)
                                    for binding in value['role_bindings']['investigate'].values()), 'chair_transfer_not_successful')
                     validation_roster[m] = copy.deepcopy(value['recovery'][member]['candidates'][0]['seat'])
-        request = {key: value[key] for key in ('run_id', 'question', 'constraints', 'coordinator_chat_id', 'approval_ref',
+        request = {key: value[key] for key in ('mode', 'run_id', 'question', 'constraints', 'coordinator_chat_id', 'approval_ref',
                     'phase_seconds', 'timeout_seconds', 'group', 'chair')}
         request.update(roster=validation_roster, research='', approved_files=value['snapshot_manifest']['files'])
         c._validate(request)
