@@ -1,7 +1,7 @@
 """Bounded v3 Council recovery. The existing Council lock owns every transition.
 
 Research and inference remain native coordinator operations outside this module.
-Source records are hypotheses; only normal host verification accepts a report.
+Source records guide technical recovery; report content remains for critics and the chair.
 """
 import copy
 from contextlib import contextmanager
@@ -158,7 +158,12 @@ def _guard(run, value, phase, member):
     observed = observe(value, item)
     c._require(observed.get('local_execution_stopped') is True, 'prior_owner_not_stopped')
     c._require(observed.get('state') in ('failed', 'rejected', 'unresolved', 'late', 'not_launched'), 'failed_attempt_required')
-    failure = c.workers.safe_failure(observed.get('failure')) or {'category': 'substantive_rejection'}
+    failure = observed.get('failure')
+    if failure is None and (observed.get('state') == 'late' or observed.get('on_time') is False):
+        failure = dict(category='deadline')
+    report = observed.get('report', observed.get('final_response', observed.get('response', '')))
+    c._report(report)
+    failure = c._technical_failure(report, False, failure)
     c._require(failure['category'] not in BLOCKING, 'shared_harness_or_authorization_blocker')
     return item, failure
 

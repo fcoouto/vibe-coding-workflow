@@ -194,7 +194,7 @@ class DirectTests(CouncilCase):
             self.reply = dict(original, **update)
             result = self.send()
             self.assertEqual(result['failure']['category'], category)
-            self.assertEqual(result['response'], '')
+            self.assertEqual(result['response'], update.get('choices', [{}])[0].get('message', {}).get('content', ''))
             self.assertNotIn('SECRET', json.dumps(result))
         for status, category in ((401, 'authentication'), (402, 'budget'), (403, 'permission'),
                                  (429, 'rate_limit'), (500, 'service')):
@@ -207,6 +207,31 @@ class DirectTests(CouncilCase):
         self.assertEqual(result['response'], 'I cannot help with that.')
         self.assertFalse(result['accounting_complete'])
         self.assertIsNone(result['reported_cost_usd'])
+
+    def test_truncated_text_retained_privately_but_never_distributed(self):
+        self.request['recovery'] = True
+        self.reply['choices'][0] = dict(finish_reason='length', message=dict(
+            content='Partial private answer.', reasoning='SECRET reasoning'))
+        run = self.prepare()
+        result = self.execute(run)
+        self.assertEqual(result['state'], 'failed')
+        self.assertEqual(result['failure']['category'], 'incomplete_output')
+        self.assertEqual(result['response'], 'Partial private answer.')
+        self.assertEqual(result['final_response'], '')
+        saved = (run / 'result.json').read_text()
+        self.assertNotIn('SECRET', saved)
+        with self.assertRaisesRegex(ValueError, 'not_verifiable'):
+            council.verify_external(self.run, 'investigate', 'member-two', 'accepted', ['Complete'])
+        packet = council.packet(self.run, 'investigate', 'member-one')
+        council.record_native(self.run, 'investigate', 'member-one', self.native_receipt(packet, 'Usable answer'))
+        packet = council.packet(self.run, 'investigate', 'member-three')
+        self.reply['choices'][0] = dict(finish_reason='stop', message=dict(content='Another usable answer'))
+        self.execute(Path(packet['worker_run']))
+        council.verify_external(self.run, 'investigate', 'member-three', 'accepted', ['Complete and within scope'])
+        critique = council.packet(self.run, 'critique', 'member-one')
+        self.assertNotIn('__council__/initial-2.md', critique['snapshot_manifest']['files'])
+        for name in critique['snapshot_manifest']['files']:
+            self.assertNotIn('Partial private answer.', (Path(critique['snapshot']) / name).read_text())
 
     def test_http_error_machine_diagnostics_are_bounded_and_private(self):
         self.http_status = 403
@@ -283,6 +308,64 @@ class DirectTests(CouncilCase):
         self.assertNotIn('gen-fixture', wire)
         self.assertNotIn('vendor/other', wire)
         self.assertNotIn(str(self.run), wire)
+
+    def test_disputed_claims_reach_critique_and_synthesis_unchanged(self):
+        self.request['recovery'] = True
+        claims = ['There is no external forcing function.', 'Assume a three-hour drive.',
+                  'Relocation is the only reasonable conclusion.']
+        self.run = Path(council.prepare(self.repo, self.request)['run'])
+        children = []
+        for phase, reports in (('investigate', claims), ('critique', [
+                'The relocation conclusion is unsupported. Prefer 1, 2, 3.',
+                'The assumed drive is mistaken; prefer 3, 1, 2.',
+                'I disagree with the forcing-function claim; ranking omitted.'])):
+            for index, member in enumerate(council.GROUP_MEMBERS):
+                packet = council.packet(self.run, phase, member)
+                if phase == 'critique':
+                    for number, claim in enumerate(claims, 1):
+                        self.assertEqual((Path(packet['snapshot']) / f'__council__/initial-{number}.md').read_text(), claim)
+                    self.assertIn('rank', packet['objective'].lower())
+                if packet['kind'] == 'native':
+                    receipt = self.native_receipt(packet, reports[index])
+                    children.append(receipt['child_id'])
+                    council.record_native(self.run, phase, member, receipt)
+                else:
+                    self.reply['choices'][0]['message']['content'] = reports[index]
+                    self.execute(Path(packet['worker_run']))
+                    council.verify_external(self.run, phase, member, 'accepted', ['Complete response within scope'])
+        chair = council.packet(self.run, 'synthesis', 'member-one')
+        for number, claim in enumerate(claims, 1):
+            self.assertEqual((Path(chair['snapshot']) / f'__council__/initial-{number}.md').read_text(), claim)
+        self.assertIn('ranking omitted', (Path(chair['snapshot']) / '__council__/critique-3.md').read_text())
+        self.assertIn('assumptions', chair['objective'])
+        self.assertIn('dissent', chair['objective'])
+        synthesis = 'The drive remains an assumption; relocation is uncertain. Meaningful dissent remains.'
+        receipt = self.native_receipt(chair, synthesis)
+        self.assertNotIn(receipt['child_id'], children)
+        council.record_native(self.run, 'synthesis', 'member-one', receipt)
+        self.assertEqual(council.status(self.run)['outcome'], 'complete')
+        self.assertEqual((self.run / 'synthesis-native.md').read_text() if not self.request.get('recovery') else
+                         (self.run / ('native-' + chair['issued_id'] + '.md')).read_text(), synthesis)
+        self.assertEqual(len(self.calls), 4)
+        for _, _, payload in self.calls[2:]:
+            for claim in claims: self.assertIn(claim, json.dumps(payload))
+
+    def test_missing_ranking_keeps_critique(self):
+        self.run = Path(council.prepare(self.repo, self.request)['run'])
+        for phase in ('investigate', 'critique'):
+            for member in council.GROUP_MEMBERS:
+                packet = council.packet(self.run, phase, member)
+                report = 'The premise is uncertain; no ranking supplied.' if phase == 'critique' else 'An initial answer.'
+                if packet['kind'] == 'native':
+                    council.record_native(self.run, phase, member, self.native_receipt(packet, report))
+                else:
+                    self.reply['choices'][0]['message']['content'] = report
+                    self.execute(Path(packet['worker_run']))
+                    council.verify_external(self.run, phase, member, 'accepted', ['Complete response within scope'])
+        chair = council.packet(self.run, 'synthesis', 'member-one')
+        for number in range(1, 4):
+            self.assertEqual((Path(chair['snapshot']) / f'__council__/critique-{number}.md').read_text(),
+                             'The premise is uncertain; no ranking supplied.')
 
     def test_direct_cancel_and_deadline_stop_owned_process(self):
         self.delay = 3

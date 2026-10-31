@@ -667,8 +667,8 @@ def _execute(run, brief, executable, auth_data, publish, *, launch_guard=None, d
                             failed = failure is not None
                             result['failure'] = safe_failure(failure) if failed else None
                             terminal = not failed and bool(response.strip())
-                            result['response'] = response if terminal else ''
-                            if recovery: result['final_response'] = result['response']
+                            result['response'] = response
+                            result['final_response'] = response if terminal else ''
                             for field in ('generation_id', 'reported_model', 'reported_tokens', 'reported_cost_usd',
                                           'known_cost_subtotal_usd', 'accounting_complete'):
                                 if field in event: result[field] = event[field]
@@ -764,7 +764,7 @@ def _execute(run, brief, executable, auth_data, publish, *, launch_guard=None, d
     return result
 
 
-def verify(run, disposition, checks):
+def verify(run, disposition, checks, *, failure=None):
     run = Path(run)
     result = json.loads((run / 'result.json').read_text())
     brief = json.loads((run / 'brief.json').read_text())
@@ -783,6 +783,14 @@ def verify(run, disposition, checks):
             raise ValueError('not_verifiable')
         if not isinstance(checks, list) or not checks or any(not isinstance(x, str) or not x.strip() for x in checks):
             raise ValueError('native_checks_required')
+        if value is not None:
+            council._require(result.get('local_execution_stopped') is True, 'not_verifiable')
+            council._report(result.get('response'))
+            if disposition == 'accepted':
+                council._remaining(value, marker['phase'])
+                council._require(bool(result['response'].strip()), 'external_report_required')
+            result['failure'] = council._technical_failure(result.get('response', ''), disposition == 'accepted',
+                failure if failure is not None else result.get('failure'))
         result.update(state=disposition, native_checks=checks,
                       native_fallback_ready=disposition == 'rejected' and result.get('local_execution_stopped') is True)
         save(run / 'result.json', result)
@@ -815,7 +823,7 @@ def main():
             save(run / 'visibility.json', {'delivered': False, 'reason': 'adapter_unavailable'})
     if args.action == 'run': result = execute(run, args.opencode, args.auth_data, publisher)
     elif args.action == 'verify':
-        result = verify(run, request['disposition'], request['checks'])
+        result = verify(run, request['disposition'], request['checks'], failure=request.get('failure'))
         if publisher: publisher(result['state'])
     else: result = json.loads((run / 'result.json').read_text())
     print(json.dumps(result, allow_nan=False))

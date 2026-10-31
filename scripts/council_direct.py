@@ -110,16 +110,17 @@ def send(payload: dict, auth_data: Path, timeout: float) -> dict:
         choice = choices[0]
         message = choice.get('message')
         if not isinstance(message, dict): raise ValueError()
+        content = message.get('content')
+        if isinstance(content, str):
+            if len(content.encode()) > REPORT_LIMIT: raise ValueError('council_report_limit')
+            result['response'] = content
         if message.get('tool_calls') or message.get('function_call'):
             return dict(result, failure=dict(category='runtime_or_output', reason='unexpected_tool'))
         reason = choice.get('finish_reason')
-        content = message.get('content')
         if reason != 'stop' or not isinstance(content, str) or not content.strip():
             failure = dict(category='policy' if reason in ('content_filter', 'content-filter') else 'incomplete_output')
             if reason in ('length', 'stop', 'content_filter', 'content-filter'): failure['terminal_reason'] = reason
             return dict(result, failure=failure)
-        if len(content.encode()) > REPORT_LIMIT: raise ValueError('council_report_limit')
-        result['response'] = content
         return result
     except urllib.error.HTTPError as error:
         # Do not expose provider bodies, redirect locations, headers, or exception text.

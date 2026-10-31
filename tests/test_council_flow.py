@@ -50,7 +50,7 @@ class CouncilFlowTests(CouncilCase):
         receipt = dict(issued_id=packet['issued_id'], child_id='child-' + phase,
             supervisor_id='coordinator', observed_model='native-frontier', observed_effort='max',
             fork_turns='none', local_execution_stopped=True, accepted=accepted,
-            checks=['Native checked scope, decisive citations and omissions.'], report=report)
+            checks=['Native checked scope, decisive citations and omissions.'], report=report if accepted else '')
         council.record_native(self.run, phase, 'native', receipt)
         return packet
 
@@ -156,6 +156,12 @@ class CouncilFlowTests(CouncilCase):
         external = council.packet(self.run, 'investigate', 'external-two')
         with council._locked(self.run) as value:
             value.pop('flow', None)
+            value['verification_feedback'] = True
+            value['members']['investigate:native']['findings'] = [dict(
+                claim='Historical disputed claim', correction='Historical correction', evidence='Historical source')]
+            feedback = b'Original historical verification feedback.'
+            council.changes._atomic(self.run, 'verification-feedback.md', feedback)
+            value['frozen']['verification-feedback.md'] = hashlib.sha256(feedback).hexdigest()
             council._save(self.run, value)
         originals = {path: path.read_bytes() for path in self.run.rglob('*')
                      if path.is_file() and path.name not in ('manifest.json', 'lock', 'execution.lock')}
@@ -186,6 +192,48 @@ class CouncilFlowTests(CouncilCase):
         self.assertTrue(state['all_local_execution_stopped'])
         self.assertFalse(state['fresh_synthesis_available'])
         self.assertEqual(originals, {path: path.read_bytes() for path in originals})
+        retained = json.loads((self.run / 'manifest.json').read_text())
+        self.assertEqual(retained['members']['investigate:native']['findings'][0]['correction'], 'Historical correction')
+
+    def test_historical_native_stop_requires_child_id_without_writes(self):
+        self.prepare()
+        packet = council.packet(self.run, 'investigate', 'native')
+        with council._locked(self.run) as value:
+            value.pop('flow')
+            council._save(self.run, value)
+        before = (self.run / 'manifest.json').read_bytes()
+        receipt = dict(issued_id=packet['issued_id'], supervisor_id='coordinator', accepted=False,
+                       report='', local_execution_stopped=True, checks=['Observed stop'])
+        with self.assertRaisesRegex(ValueError, 'invalid_native_stop_receipt'):
+            council.record_native(self.run, 'investigate', 'native', receipt)
+        self.assertEqual(before, (self.run / 'manifest.json').read_bytes())
+
+    def test_no_initial_answer_stops_without_chair(self):
+        self.prepare()
+        self.native('investigate', '', accepted=False)
+        for member in ('external-one', 'external-two'):
+            self.external('investigate', member, '', state='failed')
+        before = (self.run / 'manifest.json').read_bytes()
+        with self.assertRaisesRegex(ValueError, 'no_initial_answers'):
+            council.packet(self.run, 'critique', 'native')
+        self.assertEqual(before, (self.run / 'manifest.json').read_bytes())
+        with self.assertRaisesRegex(ValueError, 'phase_not_ready'):
+            council.packet(self.run, 'synthesis', 'native')
+        state = council.status(self.run)
+        self.assertFalse(state['fresh_synthesis_available'])
+        self.assertEqual(state['accepted_participation']['investigate']['accepted'], 0)
+
+    def test_partial_counts_and_failed_chair_are_honest(self):
+        self.request['roster']['external-two'] = dict(kind='external', unavailable_reason='Unavailable', selection='native:discovery')
+        self.prepare(); self.investigations(second=False); self.critiques()
+        self.native('synthesis', '', accepted=False)
+        state = council.status(self.run)
+        self.assertEqual(state['accepted_participation'], dict(investigate=dict(accepted=2, expected=3),
+            critique=dict(accepted=2, expected=3), synthesis=dict(accepted=0, expected=1)))
+        self.assertEqual(state['outcome'], 'partial')
+        self.assertFalse(state['fresh_synthesis_available'])
+        self.assertTrue((self.run / 'initial-1.md').exists())
+        self.assertTrue((self.run / 'critique-2.md').exists())
 
     def test_historical_free_prices_reports_and_hashes_remain_readable(self):
         current = copy.deepcopy(self.request)
@@ -233,7 +281,8 @@ class CouncilFlowTests(CouncilCase):
             else: blocked.append(False)
             return original(path, result)
         with redirect_stdout(StringIO()), patch.object(council, '_elapsed', return_value=601), patch.object(council.workers, 'save', side_effect=save_after_competing_phase_transition):
-            council.workers.verify(Path(packet['worker_run']), 'accepted', ['Checked original report'])
+            council.workers.verify(Path(packet['worker_run']), 'rejected', ['Observed runtime failure; original owner stopped'],
+                                   failure=dict(category='runtime'))
         self.assertEqual(blocked, [True])
         self.assertEqual(council.status(self.run)['phase'], 'investigate')
 
@@ -476,20 +525,39 @@ class CouncilFlowTests(CouncilCase):
         self.assertEqual(result['failure']['reason'], 'cancelled')
         self.assertEqual([call for call in spawn.call_args_list if call.args[0][0] == str(self.executable)], [])
 
-    def test_presentation_verification_preserves_original_report_for_advisory_and_hard_limits(self):
-        report = ' '.join(['evidence'] * 809)
-        for index, hard in enumerate((False, True)):
-            self.request['run_id'] = 'presentation-' + str(index)
-            self.request['constraints'] = 'Read only. ' + ('Hard maximum: 800 words.' if hard else 'Aim for 800 words.')
-            self.prepare()
-            packet = council.packet(self.run, 'investigate', 'external-one')
-            path = Path(packet['worker_run']) / 'result.json'
-            value = dict(state='awaiting_verification', response=report, local_execution_stopped=True)
-            path.write_text(json.dumps(value)); path.chmod(0o600)
-            checked = council.workers.verify(Path(packet['worker_run']), 'rejected' if hard else 'accepted',
-                ['Substantive evidence checked. ' + ('Explicit hard 800-word limit exceeded.' if hard else 'Presentation warning: 809 words exceeds advisory 800-word target; shorten chat delivery.')])
-            self.assertEqual(checked['response'], report)
-            self.assertEqual(council.status(self.run)['accepted_participation']['investigate']['accepted'], 0 if hard else 1)
+    def test_ungrouped_technical_disposition_preserves_content_and_scope_failure(self):
+        self.prepare()
+        packet = council.packet(self.run, 'investigate', 'external-one')
+        path = Path(packet['worker_run']) / 'result.json'
+        report = 'An uncited answer that a critic may dispute.'
+        council.workers.save(path, dict(state='awaiting_verification', response=report, local_execution_stopped=True))
+        before = path.read_bytes()
+        with self.assertRaisesRegex(ValueError, 'technical_failure_required'):
+            council.workers.verify(Path(packet['worker_run']), 'rejected', ['Disagree with claim'])
+        self.assertEqual(before, path.read_bytes())
+        checked = council.workers.verify(Path(packet['worker_run']), 'accepted', ['Scope and completion checked'])
+        self.assertEqual(checked['response'], report)
+        self.assertEqual(council.status(self.run)['accepted_participation']['investigate']['accepted'], 1)
+        packet = council.packet(self.run, 'investigate', 'external-two')
+        path = Path(packet['worker_run']) / 'result.json'
+        council.workers.save(path, dict(state='awaiting_verification', response=report, local_execution_stopped=True))
+        checked = council.workers.verify(Path(packet['worker_run']), 'rejected', ['Observed scope violation'],
+                                         failure=dict(category='permission', private='withheld'))
+        self.assertEqual(checked['response'], report)
+        self.assertEqual(checked['failure'], dict(category='permission'))
+
+    def test_ungrouped_verification_requires_stopped_nonempty_bounded_response(self):
+        self.prepare()
+        packet = council.packet(self.run, 'investigate', 'external-one')
+        path = Path(packet['worker_run']) / 'result.json'
+        for report, stopped, error in (('', True, 'external_report_required'),
+                ('x' * (128 * 1024 + 1), True, 'report_limit'), ('An answer', False, 'not_verifiable')):
+            with self.subTest(error=error):
+                council.workers.save(path, dict(state='awaiting_verification', response=report, local_execution_stopped=stopped))
+                before = path.read_bytes()
+                with self.assertRaisesRegex(ValueError, error):
+                    council.workers.verify(Path(packet['worker_run']), 'accepted', ['Checked scope'])
+                self.assertEqual(before, path.read_bytes())
 
     def test_snapshot_and_executable_are_rechecked_after_busy_backoff(self):
         from contextlib import redirect_stdout
@@ -606,7 +674,7 @@ class CouncilFlowTests(CouncilCase):
                 self.assertFalse((self.root / ('council-' + self.request['run_id']) / 'manifest.json').exists())
 
     def test_prepare_accepts_exact_worker_objective_boundary_without_truncation(self):
-        self.request.update(question='q' * 8000, constraints='c' * 7812)
+        self.request.update(question='q' * 8000, constraints='c' * 7721)
         self.prepare(); self.investigations()
         packet = council.packet(self.run, 'critique', 'external-one')
         brief = json.loads((Path(packet['worker_run']) / 'brief.json').read_text())
@@ -885,7 +953,8 @@ class CouncilFlowTests(CouncilCase):
         receipt = dict(issued_id=packet['issued_id'], child_id=None, supervisor_id='coordinator',
             observed_model=None, observed_effort=None, fork_turns=None,
             local_execution_stopped=True, accepted=False,
-            checks=['Native dispatch tool refused before creating a child; observed no admitted process.'], report='Native dispatch unavailable.')
+            checks=['Native dispatch tool refused before creating a child; observed no admitted process.'],
+            report='Native dispatch unavailable.', failure=dict(category='integration', launch_stage='before_spawn'))
         council.record_native(self.run, 'investigate', 'native', receipt)
         self.assertEqual(council.status(self.run)['members']['investigate']['native']['state'], 'rejected')
         self.assertTrue(council.status(self.run)['all_local_execution_stopped'])
@@ -948,7 +1017,7 @@ class CouncilFlowTests(CouncilCase):
         receipt = dict(issued_id=packet['issued_id'], child_id='child-investigate', supervisor_id='coordinator',
             observed_model='native-frontier', observed_effort='max', fork_turns='all',
             local_execution_stopped=True, accepted=False, checks=['Observed reused child and confirmed local stop.'],
-            report='Rejected answer from reused child must not become deliberation evidence.')
+            report='Rejected answer from reused child must not become deliberation evidence.', failure=dict(category='integration'))
         council.record_native(self.run, 'critique', 'native', receipt)
         native = council.status(self.run)['members']['critique']['native']
         self.assertEqual(native['state'], 'rejected')
@@ -991,7 +1060,7 @@ class CouncilFlowTests(CouncilCase):
         self.assertIn('effort telemetry unavailable', observations)
         self.assertIn('failed', observations)
         self.assertIn('deadline', observations)
-        self.assertIn('no verified evidence included', observations)
+        self.assertIn('no report included', observations)
         self.assertIn('Participant 2: accepted', observations)
         for identity in (private_reason, 'private-provider', 'private-session-identity', 'private-investigator-child', 'native-frontier', 'vendor/frontier', 'external-one', 'external-two'):
             self.assertNotIn(identity, observations)
@@ -1010,7 +1079,7 @@ class CouncilFlowTests(CouncilCase):
             packet = council.packet(self.run, 'synthesis', 'native')
         observations = packet['execution_observations']
         self.assertIn('Participant 2: awaiting_verification', observations)
-        self.assertIn('report lacks native verification', observations)
+        self.assertIn('report lacks technical and scope checks', observations)
         self.assertIn('Participant 3: late', observations)
         self.assertIn('late/unreviewed evidence', observations)
         self.assertNotIn('initial-2.md', packet['reports'])
@@ -1038,7 +1107,7 @@ class CouncilFlowTests(CouncilCase):
         packet = council.packet(self.run, phase, member)
         if packet['kind'] == 'native':
             council.record_native(self.run, phase, member, self.native_receipt(packet,
-                f'{phase} evidence by anonymous participant', accepted=disposition == 'accepted', child_id=session))
+                f'{phase} evidence by anonymous participant' if disposition == 'accepted' else '', accepted=disposition == 'accepted', child_id=session))
             return packet
         path = Path(packet['worker_run']) / 'result.json'
         result = dict(state='awaiting_verification', response=f'{phase} evidence by anonymous participant',
@@ -1047,7 +1116,8 @@ class CouncilFlowTests(CouncilCase):
             accounting_complete=True, upstream_cancellation_confirmed=False)
         council.workers.save(path, result)
         if verify:
-            council.verify_external(self.run, phase, member, disposition, ['Host verified citations, scope and freshness.'])
+            council.verify_external(self.run, phase, member, disposition, ['Host checked completion, scope and freshness.'],
+                                    failure=dict(category='runtime') if disposition == 'rejected' else None)
         return packet
 
     def grouped_rounds(self, rejected=()):
@@ -1146,7 +1216,7 @@ class CouncilFlowTests(CouncilCase):
         council.workers.save(path, result)
         with self.assertRaisesRegex(ValueError, 'fresh_external_session_required'):
             council.verify_external(self.run, 'investigate', 'member-two', 'accepted', ['Host verified'])
-        council.verify_external(self.run, 'investigate', 'member-two', 'rejected', ['No session observed'])
+        council.verify_external(self.run, 'investigate', 'member-two', 'rejected', ['No session observed'], failure=dict(category='integration'))
         manifest = json.loads((self.run / 'manifest.json').read_text())
         self.assertNotIn('session_ids', manifest['members']['investigate:member-two'])
         with self.assertRaisesRegex(ValueError, 'grouped_council_verification_required'):
@@ -1211,7 +1281,7 @@ class CouncilFlowTests(CouncilCase):
         manifest = dict(files={str(i): dict(size=1) for i in range(council.snapshot.MAX_PATHS - 7)})
         with self.assertRaisesRegex(ValueError, 'headroom'):
             council._phase_headroom(manifest, self.request['roster'], grouped=True)
-        self.request['question'] = 'q' * 7900
+        self.request['question'] = 'q' * 7800
         self.request['constraints'] = 'c' * 7850
         # The longest phase must be validated too, before the first dispatch.
         with patch.object(council.workers, '_validate_council_brief', wraps=council.workers._validate_council_brief) as validate:
@@ -1286,7 +1356,7 @@ class CouncilFlowTests(CouncilCase):
         with self.assertRaisesRegex(ValueError, 'fresh_external_session_required'):
             council.verify_external(self.run, 'critique', 'member-one', 'accepted', ['Host checked'])
         council.cancel(self.run)
-        council.verify_external(self.run, 'critique', 'member-one', 'rejected', ['Unknown session, stopped original owner'])
+        council.verify_external(self.run, 'critique', 'member-one', 'rejected', ['Unknown session, stopped original owner'], failure=dict(category='integration'))
         self.assertTrue(council.status(self.run)['all_local_execution_stopped'])
         self.assertFalse(council.status(self.run)['fresh_synthesis_available'])
 
@@ -1439,7 +1509,7 @@ class CouncilFlowTests(CouncilCase):
                     manifest = json.loads((self.run / 'manifest.json').read_text())
                     self.assertIn(original_session, manifest['members']['investigate:member-one']['session_ids'])
                     # Rejection still settles the original current owner without inventing a session.
-                    result = council.verify_external(self.run, 'critique', 'member-one', 'rejected', ['Reused session rejected'])
+                    result = council.verify_external(self.run, 'critique', 'member-one', 'rejected', ['Reused session rejected'], failure=dict(category='integration'))
                     self.assertEqual(result['session_id'], original_session)
                     self.assertTrue(result['local_execution_stopped'])
                     self.assertEqual(result['reported_cost_usd'], 0)

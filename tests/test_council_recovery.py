@@ -45,7 +45,7 @@ class CouncilRecoveryTests(CouncilCase):
         if phase == 'synthesis': member = self.request['chair']
         packet = council.packet(self.run, phase, member)
         if packet['kind'] == 'native':
-            council.record_native(self.run, phase, member, self.native_receipt(packet, accepted=accepted, child_id=session))
+            council.record_native(self.run, phase, member, self.native_receipt(packet, report='Cited evidence and uncertainty.' if accepted else '', accepted=accepted, child_id=session))
             return packet
         path = Path(packet['worker_run']) / 'result.json'
         council.workers.save(path, dict(state='awaiting_verification' if accepted else 'failed',
@@ -71,20 +71,6 @@ class CouncilRecoveryTests(CouncilCase):
         self.finish(phase, member, accepted=False)
         return self.diagnose(phase, member, corrections)
 
-    def verify_findings(self, phase, member, disposition, checks, **kwargs):
-        if phase == 'synthesis': member = self.request['chair']
-        if (phase, member) in self.pending_native:
-            packet, report = self.pending_native[(phase, member)]
-            receipt = self.native_receipt(packet, report, accepted=disposition == 'accepted')
-            receipt.update(kwargs, checks=checks)
-            return council.record_native(self.run, phase, member, receipt)
-        try:
-            return council.verify_external(self.run, phase, member, disposition, checks, **kwargs)
-        except TypeError as error:
-            if "unexpected keyword argument 'findings'" in str(error):
-                self.fail('Verification cannot retain reviewed claim corrections for the next participant')
-            raise
-
     def pending_report(self, phase, member, report):
         if phase == 'synthesis': member = self.request['chair']
         packet = council.packet(self.run, phase, member)
@@ -96,11 +82,6 @@ class CouncilRecoveryTests(CouncilCase):
             session_id=packet['worker_run'], local_execution_stopped=True,
             reported_cost_usd=0, known_cost_subtotal_usd=0, accounting_complete=True))
         return packet
-
-    def sqlite_finding(self):
-        return dict(claim="isolation_level='IMMEDIATE' protects the preceding SELECT",
-                    correction='The SELECT runs before the implicit transaction. Use explicit BEGIN IMMEDIATE before reading.',
-                    evidence='evidence.txt:1; Python sqlite3 transaction-control documentation')
 
     def test_historical_and_free_recovery_admission_preserves_stop_settlement(self):
         self.prepare()
@@ -129,172 +110,108 @@ class CouncilRecoveryTests(CouncilCase):
             local_execution_stopped=True, checks=['Observed original supervisor stop']))
         self.assertTrue(council.status(self.run)['all_local_execution_stopped'])
 
-    def test_known_false_claim_cannot_be_accepted_as_a_warning(self):
+    def test_no_host_feedback_files_or_semantic_retry(self):
         self.prepare()
-        self.pending_report('investigate', 'member-one', self.sqlite_finding()['claim'])
-        with self.assertRaisesRegex(ValueError, 'outstanding_verification_findings'):
-            self.verify_findings( 'investigate', 'member-one', 'accepted',
-                ['Useful core answer; factual warning'], findings=[self.sqlite_finding()])
-        self.assertEqual(council.status(self.run)['members']['investigate']['member-one']['state'], 'awaiting_verification')
-
-    def test_rejected_sqlite_claim_reaches_critique_and_fresh_synthesis_without_private_checks(self):
-        # The false advice from the live run has a directly observable counterexample.
-        import sqlite3
-        from contextlib import closing
-        with closing(sqlite3.connect(':memory:', isolation_level='IMMEDIATE')) as connection:
-            connection.execute('CREATE TABLE accounts(balance INTEGER)')
-            connection.execute('INSERT INTO accounts VALUES (100)')
-            connection.commit()
-            connection.execute('SELECT balance FROM accounts').fetchone()
-            self.assertFalse(connection.in_transaction)
-            connection.execute('BEGIN IMMEDIATE')
-            self.assertTrue(connection.in_transaction)
-        self.prepare()
-        first = self.pending_report('investigate', 'member-one', self.sqlite_finding()['claim'])
-        self.verify_findings( 'investigate', 'member-one', 'rejected',
-            ['PRIVATE CHECK auth/session/vendor detail must stay private'], findings=[self.sqlite_finding()])
-        self.diagnose()
-        # An independent replacement must not read the earlier candidate's conclusions.
-        council.replace_candidate(self.run, 'investigate', 'member-one', self.seat(4))
-        replacement = self.finish('investigate', 'member-one')
-        self.assertNotIn('__council__/verification-feedback.md', replacement['snapshot_manifest']['files'])
+        first = self.pending_report('investigate', 'member-one', 'I cannot help with that.')
+        before = (Path(first['worker_run']) / 'result.json').read_bytes()
+        with self.assertRaisesRegex(TypeError, 'findings'):
+            council.verify_external(self.run, 'investigate', 'member-one', 'rejected', ['Content disagreement'],
+                                    findings=[dict(claim='claim', correction='correction', evidence='evidence')])
+        self.assertEqual(before, (Path(first['worker_run']) / 'result.json').read_bytes())
+        council.verify_external(self.run, 'investigate', 'member-one', 'accepted', ['Scope and completion checked'])
+        with self.assertRaisesRegex(ValueError, 'failed_attempt_required'):
+            council.investigate_failure(self.run, 'investigate', 'member-one')
         for member in ('member-two', 'member-three'): self.finish('investigate', member)
         for member in council.GROUP_MEMBERS:
             packet = self.finish('critique', member)
-            feedback = (Path(packet['snapshot']) / '__council__/verification-feedback.md').read_text()
-            self.assertIn('explicit BEGIN IMMEDIATE before reading', feedback)
-            self.assertNotIn('PRIVATE CHECK', feedback)
-            self.assertNotIn(first['worker_run'], feedback)
-            self.assertNotIn('vendor/model-', feedback)
+            self.assertNotIn('__council__/verification-feedback.md', packet['snapshot_manifest']['files'])
+            self.assertNotIn('verification_feedback', packet)
         chair = council.packet(self.run, 'synthesis', 'member-three')
-        self.assertIn('explicit BEGIN IMMEDIATE before reading',
-                      (Path(chair['snapshot']) / '__council__/verification-feedback.md').read_text())
-        self.assertNotIn(self.sqlite_finding()['claim'],
-                         (Path(chair['snapshot']) / '__council__/initial-1.md').read_text())
+        self.assertNotIn('__council__/verification-feedback.md', chair['snapshot_manifest']['files'])
+        self.assertEqual((Path(chair['snapshot']) / '__council__/initial-1.md').read_text(), 'I cannot help with that.')
+        self.assertFalse(any('feedback' in p.name for p in self.run.rglob('*')))
 
-    def test_false_participation_feedback_reaches_replacement_chair_without_rewriting_packet_or_budget(self):
+    def test_complete_report_rejection_requires_technical_failure(self):
         self.prepare()
-        for phase in ('investigate', 'critique'):
-            for member in council.GROUP_MEMBERS: self.finish(phase, member)
-        first = self.pending_report('synthesis', 'member-three', 'No anonymous phase reports exist to cross-check divergent weightings. Three initial reports and two critiques were available.')
-        original = json.loads((self.run / 'manifest.json').read_text())
-        before = {str(p.relative_to(first['snapshot'])): p.read_bytes()
-                  for p in Path(first['snapshot']).rglob('*') if p.is_file()}
-        finding = dict(claim='No anonymous phase reports exist to cross-check divergent weightings. Three initial reports and two critiques were available.',
-                       correction='All three investigations and all three critiques were accepted. Earlier absence statements describe investigation only.',
-                       evidence='__council__/execution-observations.md: investigate and critique')
-        self.verify_findings( 'synthesis', 'member-three', 'rejected',
-                                ['PRIVATE rejection details'], findings=[finding])
-        self.diagnose('synthesis')
-        council.replace_candidate(self.run, 'synthesis', 'member-three', self.native_seat('native-replacement'))
-        next_packet = self.pending_report('synthesis', 'member-three', 'Three investigations and three critiques informed this synthesis.')
-        self.assertNotEqual(first['snapshot'], next_packet['snapshot'])
-        feedback = (Path(next_packet['snapshot']) / '__council__/verification-feedback.md').read_text()
-        self.assertIn(finding['correction'], feedback)
-        self.assertNotIn('PRIVATE', feedback)
-        self.assertEqual(before, {str(p.relative_to(first['snapshot'])): p.read_bytes()
-                                 for p in Path(first['snapshot']).rglob('*') if p.is_file()})
-        self.assertEqual(first['deadline_monotonic'], next_packet['deadline_monotonic'])
-        now = json.loads((self.run / 'manifest.json').read_text())
-        for key in ('started_monotonic', 'started_wall', 'phase_seconds', 'timeout_seconds', 'critique_generation'):
-            self.assertEqual(original[key], now[key])
-        self.assertEqual(council.status(self.run)['recovery']['member-three']['replacements_remaining'], 2)
-        self.verify_findings( 'synthesis', 'member-three', 'accepted',
-                                ['Host checked the correction against all six sealed reports and execution observations.'])
-        self.assertEqual(council.status(self.run)['outcome'], 'complete')
+        packet = self.pending_report('investigate', 'member-one', 'An uncited, disputed answer.')
+        paths = [self.run / 'manifest.json', Path(packet['worker_run']) / 'result.json']
+        before = [p.read_bytes() for p in paths]
+        with self.assertRaisesRegex(ValueError, 'technical_failure_required'):
+            council.verify_external(self.run, 'investigate', 'member-one', 'rejected', ['Factual disagreement'])
+        self.assertEqual(before, [p.read_bytes() for p in paths])
+        council.verify_external(self.run, 'investigate', 'member-one', 'rejected', ['Observed out-of-scope response'],
+                                failure=dict(category='permission', private='do not publish'))
+        result = json.loads(paths[1].read_text())
+        self.assertEqual(result['failure'], dict(category='permission'))
+        self.assertEqual(result['final_response'], 'An uncited, disputed answer.')
+        with self.assertRaisesRegex(ValueError, 'shared_harness_or_authorization_blocker'):
+            council.investigate_failure(self.run, 'investigate', 'member-one')
 
-    def test_native_findings_use_the_same_acceptance_gate_and_phase_handoff(self):
-        self.request['group'] = 'Frontier'
-        self.request['chair'] = 'member-one'
-        self.request['roster']['member-three'] = self.seat(3)
-        self.request['fallbacks']['member-three'] = [self.seat(4)]
-        self.request['roster']['member-one'] = dict(kind='native', model='native-frontier', effort='max',
-            supported_efforts=['max'], input_tokens=10000, output_tokens=4096, steps=12,
-            selection='Approved native reasoning', supervisor_id='coordinator')
-        self.request['fallbacks']['member-one'] = []
+    def test_native_content_rejection_requires_technical_failure(self):
         self.prepare()
-        packet = council.packet(self.run, 'investigate', 'member-one')
-        receipt = dict(issued_id=packet['issued_id'], child_id='native-first', supervisor_id='coordinator',
-            observed_model='native-frontier', observed_effort='max', fork_turns='none',
-            local_execution_stopped=True, accepted=True, checks=['PRIVATE native checks'],
-            report=self.sqlite_finding()['claim'], findings=[self.sqlite_finding()])
-        with self.assertRaisesRegex(ValueError, 'outstanding_verification_findings'):
-            council.record_native(self.run, 'investigate', 'member-one', receipt)
-        receipt['accepted'] = False
-        council.record_native(self.run, 'investigate', 'member-one', receipt)
-        for member in ('member-two', 'member-three'): self.finish('investigate', member)
-        packet = council.packet(self.run, 'critique', 'member-one')
-        self.assertIn(self.sqlite_finding()['correction'], packet['verification_feedback'])
-        self.assertNotIn('PRIVATE', packet['verification_feedback'])
+        packet = council.packet(self.run, 'investigate', 'member-three')
+        receipt = self.native_receipt(packet, 'A mistaken conclusion.', accepted=False)
+        before = (self.run / 'manifest.json').read_bytes()
+        with self.assertRaisesRegex(ValueError, 'technical_failure_required'):
+            council.record_native(self.run, 'investigate', 'member-three', receipt)
+        self.assertEqual(before, (self.run / 'manifest.json').read_bytes())
+        receipt['failure'] = dict(category='runtime', private='withheld')
+        council.record_native(self.run, 'investigate', 'member-three', receipt)
+        opened = council.investigate_failure(self.run, 'investigate', 'member-three')
+        self.assertEqual(opened['failure'], dict(category='runtime'))
 
-    def test_feedback_is_bounded_and_does_not_enable_old_runs(self):
+    def test_real_technical_failure_uses_bounded_recovery(self):
         self.prepare()
-        self.pending_report('investigate', 'member-one', 'Incorrect claim')
-        for findings in ([dict(self.sqlite_finding(), private_checks='secret')],
-                         [dict(self.sqlite_finding(), evidence='')],
-                         [dict(self.sqlite_finding(), correction='x' * 2001)],
-                         [self.sqlite_finding()] * 9, True):
-            with self.subTest(findings_type=type(findings).__name__):
-                with self.assertRaisesRegex(ValueError, 'invalid_verification_findings'):
-                    council.verify_external(self.run, 'investigate', 'member-one', 'rejected', ['Checked'], findings=findings)
-        with council._locked(self.run) as value:
-            value.pop('verification_feedback')
-            council._save(self.run, value)
-        with self.assertRaisesRegex(ValueError, 'verification_feedback_unavailable'):
-            council.verify_external(self.run, 'investigate', 'member-one', 'rejected', ['Checked'], findings=[self.sqlite_finding()])
+        first = self.finish('investigate', 'member-one', accepted=False)
+        opened, _ = self.diagnose(corrections=[dict(kind='workspace_guidance', source=0)])
+        self.assertEqual(opened['failure']['category'], 'service')
+        self.assertLessEqual(opened['deadline_monotonic'] - time.monotonic(), 120)
+        council.correct_candidate(self.run, 'investigate', 'member-one', 0)
+        retry = self.finish('investigate', 'member-one')
+        self.assertEqual(first['deadline_monotonic'], retry['deadline_monotonic'])
+        self.assertNotEqual(first['worker_run'], retry['worker_run'])
+        state = council.status(self.run)
+        self.assertEqual(state['recovery']['member-one']['investigations_remaining'], 0)
+        self.assertEqual(state['recovery']['member-one']['corrections_remaining'], 1)
+        self.assertEqual(state['recovery']['member-one']['replacements_remaining'], 3)
 
-    def test_critic_correction_does_not_change_peer_packets_or_frozen_generation(self):
+    def test_technical_retry_keeps_peer_packet_and_tamper_guard(self):
         self.prepare()
         for member in council.GROUP_MEMBERS: self.finish('investigate', member)
-        first = self.pending_report('critique', 'member-one', self.sqlite_finding()['claim'])
-        council.verify_external(self.run, 'critique', 'member-one', 'rejected', ['Private details'], findings=[self.sqlite_finding()])
+        first = self.finish('critique', 'member-one', accepted=False)
         self.diagnose('critique', corrections=[dict(kind='workspace_guidance', source=0)])
         council.correct_candidate(self.run, 'critique', 'member-one', 0)
         retry = council.packet(self.run, 'critique', 'member-one')
         peer = council.packet(self.run, 'critique', 'member-two')
+        self.assertEqual(first['snapshot'], retry['snapshot'])
         self.assertEqual(first['snapshot'], peer['snapshot'])
-        self.assertNotIn(self.sqlite_finding()['claim'],
-                         (Path(peer['snapshot']) / '__council__/verification-feedback.md').read_text())
-        feedback = Path(retry['snapshot']) / '__council__/verification-feedback.md'
-        self.assertIn(self.sqlite_finding()['correction'], feedback.read_text())
+        self.assertEqual(first['deadline_monotonic'], retry['deadline_monotonic'])
         brief = json.loads((Path(retry['worker_run']) / 'brief.json').read_text())
         with council.external_launch_guard(Path(retry['worker_run']), brief): pass
-        # The sealed retry can be reconciled, but cannot silently accept changed bytes.
-        resumed = council.resume_member(self.run, 'critique', 'member-one')
-        self.assertEqual(resumed['worker_run'], retry['worker_run'])
-        feedback.chmod(0o600)
-        feedback.write_text('unreviewed replacement')
-        feedback.chmod(0o400)
+        self.assertEqual(council.resume_member(self.run, 'critique', 'member-one')['worker_run'], retry['worker_run'])
+        original = Path(retry['snapshot']) / '__council__/initial-1.md'
+        original.chmod(0o600); original.write_text('unreviewed replacement'); original.chmod(0o400)
         with self.assertRaises(ValueError):
             with council.external_launch_guard(Path(retry['worker_run']), brief): pass
+        with self.assertRaises(ValueError):
+            council.resume_member(self.run, 'critique', 'member-one')
 
-    def test_uncertain_clock_rejection_settles_without_publishing_findings(self):
-        self.prepare()
-        self.pending_report('investigate', 'member-one', self.sqlite_finding()['claim'])
-        with patch.object(council, '_elapsed', side_effect=ValueError('timing_uncertain')):
-            council.verify_external(self.run, 'investigate', 'member-one', 'rejected',
-                                    ['Clock uncertain; false claim retained privately'], findings=[self.sqlite_finding()])
-        state = council.status(self.run)
-        self.assertEqual(state['members']['investigate']['member-one']['state'], 'rejected')
-        for member in ('member-two', 'member-three'): self.finish('investigate', member)
-        packet = council.packet(self.run, 'critique', 'member-two')
-        self.assertEqual((Path(packet['snapshot']) / '__council__/verification-feedback.md').read_text(), '')
-
-    def test_cli_verification_records_findings_without_a_new_action(self):
+    def test_cli_refuses_semantic_findings_without_writes(self):
         from contextlib import redirect_stdout
         from io import BytesIO, StringIO, TextIOWrapper
         from scripts import council as cli
         self.prepare()
-        self.pending_report('investigate', 'member-one', self.sqlite_finding()['claim'])
+        packet = self.pending_report('investigate', 'member-one', 'An unsupported inference.')
+        paths = [self.run / 'manifest.json', Path(packet['worker_run']) / 'result.json']
+        before = [p.read_bytes() for p in paths]
         request = dict(run=str(self.run), phase='investigate', member='member-one',
-                       disposition='rejected', checks=['Host checked source'], findings=[self.sqlite_finding()])
+                       disposition='rejected', checks=['Disagree'], findings=[])
         output = StringIO()
         with patch('sys.argv', ['council', 'verify-external', '--cwd', str(self.repo)]), \
              patch('sys.stdin', TextIOWrapper(BytesIO(json.dumps(request).encode()))), redirect_stdout(output):
-            self.assertEqual(cli.main(), 0)
-        self.assertEqual(json.loads(output.getvalue())['state'], 'rejected')
-        manifest = json.loads((self.run / 'manifest.json').read_text())
-        self.assertEqual(manifest['members']['investigate:member-one']['findings'], [self.sqlite_finding()])
+            self.assertEqual(cli.main(), 1)
+        self.assertEqual(json.loads(output.getvalue())['error'], 'invalid_council_request')
+        self.assertEqual(before, [p.read_bytes() for p in paths])
 
     def test_one_investigation_two_distinct_corrections_and_restart(self):
         self.prepare()
@@ -885,7 +802,7 @@ print(json.dumps({'type':'step_finish','part':{'reason':'stop','cost':0,'tokens'
                 council.correct_candidate(self.run, 'investigate', 'member-two', 0)
                 corrected = council.packet(self.run, 'investigate', 'member-two')
                 receipt.update(issued_id=corrected['issued_id'], child_id='corrected-' + str(accepted), accepted=accepted,
-                    checks=['Host verified actual configured controls, source and contribution'], report='Native cited finding')
+                    checks=['Host verified actual configured controls, source and contribution'], report='Native cited finding' if accepted else '')
                 council.record_native(self.run, 'investigate', 'member-two', receipt)
                 history = self.run.parent.parent / 'council-recovery-history.json'
                 self.assertTrue(history.exists())
