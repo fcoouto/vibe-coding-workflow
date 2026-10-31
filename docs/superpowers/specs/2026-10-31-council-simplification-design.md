@@ -1,6 +1,6 @@
 # LLM Council simplification
 
-Status: proposed; implementation waits for the user's review of this design and its [plan](../plans/2026-10-31-council-simplification.md).
+Status: implemented in source. Live paid qualification and comparative evaluation are separate.
 
 ## Purpose and decision
 

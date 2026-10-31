@@ -1,7 +1,7 @@
 # Council selection
 
-Read before choosing the roster and backups, and revisit the applicable rules
-before selecting a replacement. The [procedure](procedure.md) owns scope and phase
+Read applicable sections before choosing the roster/backups or a replacement;
+tool qualification applies only to repository mode. The [procedure](procedure.md) owns scope and phase
 gates; the [protocol](protocol.md#prepare-and-seat-schemas) owns seat schemas.
 
 ## Choose the group
@@ -9,23 +9,17 @@ gates; the [protocol](protocol.md#prepare-and-seat-schemas) owns seat schemas.
 Follow [worker selection](../../../policies/03-agent-delegation.md#select-capability-and-dispatch)
 for compatible cached official guidance, actual availability, capacity and observed
 controls, preserving coordinator model, reasoning, authentication and subscriptions.
-First ask **Frontier / Balanced / Free**; resolve only the chosen group. Do not
-prefetch three rosters or use fixed commercial lists. Native guidance and the
-existing bounded external discovery/cache supply current eligible participants:
+Ask **Frontier / Balanced** and resolve only the chosen group's roster. Free is
+temporarily unavailable; stop an attempted Free invocation without paid
+substitution. Do not prefetch multiple rosters or use fixed commercial lists.
+Native guidance and bounded external discovery/cache supply current participants:
 
 - **Frontier:** strongest eligible native member and two strong external models,
-  using relevant current benchmarks and capabilities.
+  using current task-relevant evidence.
 - **Balanced:** capable group-appropriate native member and two capable external
-  models with a defensible lower-cost tradeoff. Select the native member for this
-  group; do not inherit Frontier's choice or promise measured native quota savings.
+  models with a defensible lower-cost tradeoff. Select its native member for this
+  group; do not inherit Frontier's choice or promise native quota savings.
   Justified external overlap between groups is acceptable.
-- **Free:** the most capable task-appropriate free external models among eligible
-  routes, with three distinct identities;
-  select one as chair. All applicable external inference rates must be zero and
-  each request ID must retain its `:free` variant after canonical resolution. A
-  fresh external chair performs synthesis; no native investigator, critic,
-  synthesizer or fallback participates. Native host coordination and verification
-  remain outside membership and still use the host's normal allowance.
 
 ## Model vendor diversity
 
@@ -38,7 +32,7 @@ needed while keeping three distinct canonical models and all group, capability,
 reasoning and privacy requirements. Record the eligibility evidence, coverage gaps
 and reason for reuse before inference; unchecked candidates are unknown, not
 proven unavailable. Apply this rule to replacements against the other active
-seats. Transferring the chair role among existing participants adds no new seat.
+seats.
 
 ## Discovery and benchmark evidence
 
@@ -92,7 +86,7 @@ disclose that tradeoff rather than silently reverting to a general ranking.
 
 ## Pin the roster and reasoning
 
-Pin the actual roster and chair for this session, not future sessions. Paid groups
+Pin the actual roster and chair for this session, not future sessions. Both groups
 have one native and two external seats, with the native member as chair. Three
 model identities must differ; canonical observations identify duplicates without
 replacing routable request variants. If a complete qualified group is unavailable,
@@ -100,19 +94,26 @@ disclose the specific blocker and stop before member inference; never start a
 smaller roster, buy replacements or silently switch groups.
 
 Pin external provider endpoints and disable provider fallback. Selectable reasoning
-requires its greatest observed supported effort; documented fixed behavior keeps
-its existing checks. Free additionally permits an exact route's positively
-documented reasoning-enabled default when no effort selector is exposed. Missing
-effort labels alone do not exclude that capable model. Represent this as
-`effort: "default"`, not fixed high/max, an invented token budget or an observed
-maximum. Preserve the route default by omitting the entire reasoning option;
-`enabled: true` could map to a reduced mode and is not a substitute. Display
-**default; maximum mapping unverified**, and keep actual upstream model/effort
-telemetry unknown where unobserved. Paid groups do not admit this default mode.
-Do not lower a selectable effort or cascade providers. Versions 1/2 forbid
-model replacement and outer inference retries. New recovery-enabled sessions follow
-the [recovery actions](recovery.md#actions). No fresh balance check is required.
-OpenRouter owns monetary limits; finite token/step/time bounds do not reserve money.
+requires its greatest observed supported effort; documented fixed behavior emits
+no override. Unknown or unsupported maximum controls block admission; never lower
+effort or invent a maximum. Actual upstream telemetry remains unknown where
+unobserved. Recovery follows [actions](recovery.md#actions), within the original
+group and bounds. OpenRouter owns monetary limits; no fresh balance check is
+required and token/step/time bounds do not reserve money.
+
+## Mode eligibility
+
+For **text**, confirm text-only Chat Completions compatibility, supported controls
+and `council-text-v1` qualification. Tools need not be supported. The direct
+requester sends one stateless tool-free request; endpoint input/output allowances
+must fit all approved evidence and phase reports without truncation or mode switch.
+Exact seat fields and transport/authentication controls live in
+[protocol](protocol.md#prepare-and-seat-schemas).
+
+For **repository**, confirm tools on the actual installed API path. A model needing
+Responses for tool calling is ineligible on an unqualified Chat Completions route.
+Do not speculate about an upgrade or admit text-only qualification for inspection.
+Read the tool qualification section below only for repository mode.
 
 ## Tool qualification
 
@@ -129,8 +130,8 @@ qualification does not prove actual endpoint model/reasoning behavior.
 Keep permission-denial probes in controlled qualification tests. Ordinary Council
 briefs ask participants to obey the qualified boundary; they contain no probe.
 
-The qualified `council-readonly-v2` boundary is unchanged. Its internal copied
-snapshot marker remains denied to `read` but may be visible to `grep`; this known
+The internal copied snapshot marker is denied to `read` but may be visible to
+`grep`; this known
 metadata-only limitation is not an outside-file disclosure or a qualified uniform
 tool denial. Ordinary participants must ignore the marker; never broaden access or
 claim an ignore pattern fixes every explicit grep include.
@@ -138,8 +139,8 @@ claim an ignore pattern fixes every explicit grep include.
 ## Preapprove recovery candidates
 
 Before inference, declare each seat's envelope: the original candidate plus at most
-three preapproved replacements; one investigation and two distinct supported
-corrections per candidate tenure. `fallbacks` declares permitted requested/canonical
+three preapproved replacements under the [recovery limits](recovery.md).
+`fallbacks` declares permitted requested/canonical
 model and pinned provider routes, not extra spending authority. Supply refreshed
 capability, price and reasoning observations when selecting a listed replacement;
 unchanged route identity and original token/step envelope remain mandatory. Do not
@@ -150,6 +151,6 @@ available shortlist capacity (up to three) for qualified alternatives; include
 useful same-developer backups so permitted reuse remains possible if other
 developers fail. Replacing a seat with another model from its original developer
 can still preserve three developers. Do not reserve the list solely for new
-developers and then exhaust it unnecessarily. Successful actual investigation qualifies the
+developers and then exhaust it unnecessarily. A technically usable actual investigation qualifies the
 selected candidate. If metadata supplies no eligible fallback, retain that blocker.
 Every candidate, attempt, session, owner and nullable cost remains in the same run.

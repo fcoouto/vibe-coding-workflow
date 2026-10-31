@@ -1,6 +1,6 @@
 # Council recovery
 
-Read the applicable section when a seat fails or is rejected, an action is
+Read the applicable section when a seat has a technical failure, an action is
 interrupted, cancellation needs cleanup, or a round needs replacement. Before
 inference, [selection](selection.md#preapprove-recovery-candidates) declares the
 candidate envelope and the [Codex supervisor contract](../../../clients/codex-council.md#isolated-recovery-supervisors)
@@ -9,14 +9,19 @@ contracts live in the [protocol](protocol.md#status-cancellation-and-consent).
 
 ## Retry boundaries
 
-OpenCode owns transient request retries inside the original deadline; pinned 1.19.5
-permits up to five retries per failing processor stream, not per whole worker. Versions 1/2 add no outer inference replay or replacement. Version 3 records
-every supported correction and candidate replacement; it never resets its run ID
-or original deadlines to conceal failure. Preserve terminal failure categories and partial
-answers. If an unavailable member or exhausted attempt prevents full participation,
-continue only the permitted remaining phases within budget and report the outcome.
-Do not replace an exhausted Council attempt with native takeover; Free synthesis
-failure leaves evidence and gaps rather than a host-produced Council verdict.
+Recovery requires an observed technical failure under the procedure's
+[admission contract](procedure.md#4-verify-reports-and-phase-completion), with exact
+[failure fields](protocol.md#technical-failure-schema). Preserve partial answers and
+safe failure facts. Authentication, budget, permission and shared integration
+defects stop affected recovery; other seats may continue.
+
+Text transport makes one request with no internal HTTP retries. Repository
+OpenCode 1.19.5 owns up to five transient retries per failing processor stream,
+within the same deadline. Version 2 adds no outer replay or replacement. Version 3
+records bounded corrections/replacements without resetting identity or deadlines.
+Each original seat permits at most three replacements across phases and restarts.
+An exhausted seat leaves only permitted remaining phases and honest delivery;
+no supervisor or coordinator substitutes its own substantive answer.
 
 ## Lost responses and interrupted preparation
 
@@ -38,9 +43,10 @@ brief allowance, consent and absolute deadline. Genuine preparation defects rema
 blockers. A concurrent resume cannot claim a second preparation.
 It reuses the original worker path, consent revision, evidence and durable
 absolute worker deadline, also bounded by the unchanged phase/total ceiling.
-Current checkout, phase, cancellation, consent, snapshot, qualified executable,
+Current checkout, phase, cancellation, consent, snapshot, mode qualification,
 duplicate and stop guards still apply. Never resume an ordinary terminal,
-ambiguous or running attempt; missing session telemetry proves no such permission.
+ambiguous or running attempt; missing telemetry proves no such permission. Text
+recovery retains sealed attempt/request proof; repository retains actual sessions.
 Interrupted critique or synthesis artifact construction resumes only from frozen bytes after
 full inventory/hash/permission checks. Unfamiliar or changed artifacts remain for
 inspection and block recovery; do not recapture source or delete conflicts.
@@ -68,7 +74,7 @@ below. `publish-generation` takes only `{run}`. Use these exact CLI action names
 | `investigate-failure` | No extra field. Opens the tenure's only investigation after an observed failed/rejected stopped attempt; returns `candidate_id`, `failure_id`, safe failure facts, fixed `deadline_monotonic` and advisory matching private history. |
 | `record-investigation` | `evidence` is exactly `{candidate_id, failure_id, searches, reads, sources, corrections}`. Records one episode, never accepts a report. |
 | `correct-candidate` | `correction`: zero-based index in that recorded episode. Retires the failed attempt and enables one fresh immutable attempt; returns `not_before_monotonic` for a supported delay. Wait outside locks, checking cancellation/deadlines, before `member`. |
-| `replace-candidate` | `seat`: full current eligible seat record on the preapproved shortlist, with the same kind and original envelope. Retires the stopped failed attempt, atomically claims the new canonical model and enables `member`. An eligible successful Free participant may transfer to synthesis chair without appearing in the shortlist. |
+| `replace-candidate` | `seat`: full current eligible seat record on the preapproved shortlist, with the same kind and original envelope. Retires the stopped failed attempt, atomically claims the new canonical model and enables `member`. Synthesis retains an eligible native chair. |
 | `publish-generation` | No phase/member. Once all pending independent catch-ups are accepted and all critique owners stopped, freezes their new initial-report set, supersedes the old generation and enables fresh critiques for all three active participants. |
 | `record-supervisor` | `supervisor`: exactly `{supervisor_id, local_execution_stopped, checks}` with the actual native handle, Boolean observation and nonempty coordinator checks. Register before supervision; record exact observed stop before advancing phases. A new handle cannot erase a live one. Stop settlement remains available after cancellation. |
 
@@ -98,12 +104,12 @@ index, and exactly one supported shape:
   within the original seat envelope; at least one changes. OpenCode's step setting
   is a prompt threshold, not a hard tool-call cap. Preserve supported reasoning.
 - `{kind: "request_representation", source, representation: "output_limit_only"}`
-  removes the duplicate provider-specific output option while retaining the pinned
-  adapter's model output limit, model/provider/tools and reasoning. This is the
+  Repository only: removes the duplicate provider-specific output option, retaining
+  the adapter's model output limit, model/provider/tools and reasoning. This is the
   sole supported parameter-representation alternative; it is a hypothesis until
   actual report verification.
 - `{kind: "fresh_connection", source, retry_delay_seconds}` waits 0..120 seconds,
-  then creates a fresh owned worker session after the prior local owner stopped.
+  then creates a fresh owned request/session after the prior local owner stopped.
   Use only for matching transport/service/rate-limit/interruption evidence, with
   the delay fitting the remaining phase. Never weaken TLS or network boundaries.
 
@@ -133,16 +139,11 @@ packet and its participant bindings, even if a published successor did not obtai
 a usable critique. Reports from different generations never combine; no running
 owner can be ignored. No recovery borrows the synthesis reserve.
 
-A failed chair can be corrected or replaced during synthesis only, in a fresh
-session over the same sealed phase evidence. Its separately sealed attempt packet
-adds reviewed [verification findings](protocol.md#verification-findings) from prior
-chair rejections, when available. Apply the existing verification gate to those
-issues before accepting the replacement; no additional round or budget is granted.
-Free prefers an eligible already-successful
-external participant, then an eligible new free shortlist candidate. Paid groups
-keep an eligible native chair. Its original chair seat owns the three-replacement
-allowance even on role transfer. This does not rebuild valid earlier rounds;
-status discloses separate investigation/critique/synthesis identities.
+A technically failed chair can be corrected or replaced during synthesis only,
+using a fresh native child over the same sealed phase evidence. Keep an eligible
+native chair and apply normal technical admission; no additional round or budget
+is granted. The original chair seat owns the three-replacement allowance. Earlier
+valid rounds remain sealed; status records separate phase identities.
 
 ## Status and cancellation
 

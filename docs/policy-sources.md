@@ -8,38 +8,50 @@ Vibe Coding Toolkit remains the workflow authority. The contracts express its ap
 
 ### Council instruction ownership
 
-The user approved a behavior-preserving reorganization on 30 October 2026, before
-considering the pending verification-feedback change. These are the authoritative
-runtime locations; the tables below retain the original requirements and proof.
+These are the authoritative runtime locations for the approved
+[peer-review design](superpowers/specs/2026-10-31-council-simplification-design.md).
+The source records below retain the reviewed basis and historical proof.
 
 | Contract | Authoritative location |
 | --- | --- |
-| Readiness, transmission scope, original budgets, three phases, verification gates and delivery | [Procedure](../skills/llm-council/references/procedure.md) |
+| Readiness, transmission scope, original budgets, three phases, technical admission and delivery | [Procedure](../skills/llm-council/references/procedure.md) |
 | Runtime groups, task fit, developer diversity, reasoning, tool qualification and preapproved replacements | [Selection](../skills/llm-council/references/selection.md) |
 | Exact preparation/seat/verification schemas, legacy compatibility, anonymous observations, consent/cancellation and accounting | [Protocol](../skills/llm-council/references/protocol.md) |
 | Interrupted work, recovery actions and limits, supported corrections, generation/chair replacement and bounded learning | [Recovery](../skills/llm-council/references/recovery.md) |
 | Actual host identity, native member admission/dispatch/receipts and isolated supervisor ownership | [Codex controls](../clients/codex-council.md) |
 
-The entry point and procedure route required reads by stage. Shortlists, ownership
-and cancellation guards remain available before inference; native member details
-are conditional on paid-group membership. The duplicated client `resume-member`
-restriction now links to the existing common contract, including version 3's
-verified still-prepared lost-response case. This does not expand runtime admission.
-Before/after instruction coverage and representative loading decisions are recorded
-in [validation](council-validation.md#instruction-reorganization).
+The entry point and procedure route reads by stage: selection before choosing
+participants, action schemas before execution, host ownership before inference,
+recovery only on technical/interruption triggers and accounting before delivery.
+Repository-only tool guidance remains outside text-mode loading. Runtime tasks do
+not load this provenance map. Representative checks are recorded in
+[validation](council-validation.md#current-peer-review-contract-31-october-2026).
 
-### Council verification feedback
+### Council peer-review coverage
 
-The user approved the pending correction-handoff fix after the instruction
-reorganization on 30 October 2026. The [verification gate](../skills/llm-council/references/procedure.md#4-verify-reports-and-phase-completion)
-separates consequential false claims from presentation warnings and requires source
-checks before acceptance. [Protocol](../skills/llm-council/references/protocol.md#verification-findings)
-owns bounded anonymous findings, privacy review and immutable packet transport;
-[recovery](../skills/llm-council/references/recovery.md#phase-specific-replacement) owns
-replacement-chair use, and Codex controls carry native feedback/receipts. The
-existing rounds, original budgets, correction/replacement limits and provider
-permissions remain unchanged. Local regression evidence belongs in Council
-validation; no automatic semantic truth or privacy classifier is claimed.
+The user-approved [simplification design](superpowers/specs/2026-10-31-council-simplification-design.md)
+is the current Council contract. Its source basis is the original Council's
+[independent answers, anonymous review and synthesis](https://github.com/karpathy/llm-council/blob/master/backend/council.py),
+plus the retained Toolkit delegation/security requirements and approved local
+boundaries. Authoring used OpenAI skill-creator and Superpowers writing-skills;
+no new upstream fetch is required for these approved local replacements.
+
+| Requirement | Local contract and proof |
+| --- | --- |
+| Explicit LLM Council invocation; Frontier/Balanced runtime task-aware selection and replacements, group-native participant/chair, maximum supported effort, vendor diversity/reuse, private selection notes | Entry, procedure, selection and Codex controls; life/Python instruction walks and topology/eligibility tests |
+| Free unavailable at preparation/every inference entry; no silent paid substitution; historical status/cancel/operational settlement with no inference or verdict mutation | Procedure/selection, protocol history section; Free/history walk and runtime/worker guards |
+| Required fixed `text`/`repository` mode, internal `peer-review` flow; question-only text and no checkout evidence writes | Procedure and protocol preparation fields; flow/snapshot/direct tests |
+| Tool-free stateless direct Chat Completions with owned child, fixed destination, pinned route, disabled fallback, required parameters, private saved API record, no key/proxy override/redirect/HTTP retry | Protocol direct transport; direct fake-endpoint/owned-child tests. Official [routing](https://openrouter.ai/docs/guides/routing/provider-selection), [reasoning](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens) and [pinned auth source](https://github.com/anomalyco/opencode/blob/v1.19.5/packages/opencode/src/auth/index.ts) were checked during approved design authoring. |
+| Text API/qualification/one-request schema; repository pinned binary/tools/API compatibility; retained setup references and qualified boundary | Selection mode/tool sections, protocol seat schema and management prerequisites; strict cross-mode admission tests |
+| All usable reports unchanged through one anonymous critique and fresh native chair; missing rankings/refusal/disagreement preserved; technical-only rejection and recovery | Procedure phase/admission contract, protocol failure schema, Codex receipts and recovery; disputed-claim preservation and technical-failure tests |
+| Original budgets, size bounds and eight-file phase reserve; consent, immutable snapshots, anonymity, all-owner stop/cancel, private bounded raw audit, nullable billing/upstream unknown | Procedure, protocol, recovery and Codex controls; six-module regression and package checks |
+| Direct attempt/request freshness versus actual repository sessions; historical schema/audit readability; no invented model/effort/cost observations | Protocol verification/history/accounting, Codex receipts; direct/session/tamper/history fixtures |
+
+Package checks and synthetic fixtures do not qualify installed-client behavior,
+provider availability, comparative effectiveness or savings. Exact commands,
+instruction walks and unknowns belong in validation. The records below describe
+the earlier reviewed requirements and observations, not permission to launch
+historical Free sessions or apply factual filtering to current reports.
 
 ### Council amendments
 

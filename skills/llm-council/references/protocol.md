@@ -1,7 +1,7 @@
 # Council protocol
 
 Read the section for the action you are about to take. The [procedure](procedure.md)
-owns workflow and verification; [selection](selection.md) owns eligibility.
+owns workflow and technical admission; [selection](selection.md) owns eligibility.
 Recovery action schemas live in [recovery](recovery.md#actions).
 
 ## Prepare and seat schemas
@@ -19,10 +19,10 @@ are rejected. `ACTION` is exactly `prepare`, `member`, `resume-member`,
 `publish-generation` or `record-supervisor`. These actions validate fixed schemas;
 there is no arbitrary source/configuration patch or research service.
 
-`prepare` accepts exactly these fields plus optional `timeout_seconds`. New grouped
-requests require `group` and `chair`. Supply `recovery: true` for new version-3
-sessions and the preapproved `fallbacks` shortlist in [selection](selection.md#preapprove-recovery-candidates). Omission preserves
-version-2 execution and its original no-replacement rules:
+Prepare current grouped runs with `group`, `chair`, required `mode`, and the fields
+below. Supply `recovery: true` and the preapproved `fallbacks` shortlist for version
+3. Without recovery the run is version 2, with no outer retry/replacement. The
+runtime stamps `flow: "peer-review"`; mode/flow remain fixed across attempts:
 
 | Field | Value |
 | --- | --- |
@@ -30,11 +30,12 @@ version-2 execution and its original no-replacement rules:
 | `question`, `constraints` | Bounded objective and read-only scope, uncertainty and acceptance requirements |
 | `coordinator_chat_id` | Actual coordinator UUID |
 | `approval_ref` | Actual native authorization reference for this scope |
-| `approved_files` | Nonempty mapping of reviewed relative paths to exactly `{sha256, size}` for exact UTF-8 bytes |
+| `approved_files` | Mapping of reviewed relative paths to exactly `{sha256, size}` for exact UTF-8 bytes; text permits `{}`, repository requires files |
 | `research` | Shared Markdown, empty permitted |
 | `phase_seconds` | Exactly positive integer `investigate`, `critique`, `synthesis`, totaling declared timeout |
-| `group` | Exactly `Frontier`, `Balanced` or `Free` |
-| `chair` | One selected member ID; the native seat for paid groups, selected external seat for Free |
+| `mode` | Exactly `text` or `repository`, selected from the required work |
+| `group` | Exactly `Frontier` or `Balanced` |
+| `chair` | Selected native member ID |
 | `roster` | Exactly `member-one`, `member-two`, `member-three`, using kind-specific schemas below |
 | `timeout_seconds` | Optional integer 1..2**31-1, default 1200 |
 | `recovery` | Optional exact Boolean `true`; grouped requests only; enables version 3 |
@@ -43,9 +44,9 @@ version-2 execution and its original no-replacement rules:
 Question, constraints, approval, selection and supervisor text are at most 16,000
 UTF-8 bytes each. Every generated external objective, including the combined question,
 constraints and phase instructions, must also fit the worker's 16,000-character
-limit. Preparation validates every executable phase brief, including external synthesis,
-before any member work. If any objective exceeds that limit, shorten the question/constraints
-or move supporting context into explicitly approved evidence files; never truncate it.
+limit. Preparation validates executable phase briefs before member work. If an
+objective exceeds that limit, shorten the question/constraints or move supporting
+context into approved evidence files; never truncate it.
 File paths must satisfy snapshot safety checks: canonical checkout,
 reviewed relative files, no symlinks or unsafe segments. External permission
 patterns additionally reject wildcard names. Reserved credential/runtime paths and
@@ -54,8 +55,7 @@ approved path was included.
 `__council__` is reserved for generated phase evidence. Capture limits are 2,000
 files, 512 KiB/file and 32 MiB total. Reports and research are each at most 128 KiB.
 Before launch, grouped preparation reserves six maximum reports, research and
-anonymous observations and verification feedback within the same limits: nine free
-file slots and 1.125 MiB for newly prepared grouped runs.
+anonymous observations within the same limits: eight free file slots and 1 MiB.
 Impossible scopes fail before investigation; reduce
 scope explicitly rather than truncate evidence or increase limits silently.
 
@@ -73,29 +73,45 @@ Each available external seat has exactly `kind: "external"`, `model`,
 `canonical_model` is the nonempty observed model identity, separate from `model`,
 the exact routable request ID. `pricing` contains exactly numeric nonnegative
 `prompt_usd_per_million`, `completion_usd_per_million`, and nonempty bounded
-`source`, `observed_at`; Free requires both rates exactly zero. Retain discovery
+`source`, `observed_at`. Retain discovery
 provenance in selection. These checks and the pinned original contract are checked
-again at launch; editing a worker brief cannot select a paid variant.
-`capabilities` has exactly `model`, `provider`, `context_length`,
-`max_output_tokens`, `tools: true`, `reasoning`, `observed_at`, `source`, plus
-optional `max_input_tokens`. Model/provider must match the seat. `reasoning` is
-exactly `{"efforts":[...]}` or `{"fixed":"<observed effort>"}`; external supported
-labels in order are `minimal`, `low`, `medium`, `high`, `xhigh`, `max`.
-For adjustable reasoning choose the greatest label; fixed reasoning emits no
-override. Grouped Free alone also accepts exactly `{"default_enabled":true}`
-with `effort: "default"`; `true` must be Boolean. Existing capability `source` and
-`observed_at` retain positive exact-route documentation, not inferred support from
-missing catalog metadata. This transport marker adds no ordered effort level;
-`fixed: "default"`, combined declarations and paid/legacy default modes are invalid.
-Its omission/uncertainty rules are defined in [selection](selection.md#pin-the-roster-and-reasoning). Numeric token values are positive integers at most 2**31-1; requested
-output fits endpoint output, input fits any narrower observed input limit, and
-input plus output fits context. Steps are integers 1..64. OpenCode's input limit
-is context-planning metadata, not a hard exact-token transport counter.
+again at launch; editing a worker brief cannot change the pinned contract.
+`capabilities` requires `model`, `provider`, `context_length`, `max_output_tokens`,
+`tools`, `reasoning`, `observed_at`, `source`; optional `max_input_tokens` supplies
+a narrower input limit. Model/provider match the seat. `reasoning` is exactly
+`{"efforts":[...]}` or `{"fixed":"<observed effort>"}`. Selectable labels in order
+are `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; choose the greatest observed
+supported label. Fixed behavior emits no reasoning override. Positive integer token
+values are at most 2**31-1: output fits endpoint output, input fits its input limit,
+and input plus output fits context. Steps are integers 1..64, with the text
+restriction below. OpenCode input limits are planning metadata, not exact counters.
 
-`permission_qualification` contains exactly `opencode_sha256`, `version: "1.19.5"`,
-`profile: "council-readonly-v2"`, `evidence`. Supply the actual qualified executable
-SHA256 and native controlled-observation reference. Selection, capabilities and
-qualification are coordinator observations, not authenticated model self-reports.
+| Mode | Additional capability and qualification fields |
+| --- | --- |
+| `text` | `api: "chat-completions"` with capability source/date; `tools` is Boolean, either value; `steps: 1`; `permission_qualification` exactly `{profile: "council-text-v1", evidence: "<qualification reference>"}` |
+| `repository` | `tools: true`; no `api` field; `permission_qualification` exactly `{opencode_sha256: "<actual qualified SHA256>", version: "1.19.5", profile: "council-readonly-v2", evidence: "<controlled-observation reference>"}` |
+
+Selection/capability/qualification records are coordinator observations, not model
+self-reports. Each mode rejects the other's qualification.
+
+### Direct text transport
+
+The owned worker child `scripts/council_direct.py` sends one nonstreaming request
+to fixed `https://openrouter.ai/api/v1/chat/completions`, with one fresh user
+message, pinned model/provider, `allow_fallbacks: false`, `require_parameters: true`,
+supported reasoning and finite output. It accepts no tools, history, prior response
+ID, endpoint override or redirects and adds no HTTP retry layer. Only approved
+question/constraints, exact evidence, shared research and applicable anonymous
+phase packets enter the payload; local storage/authentication paths stay private.
+UTF-8 input bytes plus a 1,024-byte envelope reserve must fit `input_tokens` before
+send. Oversize input blocks; nothing is truncated.
+
+Only the child reads the saved `openrouter` provider record in
+`<auth_data>/opencode/auth.json`, requiring `type: "api"` and private-file checks.
+Missing/unsupported records fail before send. No credential copy/migration/logging,
+alternative environment key/proxy or prompt-supplied endpoint is used. Saved pinned
+OpenCode setup references remain prerequisites; text execution does not invoke it.
+The existing runner owns admission, deadlines, progress and process-group cleanup.
 
 `prepare` returns exactly `run`, `snapshot`, `remaining_seconds`. Keep the returned
 private run path under the saved `council_root`; do not substitute worker roots or
@@ -104,70 +120,64 @@ original ownership and accounting. Failed preparation may leave private partial 
 
 ## Verify external reports
 
-For grouped runs, settle every external phase through Python
-`council.verify_external(Path(run), phase, member, "accepted"|"rejected", checks)`
-or Council CLI `verify-external` with required `{run, phase, member, disposition,
-checks}` and optional `findings` as defined below. The Python function accepts the
-same optional keyword. Host verification binds the original attempt, frozen evidence, phase,
-deadline and observed session. Acceptance requires an actual nonempty session ID
-distinct from every earlier external attempt; unknown/reused freshness blocks
-acceptance, including synthesis. A manually set accepted flag or legacy worker
-verification cannot supply grouped freshness proof. Rejection and terminal failure
-retain true stop/cost evidence without inventing a session. The helper records
-coordinator observations, not independent authentication of provider telemetry. The exact worker path is returned by the Python packet API and
-retained in Council status/manifest; do not create another attempt to recover it.
+For current grouped runs use Python
+`council.verify_external(Path(run), phase, member, disposition, checks, failure=None)`
+(the optional `failure` is keyword-only), or CLI `verify-external` with required
+`{run, phase, member, disposition, checks}` and optional `failure`.
+`disposition` is `accepted` or `rejected` under the procedure's
+[technical admission](procedure.md#4-verify-reports-and-phase-completion).
+`checks` is a nonempty list of bounded strings describing observed completion,
+ownership, privacy, scope and identity. `findings` is invalid.
 
-Version 3 preserves
-all assistant text privately but passes only final-step text into verified reports.
-Malformed final content still requires rejection; separating interim text alone
-does not repair it.
+Acceptance binds the original stopped attempt, frozen evidence, phase and deadline.
+Repository transport requires a real nonempty OpenCode session ID distinct from
+earlier attempts. Text transport uses `transport: "openrouter-chat"`, sealed local
+`attempt_id` and immutable `request_sha256` from the fresh stateless launch;
+`session_id` is null. A returned provider generation ID is separate and optional.
+Preserve nullable cost/usage and reported model without inventing observed effort.
+Neither a manually accepted flag nor worker verification bypasses grouped proof.
+Keep the existing worker path returned by the packet API/status; do not create
+another attempt to retrieve it. Receipts attest observations, not authenticated
+upstream telemetry. Original assistant text stays private; repository reports use
+final-step text. Failed/truncated direct responses retain bounded message text
+privately with no usable `final_response`.
 
-## Verification findings
+### Technical failure schema
 
-Newly prepared grouped runs support optional `findings` on external verification
-and native receipts. Each finding is exactly `{claim, correction, evidence}`:
-nonempty strings of at most 2,000 UTF-8 bytes each. `correction` records the supported
-correction or explicitly unresolved uncertainty; `evidence` cites approved source
-locations or public references. Limit each submission to eight findings and 16,000
-serialized JSON bytes. Acceptance with nonempty findings is rejected. Once the
-report addresses them, record actual source checks through the existing `checks`.
-
-The coordinator reviews these notes for scope, factual support and anonymity before
-submission. Never copy raw private checks, diagnostics, credentials or identities
-into findings. The runtime validates structure, not truth or semantic privacy.
-Presentation warnings remain private checks, not outstanding factual findings.
-
-Later critique/synthesis packets include `__council__/verification-feedback.md`,
-frozen with their phase generation. Rejected reports remain excluded; only reviewed
-findings are shared. Native packets also expose its Markdown as
-`verification_feedback`. Independent investigations and critic catch-ups receive
-no earlier answers or findings. A same-phase retry gets only its own prior rejection
-findings added to a separately sealed attempt packet; peers retain their original
-packet. Superseded critique generations do not contribute critique findings.
-Late or cancelled findings stay private. The combined feedback retains the existing
-128 KiB report limit; overflow blocks dispatch rather than truncating or increasing
-allowances. Frozen original reports and shared phase evidence never change.
-
-Older runs without feedback support retain their original verification contract;
-nonempty findings are unavailable there. Do not retrofit their manifests or renew
-the session budget. Feedback does not grant another attempt, round or provider call.
+`failure` is absent/null for usable reports. Rejecting complete nonempty text
+requires an explicit dictionary with a recognized `category`: `transport`,
+`context`, `policy`, `unknown`, `authentication`, `budget`, `permission`,
+`rate_limit`, `service`, `invalid_request`, `runtime`, `incomplete_output`,
+`deadline`, `integration`, `runtime_or_output` or `interrupted`. Use the observed
+technical condition, never a factual disagreement. Safe known diagnostic fields
+are retained; arbitrary/private fields are dropped. Blank rejection may derive
+`incomplete_output`; observed lateness may derive `deadline`. Acceptance with a
+failure is invalid. Native receipts use this same optional failure contract.
 
 ## Older runs and native receipts
 
-Ungrouped legacy requests/manifests remain version 1, with original
-`native`, `external-one`, `external-two` IDs, optional unavailable external seats,
-unchanged seat fields and original outcome meaning. They retain the old worker
-verification route:
+Runs without `flow: "peer-review"` are historical: status, cancellation and
+operational stop/accounting settlement remain available without inference. Keep
+original Free records, prices, reports, verdicts and feedback readable and unchanged.
+No new member/resume/recovery inference or verdict mutation is permitted. Use a
+new identity with current consent and mode for new deliberation; never retrofit
+old manifests. Free is blocked at preparation and every inference entry, including
+direct helpers and replacements. Historical native owner cleanup uses the
+[stop-only receipt](../../../clients/codex-council.md#historical-native-stop-settlement),
+not current-run report admission.
+
+Ungrouped IDs remain `native`, `external-one`, `external-two`. For a current
+ungrouped external result only, the worker-owned verify route is:
 
 ```text
 python3 -I -B <plugin-root>/scripts/openrouter_workers.py verify --root <saved-council-root>
 ```
 
-Its JSON is `{"task_id":"<original worker task_id>","disposition":"accepted",
-"checks":["<actual native check and result>"]}` (or `"rejected"`). IDs are
-`<run_id>-<phase>-<external member>` under the exact Council root. Native reports
-use `record-native` with exactly `{run, phase, member: "<selected native seat>", receipt}`;
-the receipt and native supervision requirements live in the Codex contract.
+Its JSON is `{task_id, disposition, checks}` with optional `failure` under the same
+technical contract. `task_id` is `<run_id>-<phase>-<external member>`.
+Grouped results require Council verification. Native results use `record-native`
+with exactly `{run, phase, member: "<selected native seat>", receipt}`; receipt
+fields and supervision live in the [Codex contract](../../../clients/codex-council.md).
 
 ## Execution observations
 

@@ -63,10 +63,16 @@ Use the existing pinned OpenCode 1.19.5 executable and its existing owner-only
 authentication directory. Obtain nonsecret paths from approved local setup when
 available; do not read or copy the key. A proposals-only configuration uses
 `"opencode":null,"auth_data":null` and the current client's existing MCP connection.
-Council requires these OpenCode references even when workers are not selected:
+Council setup requires these OpenCode references even when workers are not selected:
 configure with `"routes":["council"]` and the existing pinned paths, then explicitly
 enable the resulting configuration. Status returns a separate `council_root` for
 Council artifacts; do not substitute `worker_root` or another checkout's path.
+Council text mode uses an owned direct Chat Completions child reading only the
+saved private `openrouter` API record (`type: "api"`); it does not invoke OpenCode.
+Unsupported/missing auth fails before send. Repository mode uses qualified pinned
+OpenCode inspection. The Council procedure selects the mode and eligibility;
+Free is temporarily unavailable, with no automatic paid substitution. Historical
+Council runs remain readable/cancellable with operational settlement only.
 This skill does not install clients, initiate login, change providers or add a
 connection. If separate setup is needed, identify it without pretending local
 configuration verifies execution.
