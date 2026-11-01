@@ -173,8 +173,9 @@ class DirectTests(CouncilCase):
         with patch.object(direct, 'ENDPOINT', self.endpoint):
             return direct.send(payload or self.payload, self.auth, 2)
 
-    def prepare(self):
+    def prepare(self, *, historical=False):
         self.run = Path(council.prepare(self.repo, self.request)['run'])
+        if historical: self.historical_run()
         packet = council.packet(self.run, 'investigate', 'member-two')
         return Path(packet['worker_run'])
 
@@ -313,11 +314,11 @@ class DirectTests(CouncilCase):
         self.assertFalse(result['accounting_complete'])
         self.assertIsNone(result['reported_cost_usd'])
 
-    def test_truncated_text_retained_privately_but_never_distributed(self):
+    def test_historical_truncated_text_retained_privately_but_never_distributed(self):
         self.request['recovery'] = True
         self.reply['choices'][0] = dict(finish_reason='length', message=dict(
             content='Partial private answer.', reasoning='SECRET reasoning'))
-        run = self.prepare()
+        run = self.prepare(historical=True)
         result = self.execute(run)
         self.assertEqual(result['state'], 'failed')
         self.assertEqual(result['failure']['category'], 'incomplete_output')
@@ -462,7 +463,14 @@ class DirectTests(CouncilCase):
     def assert_native_prompt(self, packet):
         prompt = packet['prompt']
         self.assertEqual(packet['prompt_sha256'], hashlib.sha256(prompt.encode('utf-8')).hexdigest())
-        encoded = prompt.split('Approved evidence and phase reports (JSON):\n', 1)[1]
+        path = Path(packet['packet_path'])
+        raw = path.read_bytes()
+        self.assertEqual(path.stat().st_mode & 0o777, 0o400)
+        self.assertEqual(packet['packet_sha256'], hashlib.sha256(raw).hexdigest())
+        self.assertIn(str(path), prompt)
+        self.assertIn(packet['packet_sha256'], prompt)
+        self.assertLess(len(prompt), 1800)
+        encoded = raw.decode('utf-8').split('Approved evidence and phase reports (JSON):\n', 1)[1]
         inputs, end = json.JSONDecoder().raw_decode(encoded)
         for name in packet['snapshot_manifest']['files']:
             self.assertEqual(inputs[name].encode('utf-8'), (Path(packet['snapshot']) / name).read_bytes())
@@ -473,7 +481,7 @@ class DirectTests(CouncilCase):
         elif observations:
             self.assertEqual(encoded[end:], '\n\nExecution observations:\n' + observations)
         self.assertEqual(packet['reasoning_effort'], 'max')
-        for denied in (str(self.repo), str(self.auth), str(self.run), self.request['coordinator_chat_id']):
+        for denied in (str(self.repo), str(self.auth), self.request['coordinator_chat_id']):
             self.assertNotIn(denied, prompt)
 
     def test_native_text_prompt_preserves_evidence_and_original_deadline(self):
@@ -486,11 +494,25 @@ class DirectTests(CouncilCase):
         self.assert_native_prompt(packet)
         saved = json.loads((self.run / 'manifest.json').read_text())
         self.assertEqual(saved['members']['investigate:member-one']['prompt_sha256'], packet['prompt_sha256'])
-        self.assertEqual(packet['deadline_monotonic'], before['started_monotonic'] + 600)
+        self.assertAlmostEqual(packet['deadline_monotonic'] - time.monotonic(), 1200, delta=2)
         self.assertEqual(before['timeout_seconds'], 1200)
         self.assertEqual(before['phase_seconds'], dict(investigate=600, critique=360, synthesis=240))
         with self.assertRaisesRegex(ValueError, 'already_issued'):
             council.packet(self.run, 'investigate', 'member-one')
+
+    def test_native_packet_tampering_blocks_acceptance_but_not_stop_settlement(self):
+        self.run = Path(council.prepare(self.repo, self.request)['run'])
+        packet = council.packet(self.run, 'investigate', 'member-one')
+        path = Path(packet['packet_path'])
+        path.chmod(0o600)
+        path.write_text('Changed evidence')
+        path.chmod(0o400)
+        receipt = self.native_receipt(packet)
+        with self.assertRaisesRegex(ValueError, 'native_packet_changed'):
+            council.record_native(self.run, 'investigate', 'member-one', receipt)
+        receipt.update(accepted=False, report='', failure=dict(category='integration'))
+        council.record_native(self.run, 'investigate', 'member-one', receipt)
+        self.assertTrue(council.status(self.run)['all_local_execution_stopped'])
 
     def test_private_timing_tracks_issuance_and_verification_without_renewal(self):
         for recovery in (False, True):
@@ -627,7 +649,12 @@ class DirectTests(CouncilCase):
             for name, report in phase_reports.items():
                 self.assertEqual((self.run / name).read_bytes(), report)
                 expected.append(b'## ' + name.encode() + b'\n' + report)
-        self.assertEqual(chair['reports'].encode(), b'\n\n'.join(expected))
+        self.assertEqual(chair['reports'], '')
+        packet_text = Path(chair['packet_path']).read_text()
+        inputs, _ = json.JSONDecoder().raw_decode(packet_text.split('Approved evidence and phase reports (JSON):\n', 1)[1])
+        for phase_reports in reports.values():
+            for name, report in phase_reports.items():
+                self.assertEqual(inputs['__council__/' + name].encode(), report)
         self.assertEqual(len(self.calls), 4)
 
     def test_ungrouped_text_verification_rejects_tampering_and_excludes_changed_proof(self):

@@ -38,8 +38,76 @@ class CouncilRecoveryTests(CouncilCase):
             permission_qualification=dict(opencode_sha256=hashlib.sha256(self.executable.read_bytes()).hexdigest(),
                 version='1.19.5', profile='council-readonly-v2', evidence='native:fixture'))
 
-    def prepare(self):
+    def prepare(self, *, historical=False):
         self.run = Path(council.prepare(self.repo, self.request)['run'])
+        if historical: self.historical_run()
+
+    def test_recovery_after_old_session_cap_completes_full_panel(self):
+        self.prepare()
+        self.finish('investigate', 'member-two')
+        self.finish('investigate', 'member-three')
+        first = self.finish('investigate', 'member-one', accepted=False)
+        with self.assertRaisesRegex(ValueError, 'full_panel_required'):
+            council.packet(self.run, 'critique', 'member-two')
+        with patch.object(council, '_elapsed', return_value=1800):
+            self.diagnose()
+            council.replace_candidate(self.run, 'investigate', 'member-one', self.seat(4))
+            replacement = self.finish('investigate', 'member-one')
+        self.assertGreater(replacement['deadline_monotonic'], first['deadline_monotonic'])
+        for member in council.GROUP_MEMBERS:
+            self.finish('critique', member)
+        self.finish('synthesis', 'member-three')
+        state = council.status(self.run)
+        self.assertEqual(state['outcome'], 'complete')
+        self.assertEqual([state['accepted_participation'][p]['accepted'] for p in council.PHASES], [3, 3, 1])
+        self.assertEqual(len(state['attempts']), 8)
+
+    def test_missing_critique_requires_recovery_not_reduced_synthesis(self):
+        self.prepare()
+        for member in council.GROUP_MEMBERS:
+            self.finish('investigate', member)
+        for member in council.GROUP_MEMBERS:
+            self.finish('critique', member, accepted=member != 'member-one')
+        with self.assertRaisesRegex(ValueError, 'full_panel_required'):
+            council.packet(self.run, 'synthesis', 'member-three')
+        self.assertFalse(council.status(self.run)['fresh_synthesis_available'])
+
+    def test_request_timeouts_continue_after_old_session_deadline(self):
+        self.prepare()
+        with patch.object(council, '_elapsed', return_value=3600):
+            packet = council.packet(self.run, 'investigate', 'member-three')
+            self.assertAlmostEqual(packet['deadline_monotonic'] - time.monotonic(), 1200, delta=2)
+            self.assertIsNone(council.status(self.run)['remaining_seconds'])
+        with patch.object(council.time, 'monotonic', return_value=packet['deadline_monotonic'] + 1), \
+             patch.object(council, '_elapsed', return_value=4801):
+            council.record_native(self.run, 'investigate', 'member-three', self.native_receipt(packet))
+        self.assertEqual(council.status(self.run)['members']['investigate']['member-three']['state'], 'rejected')
+
+    def test_expired_preparation_contention_recovers_without_renewing_attempt(self):
+        self.prepare()
+        for member in ('member-two', 'member-three'):
+            self.finish('investigate', member)
+        with council.settings.admission(self.repo, 'council'):
+            with self.assertRaisesRegex(council.settings.SettingsError, 'openrouter_operation_busy'):
+                council.packet(self.run, 'investigate', 'member-one')
+        with council._locked(self.run) as value:
+            owner = value['members']['investigate:member-one']
+            owner['deadline_monotonic'] = time.monotonic() - 1
+            owner['deadline_wall'] = time.time() - 1
+            original_id = owner['attempt_id']
+            council._save(self.run, value)
+        with self.assertRaisesRegex(ValueError, 'deadline_exhausted'):
+            council.resume_member(self.run, 'investigate', 'member-one')
+        opened, _ = self.diagnose()
+        self.assertEqual(opened['failure']['category'], 'deadline')
+        council.replace_candidate(self.run, 'investigate', 'member-one', self.seat(4))
+        self.finish('investigate', 'member-one')
+        for member in council.GROUP_MEMBERS:
+            self.finish('critique', member)
+        self.finish('synthesis', 'member-three')
+        state = council.status(self.run)
+        self.assertEqual(state['outcome'], 'complete')
+        self.assertTrue(any(row['attempt_id'] == original_id and row['local_execution_stopped'] for row in state['attempts']))
 
     def finish(self, phase, member, *, accepted=True, stopped=True, session=None, cost=0):
         if phase == 'synthesis': member = self.request['chair']
@@ -109,7 +177,7 @@ class CouncilRecoveryTests(CouncilCase):
         brief = json.loads((Path(third['worker_run']) / 'brief.json').read_text())
         self.assertEqual(council.workers.configuration(brief)['provider']['openrouter']['models'][brief['model']]
                          ['options']['maxOutputTokens'], 8000)
-        self.assertEqual(third['deadline_monotonic'], first['deadline_monotonic'])
+        self.assertGreater(third['deadline_monotonic'], first['deadline_monotonic'])
 
     def test_capacity_correction_rejects_above_provider_limit_and_wrong_failure(self):
         self.prepare()
@@ -222,7 +290,7 @@ class CouncilRecoveryTests(CouncilCase):
         self.assertLessEqual(opened['deadline_monotonic'] - time.monotonic(), 120)
         council.correct_candidate(self.run, 'investigate', 'member-one', 0)
         retry = self.finish('investigate', 'member-one')
-        self.assertEqual(first['deadline_monotonic'], retry['deadline_monotonic'])
+        self.assertGreater(retry['deadline_monotonic'], first['deadline_monotonic'])
         self.assertNotEqual(first['worker_run'], retry['worker_run'])
         state = council.status(self.run)
         self.assertEqual(state['recovery']['member-one']['investigations_remaining'], 0)
@@ -239,7 +307,7 @@ class CouncilRecoveryTests(CouncilCase):
         peer = council.packet(self.run, 'critique', 'member-two')
         self.assertEqual(first['snapshot'], retry['snapshot'])
         self.assertEqual(first['snapshot'], peer['snapshot'])
-        self.assertEqual(first['deadline_monotonic'], retry['deadline_monotonic'])
+        self.assertGreater(retry['deadline_monotonic'], first['deadline_monotonic'])
         brief = json.loads((Path(retry['worker_run']) / 'brief.json').read_text())
         with council.external_launch_guard(Path(retry['worker_run']), brief): pass
         self.assertEqual(council.resume_member(self.run, 'critique', 'member-one')['worker_run'], retry['worker_run'])
@@ -408,8 +476,8 @@ class CouncilRecoveryTests(CouncilCase):
         self.assertEqual(state['recovery']['member-three']['replacements_remaining'], 2)
         self.assertEqual(state['critique_generation'], 1)
 
-    def test_free_replacement_cannot_use_paid_or_native_and_deadline_does_not_refresh(self):
-        self.prepare(); self.fail_and_diagnose()
+    def test_historical_free_replacement_cannot_use_paid_or_native_and_deadline_does_not_refresh(self):
+        self.prepare(historical=True); self.fail_and_diagnose()
         with council._locked(self.run) as value:
             value['group'] = 'Free'
             council._save(self.run, value)
@@ -489,8 +557,8 @@ for event in [
         with self.assertRaisesRegex(ValueError, 'previously_failed_correction'):
             self.diagnose(corrections=[dict(kind='workspace_guidance', source=0)])
 
-    def test_critique_deadline_uses_unchanged_coherent_reduced_panel(self):
-        self.prepare()
+    def test_historical_critique_deadline_uses_unchanged_coherent_reduced_panel(self):
+        self.prepare(historical=True)
         for member in council.GROUP_MEMBERS: self.finish('investigate', member)
         self.finish('critique', 'member-two'); self.finish('critique', 'member-three')
         self.fail_and_diagnose('critique')
@@ -731,7 +799,7 @@ print(json.dumps({'type':'step_finish','part':{'reason':'stop','cost':0,'tokens'
         self.assertEqual(before['attempts'][0]['state'], 'not_launched')
         with council._locked(self.run) as value:
             owner = copy.deepcopy(value['members']['investigate:member-one'])
-            deadline = value['started_monotonic'] + 600
+            deadline = value['members']['investigate:member-one']['deadline_monotonic']
             stamp = copy.deepcopy(value['management'])
         self.assertFalse(Path(owner['worker_run']).exists())
         packet = council.resume_member(self.run, 'investigate', 'member-one')
@@ -762,16 +830,20 @@ print(json.dumps({'type':'step_finish','part':{'reason':'stop','cost':0,'tokens'
                 if action == 'cancel': council.cancel(self.run)
                 elif action == 'expire':
                     with council._locked(self.run) as value:
-                        value['started_monotonic'] -= 601; value['started_wall'] -= 601
+                        owner = value['members']['investigate:member-one']
+                        owner['deadline_monotonic'] = time.monotonic() - 1
+                        owner['deadline_wall'] = time.time() - 1
                         council._save(self.run, value)
                 else:
                     council.settings.disable(self.repo, {'expected_revision': self.settings['revision']})
                 with self.assertRaisesRegex(ValueError, expected):
                     council.resume_member(self.run, 'investigate', 'member-one')
                 self.assertEqual(len(council.status(self.run)['attempts']), 1)
+                if action == 'expire':
+                    self.assertTrue(council.status(self.run)['all_local_execution_stopped'])
 
-    def test_published_successor_deadline_uses_retained_coherent_generation(self):
-        self.prepare()
+    def test_historical_published_successor_deadline_uses_retained_coherent_generation(self):
+        self.prepare(historical=True)
         for member in council.GROUP_MEMBERS: self.finish('investigate', member)
         for member in ('member-two', 'member-three'): self.finish('critique', member)
         self.fail_and_diagnose('critique')
@@ -805,8 +877,8 @@ print(json.dumps({'type':'step_finish','part':{'reason':'stop','cost':0,'tokens'
         self.assertEqual(state['role_bindings']['investigate']['member-one']['canonical_model'], 'vendor/model-1')
         self.assertEqual(state['role_bindings']['synthesis']['canonical_model'], 'native-balanced')
 
-    def test_expired_failed_correction_settles_once_and_blocks_next_session(self):
-        self.prepare()
+    def test_historical_expired_failed_correction_settles_once_and_blocks_next_session(self):
+        self.prepare(historical=True)
         self.fail_and_diagnose(corrections=[dict(kind='workspace_guidance', source=0)])
         council.correct_candidate(self.run, 'investigate', 'member-one', 0)
         packet = council.packet(self.run, 'investigate', 'member-one')
@@ -836,7 +908,7 @@ print(json.dumps({'type':'step_finish','part':{'reason':'stop','cost':0,'tokens'
         self.assertEqual(history.read_bytes(), recorded)
         with self.assertRaisesRegex(ValueError, 'deadline_exhausted'):
             council.replace_candidate(self.run, 'investigate', 'member-one', self.seat(4))
-        self.request['run_id'] = 'after-expired-correction'; self.prepare()
+        self.request['run_id'] = 'after-expired-correction'; self.prepare(historical=True)
         self.finish('investigate', 'member-one', accepted=False)
         with self.assertRaisesRegex(ValueError, 'previously_failed_correction'):
             self.diagnose(corrections=[dict(kind='workspace_guidance', source=0)])

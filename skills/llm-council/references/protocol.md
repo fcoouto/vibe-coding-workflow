@@ -22,7 +22,8 @@ there is no arbitrary source/configuration patch or research service.
 Prepare current grouped runs with `group`, `chair`, required `mode`, and the fields
 below. Supply `recovery: true` and the preapproved `fallbacks` shortlist for version
 3. Without recovery the run is version 2, with no outer retry/replacement. The
-runtime stamps `flow: "peer-review"`; mode/flow remain fixed across attempts:
+runtime stamps `flow: "peer-review"`, `timing_policy: "per-request"` and
+`completion_policy: "full-panel"`; these remain fixed across attempts:
 
 | Field | Value |
 | --- | --- |
@@ -32,12 +33,12 @@ runtime stamps `flow: "peer-review"`; mode/flow remain fixed across attempts:
 | `approval_ref` | Actual native authorization reference for this scope |
 | `approved_files` | Mapping of reviewed relative paths to exactly `{sha256, size}` for exact UTF-8 bytes; text permits `{}`, repository requires files |
 | `research` | Shared Markdown, empty permitted |
-| `phase_seconds` | Exactly positive integer `investigate`, `critique`, `synthesis`, totaling declared timeout |
+| `phase_seconds` | Positive integer `investigate`, `critique`, `synthesis` planning weights, totaling declared timeout; no phase deadlines |
 | `mode` | Exactly `text` or `repository`, selected from the required work |
 | `group` | `Frontier`, `Balanced`, or text-only `Free` |
 | `chair` | Selected native member ID for Frontier/Balanced; selected external member for Free |
 | `roster` | Exactly `member-one`, `member-two`, `member-three`, using kind-specific schemas below |
-| `timeout_seconds` | Optional integer 1..2**31-1, default 1200 |
+| `timeout_seconds` | Optional positive integer, default 1200; each issued request is bounded by `min(timeout_seconds, 1200)`, not the session |
 | `recovery` | Optional exact Boolean `true`; grouped requests only; enables version 3 |
 | `fallbacks` | Version 3 only: all three member IDs mapped to lists of zero to three full eligible replacement-seat records, ranked within the approved transmission/spending scope |
 
@@ -216,7 +217,7 @@ into diagnostics or progress. Retry hints do not authorize another inference.
 ## Status, cancellation and consent
 
 `status` and `cancel` accept exactly `{"run":"<returned path>"}`. They perform
-no inference or balance lookup. Status reports phase/member states, remaining time,
+no inference or balance lookup. Status reports phase/member states, `remaining_seconds: null` for sessions without a time cap,
 timing certainty and `outcome`. Accounting keys are `known_external_subtotal_usd`
 and nullable `external_total_usd`; `upstream_cancellation_confirmed: false` means
 unconfirmed, not proof that billing stopped. Stop keys are
@@ -226,7 +227,7 @@ Status `timings` maps issued phase/member keys to locally recorded wall-clock
 stay absent. Join these with worker `progress.jsonl` startup, transport-result and
 terminal events, and actual native host observations, to distinguish dispatch,
 request duration and handoff delay. A transport result is a local helper result, including local failures; it does
-not establish a provider response. These records do not change monotonic budgets
+not establish a provider response. These records do not change issued request deadlines
 or establish provider queue time, internal reasoning, billing or upstream stop.
 Cancel records stop-new-work
 intent and returns owners to terminate; it is not evidence that they stopped. Stop

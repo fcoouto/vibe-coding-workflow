@@ -1091,3 +1091,50 @@ At the user's request, the skill is now **LLM Council**, with directory/name
 invocation guidance use that name. Earlier validation records above retain their
 original `council` command and display name as historical evidence. Runtime route
 keys, run identities, consent and deliberation behavior are unchanged.
+
+
+## Council completion and packet delivery — 1 November 2026
+
+The approved completion design uses immutable native text packets, finite request
+timeouts without phase/session time caps, and full-panel barriers before critique
+and synthesis. Recovery retains accepted work and existing attempt/spending limits.
+Free remains text-only with zero-cost routing; Balanced remains recommended.
+
+Package validation passed. All **203 Council regressions** passed on the final code:
+100 flow, 46 recovery, 36 direct transport and 21 snapshot tests. These include
+late request rejection, unchanged same-owner resume deadlines, recovery beyond the
+former session cap, expired pre-spawn contention recovery, complete seven-answer
+participation, coherent critique replacement, tampered packets and historical sessions.
+An additional disposable local probe preserved 280,000 bytes of Unicode evidence in
+a 292,557-byte packet using a 720-character handoff; it made no inference requests.
+
+Independent Astra/xhigh review found an expired preparation contention recovery gap
+and one obsolete phase-time instruction. Both were fixed; the recovery regression
+was observed failing before the fix and passing afterward. Instruction walkthroughs
+cover exact-packet loading, recoverable failure, exhausted recovery, and complete
+result delivery. Detailed diagnostics remain private; they do not replace the user's
+requested decision support.
+
+The subsequent authorized Frontier text run completed three investigations, three
+critiques over one sealed report set, and fresh native synthesis. Astra/ultra,
+Opus 5.5/max and Gemini 4 Argon/high retained maximum supported reasoning. All local
+owners stopped; no external timeout, correction or replacement was needed. Native
+packet hashes and complete delivery were checked against observed tool outputs,
+including chunked reads. One coordinator path-copy error was interrupted before
+tool use and corrected through a fresh child under the original deadline; this
+does not qualify automatic recovery.
+
+Opus completed investigation in 7.42 minutes and critique in 9.55 minutes. The run
+took 25.43 minutes from preparation to final acceptance, or 20.93 minutes from the
+first external launch. Earlier roster discovery and report assembly are excluded.
+Four external calls reported $2.704038; native subscription usage is separate and
+no all-in monetary total or invoice reconciliation is claimed. External output
+ceilings remained omitted and token targets advisory.
+
+This is one observed native/provider execution, separate from package and synthetic
+checks. It does not establish general reliability, speed or answer-quality gains.
+Private original reports and timings remain under
+`.superpowers/sdd/2026-11-01-council-completion-live/`. The separate read-only Opus
+investigation found extensive completion usage and incomplete latency telemetry,
+not proof of context starvation. Prompt optimization and streaming remain proposed
+follow-ups.

@@ -34,6 +34,14 @@ class CouncilCase(unittest.TestCase):
         return {name: dict(sha256=hashlib.sha256((self.repo / name).read_bytes()).hexdigest(),
                            size=(self.repo / name).stat().st_size) for name in paths}
 
+    def historical_run(self):
+        """Exercise persisted sessions created before per-request/full-panel contracts."""
+        from runtime import council
+        with council._locked(self.run) as value:
+            value.pop('timing_policy', None)
+            value.pop('completion_policy', None)
+            council._save(self.run, value)
+
     def native_seat(self, model='native-balanced'):
         return dict(kind='native', model=model, effort='max', supported_efforts=['max'],
             input_tokens=10000, output_tokens=4096, steps=12,

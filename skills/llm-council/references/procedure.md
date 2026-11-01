@@ -55,16 +55,16 @@ retention choices; Council adds no telemetry export or automatic historical dele
 Approved committed, dirty and untracked files are allowed: sealed bytes define the
 target. Reports remain private outside Git. Text evidence needs no checkout writes.
 
-The default total is **1200 seconds**, including preparation, checks, waits and
-recovery, allocated **600/360/240** to investigate/critique/synthesis. A different
-total requires an explicit request before preparation and `timeout_seconds`;
-positive integer phase allowances must total it. Cumulative deadlines start at
-preparation; early advancement and restart never renew time. Each external call
-is at most 1200 seconds. Timing discontinuity blocks new work. Choose finite per-model input/output token targets as advisory prompt guidance;
+Council has no phase or overall session time cap. Each issued request has a finite
+**1200-second default timeout**, including its preparation, handoff and verification;
+resuming it never resets that deadline. `phase_seconds` supplies planning guidance,
+not cancellation triggers. Supported corrections and replacements get fresh request
+deadlines within the existing attempt counts and authorized spending scope. Preserve
+maximum reasoning. Timing discontinuity blocks new work. Choose finite per-model input/output token targets as advisory prompt guidance;
 exceeding them never rejects an answer or triggers fallback. Follow the
 [direct output contract](protocol.md#direct-text-transport) for text requests;
 size repository API ceilings from observed endpoint capacity, independently of targets. Keep
-maximum reasoning and original step/time/spending bounds.
+maximum reasoning and original step/spending bounds.
 
 Before dispatch, show task priorities, roster/chair and per-model fit, requested
 and canonical identities, pinned routes, supported reasoning, sourced/date-stamped
@@ -83,8 +83,8 @@ returned private path and ownership.
    ask for decisive source locations/URLs where applicable. For thread splitting,
    examine dependencies, ownership and capacity. Public research may update private
    `research.md` before critique, retaining URLs, dates, short excerpts and limits.
-2. **Critique once.** After technical settlement, give every usable initial answer
-   unchanged to the parallel critics. If none survives, stop. First critique seals
+2. **Critique once.** After all three investigations are accepted and stopped, give every initial answer
+   unchanged to the parallel critics. Recover failed seats before advancing. First critique seals
    the shared `critique-snapshot`: original evidence, anonymous
    `__council__/initial-1.md` through `initial-3.md` for usable seats, and
    `__council__/research.md`. Ask for strengths, errors, assumptions, uncertainty and
@@ -112,7 +112,7 @@ Keep every usable report byte-for-byte. Mistakes, unsupported inferences, ordina
 refusal text, disagreement, missing citations, presentation preferences and poor
 rankings go to critics/chair; they do not authorize rejection, host correction
 notes or semantic retries. The coordinator may disclose observed concerns to the
-user without silently editing or deleting reports. Actual provider capacity and original time/spending bounds remain binding;
+user without silently editing or deleting reports. Actual provider capacity and issued request deadlines and authorized spending bounds remain binding;
 advisory tokens, brevity and headings do not become gates.
 
 `member` runs the owned external attempt and streams progress; it cannot accept
@@ -121,13 +121,13 @@ itself. `awaiting_verification` does not count. Settle external reports through
 through [Codex receipts](../../../clients/codex-council.md#record-native-observations).
 Independently check technical observations; a model's assurances are insufficient.
 
-Advance only when previous attempts are settled and observed locally stopped.
-Never-issued missing seats may be disclosed after deadline; elapsed time cannot
-remove live or uncertain ownership. Version-3 changed critique sets use only
-[phase replacement](recovery.md#phase-specific-replacement); closed generations
+Advance only when all three reports from the preceding phase are accepted and all
+owners are observed locally stopped. Recover a missing seat before advancing; elapsed
+time cannot remove live or uncertain ownership. Version-3 changed critique sets use
+only [phase replacement](recovery.md#phase-specific-replacement); closed generations
 remain immutable. Carry anonymous execution observations into later phases.
 
-## 5. Supervise and recover within budget
+## 5. Supervise and recover
 
 Retain actual external process handles and native ownership. Send observed progress
 or truthful waiting updates within 60 seconds where supported. External startup
@@ -141,20 +141,23 @@ live deliberation; required privacy, ownership and admission checks stay inside 
 
 Use [status/cancellation](protocol.md#status-cancellation-and-consent) for exact
 owners. Follow [recovery](recovery.md) only for technical failures or interrupted
-operations, preserving successful seats, original budgets and remaining phases.
+operations, preserving successful seats and the approved attempt/spending limits.
+Use version-3 recovery for normal sessions. Continue permitted recovery without
+asking the user to approve each already-authorized attempt. A failure ends the
+Council only when recovery is exhausted, consent or ownership prevents proceeding,
+the user cancels, or an explicit spending limit is reached.
 
 ## 6. Deliver the result
 
-When `fresh_synthesis_available` is true, lead with the chair's answer. Report
-`accepted_participation` separately, for example “reduced panel: 2/3 investigations,
-2/3 critiques; fresh synthesis completed.” These counts describe technical
-participation. Explain evidence gaps and conclusion-specific confidence from
-sources and objections. Without fresh synthesis, label delivery **evidence summary**,
-retain unresolved questions and claim no Council verdict.
-
-Keep status's outcome: **complete** requires all three investigations, all three
-critiques and fresh usable synthesis; **incomplete** requires at least two same
-members usable in both rounds plus fresh synthesis. Everything else is **partial**,
-including missing synthesis. Disclose failed, rejected, unavailable, late and
-unverified participation and its effects. Report costs, settings and qualification
+Deliver the chair's decision support only when `outcome` is `complete`: three
+accepted investigations, three accepted critiques over one coherent report set,
+and fresh accepted synthesis. Lead with the answer, material uncertainty, dissent,
+and evidence that could change the decision. Include relevant cost and settings
 through [accounting](protocol.md#accounting-and-qualification-reporting).
+
+Keep working through recoverable failures. Progress should explain what is being
+recovered and that completed work is retained. Detailed diagnostics stay private;
+do not replace the requested Council with a diagnostic report. If completion becomes
+impossible within the permitted recovery and spending scope, state that briefly,
+explain the blocker and the concrete next option. Never present a reduced panel or
+an evidence summary as a successful Council verdict.

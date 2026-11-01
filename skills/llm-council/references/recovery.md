@@ -19,9 +19,9 @@ defects stop affected recovery; other seats may continue.
 Text transport makes one request with no internal HTTP retries. Repository
 OpenCode 1.19.5 owns up to five transient retries per failing processor stream,
 within the same deadline. Version 2 adds no outer replay or replacement. Version 3
-records bounded corrections/replacements without resetting identity or deadlines.
+records bounded corrections/replacements without resetting an issued attempt's identity or deadline. Each new attempt receives its own finite request timeout.
 Each original seat permits at most three replacements across phases and restarts.
-An exhausted seat leaves only permitted remaining phases and honest delivery;
+An exhausted seat prevents Council completion;
 no supervisor or coordinator substitutes its own substantive answer.
 
 ## Lost responses and interrupted preparation
@@ -43,7 +43,9 @@ Known before-spawn preparation contention may leave no worker directory yet;
 brief allowance, consent and absolute deadline. Genuine preparation defects remain
 blockers. A concurrent resume cannot claim a second preparation.
 It reuses the original worker path, consent revision, evidence and durable
-absolute worker deadline, also bounded by the unchanged phase/total ceiling.
+absolute worker deadline. Phase and session time do not impose additional ceilings.
+If that deadline expires during proven pre-spawn contention, retain the stopped
+attempt and use bounded timeout recovery; do not resume or renew the expired request.
 Current checkout, phase, cancellation, consent, snapshot, mode qualification,
 duplicate and stop guards still apply. Never resume an ordinary terminal,
 ambiguous or running attempt; missing telemetry proves no such permission. Text
@@ -81,9 +83,8 @@ below. `publish-generation` takes only `{run}`. Use these exact CLI action names
 
 ## Investigate and apply supported corrections
 
-An episode lasts **at most 120 seconds excluding fix application**, clipped by
-current cumulative phase/session deadlines, with at most **three searches and five
-page reads**. Its clock never resets on restart or supervisor replacement. Read
+An episode lasts **at most 120 seconds excluding fix application**, with at most
+**three searches and five page reads**. Its clock never resets on restart or supervisor replacement. Read
 matching history first when useful. Use non-sensitive public queries based on safe
 machine facts; prefer exact-version official support, treating community reports
 as hypotheses. Never send private errors, model text, source content, credentials
@@ -118,7 +119,8 @@ index, and exactly one supported shape:
 - `{kind: "fresh_connection", source, retry_delay_seconds}` waits 0..120 seconds,
   then creates a fresh owned request/session after the prior local owner stopped.
   Use only for matching transport/service/rate-limit/interruption evidence, with
-  the delay fitting the remaining phase. Never weaken TLS or network boundaries.
+  the delay and fresh request staying within approved recovery/spending limits.
+  Never weaken TLS or network boundaries.
 
 Other remedies, including parsers, upgrades, dependencies and arbitrary executable
 configuration, remain proposed maintenance in private operational notes; do not
@@ -135,21 +137,20 @@ upstream billing/cancellation separately from safe transport codes.
 
 During investigation, replace only that seat on the original sealed source. During
 critique, a new candidate's `member` packet first contains independent source only,
-under the current critique deadline; it must not see peers. After the main
+under its own request deadline; it must not see peers. After the main
 coordinator accepts all pending catch-ups and stops their supervisors, batch them
 through `publish-generation`. Rerun every critique whose packet changed. Same
 candidate corrections reuse the same generation. Accepted superseded critiques
 remain private evidence and accounted usage, never mixed into the active round.
-At the critique deadline, an unsettled-but-stopped catch-up is excluded and the
-newest retained qualifying coherent generation supplies the entire synthesis
-packet and its participant bindings, even if a published successor did not obtain
-a usable critique. Reports from different generations never combine; no running
-owner can be ignored. No recovery borrows the synthesis reserve.
+Require all three accepted critiques over the current coherent report set before
+synthesis. Continue pending catch-up and critique recovery within their attempt limits;
+never select a reduced historical generation to bypass a missing participant.
+Reports from different generations never combine; no running owner can be ignored.
 
 A technically failed chair can be corrected or replaced during synthesis only,
 using a fresh native child over the same sealed phase evidence. Keep an eligible
-native chair and apply normal technical admission; no additional round or budget
-is granted. The original chair seat owns the three-replacement allowance. Earlier
+native chair and apply normal technical admission; no extra recovery attempts or spending scope
+are granted. The original chair seat owns the three-replacement allowance. Earlier
 valid rounds remain sealed; status records separate phase identities.
 
 ## Status and cancellation

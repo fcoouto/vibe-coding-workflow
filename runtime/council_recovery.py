@@ -98,7 +98,7 @@ def observe(value, owner):
     if result.get('state') == 'accepted':
         if not c._external_verified(value, owner, result, raw):
             return dict(result, state='awaiting_verification')
-        if (Path(owner['worker_run']) / 'result.json').stat().st_mtime > value['started_wall'] + c._end(value, owner['phase']):
+        if (Path(owner['worker_run']) / 'result.json').stat().st_mtime > c._attempt_deadline(value, owner['phase'], owner, wall=True):
             return dict(result, state='late')
     return result
 
@@ -113,6 +113,7 @@ def prior_stopped(value, phase):
 def phase_guard(value, phase):
     pending = any(state['catch_up'] for state in value['recovery'].values())
     if phase == 'synthesis' and pending:
+        c._require(value.get('completion_policy') != 'full-panel', 'critique_generation_pending')
         c._require(c._elapsed(value) >= c._end(value, 'critique'), 'critique_generation_pending')
         c._require(prior_stopped(value, 'critique'), 'phase_not_ready')
         for member, state in value['recovery'].items():
@@ -159,6 +160,12 @@ def _guard(run, value, phase, member):
     c._require(observed.get('local_execution_stopped') is True, 'prior_owner_not_stopped')
     c._require(observed.get('state') in ('failed', 'rejected', 'unresolved', 'late', 'not_launched'), 'failed_attempt_required')
     failure = observed.get('failure')
+    if (value.get('timing_policy') == 'per-request' and item.get('preparation_failure')
+            and observed.get('state') == 'not_launched' and failure
+            and failure.get('category') == 'integration' and failure.get('launch_stage') == 'before_spawn'
+            and failure.get('reason') in c.workers.BUSY_REASONS
+            and time.monotonic() >= c._attempt_deadline(value, phase, item)):
+        failure = dict(category='deadline', launch_stage='before_spawn')
     if failure is None and (observed.get('state') == 'late' or observed.get('on_time') is False):
         failure = dict(category='deadline')
     report = observed.get('report', observed.get('final_response', observed.get('response', '')))
@@ -199,8 +206,9 @@ def investigate_failure(run, phase, member):
         now = time.monotonic()
         episode = dict(candidate_id=candidate['candidate_id'], failure_id=item['attempt_id'],
             failure=failure, signature=_signature(candidate, failure), started_monotonic=now,
-            deadline_monotonic=min(now + 120, value['started_monotonic'] + c._end(value, phase),
-                                   value['started_monotonic'] + value['timeout_seconds']), state='investigating')
+            deadline_monotonic=now + 120 if value.get('timing_policy') == 'per-request' else min(
+                now + 120, value['started_monotonic'] + c._end(value, phase),
+                value['started_monotonic'] + value['timeout_seconds']), state='investigating')
         candidate['investigation'] = episode
         matches = [row for row in _history(value) if row.get('signature') == episode['signature']
                    and 0 <= time.time() - row.get('checked_at', 0) <= HISTORY_TTL]
@@ -506,7 +514,7 @@ def status(run, value):
     for item in external:
         costs.append(item.get('reported_cost_usd'))
         known.append(item.get('known_cost_subtotal_usd', 0))
-    try: remaining, timing = max(0, value['timeout_seconds'] - c._elapsed(value)), True
+    try: remaining, timing = c._session_remaining(value), True
     except ValueError: remaining, timing = 0, False
     recovery = {}
     for member, state in value['recovery'].items():
