@@ -669,8 +669,8 @@ def plan_delegation(scope, request):
         task = evidence._task(db, scope, request)
         _require('delegation' not in task, 'Delegation plan was concurrently established')
         task['delegation'] = dict(version=ADMISSION_VERSION, plan=reference, attempts_consumed=0, resource_units_consumed=0)
-        if task['state'] == 'ready':
-            task['state'] = 'verifying'
+        if task['state'] == 'DONE':
+            task['state'] = 'REVIEW'
         task['revision'] += 1
         state._save(db, state._scope_id(scope), task)
     return dict(ok=True, revision=task['revision'], plan=reference, plan_digest=reference['digest'], limitations=ADMISSION_LIMITATIONS)
@@ -844,11 +844,11 @@ def _invalidate_ready(db, scope, task, claims):
         if (scope_id, client, session, task_id) == owner:
             continue
         current = state._task(db, scope_id, client, session, task_id)
-        if current['state'] != 'ready':
+        if current['state'] != 'DONE':
             continue
         closure = _ready_closure(scope, current)
         if closure is None or _held_conflict(claims, closure):
-            current.update(state='verifying', reason='Conflicting reservation requires fresh completion evidence', reference='delegation:ownership')
+            current.update(state='REVIEW', reason='Conflicting reservation requires fresh completion evidence', reference='delegation:ownership')
             current['revision'] += 1
             state._save(db, scope_id, current)
 
@@ -868,8 +868,8 @@ def _insert_assignment(db, scope, task, record):
     if data['role'] in NATIVE_ROLES:
         task['delegation']['attempts_consumed'] += 1
         task['delegation']['resource_units_consumed'] += data['resource_units']
-    if task['state'] == 'ready':
-        task['state'] = 'verifying'
+    if task['state'] == 'DONE':
+        task['state'] = 'REVIEW'
     task['revision'] += 1
 
 
@@ -969,7 +969,7 @@ def _discovery(scope, plan, request):
 
 def _admission(scope, db, task, plan, job, claims, records, request):
     limits = plan['limits']
-    _require(task['state'] not in {'blocked', 'awaiting_user', 'cancelled'} and not any(
+    _require(task['state'] not in {'BLOCKED','WAITING','PAUSED','CANCELLED'} and not any(
         c['kind'] in {'blocker', 'decision'} and c['status'] == 'pending' for c in task['conditions']),
         'Task blockers or pending decisions prevent worker dispatch')
     _require(task['mode'] == 'editable' or all(c['mode'] == 'read' for c in claims), 'Read-only task cannot admit mutable worker claims')
@@ -1187,7 +1187,7 @@ def _reserve_operation(scope, request, *, role, _verification=False):
             _require(replay['data']['role'] == role, 'Dispatch identity belongs to another role')
             return _operation_reply(replay)
         task = evidence._task(db, scope, request)
-        _require((_verification or task['state'] not in {'blocked', 'awaiting_user'}) and
+        _require(task['state'] not in {'BLOCKED','WAITING','PAUSED'} and
                  (task['mode'] == 'editable' or all(c['mode'] == 'read' for c in claims)), 'Task cannot reserve this operation')
         _resources_available(scope, db, claims, records)
         d5_plan = task.get('evidence', {}).get('plan')

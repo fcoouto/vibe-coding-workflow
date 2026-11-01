@@ -129,15 +129,21 @@ def version(executable, deadline):
         child.close()
 
 
+def validate_initialize(response):
+    for field in ("codexHome", "platformFamily", "platformOs", "userAgent"):
+        value = response.get(field)
+        if (not isinstance(value, str) or not value.strip() or len(value) > 4096
+                or any(not char.isprintable() for char in value)):
+            raise ObservationError("malformed_response")
+
+
 def discover(executable, cwd, deadline):
     child = NativeProcess([str(executable), "app-server", "--listen", "stdio://"], deadline)
     try:
         initialized = child.request(1, "initialize", {
             "clientInfo": {"name": "vibe-workflow-doctor", "version": "1"},
             "capabilities": {"experimentalApi": True}})
-        if any(not isinstance(initialized.get(field), str) for field in
-               ("codexHome", "platformFamily", "platformOs", "userAgent")):
-            raise ObservationError("malformed_response")
+        validate_initialize(initialized)
         child.send({"method": "initialized"})
         return child.request(2, "hooks/list", {"cwds": [str(cwd)]})
     finally:

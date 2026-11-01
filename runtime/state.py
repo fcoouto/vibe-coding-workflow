@@ -10,6 +10,7 @@ import stat
 
 from runtime.engine import HookResult, evaluate
 from runtime.startup import StartupError
+from runtime.task_statuses import STATES
 
 
 SCHEMA_VERSION = 2
@@ -17,7 +18,7 @@ APPLICATION_ID = 0x56494245
 PACKAGE = Path(__file__).resolve().parents[1]
 LIMITATIONS = ["Supported apply_patch guard only; shell and external edits remain possible",
                "Hooks alone do not establish client execution, filesystem locality or current completion evidence"]
-STATES = {"planned", "active", "awaiting_user", "blocked", "verifying", "ready", "cancelled"}
+_HISTORICAL_STATES = {"planned", "active", "awaiting_user", "blocked", "verifying", "ready", "cancelled"}
 TABLE_SQL = {
     "checkouts": """CREATE TABLE checkouts(scope_id TEXT PRIMARY KEY, project_id TEXT NOT NULL,
         repository_root TEXT NOT NULL, git_common_dir TEXT NOT NULL, generation INTEGER NOT NULL)""",
@@ -44,7 +45,7 @@ def runtime_fingerprint():
     """Pin installed runtime sources, dispatcher and adapter contents, by relative path."""
     digest = hashlib.sha256()
     paths = sorted((PACKAGE / "runtime").glob("*.py")) + sorted((PACKAGE / "runtime/adapters").glob("*.py"))
-    paths.append(PACKAGE / "scripts/workflow.py")
+    paths.extend((PACKAGE / "scripts/workflow.py", PACKAGE / "scripts/workstreams_family.py"))
     for path in sorted(paths):
         digest.update(str(path.relative_to(PACKAGE)).encode() + b"\0" + path.read_bytes() + b"\0")
     return digest.hexdigest()
@@ -184,7 +185,7 @@ def _database(scope, write=False, initialize=False):
             db.close()
 
 
-def _task(db, scope_id, client, session, task_id=None):
+def _task(db, scope_id, client, session, task_id=None, *, historical=False):
     if task_id is None:
         binding = db.execute("select task_id from bindings where scope_id=? and client=? and session_id=?",
                              (scope_id, client, session)).fetchone()
@@ -197,14 +198,18 @@ def _task(db, scope_id, client, session, task_id=None):
         raise StateError("Runtime task binding is corrupt")
     task = json.loads(row[0])
     _fields(task, ("client", "session_id", "task_id", "scope_ref", "mode", "decision_ref", "state", "revision",
-                   "pins", "reason", "reference", "conditions", "turn_id", "turn_uncertain"), ("resolution_ref", "evidence", "retirement", "delegation"))
+                   "pins", "reason", "reference", "conditions", "turn_id", "turn_uncertain"), ("resolution_ref", "evidence", "retirement", "delegation", "milestones"))
     _identity(task)
     _integer(task["revision"], "stored revision", 1)
     for field in ("decision_ref", "reason", "reference", "resolution_ref"):
         if field in task:
             _text(task[field], "stored " + field)
+    legacy = (historical and task['state'] in _HISTORICAL_STATES and isinstance(task['pins'],dict)
+        and task['pins'].get('runtime_digest') != runtime_fingerprint())
+    if task['state'] in _HISTORICAL_STATES and not legacy:
+        raise StateError('Historical task vocabulary requires explicit migration and its original pinned runtime')
     if (task["task_id"] != task_id or task["client"] != client or task["session_id"] != session or
-            task["state"] not in STATES or task["mode"] not in {"editable", "read-only"} or
+            (task["state"] not in STATES and not legacy) or task["mode"] not in {"editable", "read-only"} or
             type(task["turn_uncertain"]) is not bool or not isinstance(task["conditions"], list) or
             len(task["conditions"]) > 64):
         raise StateError("Runtime task record is corrupt")
@@ -244,12 +249,36 @@ def _task(db, scope_id, client, session, task_id=None):
         for field in ("proof_digest", "observation_ref", "coordinator_ref"):
             _text(retirement[field], "stored retirement " + field)
         _integer(retirement["previous_revision"], "stored retirement revision", 1)
-        if task["state"] != "cancelled" or retirement["previous_revision"] >= task["revision"]:
+        if task["state"] != ('cancelled' if legacy else 'CANCELLED') or retirement["previous_revision"] >= task["revision"]:
             raise StateError("Retired task must remain terminal with original history")
+    if 'milestones' in task:_milestones(task['milestones'])
     return task
 
 
+def _milestones(values):
+    if not isinstance(values,list) or len(values)>64:
+        raise StateError('Task milestones must be a bounded list')
+    seen=set()
+    for value in values:
+        _fields(value,('id','weight','accepted','reference'))
+        _text(value['id'],'milestone id',128);_text(value['reference'],'milestone acceptance reference',1024)
+        if (value['id'] in seen or type(value['weight']) is not int or not 1<=value['weight']<=1000000
+                or type(value['accepted']) is not bool):
+            raise StateError('Invalid task milestone identity, weight or acceptance')
+        seen.add(value['id'])
+    return values
+
+
 def _save(db, scope_id, task):
+    if task.get('state') not in STATES or task.get('pins',{}).get('runtime_digest') != runtime_fingerprint():
+        raise StateError('Historical task mutation requires its original pinned runtime; explicit migration is required')
+    previous=db.execute('select data from tasks where scope_id=? and client=? and session_id=? and task_id=?',
+        (scope_id,task['client'],task['session_id'],task['task_id'])).fetchone()
+    if previous is not None:
+        old=json.loads(previous[0])
+        if old.get('state') not in STATES or old.get('pins') != task['pins']:
+            raise StateError('Historical task vocabulary and pins cannot be rewritten')
+    if 'milestones' in task:_milestones(task['milestones'])
     if "delegation" in task:
         from runtime.delegation import validate_delegation
         validate_delegation(task["delegation"])
@@ -261,7 +290,7 @@ def _save(db, scope_id, task):
 
 
 def _compatible(scope, task):
-    if task is not None and task["pins"] != _pins(scope):
+    if task is not None and (task['state'] not in STATES or task["pins"] != _pins(scope)):
         raise StateError("Task policy, runtime or schema pins differ; explicit migration is required")
 
 
@@ -330,6 +359,15 @@ def start_task(scope, request):
         _integer(replacement["expected_revision"], "expected_revision", 1)
     pins = _pins(scope)
     with _database(scope, write=True, initialize=True) as db:
+        placeholders=','.join('?' for _ in STATES)
+        incompatible=db.execute("select 1 from tasks where json_type(data,'$.state') is not 'text' or "
+            "json_extract(data,'$.state') not in ("+placeholders+") or json_type(data,'$.pins.runtime_digest') is not 'text' or "
+            "json_extract(data,'$.pins.runtime_digest') != ? or json_type(data,'$.pins.schema_version') is not 'integer' or "
+            "json_extract(data,'$.pins.schema_version') != ? or json_type(data,'$.pins.policy_digest') is not 'text' or "
+            "(scope_id=? and json_extract(data,'$.pins.policy_digest') != ?) limit 1",
+            (*sorted(STATES),pins['runtime_digest'],SCHEMA_VERSION,_scope_id(scope),pins['policy_digest'])).fetchone()
+        if incompatible:
+            raise StateError('Retained incompatible task authority requires explicit migration; use a fresh approved successor authority')
         scope_id = _scope_id(scope)
         current = _task(db, scope_id, request["client"], request["session_id"])
         if current and current["task_id"] == request["task_id"]:
@@ -355,7 +393,7 @@ def start_task(scope, request):
         db.execute("insert or ignore into checkouts values(?,?,?,?,0)",
                    (scope_id, scope.project_id, str(scope.repository_root), str(scope.git_common_dir)))
         task = {field: request[field] for field in ("client", "session_id", "task_id", "scope_ref", "mode", "decision_ref")}
-        task.update(state="planned", revision=1, pins=pins, reason="Task started", reference=request["decision_ref"],
+        task.update(state="TRIAGE", revision=1, pins=pins, reason="Task started", reference=request["decision_ref"],
                     conditions=[], turn_id=None, turn_uncertain=True)
         _save(db, scope_id, task)
         db.execute("insert or replace into bindings values(?,?,?,?)", (scope_id, request["client"], request["session_id"], request["task_id"]))
@@ -380,7 +418,7 @@ def _condition(value, task, previous):
         _text(continuation["turn_id"], "continuation turn_id")
         if type(continuation["budget"]) is not int or continuation["budget"] not in (0, 1):
             raise StateError("Continuation budget must be zero or one")
-        if (value["kind"] != "runnable" or task["state"] not in {"active", "verifying"} or
+        if (value["kind"] != "runnable" or task["state"] not in {"WORKING", "REVIEW"} or
                 task["turn_id"] != continuation["turn_id"] or task["turn_uncertain"]):
             raise StateError("Continuation requires a runnable condition and observed current task turn")
         if old and (old["turn_id"] != continuation["turn_id"] or continuation["budget"] > old["budget"]):
@@ -394,15 +432,15 @@ def _condition(value, task, previous):
 
 def update_task(scope, request):
     _fields(request, ("client", "session_id", "task_id", "scope_ref", "expected_revision", "state", "reason", "reference"),
-            ("conditions", "resolutions", "resolution_ref"))
+            ("conditions", "resolutions", "resolution_ref", "milestones"))
     _identity(request)
     _integer(request["expected_revision"], "expected_revision", 1)
     for field in ("reason", "reference"):
         _text(request[field], field)
     if "resolution_ref" in request:
         _text(request["resolution_ref"], "resolution_ref")
-    if not isinstance(request["state"], str) or request["state"] not in STATES - {"ready"}:
-        raise StateError("Only completion evidence verification can declare ready")
+    if not isinstance(request["state"], str) or request["state"] not in STATES - {"DONE"}:
+        raise StateError("Only completion evidence verification can declare DONE")
     for field in ("conditions", "resolutions"):
         if field in request and (not isinstance(request[field], list) or len(request[field]) > 64):
             raise StateError("Task conditions and resolutions must be bounded lists")
@@ -417,13 +455,14 @@ def update_task(scope, request):
         if task["revision"] != request["expected_revision"]:
             raise StateError("Task revision conflict")
         old_state, state = task["state"], request["state"]
-        allowed = (old_state == state or state in {"awaiting_user", "blocked", "cancelled"} or
-                   (old_state, state) in {("planned", "active"), ("active", "verifying"), ("verifying", "active"), ("ready", "active"), ("ready", "verifying")} or
-                   (old_state in {"blocked", "awaiting_user"} and state in {"planned", "active", "verifying"} and
-                    "resolution_ref" in request))
-        if old_state == "cancelled" or not allowed:
+        allowed = (old_state == state or state in {'WAITING','BLOCKED','PAUSED','CANCELLED'} or
+            (old_state,state) in {('TRIAGE','READY'),('TRIAGE','WORKING'),('TRIAGE','REVIEW'),('READY','WORKING'),
+                ('READY','REVIEW'),('WORKING','REVIEW'),('REVIEW','WORKING'),('DONE','WORKING'),('DONE','REVIEW')} or
+            (old_state in {'WAITING','BLOCKED','PAUSED'} and state in {'TRIAGE','READY','WORKING','REVIEW'} and 'resolution_ref' in request))
+        if old_state == 'CANCELLED' or not allowed:
             raise StateError("Task state transition is not allowed")
         task.update(state=state, reason=request["reason"], reference=request["reference"])
+        if 'milestones' in request:task['milestones']=_milestones(request['milestones'])
         if "resolution_ref" in request:
             task["resolution_ref"] = request["resolution_ref"]
         conditions = {condition["id"]: condition for condition in task["conditions"]}
@@ -446,7 +485,7 @@ def update_task(scope, request):
             seen.add(resolution["id"])
             conditions[resolution["id"]].update(status="resolved", resolution_ref=resolution["reference"])
         task["conditions"] = list(conditions.values())
-        if state in {"blocked", "awaiting_user", "cancelled"}:
+        if state in {'BLOCKED','WAITING','PAUSED','CANCELLED'}:
             for condition in task["conditions"]:
                 if "continuation" in condition:
                     condition["continuation"]["revoked"] = True
@@ -530,7 +569,6 @@ def retire_task(scope, request):
             proof['stopped'] is not True or proof['descendants_stopped'] is not True):
         raise StateError('Trusted stopped-writer and descendant reconciliation remains missing')
     from runtime.evidence import _artifact
-    retained_proof = _artifact(scope, proof)
     with _database(scope, write=True) as db:
         if db is None:
             raise StateError('Task state has not been initialized')
@@ -541,12 +579,14 @@ def retire_task(scope, request):
                 task['pins'] != request['expected_pins'] or task['pins']['schema_version'] != SCHEMA_VERSION or
                 'retirement' in task):
             raise StateError('Retirement requires exact supported stored identity, pins and revision')
+        _compatible(scope,task)
         _guard_assignments(db, scope, request['client'], request['session_id'])
         attempts = [a['id'] for a in task.get('evidence', {}).get('attempts', []) if a['status'] in {'reserved', 'running', 'uncertain'}]
         if (proof['identity'] != identity or proof['expected_revision'] != task['revision'] or proof['expected_pins'] != task['pins'] or
                 proof['observed_turn_id'] != task['turn_id'] or proof['attempt_ids'] != attempts):
             raise StateError('Stopped-writer proof does not match exact historical task and attempts')
-        task.update(state='cancelled', reason=request['reason'], reference=request['reference'],
+        retained_proof = _artifact(scope, proof)
+        task.update(state='CANCELLED', reason=request['reason'], reference=request['reference'],
                     retirement=dict(proof_digest=request['stop_proof']['sha256'], proof=retained_proof, observation_ref=proof['observation_ref'],
                                     coordinator_ref=proof['coordinator_ref'], previous_revision=task['revision']))
         for condition in task['conditions']:

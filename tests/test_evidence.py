@@ -220,7 +220,7 @@ class EvidenceTests(unittest.TestCase):
         with patch.object(delegation, 'guidance_status', side_effect=AssertionError('model-free verify queried guidance')):
             result = self.verify()
         self.assertFalse(result['verified'])
-        self.assertNotEqual(result['task']['state'], 'ready')
+        self.assertNotEqual(result['task']['state'], 'DONE')
         with state._database(self.scope) as db:
             self.assertEqual(next(r for r in delegation._ledger(self.scope, db) if r['id'] == writer['attempt_id'])['data']['status'], 'prepared')
         self.assertNotIn('delegation', result['task'])
@@ -260,7 +260,7 @@ class EvidenceTests(unittest.TestCase):
         first = delegation._reserve_operation(self.scope, writer, role='coordinator')
         with state._database(self.scope) as db:
             current = state._task(db, state._scope_id(self.scope), 'codex', 'parent')
-        self.assertEqual(current['state'], 'verifying')
+        self.assertEqual(current['state'], 'REVIEW')
         self.assertEqual(current['revision'], ready['revision'] + 1)
         self.assertTrue(delegation._reserve_operation(self.scope, writer, role='coordinator')['replayed'])
         failed = self.readiness_owner(session='third-parent')
@@ -284,7 +284,7 @@ class EvidenceTests(unittest.TestCase):
         before = retained[0]['data']
         retry = self.verify()
         self.assertFalse(retry['verified'])
-        self.assertNotEqual(retry['task']['state'], 'ready')
+        self.assertNotEqual(retry['task']['state'], 'DONE')
         with state._database(self.scope) as db:
             self.assertEqual(next(r for r in delegation._ledger(self.scope, db) if r['id'] == retained[0]['id'])['data'], before)
         with self.assertRaises(state.StateError):
@@ -335,7 +335,7 @@ class EvidenceTests(unittest.TestCase):
         independent = self.readiness_owner(claims=[service | dict(key='fixture:independent-db')])
         delegation._reserve_operation(self.scope, independent, role='coordinator')
         ready = self.verify()['task']
-        self.assertEqual(ready['state'], 'ready')
+        self.assertEqual(ready['state'], 'DONE')
         verification = self.api._read(self.scope, ready['evidence']['verification'])
         self.assertIn(service | dict(mode='read'), verification['resource_closure'])
         self.assertFalse(self.api.evidence_status(self.scope, 'codex', 'parent')['evidence']['blockers'])
@@ -343,12 +343,12 @@ class EvidenceTests(unittest.TestCase):
         delegation._reserve_operation(self.scope, reader, role='coordinator')
         with state._database(self.scope) as db:
             before_status = state._task(db, state._scope_id(self.scope), 'codex', 'parent')
-        self.assertEqual(before_status['state'], 'ready')
+        self.assertEqual(before_status['state'], 'DONE')
         self.assertEqual(before_status['revision'], ready['revision'])
         self.api.revalidate_ready(self.scope, 'codex', 'parent')
         with state._database(self.scope) as db:
             after = state._task(db, state._scope_id(self.scope), 'codex', 'parent')
-        self.assertEqual(after['state'], 'verifying')
+        self.assertEqual(after['state'], 'REVIEW')
         self.assertEqual(after['revision'], ready['revision'] + 1)
 
     def test_status_uses_newly_accepted_d6_resources_when_candidate_is_unchanged(self):
@@ -380,7 +380,7 @@ class EvidenceTests(unittest.TestCase):
         accepted = delegation.plan_delegation(self.scope, request)
         with state._database(self.scope) as db:
             current = state._task(db, state._scope_id(self.scope), 'codex', 'parent')
-        self.assertEqual(current['state'], 'verifying')
+        self.assertEqual(current['state'], 'REVIEW')
         self.assertEqual(current['revision'], before['revision'] + 1)
         self.assertEqual(accepted['revision'], current['revision'])
         self.assertEqual(current['pins'], before['pins'])
@@ -409,7 +409,7 @@ class EvidenceTests(unittest.TestCase):
             self.readiness_owner(claims=[dependency | dict(mode='write')]))
         with state._database(self.scope) as db:
             invalidated = state._task(db, state._scope_id(self.scope), 'codex', 'parent')
-        self.assertEqual(invalidated['state'], 'verifying')
+        self.assertEqual(invalidated['state'], 'REVIEW')
         self.assertEqual(invalidated['revision'], fresh['revision'] + 1)
         self.assertEqual(writer['status'], 'prepared')
 
@@ -423,11 +423,11 @@ class EvidenceTests(unittest.TestCase):
         delegation.plan_delegation(self.scope, self.request(plan=plan))
         with state._database(self.scope) as db:
             current = state._task(db, state._scope_id(self.scope), 'codex', 'parent')
-        self.assertEqual(current['state'], 'verifying')
+        self.assertEqual(current['state'], 'REVIEW')
         self.assertTrue(self.verify()['verified'])
         owner = delegation.reserve_coordinator(self.scope, self.readiness_owner(claims=[dependency]))
         status = state.task_status(self.scope, 'codex', 'parent')
-        self.assertEqual(status['task']['state'], 'verifying')
+        self.assertEqual(status['task']['state'], 'REVIEW')
         blockers = self.api.evidence_status(self.scope, 'codex', 'parent')['evidence']['blockers']
         self.assertTrue(any(owner['attempt_id'] in item for item in blockers))
 
@@ -442,7 +442,7 @@ class EvidenceTests(unittest.TestCase):
         delegation._reserve_operation(foreign, request, role='coordinator')
         with state._database(self.scope) as db:
             current = state._task(db, state._scope_id(self.scope), 'codex', 'parent')
-        self.assertEqual(current['state'], 'verifying')
+        self.assertEqual(current['state'], 'REVIEW')
         self.assertEqual(current['revision'], ready['revision'] + 1)
 
     def test_stale_verification_generation_retains_exact_barrier_and_cannot_publish_ready(self):
@@ -459,7 +459,7 @@ class EvidenceTests(unittest.TestCase):
         with state._database(self.scope) as db:
             task = state._task(db, state._scope_id(self.scope), 'codex', 'parent')
             records = [r for r in delegation._ledger(self.scope, db) if r['data']['role'] == 'coordinator']
-        self.assertNotEqual(task['state'], 'ready')
+        self.assertNotEqual(task['state'], 'DONE')
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]['data']['status'], 'prepared')
         self.assertIsNone(records[0]['data']['reconciliation'])
@@ -480,7 +480,7 @@ class EvidenceTests(unittest.TestCase):
             self.api.revalidate_ready(self.scope, 'codex', 'parent')
         with state._database(self.scope) as db:
             current = state._task(db, state._scope_id(self.scope), 'codex', 'parent')
-        self.assertEqual(current['state'], 'verifying')
+        self.assertEqual(current['state'], 'REVIEW')
         self.assertEqual(current['revision'], ready['revision'] + 1)
 
     def test_missing_ready_resource_closure_cannot_establish_independence(self):
@@ -496,7 +496,7 @@ class EvidenceTests(unittest.TestCase):
         delegation._reserve_operation(self.scope, independent, role='coordinator')
         with state._database(self.scope) as db:
             current = state._task(db, state._scope_id(self.scope), 'codex', 'parent')
-        self.assertEqual(current['state'], 'verifying')
+        self.assertEqual(current['state'], 'REVIEW')
         self.assertEqual(current['revision'], ready['revision'] + 1)
 
     def test_outside_readonly_hardlink_owner_remains_relevant_to_directory_closure(self):
@@ -508,7 +508,7 @@ class EvidenceTests(unittest.TestCase):
         delegation._reserve_operation(self.scope, reader, role='coordinator')
         result = self.verify()
         self.assertFalse(result['verified'])
-        self.assertNotEqual(result['task']['state'], 'ready')
+        self.assertNotEqual(result['task']['state'], 'DONE')
         self.assertTrue(any('ownership' in item for item in result['blockers']))
 
     def test_verifier_deduplicates_accepted_root_alias_without_relaxing_external_claims(self):
@@ -606,7 +606,7 @@ class EvidenceTests(unittest.TestCase):
         with patch.object(self.api, '_blockers', side_effect=blockers):
             result = self.verify()
         self.assertFalse(result['verified'])
-        self.assertNotEqual(result['task']['state'], 'ready')
+        self.assertNotEqual(result['task']['state'], 'DONE')
         self.assertTrue(any(inserted[0] in b for b in result['blockers']))
 
     def test_detached_writer_cannot_pass_without_exact_current_host_reconciliation(self):
@@ -675,12 +675,12 @@ class EvidenceTests(unittest.TestCase):
         self.review()
         result = self.verify()
         self.assertTrue(result['verified'], result)
-        self.assertEqual(result['task']['state'], 'ready')
+        self.assertEqual(result['task']['state'], 'DONE')
         with self.assertRaises(state.StateError):
-            state.update_task(self.scope, self.request(state='ready', reason='claim', reference='claim'))
+            state.update_task(self.scope, self.request(state='DONE', reason='claim', reference='claim'))
         (self.repo / 'app.py').write_text('value = 2\n')
         result = state.task_status(self.scope, 'codex', 'parent')
-        self.assertEqual(result['task']['state'], 'verifying')
+        self.assertEqual(result['task']['state'], 'REVIEW')
 
     def test_candidate_binds_modes_untracked_index_base_environment_and_linked_checkout(self):
         self.plan()
@@ -746,7 +746,7 @@ class EvidenceTests(unittest.TestCase):
         self.assertTrue(self.verify()['verified'])
         event = RuntimeEvent('PostToolUse', 'codex', 'parent', self.repo, 'turn', 'call', 'read_file', False, 'receipt')
         state.process_event(self.scope, event)
-        self.assertEqual(state.task_status(self.scope, 'codex', 'parent')['task']['state'], 'ready')
+        self.assertEqual(state.task_status(self.scope, 'codex', 'parent')['task']['state'], 'DONE')
         self.assertEqual(state.process_event(self.scope, replace(event, kind='Stop')).action, 'pass')
 
     def test_security_impact_must_be_reassessed_after_candidate_change(self):
@@ -771,7 +771,7 @@ class EvidenceTests(unittest.TestCase):
         interleaved = []
         def execute_with_operation(*args):
             if cancel:
-                state.update_task(self.scope, self.request(state='cancelled', reason='User cancelled during check',
+                state.update_task(self.scope, self.request(state='CANCELLED', reason='User cancelled during check',
                     reference='user:cancelled'))
             else:
                 delegation.reserve_coordinator(self.scope, self.readiness_owner(identity=self.identity,
@@ -887,7 +887,7 @@ class EvidenceTests(unittest.TestCase):
     def test_cancel_and_replace_cannot_forget_uncertain_checkout_writer(self):
         self.plan()
         self.api._reserve(self.scope, self.request(), 'check', dict(check_id='unit'))
-        result = state.update_task(self.scope, self.request(state='cancelled', reason='Interrupted parent', reference='user:cancel'))
+        result = state.update_task(self.scope, self.request(state='CANCELLED', reason='Interrupted parent', reference='user:cancel'))
         old_revision = result['task']['revision']
         with self.assertRaises(state.StateError):
             state.start_task(self.scope, self.identity | dict(task_id='replacement', mode='editable', decision_ref='user:accepted',
@@ -926,11 +926,11 @@ class EvidenceTests(unittest.TestCase):
         original = self.api.capture_candidate
         def capture(scope, plan):
             candidate = original(scope, plan)
-            state.update_task(scope, self.request(state='blocked', reason='Intervening decision', reference='user:hold'))
+            state.update_task(scope, self.request(state='BLOCKED', reason='Intervening decision', reference='user:hold'))
             return candidate
         with patch.object(self.api, 'capture_candidate', side_effect=capture), self.assertRaises(state.StateError):
             self.api.verify_completion(self.scope, request)
-        self.assertEqual(state.task_status(self.scope, 'codex', 'parent')['task']['state'], 'blocked')
+        self.assertEqual(state.task_status(self.scope, 'codex', 'parent')['task']['state'], 'BLOCKED')
 
     def test_confirmed_security_finding_survives_edits_and_needs_scoped_fresh_review(self):
         self.plan()
@@ -972,7 +972,7 @@ class EvidenceTests(unittest.TestCase):
         result = self.api.verify_completion(self.scope, self.request(purpose='merge-evidence'))
         self.assertTrue(result['verified'], result)
         self.assertFalse(result['merge_authority'])
-        self.assertNotEqual(result['task']['state'], 'ready')
+        self.assertNotEqual(result['task']['state'], 'DONE')
 
 
 if __name__ == '__main__':

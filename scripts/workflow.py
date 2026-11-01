@@ -13,6 +13,15 @@ PACKAGE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PACKAGE))
 
 
+def title_report(scope, client, session, report):
+    if client == "codex" and session:
+        from runtime.title_sync import repair
+        result = repair(scope, client, session)
+        if result.get("managed"):
+            report = dict(report, title_sync=result)
+    return report
+
+
 def control_main():
     from runtime.startup import MAX_INPUT, StartupError, json_object, resolve_project
 
@@ -31,6 +40,9 @@ def control_main():
             if name == "status":
                 action.add_argument("--client", required=True, choices=("codex",))
                 action.add_argument("--session", required=True)
+        title = actions.add_parser("title", add_help=False)
+        title.add_argument("title_action", choices=("configure", "resume", "status", "sync"))
+        title.add_argument("--cwd", required=True)
         evidence = commands.add_parser("evidence", add_help=False)
         evidence_actions = evidence.add_subparsers(dest="action", required=True)
         for name in ("plan", "status", "check", "reconcile-check", "verify"):
@@ -97,7 +109,7 @@ def control_main():
                     client = request.get("client")
                     if client != "codex":
                         raise StartupError("Expected a supported native task client")
-        elif (args.command == "task" and args.action in ("start", "update", "retire") or
+        elif (args.command == "task" and args.action in ("start", "update", "retire", "title") or
                 args.command == "evidence" and args.action != "status"):
             request = json_object(sys.stdin.buffer.read(MAX_INPUT + 1))
             client = request.get("client")
@@ -115,6 +127,11 @@ def control_main():
             raise StartupError("The requested checkout is not enrolled for this client")
         if scope.runtime is None:
             raise StartupError("Runtime state is not configured for this checkout")
+        if args.command == "task" and args.action == "title":
+            from runtime.title_sync import operate
+            report = operate(scope, args.title_action, request, force=True)
+            print(json.dumps(report))
+            return 0
         if args.command == "delegation":
             from runtime import delegation
             if args.delegation_action == "guidance":
@@ -127,6 +144,7 @@ def control_main():
                              "observe": delegation.observe_assignment, "reconcile": delegation.reconcile_assignment,
                              "coordinator": delegation.reserve_coordinator}
                 report = operation[args.delegation_action](scope, request)
+            report = title_report(scope, client, request.get("session_id") if args.delegation_action != "status" else args.session, report)
             print(json.dumps(report))
             return 0
         if args.command == "evidence":
@@ -135,6 +153,7 @@ def control_main():
                           "prepare": evidence.prepare_review, "collect": evidence.collect_review, "assess": evidence.assess_review}
             report = (evidence.evidence_status(scope, client, args.session) if args.action == "status" else
                       operations[args.review_action if args.action == "review" else args.action](scope, request))
+            report = title_report(scope, client, request.get("session_id") if args.action != "status" else args.session, report)
             print(json.dumps(report))
             return 0
         from runtime.state import start_task, update_task, task_status, retire_task
@@ -142,6 +161,7 @@ def control_main():
             report = task_status(scope, client, args.session)
         else:
             report = {"start": start_task, "update": update_task, "retire": retire_task}[args.action](scope, request)
+        report = title_report(scope, client, request.get("session_id") if args.action != "status" else args.session, report)
         print(json.dumps(report))
         return 0
     except StartupError as error:
@@ -182,7 +202,20 @@ def main():
         if payload.get("hook_event_name") != requested_event:
             raise StartupError("CLI event does not match the payload event")
         if requested_event == "SessionStart":
-            output = adapter.render(orient(adapter.normalize(payload), PACKAGE))
+            start = adapter.normalize(payload)
+            output = adapter.render(orient(start, PACKAGE))
+            if start.client == "codex":
+                try:
+                    scope = resolve_project(start, PACKAGE)
+                    if scope is not None and scope.runtime is not None:
+                        from runtime.title_sync import repair
+                        presentation = repair(scope, start.client, payload.get("session_id"), force=True)
+                        if presentation.get("notification"):
+                            output = dict(output or {})
+                            output["systemMessage"] = (output.get("systemMessage", "") + " " + presentation["notification"]).strip()
+                except Exception:
+                    # Optional title repair must preserve the startup result.
+                    pass
         else:
             event = codex.normalize_runtime(payload)
             scope = resolve_project(event, PACKAGE)
@@ -191,6 +224,12 @@ def main():
                 from runtime.state import process_event
                 result = process_event(scope, event)
             output = codex.render_runtime(result)
+            if scope is not None and scope.runtime is not None and event.kind in {"PostToolUse", "Stop"}:
+                from runtime.title_sync import repair
+                presentation = repair(scope, event.client, event.session_id, force=True)
+                if presentation.get("notification"):
+                    output = dict(output or {})
+                    output["systemMessage"] = (output.get("systemMessage", "") + " " + presentation["notification"]).strip()
     except RuntimeScopeError as error:
         if runtime_kind == "PreToolUse" and event.tool_name == "apply_patch":
             output = codex.render_runtime(HookResult(runtime_kind, "deny", str(error)))

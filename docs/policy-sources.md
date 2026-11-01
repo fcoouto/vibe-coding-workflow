@@ -105,3 +105,27 @@ Before delivery, compare requirement coverage and run representative instruction
 [evaluation]: https://github.com/soumatheusgomes/vibe-coding-toolkit/blob/790a895304e0c08b70a5b215c9d334f1c86b816c/docs/prompts/14-harness-evaluation.md
 [improvement]: https://github.com/soumatheusgomes/vibe-coding-toolkit/blob/790a895304e0c08b70a5b215c9d334f1c86b816c/docs/prompts/15-harness-improvement.md
 [harness-method]: https://github.com/soumatheusgomes/vibe-coding-toolkit/blob/790a895304e0c08b70a5b215c9d334f1c86b816c/docs/tools/23-harness2.md
+
+
+### Thread Naming main integration · 1 November 2026
+
+The user approved five-cell leading meters, one space before globally reserved
+family codes, stable parent/child labels and one exact task-status vocabulary.
+`WORKING` describes ongoing effort; evidence-gated `DONE` keeps the full meter.
+Accepted weighted milestones establish progress. Normal task handling records
+phase changes, and deterministic code repairs adopted titles at workflow events
+without another model turn or idle watcher.
+
+Topic-only manual edits are adopted; other manual edits preserve the title and
+pause only synchronization, with one notice and explicit resumption. Display
+changes grant no task, native or permission authority. The
+[naming contract](../clients/workstreams.md) and
+[title procedure](../clients/workstreams-titles.md) own the operational rules.
+
+For the requested main merge, the user explicitly selected Thread Naming and its
+essential dependencies. Main's schema-2 runtime is retained. The 88 unmerged
+ancestor commits, canonical schema 3, other development features and efficiency
+candidates are excluded. Historical records remain read-only under new pins;
+original-runtime reconciliation and the existing approved fresh-authority update
+remain required. Source validation and actual native hook observation are
+reported separately.

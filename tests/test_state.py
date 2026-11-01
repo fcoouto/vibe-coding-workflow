@@ -58,7 +58,7 @@ class StateTests(unittest.TestCase):
 
     def arm(self):
         self.start()
-        self.update(state="active")
+        self.update(state='WORKING')
         self.event()
         self.update(conditions=[self.runnable()])
 
@@ -85,9 +85,15 @@ class StateTests(unittest.TestCase):
         request["stop_proof"] = dict(path=str(path), sha256=hashlib.sha256(raw).hexdigest())
         with self.assertRaises(self.api().StateError):
             self.api().retire_task(self.scope, request | dict(expected_revision=1))
-        with patch.object(self.api(), "runtime_fingerprint", return_value="new-runtime"):
-            result = self.api().retire_task(self.scope, request)
-        self.assertEqual(result["task"]["state"], "cancelled")
+        files = {str(p):p.read_bytes() for p in self.scope.runtime.state_dir.rglob('*') if p.is_file()}
+        with patch.object(self.api(), "runtime_fingerprint", return_value="new-runtime"), \
+                self.assertRaisesRegex(self.api().StateError, 'explicit migration'):
+            self.api().retire_task(self.scope, request)
+        self.assertEqual({str(p):p.read_bytes() for p in self.scope.runtime.state_dir.rglob('*') if p.is_file()}, files)
+        with self.api()._database(self.scope) as db:
+            self.assertEqual(self.api()._task(db, self.api()._scope_id(self.scope), 'codex', 'session', 'task'), historical)
+        result = self.api().retire_task(self.scope, request)
+        self.assertEqual(result["task"]["state"], 'CANCELLED')
         self.assertEqual(result["task"]["pins"], historical["pins"])
         self.assertEqual(self.status()["task"]["task_id"], "new")
         with self.assertRaises(self.api().StateError):
@@ -127,7 +133,7 @@ class StateTests(unittest.TestCase):
 
     def test_start_restart_idempotence_and_pins(self):
         first = self.start()
-        self.assertEqual(first["task"]["state"], "planned")
+        self.assertEqual(first["task"]["state"], 'TRIAGE')
         self.assertEqual(first["task"]["revision"], 1)
         self.assertEqual(first, self.start())
         result = subprocess.run([sys.executable, "-B", "-c",
@@ -151,27 +157,27 @@ class StateTests(unittest.TestCase):
         self.assertEqual(stored["revision"], old["revision"] + 1)
         self.assertTrue(stored["conditions"][0]["continuation"]["revoked"])
         self.assertEqual(self.event("Interrupt").action, "context")
-        self.assertEqual(self.status()["task"]["state"], "planned")
+        self.assertEqual(self.status()["task"]["state"], 'TRIAGE')
 
     def test_cas_transitions_terminal_cancellation_and_immutable_mode(self):
         self.start()
-        for updates in ({"state": "ready"}, {"state": "verifying"}, {"expected_revision": 0}, {"mode": "read-only"}):
+        for updates in ({"state": 'DONE'}, {"state": 'NOT A STATUS'}, {"expected_revision": 0}, {"mode": "read-only"}):
             with self.subTest(updates=updates), self.assertRaises(self.api().StateError):
                 self.update(**updates)
-        self.update(state="active")
-        self.update(state="verifying")
-        self.update(state="active")
-        self.update(state="blocked")
+        self.update(state='WORKING')
+        self.update(state='REVIEW')
+        self.update(state='WORKING')
+        self.update(state='BLOCKED')
         with self.assertRaises(self.api().StateError):
-            self.update(state="active")
-        self.update(state="active", resolution_ref="user:resolved")
-        self.update(state="cancelled")
+            self.update(state='WORKING')
+        self.update(state='WORKING', resolution_ref="user:resolved")
+        self.update(state='CANCELLED')
         with self.assertRaises(self.api().StateError):
-            self.update(state="active")
+            self.update(state='WORKING')
 
     def test_conditions_need_explicit_resolution_and_no_approval_is_inferred(self):
         self.start()
-        self.update(state="active", conditions=[dict(id="decision", kind="decision", action="task",
+        self.update(state='WORKING', conditions=[dict(id="decision", kind="decision", action="task",
                                                      reason="Choose", reference="agent:claims-user-approved")])
         self.assertEqual(self.event().action, "deny")
         self.update(conditions=[])
@@ -250,7 +256,7 @@ class StateTests(unittest.TestCase):
 
     def test_policy_runtime_pin_mismatch_and_lock_fail_closed(self):
         self.start()
-        self.update(state="active")
+        self.update(state='WORKING')
         changed = replace(self.scope, policy_digest="changed")
         self.assertEqual(self.api().process_event(changed, RuntimeEvent("PreToolUse", "codex", "session",
                          self.scope.repository_root, tool_name="apply_patch")).action, "deny")
@@ -265,13 +271,13 @@ class StateTests(unittest.TestCase):
     def test_patch_guard_and_scoped_blockers(self):
         self.assertEqual(self.event().action, "deny")
         self.start(mode="read-only")
-        self.update(state="active")
+        self.update(state='WORKING')
         self.assertEqual(self.event().action, "deny")
         self.assertEqual(self.event(tool_name="Bash").action, "pass")
         self.start(session_id="editable")
         other = RuntimeEvent("PreToolUse", "codex", "editable", self.scope.repository_root, tool_name="apply_patch")
         self.api().update_task(self.scope, dict(client="codex", session_id="editable", task_id="task",
-            scope_ref="request:1", expected_revision=1, state="active", reason="work", reference="user:1"))
+            scope_ref="request:1", expected_revision=1, state='WORKING', reason="work", reference="user:1"))
         self.assertEqual(self.api().process_event(self.scope, other).action, "pass")
         self.update(conditions=[dict(id="patch", kind="blocker", action="patch", reason="Check", reference="ref")])
         self.assertEqual(self.api().process_event(self.scope, other).action, "pass")
@@ -293,7 +299,7 @@ class StateTests(unittest.TestCase):
 
     def test_continuation_requires_observation_and_never_rearms(self):
         self.start()
-        self.update(state="active")
+        self.update(state='WORKING')
         with self.assertRaises(self.api().StateError):
             self.update(conditions=[self.runnable()])
         self.event()
@@ -302,7 +308,7 @@ class StateTests(unittest.TestCase):
         self.assertEqual(self.event("Stop").action, "pass")
         self.update(conditions=[self.runnable(reason="Edited")])
         self.assertEqual(self.event("Stop").action, "pass")
-        self.assertEqual(self.status()["task"]["state"], "active")
+        self.assertEqual(self.status()["task"]["state"], 'WORKING')
 
     def test_stop_suppression_for_uncertainty_budget_state_and_blockers(self):
         self.arm()
@@ -319,11 +325,11 @@ class StateTests(unittest.TestCase):
     def test_interruption_pauses_only_correlated_task_and_cannot_continue(self):
         self.arm()
         self.assertEqual(self.event("Interrupt", turn_id="unknown").action, "context")
-        self.assertEqual(self.status()["task"]["state"], "active")
+        self.assertEqual(self.status()["task"]["state"], 'WORKING')
         self.assertEqual(self.event("Interrupt").action, "pass")
-        self.assertEqual(self.status()["task"]["state"], "blocked")
+        self.assertEqual(self.status()["task"]["state"], 'PAUSED')
         self.assertEqual(self.event("Stop").action, "pass")
-        self.update(state="active", resolution_ref="user:resume")
+        self.update(state='WORKING', resolution_ref="user:resume")
         self.assertEqual(self.event("Stop").action, "pass")
 
     def test_late_old_turns_do_not_pause_or_reassign_new_binding(self):
@@ -331,7 +337,7 @@ class StateTests(unittest.TestCase):
         revision = self.status()["task"]["revision"]
         self.start(task_id="new-task", replaces=dict(task_id="task", expected_revision=revision))
         self.request["task_id"] = "new-task"
-        self.update(state="active")
+        self.update(state='WORKING')
         self.event(turn_id="new-turn", tool_call_id="new-call")
         self.update(conditions=[self.runnable(continuation={"turn_id": "new-turn", "budget": 1})])
         before = self.status()["task"]
@@ -356,12 +362,12 @@ class StateTests(unittest.TestCase):
                 tool_name="Bash", tool_input={"command": "PRIVATE_SENTINEL"}, tool_response=response))
             self.api().process_event(self.scope, event)
         self.assertEqual(self.status()["generation"], 2)
-        self.assertEqual(self.status()["task"]["state"], "active")
+        self.assertEqual(self.status()["task"]["state"], 'WORKING')
         for path in self.scope.runtime.state_dir.iterdir():
             self.assertNotIn(b"PRIVATE_SENTINEL", path.read_bytes())
 
     def test_cancelled_waiting_blocked_and_decisions_suppress_stop(self):
-        for state in ("blocked", "awaiting_user", "cancelled"):
+        for state in ('BLOCKED', 'WAITING', 'CANCELLED'):
             with self.subTest(state=state):
                 self.arm()
                 self.update(state=state)
@@ -446,7 +452,7 @@ class StateTests(unittest.TestCase):
         self.arm()
         self.event("PostToolUse", turn_id="unseen-new-turn", tool_call_id="new-result")
         task = self.status()["task"]
-        self.assertEqual(task["state"], "active")
+        self.assertEqual(task["state"], 'WORKING')
         self.assertEqual(task["turn_id"], "turn")
         self.assertTrue(task["turn_uncertain"])
         self.assertEqual(self.event("Stop").action, "pass")
@@ -462,7 +468,7 @@ class StateTests(unittest.TestCase):
                 self.arm()
                 self.assertEqual(self.event("Stop", turn_id=observed).action, "pass")
                 task = self.status()["task"]
-                self.assertEqual(task["state"], "active")
+                self.assertEqual(task["state"], 'WORKING')
                 self.assertEqual(task["turn_id"], "turn")
                 self.assertTrue(task["turn_uncertain"])
                 self.assertTrue(task["conditions"][0]["continuation"]["revoked"])

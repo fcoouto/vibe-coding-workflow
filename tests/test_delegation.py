@@ -1137,7 +1137,7 @@ class AdmissionTests(unittest.TestCase):
         with state._database(self.scope) as db:
             task = state._task(db, state._scope_id(self.scope), 'codex', 'parent', 'task')
         self.assertEqual(task['evidence']['attempts'], [])
-        self.assertNotEqual(task['state'], 'ready')
+        self.assertNotEqual(task['state'], 'DONE')
 
     def test_never_started_worker_requires_exact_proof_and_cancellation_retains_budget(self):
         self.plan()
@@ -1149,7 +1149,7 @@ class AdmissionTests(unittest.TestCase):
         with self.assertRaises(state.StateError):
             self.api.reconcile_assignment(self.scope, bad)
         task = state.task_status(self.scope, 'codex', 'parent')['task']
-        state.update_task(self.scope, self.identity | dict(expected_revision=task['revision'], state='cancelled',
+        state.update_task(self.scope, self.identity | dict(expected_revision=task['revision'], state='CANCELLED',
             reason='Cancel intent', reference='user:cancel'))
         result = self.api.reconcile_assignment(self.scope, self.worker_reconciliation_request(prepared, outcome='cancelled'))
         self.assertEqual(result['outcome'], 'cancelled')
@@ -1172,7 +1172,7 @@ class AdmissionTests(unittest.TestCase):
         with patch('runtime.adapters.codex.observe_native_worker', side_effect=StartupError('fixture unavailable')):
             result = self.api.observe_assignment(self.scope, request)
         self.assertEqual(result['status'], 'uncertain')
-        no_child = self.worker_reconciliation_request(prepared, outcome='cancelled', proof_delta=dict(launch_state='not-started'))
+        no_child = self.worker_reconciliation_request(prepared, outcome='CANCELLED', proof_delta=dict(launch_state='not-started'))
         with self.assertRaises(state.StateError):
             self.api.reconcile_assignment(self.scope, no_child)
         malformed = self.lifecycle_observation(prepared)
@@ -1199,7 +1199,7 @@ class AdmissionTests(unittest.TestCase):
         def capture(*args):
             candidate = original_capture(*args)
             task = state.task_status(self.scope, 'codex', 'parent')['task']
-            state.update_task(self.scope, self.identity | dict(expected_revision=task['revision'], state='verifying',
+            state.update_task(self.scope, self.identity | dict(expected_revision=task['revision'], state='REVIEW',
                 reason='Intervening coordinator update', reference='fixture:race'))
             return candidate
         with patch.object(evidence, 'capture_candidate', side_effect=capture), self.assertRaises(state.StateError):
@@ -1408,7 +1408,7 @@ class AdmissionTests(unittest.TestCase):
         self.plan()
         prepared = self.prepare()
         task = state.task_status(self.scope, 'codex', 'parent')['task']
-        state.update_task(self.scope, self.identity | dict(expected_revision=task['revision'], state='cancelled',
+        state.update_task(self.scope, self.identity | dict(expected_revision=task['revision'], state='CANCELLED',
             reason='Cancel intent retains ownership', reference='user:cancel'))
         current = state.task_status(self.scope, 'codex', 'parent')['task']
         with self.assertRaisesRegex(state.StateError, 'assignment'):
@@ -2144,7 +2144,7 @@ class Stage3ModelFreeTests(unittest.TestCase):
         self.assertNotEqual(self.record(barrier['id'])['data']['status'], 'settled')
         recovered = self.reconcile_operation(proof)
         self.assertEqual(recovered['outcome'], 'completed')
-        self.assertNotEqual(self.task()['state'], 'ready')
+        self.assertNotEqual(self.task()['state'], 'DONE')
         self.assertNotIn('verification', self.task()['evidence'])
         self.assertNotIn('delegation', self.task())
         self.assertTrue(self.reconcile_operation(proof)['replayed'])
@@ -2429,7 +2429,7 @@ class Stage4NativeReviewTests(unittest.TestCase):
         self.api.reconcile_assignment(self.scope, request)
         next_review = self.prepared(dispatch_id='never-started', retry_of=prepared['attempt_id'], diagnostic=dict(
             prior_attempt_id=prepared['attempt_id'], cause='Contradictory review', change='New attempt', evidence=['fixture:diagnosed']))
-        state.update_task(self.scope, self.request(state='cancelled', reason='User cancelled launch', reference='user:cancel'))
+        state.update_task(self.scope, self.request(state='CANCELLED', reason='User cancelled launch', reference='user:cancel'))
         task = state.task_status(self.scope, 'codex', 'parent')['task']
         with self.assertRaises(state.StateError):
             state.start_task(self.scope, self.identity | dict(task_id='new', mode='editable', decision_ref='user:accepted',
@@ -2604,7 +2604,7 @@ class Stage4NativeReviewTests(unittest.TestCase):
             self.assertEqual([a['id'] for a in attempts], [record['id']])
             self.assertEqual(attempts[0]['ledger_assignment_digest'], record['data']['assignment']['digest'])
             self.assertEqual(attempts[0]['assignment_digest'], hashlib.sha256(request['assignment'].encode()).hexdigest())
-            state.update_task(scope, self.identity | dict(expected_revision=task['revision'], state='blocked',
+            state.update_task(scope, self.identity | dict(expected_revision=task['revision'], state='BLOCKED',
                 reason='Coordinator update after durable admission', reference='user:hold'))
             with state._database(scope) as visible:
                 committed.append(deepcopy(state._task(visible, state._scope_id(scope), 'codex', 'parent')))
@@ -2618,7 +2618,7 @@ class Stage4NativeReviewTests(unittest.TestCase):
         self.assertFalse(replay['launch_admitted'])
         self.assertTrue(replay['replayed'])
         self.assertEqual(replay['task'], committed[0])
-        self.assertEqual(replay['task']['state'], 'blocked')
+        self.assertEqual(replay['task']['state'], 'BLOCKED')
         self.assertEqual(replay['attempt']['id'], committed[0]['evidence']['attempts'][0]['id'])
         self.assertEqual(replay['task']['delegation']['attempts_consumed'], 1)
         self.assertEqual(replay['task']['delegation']['resource_units_consumed'], 1)

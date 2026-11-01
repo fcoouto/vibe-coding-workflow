@@ -131,10 +131,10 @@ class RuntimeTests(unittest.TestCase):
                        mode="editable", decision_ref="user:request")
         code, output = self.task_cli("start", request)
         self.assertEqual(code, 0, output)
-        self.assertEqual(output["task"]["state"], "planned")
+        self.assertEqual(output["task"]["state"], 'TRIAGE')
         self.assertTrue(output["ok"])
         update = {key: request[key] for key in ("client", "session_id", "task_id", "scope_ref")} | dict(
-            expected_revision=1, state="active", reason="Implement request", reference="user:request")
+            expected_revision=1, state='WORKING', reason="Implement request", reference="user:request")
         code, output = self.task_cli("update", update)
         self.assertEqual(code, 0, output)
         self.assertEqual(output["task"]["revision"], 2)
@@ -142,7 +142,7 @@ class RuntimeTests(unittest.TestCase):
         code, output = self.task_cli("status", None, "--client", "codex", "--session", "session-1")
         self.assertEqual(code, 0, output)
         self.assertEqual(output["task"]["task_id"], "cli-task")
-        for invalid in (update, {**update, "state": "ready"}, {**update, "unexpected": True}):
+        for invalid in (update, {**update, "state": 'DONE'}, {**update, "unexpected": True}):
             code, output = self.task_cli("update", invalid)
             self.assertEqual(code, 1, output)
             self.assertFalse(output["ok"])
@@ -199,10 +199,10 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result['attempt']['status'], 'passed')
         code, result = evidence(['verify'], identity | dict(expected_revision=result['task']['revision'], purpose='completion'))
         self.assertTrue(result['verified'], result)
-        self.assertEqual(result['task']['state'], 'ready')
+        self.assertEqual(result['task']['state'], 'DONE')
         code, status = evidence(['status'], None, '--client', 'codex', '--session', 'session-1')
         self.assertEqual(code, 0, status)
-        self.assertEqual(status['task']['state'], 'ready')
+        self.assertEqual(status['task']['state'], 'DONE')
         code, result = evidence(['verify'], identity | dict(expected_revision=status['task']['revision'], purpose='merge-evidence'))
         self.assertEqual(code, 0, result)
         self.assertFalse(result['verified'])
@@ -662,7 +662,7 @@ runpy.run_path(sys.argv[0],run_name='__main__')
         self.assertEqual((fixture.directory/'enrollment.backup').read_bytes(),original)
         self.assertEqual({str(p.relative_to(old_dir)):p.read_bytes() for p in old_dir.rglob('*') if p.is_file()},before)
         code,stopped=invoke('task',['update','--cwd',str(fixture.repo)],identity|dict(expected_revision=started['task']['revision'],
-            state='cancelled',reason='User cancelled unused fresh task',reference='user:cancel'))
+            state='CANCELLED',reason='User cancelled unused fresh task',reference='user:cancel'))
         self.assertEqual(code,0,stopped)
         code,result=onboard('rollback',fixture.observe(request))
         self.assertEqual(code,2,result)
@@ -1002,7 +1002,9 @@ class DelegationLifecycleDispatcherTests(unittest.TestCase):
         with state._database(f.scope,write=True) as db:
             task=state._task(db,state._scope_id(f.scope),'codex','parent')
             task['pins']['runtime_digest']='0'*64
-            state._save(db,state._scope_id(f.scope),task)
+            # Seed a retained incompatible record without using the current mutation authority.
+            db.execute('update tasks set data=? where scope_id=? and client=? and session_id=? and task_id=?',
+                (json.dumps(task,separators=(',',':')),state._scope_id(f.scope),'codex','parent',task['task_id']))
         directory=f.scope.runtime.state_dir
         before={str(p.relative_to(directory)):p.read_bytes() for p in directory.rglob('*') if p.is_file()}
         request=f.identity|dict(expected_revision=task['revision'],dispatch_id='incompatible',claims=[f.path_claim()],

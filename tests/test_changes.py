@@ -825,7 +825,7 @@ class ChangesTests(d3_tests.OnboardingTests):
         identity = {"client": "codex", "session_id": "fixture", "task_id": "stopped", "scope_ref": "fixture"}
         started = state.start_task(scope, dict(identity, mode="editable", decision_ref="fixture"))
         state.update_task(scope, dict(identity, expected_revision=started["task"]["revision"],
-            state="cancelled", reason="writer stopped", reference="fixture:stopped"))
+            state='CANCELLED', reason="writer stopped", reference="fixture:stopped"))
         result = self.changes.apply_plan(self.directory, self.observe(request))
         self.assertEqual(result["exit_code"], 2, result)
         self.assertFalse((self.repo / PROJECT_FILE).exists())

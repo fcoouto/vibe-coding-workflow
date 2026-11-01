@@ -74,7 +74,7 @@ def _task(db, scope, request, revision=True):
     _require(task is not None and all(task[k] == request[k] for k in IDENTITY[:4]), 'Evidence task binding changed')
     state._compatible(scope, task)
     _require(not revision or task['revision'] == request['expected_revision'], 'Task revision conflict')
-    _require(task['state'] != 'cancelled', 'Cancelled tasks cannot collect or verify evidence')
+    _require(task['state'] != 'CANCELLED', 'Cancelled tasks cannot collect or verify evidence')
     return task
 
 
@@ -357,8 +357,8 @@ def plan_evidence(scope, request):
     with state._database(scope, write=True) as db:
         task = _task(db, scope, request)
         task['evidence'] = evidence
-        if task['state'] == 'ready':
-            task['state'] = 'verifying'
+        if task['state'] == 'DONE':
+            task['state'] = 'REVIEW'
         task['revision'] += 1
         state._save(db, state._scope_id(scope), task)
     return dict(ok=True, task=task, candidate_digest=_digest(candidate))
@@ -506,7 +506,7 @@ def _check_response(scope, db, request, record, replayed=True):
 def _check_admission(scope, db, task, check, claims, records):
     from runtime import delegation
     # Exclusive bookkeeping for an unknown read footprint does not grant mutable command effects.
-    _require(task['state'] not in {'blocked', 'awaiting_user'} and
+    _require(task['state'] not in {'BLOCKED','WAITING','PAUSED'} and
         (task['mode'] == 'editable' or check['effects']['kind'] == 'read-only'), 'Task cannot reserve this check')
     _require(len(task['evidence']['attempts']) < MAX_ATTEMPTS, 'Evidence attempt bound reached')
     owner = dict(scope_id=state._scope_id(scope), **{key: task[key] for key in ('client', 'session_id', 'task_id')})
@@ -789,7 +789,7 @@ def prepared_native_review(scope, attempt_id):
         _require(len(found) == 1, 'Native review attempt identity is missing or ambiguous')
         task, attempt = found[0]
         binding = state._task(db, state._scope_id(scope), task['client'], task['session_id'])
-        _require(binding['task_id'] == task['task_id'] and task['state'] != 'cancelled' and attempt['kind'] == 'review'
+        _require(binding['task_id'] == task['task_id'] and task['state'] != 'CANCELLED' and attempt['kind'] == 'review'
                  and attempt['status'] == 'reserved', 'Native review binding is no longer collectable')
         state._compatible(scope, task)
         if 'ledger_assignment_digest' in attempt:
@@ -1005,7 +1005,7 @@ def _blockers(scope, task, plan, candidate, purpose, reuse, security_impact=None
     from runtime import delegation
     blockers = []
     evidence = task['evidence']
-    if task['state'] == 'cancelled':
+    if task['state'] == 'CANCELLED':
         blockers.append('Task is cancelled')
     if any(c['status'] == 'pending' and c['kind'] in {'blocker', 'decision'} for c in task['conditions']):
         blockers.append('Task conditions remain unresolved')
@@ -1158,6 +1158,7 @@ def verify_completion(scope, request):
     from runtime import delegation
     with state._database(scope) as db:
         task = deepcopy(_task(db, scope, request))
+        _require(task['state'] not in {'WAITING','BLOCKED','PAUSED'}, 'Resolve the task status explicitly before verification')
         _require('evidence' in task, 'Evidence plan is missing')
         plan = _read(scope, task['evidence']['plan'])
         generation = db.execute('select generation from checkouts where scope_id=?', (state._scope_id(scope),)).fetchone()[0]
@@ -1215,12 +1216,12 @@ def verify_completion(scope, request):
             verification_ref = _artifact(scope, verification)
         current['evidence']['verification'] = verification_ref
         if not blockers and request['purpose'] == 'completion':
-            current['state'] = 'ready'
+            current['state'] = 'DONE'
             for condition in current['conditions']:
                 if 'continuation' in condition:
                     condition['continuation']['revoked'] = True
-        elif current['state'] == 'ready':
-            current['state'] = 'verifying'
+        elif current['state'] == 'DONE':
+            current['state'] = 'REVIEW'
         current['revision'] += 1
         reconciliation = _artifact(scope, dict(version=1, kind='synchronous-verification', barrier_id=barrier['id'],
             verification=verification_ref, revision=current['revision']))
@@ -1235,7 +1236,7 @@ def revalidate_ready(scope, client, session_id):
     from runtime import delegation
     with state._database(scope) as db:
         task = state._task(db, state._scope_id(scope), client, session_id) if db else None
-        if task is None or task['state'] != 'ready':
+        if task is None or task['state'] != 'DONE':
             return
         state._compatible(scope, task)
         request = {key: task[key] for key in IDENTITY[:4]} | dict(expected_revision=task['revision'])
@@ -1253,12 +1254,12 @@ def revalidate_ready(scope, client, session_id):
         valid = False
     with delegation._reservation_write(scope) as db:
         current = state._task(db, state._scope_id(scope), client, session_id)
-        if current['state'] != 'ready':
+        if current['state'] != 'DONE':
             return
         _require(current['revision'] == request['expected_revision'], 'Ready task revision changed during freshness capture')
         valid = valid and not _ledger_blockers(scope, db, closure) and not _checkout_attempt_blockers(db, scope, current)
         if not valid:
-            current.update(state='verifying', reason='Completion evidence requires freshness verification', reference='evidence:status')
+            current.update(state='REVIEW', reason='Completion evidence requires freshness verification', reference='evidence:status')
             current['revision'] += 1
             state._save(db, state._scope_id(scope), current)
 

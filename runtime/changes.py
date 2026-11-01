@@ -722,7 +722,7 @@ def _legacy_writers(scope):
             for scope_id, client, session, task_id, raw in rows:
                 d3._require(scope_id in checkouts, "Legacy task has no checkout identity")
                 json_object(raw)
-                task = task_state._task(db, scope_id, client, session, task_id)
+                task = task_state._task(db, scope_id, client, session, task_id, historical=True)
                 d3._require("delegation" not in task, "Legacy task contains unsupported delegation ownership state")
                 d3._require(task["pins"]["schema_version"] == 1, "Legacy task pins have an incompatible schema")
                 for field in ("policy_digest", "runtime_digest"):
@@ -781,8 +781,8 @@ def _writers(plan, prior, observation, scope=None):
         rows = db.execute("select t.scope_id,t.client,t.session_id,t.task_id from tasks t join checkouts c on t.scope_id=c.scope_id where c.repository_root=? and c.git_common_dir=?",
                           (str(scope.repository_root), str(scope.git_common_dir))).fetchall()
         for scope_id, client, session, task_id in rows:
-            task = task_state._task(db, scope_id, client, session, task_id)
-            active |= task["mode"] == "editable" and task["state"] != "cancelled"
+            task = task_state._task(db, scope_id, client, session, task_id, historical=True)
+            active |= task["mode"] == "editable" and task["state"] not in {"CANCELLED", "cancelled"}
         from runtime.delegation import _ledger, _held_conflict, _linked_attempt
         affected = [dict(kind="path", key=str(scope.repository_root), mode="write"),
                     dict(kind="git", key=str(scope.git_common_dir), mode="write")]
@@ -792,7 +792,7 @@ def _writers(plan, prior, observation, scope=None):
             if record["data"]["status"] != "settled" and _held_conflict(_claims(affected), record["data"]["claims"]):
                 active = True
         for scope_id, client, session, task_id in db.execute("select scope_id,client,session_id,task_id from tasks"):
-            task = task_state._task(db, scope_id, client, session, task_id)
+            task = task_state._task(db, scope_id, client, session, task_id, historical=True)
             active |= not task.get("retirement") and any(a["status"] in {"reserved", "running", "uncertain"} and
                         _linked_attempt(scope, scope_id, task, a, records) is None
                         for a in task.get("evidence", {}).get("attempts", []))

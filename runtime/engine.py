@@ -59,10 +59,10 @@ def evaluate(event, snapshot):
                 task["turn_id"] = event.turn_id
                 task["turn_uncertain"] = False
         if event.tool_name == "apply_patch":
-            if (not task or task["state"] != "active" or task["mode"] != "editable" or any(
+            if (not task or task["state"] != "WORKING" or task["mode"] != "editable" or any(
                     condition["status"] == "pending" and condition["kind"] in {"blocker", "decision"}
                     for condition in task["conditions"])):
-                result = HookResult(event.kind, "deny", "Patching requires an active editable bound task without applicable blockers")
+                result = HookResult(event.kind, "deny", "Patching requires a WORKING editable bound task without applicable blockers")
     if event.kind in {"PreToolUse", "PostToolUse"}:
         stable = event.turn_id is not None and event.tool_call_id is not None and event.receipt_fingerprint is not None
         previous = snapshot.get("receipt")
@@ -93,11 +93,11 @@ def evaluate(event, snapshot):
     if event.kind == "Interrupt":
         if not current or task.get("turn_uncertain"):
             result = HookResult(event.kind, "context", "Interrupt correlation is uncertain; the bound task was not changed")
-        elif task["state"] != "cancelled":
+        elif task["state"] != "CANCELLED":
             revoke()
-            task.update(state="blocked", reason="Native turn interrupted; task paused", reference="native:Interrupt")
+            task.update(state="PAUSED", reason="Native turn interrupted; task paused", reference="native:Interrupt")
     if event.kind == "Stop" and (current and turn["continuation_consumed"] == 0 and event.stop_hook_active is False and
-            not task.get("turn_uncertain") and task["state"] in {"active", "verifying"} and not any(
+            not task.get("turn_uncertain") and task["state"] in {"WORKING", "REVIEW"} and not any(
                 condition["status"] == "pending" and condition["kind"] in {"decision", "blocker"}
                 for condition in task["conditions"])):
         for condition in task["conditions"]:
