@@ -1,12 +1,12 @@
 # Reduce repeated preparation, handoffs, and monitoring
 
-Status: proposed design; implementation requires user approval.
+Status: design approved in chat on 1 November 2026, including the impact-scan refinements below. Implementation plan review remains pending.
 
 ## Intent and agreed direction
 
 Reduce avoidable work during a typical coding task with implementation and independent review. Preserve the full Toolkit workflow, acceptance checks, security, ownership, permissions, and the user's model/provider/reasoning choices.
 
-The user selected shared rules plus support in existing runtime paths over instructions alone. They requested concrete mechanisms and protection against stale facts. They have endorsed the direction, not this implementation design. The reported anecdote identifies possible waste; it is not a measurement of this plugin.
+The user selected shared rules plus support in existing runtime paths over instructions alone. They requested concrete mechanisms and protection against stale facts, reviewed the repository-wide impact assessment, and agreed with the design. The reported anecdote identifies possible waste; it is not a measurement of this plugin.
 
 ## Approaches
 
@@ -19,9 +19,18 @@ No additional coordinator, generic tool interception layer, service, dashboard, 
 
 The initial path is direct implementation plus required native independent review. Existing external-worker status is included as another existing output surface; this work never enables an external route or changes its approved task scope. Council topology, model selection, billing, and recovery semantics remain unchanged.
 
-Enforcement applies only to plugin-owned calls and state. Shared instructions cover ordinary shell and connector use; the plugin cannot prevent arbitrary agent calls outside its managed paths. This boundary is a proposed scope choice, not an assertion of universal enforcement.
+Enforcement applies only to plugin-owned calls and state. Shared instructions cover ordinary shell and connector use; the plugin cannot prevent arbitrary agent calls outside its managed paths.
 
 Routine successful reuse remains quiet. Rechecking reasons are retained in the existing evidence and surfaced when they change the next action or block progress. This is the author's proposed default because the user did not select a notification preference.
+
+### Impact-scan refinements
+
+- Preserve existing detailed consumers and meanings. Exact bytes remain protected where evidence is digest-bound; this does not freeze every display response forever. In particular, compact external status must not rewrite `result.json`, which Council authenticates by digest.
+- Ordinary `state.task_status` also revalidates ready tasks. Keep it and evidence status authoritative; do not use either as a cheap polling substitute. Compact delegation output reduces exposed context but does not promise to eliminate the existing bounded ledger-validation work.
+- Reuse existing failed-refresh suppression and prerequisite checks. OpenRouter already rejects a missing configured executable before launch. Do not add persistence around that cheap check just to exercise a new mechanism.
+- Additional failure persistence is conditional on an uncovered reproducible managed failure and a credible avoided cost. A controlled fixture is enough to establish the problem; neither a production incident nor a separate savings benchmark is required. If no such gap is demonstrated, preserve current mechanisms and record that outcome.
+- Test affected interfaces and consumers. An import relationship alone does not require full client requalification or changes to Council, observability, storage, onboarding, or Claude. Extend storage/retention only if a concrete new record requires it.
+- Policy/runtime content changes affect accepted enrollment/task pins. Handle safe transition through the existing update/recovery workflow when installing or activating the changed package, not during each local development step. No automatic repinning or new recurring approval gate is introduced. Future updates to pinned content can require this again; a version-label change alone does not.
 
 ## Existing implementation
 
@@ -71,11 +80,11 @@ Cheap local identity comparisons may detect changes; they cannot replace mandato
 
 Repair verified invocation/configuration defects in their existing owner so subsequent calls use the corrected definition. Updating a lesson without changing the faulty invocation is not a completed repair.
 
-For an unresolved deterministic setup/invocation failure, extend the affected owner's existing private control/evidence records with a bounded failure observation. Identify the operation and scope, relevant input/configuration/executable dependencies, original evidence/time, classification, and permitted recheck trigger. No credentials, raw remote response, or unbounded log enters the lookup key or summary.
+If the impact-scan criterion demonstrates a gap for an unresolved deterministic setup/invocation failure, extend the affected owner's existing private control/evidence records with a bounded failure observation. Identify the operation and scope, relevant input/configuration/executable dependencies, original evidence/time, classification, and permitted recheck trigger. No credentials, raw remote response, or unbounded log enters the lookup key or summary.
 
 Before the same plugin-managed operation launches again, compare that failure's dependencies. If unchanged, return the retained blocker and evidence reference without relaunching. Suppression is not success and must not mark a required check inapplicable. A relevant change, later authorized maintenance, or explicit retry permits one bounded recheck under existing attempt/deadline/ownership rules. Reuse existing owner locking to prevent simultaneous callers from multiplying that recheck; never reset task budgets or release uncertain workers.
 
-The first implementation must select one concrete deterministic managed invocation failure and its owner during planning. A locally missing configured executable is the proposed case. This is a narrow extension, not a general classifier for arbitrary tool errors. Normal failing tests, ambiguous failures, authentication errors, transient network/service errors, and unknown process outcomes retain their existing treatment. Existing guidance suppression remains its own working implementation.
+Use existing failed-guidance-refresh and missing-executable cases to verify the covered boundaries first. No additional uncovered failure has yet been demonstrated. Any justified extension must name its concrete operation and owner before implementation; it is not a general classifier for arbitrary tool errors. Normal failing tests, ambiguous failures, authentication errors, transient network/service errors, and unknown process outcomes retain their existing treatment. Existing guidance suppression remains its own working implementation.
 
 Store at most the current applicable failure per selected operation/scope, with its original evidence reference. Superseded audit evidence follows existing retention. Missing/corrupt state never establishes passing evidence or turns a required check into an optional one. A repair check that cannot be recorded does not claim durable repair; preserve execution/ownership uncertainty as appropriate.
 
@@ -99,12 +108,12 @@ Use focused behavioral tests and representative instruction walks:
 
 1. Compact output exposes state, failures, blockers, uncertainty, and retrieval references without full reports/logs; detailed callers retain their existing response.
 2. Progress inspection neither runs checks nor grants readiness, changes ownership, launches workers, or makes model/network calls.
-3. Repeated identical deterministic setup failure produces one attempted operation and retained blockers. Relevant dependency change or explicit retry permits a bounded recheck; concurrent rechecks do not multiply launches.
+3. Existing failed-refresh suppression prevents duplicate acquisition; prerequisite checks prevent launching a missing executable. For any justified additional failure-persistence extension, repeated identical failure produces one attempted operation and retained blockers; a relevant dependency change or explicit retry permits a bounded recheck, with concurrent rechecks coalesced.
 4. Source/configuration changes invalidate affected facts. Contradictory evidence wins over historical success. Missing evidence and volatile permissions cannot become cached authorization.
 5. An implementation-and-review walk loads required procedures, avoids unrelated setup/Council material, preserves independent review, and performs authoritative completion verification.
 6. Existing negative tests continue to reject stale candidates, forged results, and uncertain stopped ownership. Package validation remains `python3 -B scripts/validate.py`.
 
-After implementation checks, compare one baseline/candidate coding task from equivalent isolated starting states with the same model/effort, permissions, acceptance criteria, and required review. Include a verified deterministic setup defect so recurrence behavior can be observed across invocations. Use native execution only within available authorization; no paid/external benchmark is implied.
+After implementation checks, compare one baseline/candidate coding task from equivalent isolated starting states with the same model/effort, permissions, acceptance criteria, and required review. Exercise an existing controlled failure case to verify that suppression/recovery is preserved; do not claim a new failure-related saving when both arms already avoid the repeated operation. Use native execution only within available authorization; no paid/external benchmark is implied.
 
 Measure repeated context/log reads, response bytes, launches/retries, elapsed time, acceptance outcome, and attributable tokens if exposed. Count preparation, review, and verification overhead. Compare unchanged quality first, then observed overhead; do not infer tokens from bytes or claim general savings from one run. Keep test artifacts and evaluation notes under existing owners, without a permanent telemetry subsystem.
 
@@ -114,4 +123,4 @@ Completion requires current package/check evidence and an explicit report of act
 
 The builder chooses exact compact-view syntax, bounded field sizes, test placement, and the smallest compatible extension of the selected failure owner's record. Existing CLI schemas and runtime state migrations must remain readable or have an explicit compatibility transition; do not silently change old meanings. If the selected owner lacks a safe existing persistence/locking boundary, return that design issue instead of introducing a general failure registry.
 
-The user must approve this design before implementation planning. No implementation, runtime installation, configuration change, external execution, release archive, or measured-savings claim is authorized by this document alone.
+Proceed to implementation planning under the approved design. Review the plan and select execution method before implementation, as required by the invoked Writing Plans workflow. Installation/activation remains a separate update operation within its applicable authorization; this document alone authorizes no configuration changes, external execution, release archives, or measured-savings claim.
