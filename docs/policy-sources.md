@@ -77,12 +77,19 @@ material task advantages, reasoning-volume costs, unknown evidence and unchanged
 Frontier/Free behavior. Free stays disabled; comparative evaluation stays deferred.
 
 The user-approved [advisory token correction](superpowers/plans/2026-11-01-council-advisory-tokens.md)
-keeps token targets in prompts, derives API ceilings from endpoint capacity and
+keeps token targets in prompts, derives repository API ceilings from endpoint capacity and
 retains maximum reasoning. Protocol defines these separate fields; procedure
 defines acceptance; recovery defines the source-backed capacity correction within
 existing attempts and deadlines. Direct/worker/recovery fixtures cover advisory
 targets, actual ceilings, unchanged reasoning and bounded corrections. Free stays
 disabled and comparative evaluation remains deferred.
+
+The user-approved [optional direct output ceiling](superpowers/plans/2026-11-01-council-optional-output-ceiling.md)
+uses router/provider defaults for direct text requests while retaining explicit
+source-backed capacity corrections. The direct transport contract defines that
+choice; request validation and live-shaped worker fixtures verify omission,
+invalid override rejection, advisory targets and unchanged maximum reasoning.
+Free remains disabled. Repository output settings and recovery bounds are preserved.
 
 The user-approved [Council reliability amendment](superpowers/specs/2026-10-29-council-design.md#reliability-amendment-30-october-2026)
 adds bounded local recovery and useful reduced-panel delivery. Its contract coverage

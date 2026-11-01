@@ -320,10 +320,11 @@ def direct_payload(brief, workspace):
     _verify_council_copy(workspace, manifest)
     inputs = {name: council_snapshot.onboarding._read_file(workspace / name, council_snapshot.MAX_FILE).decode('utf-8')
               for name in sorted(manifest['files'])}
-    payload = dict(model=brief['model'], stream=False, max_tokens=council_output_capacity(brief),
+    payload = dict(model=brief['model'], stream=False,
         provider=dict(only=[brief['provider']], allow_fallbacks=False, require_parameters=True),
         messages=[dict(role='user', content=brief['objective'] + '\n\nApproved evidence and phase reports (JSON):\n'
             + json.dumps(inputs, ensure_ascii=False, separators=(',', ':')))])
+    if 'output_capacity' in brief['council']: payload['max_tokens'] = council_output_capacity(brief)
     if 'efforts' in brief['capabilities']['reasoning']: payload['reasoning'] = dict(effort=brief['effort'])
     return payload
 

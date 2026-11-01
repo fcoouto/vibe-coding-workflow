@@ -301,8 +301,9 @@ def correct_candidate(run, phase, member, correction):
             c._require(failure['category'] == 'context' or failure['category'] == 'incomplete_output'
                        and failure.get('terminal_reason') == 'length', 'capacity_failure_required')
             seat = candidate['seat']
-            capacity = value['recovery'][member].get('active_correction', {}).get('max_output_tokens',
-                min(seat['capabilities']['max_output_tokens'], seat['capabilities']['context_length']))
+            capacity = value['recovery'][member].get('active_correction', {}).get('max_output_tokens')
+            if capacity is None and value['mode'] != 'text':
+                capacity = min(seat['capabilities']['max_output_tokens'], seat['capabilities']['context_length'])
             c._require(fix['max_output_tokens'] != capacity, 'unchanged_correction')
         if fix['kind'] == 'fresh_connection':
             c._require(failure['category'] in ('service', 'rate_limit', 'transport', 'unknown', 'interrupted'), 'transport_correction_required')

@@ -61,8 +61,9 @@ total requires an explicit request before preparation and `timeout_seconds`;
 positive integer phase allowances must total it. Cumulative deadlines start at
 preparation; early advancement and restart never renew time. Each external call
 is at most 1200 seconds. Timing discontinuity blocks new work. Choose finite per-model input/output token targets as advisory prompt guidance;
-exceeding them never rejects an answer or triggers fallback. Size actual API
-ceilings from observed endpoint capacity, independently of those targets. Keep
+exceeding them never rejects an answer or triggers fallback. Follow the
+[direct output contract](protocol.md#direct-text-transport) for text requests;
+size repository API ceilings from observed endpoint capacity, independently of targets. Keep
 maximum reasoning and original step/time/spending bounds.
 
 Before dispatch, show task priorities, roster/chair and per-model fit, requested

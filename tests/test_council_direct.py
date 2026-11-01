@@ -147,6 +147,19 @@ class DirectTests(CouncilCase):
                 self.assertEqual(result['failure']['category'], 'invalid_request')
         self.assertEqual(len(self.calls), 1)
 
+    def test_output_ceiling_is_optional_but_explicit_values_are_validated(self):
+        payload = dict(self.payload)
+        payload.pop('max_tokens')
+        self.assertIsNone(self.send(payload)['failure'])
+        self.assertNotIn('max_tokens', self.calls[0][2])
+        self.assertEqual(self.calls[0][2]['reasoning'], {'effort': 'max'})
+        for value in (None, True, 0, 1.5, '8192'):
+            with self.subTest(value=value):
+                with patch.object(direct.onboarding, '_read_file', side_effect=AssertionError('must not read auth')):
+                    result = self.send(dict(payload, max_tokens=value))
+                self.assertEqual(result['failure']['category'], 'invalid_request')
+        self.assertEqual(len(self.calls), 1)
+
     def test_free_routes_block_direct_send_and_main_before_auth_or_network(self):
         import subprocess
         for model in ('vendor/model:free', 'openrouter/free'):
@@ -538,14 +551,14 @@ class DirectTests(CouncilCase):
             self.prepare()
         self.assertEqual(self.calls, [])
 
-    def test_text_allowances_are_advisory_and_wire_uses_endpoint_capacity(self):
+    def test_text_allowances_are_advisory_without_a_default_output_ceiling(self):
         self.request['question'] = 'x' * 12000
         for seat in self.request['roster'].values():
             seat.update(input_tokens=1, output_tokens=1)
         result = self.execute(self.prepare())
         self.assertEqual(result['state'], 'awaiting_verification')
         payload = self.calls[0][2]
-        self.assertEqual(payload['max_tokens'], 8000)
+        self.assertNotIn('max_tokens', payload)
         self.assertEqual(payload['reasoning'], {'effort': 'max'})
         self.assertIn('advisory', payload['messages'][0]['content'])
         packet = council.packet(self.run, 'investigate', 'member-one')
@@ -555,7 +568,7 @@ class DirectTests(CouncilCase):
         self.request['roster']['member-two'].update(input_tokens=50000, output_tokens=50000)
         result = self.execute(self.prepare())
         self.assertEqual(result['state'], 'awaiting_verification')
-        self.assertEqual(self.calls[0][2]['max_tokens'], 8000)
+        self.assertNotIn('max_tokens', self.calls[0][2])
 
     def test_structured_context_failure_remains_distinct_from_bad_request(self):
         self.http_status = 400
@@ -584,5 +597,27 @@ class DirectTests(CouncilCase):
         self.http_status, self.reply = 200, complete
         result = self.execute(Path(packet['worker_run']))
         self.assertEqual(result['state'], 'awaiting_verification')
-        self.assertEqual([call[2]['max_tokens'] for call in self.calls], [8000, 6000])
+        self.assertEqual([call[2].get('max_tokens') for call in self.calls], [None, 6000])
+        self.assertTrue(all(call[2]['reasoning'] == {'effort': 'max'} for call in self.calls))
+
+    def test_length_failure_can_set_explicit_endpoint_capacity(self):
+        self.request.update(recovery=True, fallbacks={member: [] for member in council.GROUP_MEMBERS})
+        complete = copy.deepcopy(self.reply)
+        self.reply['choices'][0] = dict(finish_reason='length', message=dict(content='Partial answer'))
+        first = self.execute(self.prepare())
+        self.assertEqual(first['failure']['category'], 'incomplete_output')
+        self.assertEqual(first['failure']['terminal_reason'], 'length')
+        self.assertNotIn('max_tokens', self.calls[0][2])
+        opened = council.investigate_failure(self.run, 'investigate', 'member-two')
+        council.record_investigation(self.run, 'investigate', 'member-two', dict(
+            candidate_id=opened['candidate_id'], failure_id=opened['failure_id'], searches=0, reads=1,
+            sources=[dict(url='https://docs.example.org/default-output', checked_at=time.time(), authority='official',
+                          applicability='Provider default truncated; explicit observed capacity permits more output')],
+            corrections=[dict(kind='output_capacity', source=0, max_output_tokens=8000)]))
+        council.correct_candidate(self.run, 'investigate', 'member-two', 0)
+        packet = council.packet(self.run, 'investigate', 'member-two')
+        self.reply = complete
+        result = self.execute(Path(packet['worker_run']))
+        self.assertEqual(result['state'], 'awaiting_verification')
+        self.assertEqual([call[2].get('max_tokens') for call in self.calls], [None, 8000])
         self.assertTrue(all(call[2]['reasoning'] == {'effort': 'max'} for call in self.calls))

@@ -29,13 +29,14 @@ def _number(value):
 
 
 def _payload(payload):
-    required = {'model', 'messages', 'provider', 'max_tokens', 'stream'}
+    required = {'model', 'messages', 'provider', 'stream'}
     if (not isinstance(payload, dict) or not required <= set(payload)
-            or set(payload) - required - {'reasoning'}
+            or set(payload) - required - {'reasoning', 'max_tokens'}
             or not isinstance(payload['model'], str) or not re.fullmatch(r'[\w.-]+/[\w./:-]+', payload['model'])
             or payload['model'].lower().endswith(':free') or payload['model'].lower() == 'openrouter/free'
-            or payload['stream'] is not False or type(payload['max_tokens']) is not int
-            or not 1 <= payload['max_tokens'] <= 2**31 - 1):
+            or payload['stream'] is not False
+            or ('max_tokens' in payload and (type(payload['max_tokens']) is not int
+                or not 1 <= payload['max_tokens'] <= 2**31 - 1))):
         raise ValueError()
     provider = payload['provider']
     if (not isinstance(provider, dict) or set(provider) != {'only', 'allow_fallbacks', 'require_parameters'}

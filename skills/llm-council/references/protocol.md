@@ -100,7 +100,9 @@ self-reports. Each mode rejects the other's qualification.
 The owned worker child `scripts/council_direct.py` sends one nonstreaming request
 to fixed `https://openrouter.ai/api/v1/chat/completions`, with one fresh user
 message, pinned model/provider, `allow_fallbacks: false`, `require_parameters: true`,
-supported reasoning and finite output. It accepts no tools, history, prior response
+supported reasoning. Omit `max_tokens` by default, using router/provider output
+defaults; a source-backed `output_capacity` correction supplies an explicit ceiling.
+Defaults do not guarantee complete output. It accepts no tools, history, prior response
 ID, endpoint override or redirects and adds no HTTP retry layer. Only approved
 question/constraints, exact evidence, shared research and applicable anonymous
 phase packets enter the payload; local storage/authentication paths stay private.
