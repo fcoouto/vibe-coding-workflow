@@ -55,6 +55,27 @@ historical Free sessions or apply factual filtering to current reports.
 
 ### Council amendments
 
+The user-approved Council-only discovery update reuses the existing proposal
+metadata cache and leaves Delegation unchanged. Selection owns task-relevant
+benchmark discovery, exact-route price evidence, comparison gaps and one bounded
+publisher-page lookup per roster or replacement selection. Existing refresh ownership and
+session bounds remain authoritative. The official [benchmark API](https://openrouter.ai/docs/client-sdks/typescript/sdks/benchmarks/README)
+and [GPQA methodology](https://openrouter.ai/benchmarks/gpqa-diamond), checked on
+1 November 2026, support source/task filtering and the distinction between
+scientific benchmark results, default routing and provider-pinned observations.
+The [implementation plan](superpowers/plans/2026-11-01-council-cost-discovery.md)
+and [validation](council-validation.md#council-cost-discovery-1-november-2026)
+record coverage and limits. No shared discovery workflow or new cache is added.
+
+The user-approved [Balanced cost-benefit rule](superpowers/plans/2026-11-01-council-balanced-cost-benefit.md)
+prioritizes capable, better-value runtime choices and requires a clear task-specific
+advantage for a large premium. Selection defines the rule once for initial seats,
+fallback ranking and replacements, preserving maximum reasoning, vendor diversity
+and advisory token targets. Existing selection notes retain the evidence and cost
+uncertainty. Representative instruction checks cover small gains/large premiums,
+material task advantages, reasoning-volume costs, unknown evidence and unchanged
+Frontier/Free behavior. Free stays disabled; comparative evaluation stays deferred.
+
 The user-approved [advisory token correction](superpowers/plans/2026-11-01-council-advisory-tokens.md)
 keeps token targets in prompts, derives API ceilings from endpoint capacity and
 retains maximum reasoning. Protocol defines these separate fields; procedure
