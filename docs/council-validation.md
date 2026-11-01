@@ -4,6 +4,33 @@ Current contract checked on **1 November 2026**, Europe/Amsterdam. Council is a
 user extension with [source coverage](policy-sources.md). Validation authorizes no
 run, route activation, installation or paid inference.
 
+## Balanced cost-benefit, 1 November 2026
+
+The [approved instruction update](superpowers/plans/2026-11-01-council-balanced-cost-benefit.md)
+uses the coordinator's existing selection notes for better-value initial and
+replacement choices. The rule lives once in selection; the group entry and
+task-aware replacement instructions load it when applicable. The vendor rule
+applies each group's priorities within developers. Frontier, maximum reasoning,
+advisory token targets and all runtime safeguards retain their existing contracts.
+
+These representative checks use synthetic candidate metadata, not a new benchmark
+source or external-model comparison:
+
+| Scenario | Required decision |
+| --- | --- |
+| Balanced life question; two same-developer, otherwise eligible candidates score 95 vs 95.2 on a comparable task-relevant benchmark and cost USD 0.04 vs 0.80 per session | Prefer the cheaper capable model; the small gain does not justify the large premium. Preserve maximum reasoning and vendor diversity. |
+| Balanced Python task; a cheaper candidate has substantially weaker relevant correctness evidence, while the premium candidate has a demonstrated material task advantage | The premium may be justified. Explain the concrete capability benefit and price evidence; do not substitute a tiny general benchmark gain for task fit. |
+| Comparable capability; one candidate has cheaper token rates but much larger evidenced reasoning volume | Compare likely billed input/output across both rounds, counting reasoning once. Prefer better supported total value and disclose estimation limits. |
+| Missing comparable usage, one unrelated past run, or a benchmark's cost/question | Keep expected usage uncertain. Do not assume zero, transfer unrelated costs or invent a precise Council estimate. Native subscription usage stays separate from OpenRouter spend. |
+| Balanced fallback or chair replacement; cheaper candidates constrained by vendor eligibility | Load task-aware selection and its cost-benefit link, preserve the approved shortlist and session bounds, and disclose the constraint without inventing a capability advantage. |
+| Frontier selection or new Free request | Keep Frontier's capability-first priority. Block Free without paid substitution. Comparative evaluation stays deferred. |
+
+Independent native Sol/high review traced the loading paths and applied six
+holdout scenarios with different synthetic values; all decisions matched these
+requirements, with no actionable findings. Package and skill validation passed;
+the entry point remains 113 words. This is instruction-contract validation, not
+live model qualification or measured savings. No paid comparison was run.
+
 ## Advisory token targets, 1 November 2026
 
 The [approved correction](superpowers/plans/2026-11-01-council-advisory-tokens.md)
