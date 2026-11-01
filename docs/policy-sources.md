@@ -39,11 +39,11 @@ no new upstream fetch is required for these approved local replacements.
 | Requirement | Local contract and proof |
 | --- | --- |
 | Explicit LLM Council invocation; Frontier/Balanced runtime task-aware selection and replacements, group-native participant/chair, maximum supported effort, vendor diversity/reuse, private selection notes | Entry, procedure, selection and Codex controls; life/Python instruction walks and topology/eligibility tests |
-| Free unavailable at preparation/every inference entry; no silent paid substitution; historical status/cancel/operational settlement with no inference or verdict mutation | Procedure/selection, protocol history section; Free/history walk and runtime/worker guards |
+| Text-only Free with three distinct zero-rate variants and an external chair; no native/paid fallback; historical status/cancel/operational settlement without inference or verdict mutation | Procedure/selection, protocol history section; Free/history walk and runtime/worker guards |
 | Required fixed `text`/`repository` mode, internal `peer-review` flow; question-only text and no checkout evidence writes | Procedure and protocol preparation fields; flow/snapshot/direct tests |
 | Tool-free stateless direct Chat Completions with owned child, fixed destination, pinned route, disabled fallback, required parameters, private saved API record, no key/proxy override/redirect/HTTP retry | Protocol direct transport; direct fake-endpoint/owned-child tests. Official [routing](https://openrouter.ai/docs/guides/routing/provider-selection), [reasoning](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens) and [pinned auth source](https://github.com/anomalyco/opencode/blob/v1.19.5/packages/opencode/src/auth/index.ts) were checked during approved design authoring. |
 | Text API/qualification/one-request schema; repository pinned binary/tools/API compatibility; retained setup references and qualified boundary | Selection mode/tool sections, protocol seat schema and management prerequisites; strict cross-mode admission tests |
-| All usable reports unchanged through one anonymous critique and fresh native chair; missing rankings/refusal/disagreement preserved; technical-only rejection and recovery | Procedure phase/admission contract, protocol failure schema, Codex receipts and recovery; disputed-claim preservation and technical-failure tests |
+| All usable reports unchanged through one anonymous critique and fresh chair of the selected group's kind; missing rankings/refusal/disagreement preserved; technical-only rejection and recovery | Procedure phase/admission contract, protocol failure schema, Codex receipts and recovery; disputed-claim preservation and technical-failure tests |
 | Original budgets, size bounds and eight-file phase reserve; consent, immutable snapshots, anonymity, all-owner stop/cancel, private bounded raw audit, nullable billing/upstream unknown | Procedure, protocol, recovery and Codex controls; six-module regression and package checks |
 | Direct attempt/request freshness versus actual repository sessions; historical schema/audit readability; no invented model/effort/cost observations | Protocol verification/history/accounting, Codex receipts; direct/session/tamper/history fixtures |
 
@@ -54,6 +54,14 @@ the earlier reviewed requirements and observations, not permission to launch
 historical Free sessions or apply factual filtering to current reports.
 
 ### Council amendments
+
+The user-approved Free text port adopts the tested runtime and explicit enabled-
+thinking support from qualification commits `db066b8` and `6204f73`, retaining the
+merged native prompt and timing behavior. Selection keeps Balanced recommended,
+discovers Free candidates at runtime and discloses missing control/benchmark
+evidence. Protocol and runtime enforce text-only, zero-rate `:free` routes and
+external-only replacement/chair topology within the original 1200-second budget.
+Current integration proof is recorded in [validation](council-validation.md#free-text-integration--1-november-2026).
 
 The user-approved [latency plan](superpowers/plans/2026-11-01-council-latency.md)
 preserves maximum reasoning, the 1200-second cumulative budget and disabled Free.

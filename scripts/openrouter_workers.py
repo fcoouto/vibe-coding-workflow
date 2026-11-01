@@ -33,7 +33,8 @@ PREREQUISITE_REASONS = BUSY_REASONS | {
     'openrouter_scope_changed', 'openrouter_configuration_unavailable', 'openrouter_storage_or_scope_unavailable',
     'council_runtime_qualification_mismatch', 'cancelled', 'phase_already_closed',
     'deadline_exhausted', 'timing_uncertain', 'frozen_evidence_changed',
-    'free_council_temporarily_disabled', 'historical_council_read_only',
+    'free_council_temporarily_disabled', 'free_council_zero_rate_variant_required',
+    'free_text_qualification_required', 'historical_council_read_only',
     'unsafe_worker_preparation_directory', 'output_limit', 'council_report_limit',
     'invalid_event', 'invalid_part', 'unsupported_event', 'unexpected_tool', 'session_mismatch',
     'malformed_event', 'unterminated_event'}
@@ -90,7 +91,7 @@ def _validate_brief(brief, council=False):
             raise ValueError('invalid_brief_value: ' + key + ' must be nonempty text within 16000 characters')
     if not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,63}', brief['task_id']): raise ValueError('invalid_task_id')
     if brief['role'] not in ROLES: raise ValueError('invalid_role')
-    if brief['effort'] not in (('minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'default') if council else ('low', 'medium', 'high', 'max')): raise ValueError('invalid_effort')
+    if brief['effort'] not in (('minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'default', 'enabled') if council else ('low', 'medium', 'high', 'max')): raise ValueError('invalid_effort')
     uuid.UUID(brief['coordinator_chat_id'])
     if not re.fullmatch(r'[\w.-]+/[\w./:-]+', brief['model']): raise ValueError('invalid_model')
     if not re.fullmatch(r'[\w./:-]+', brief['provider']): raise ValueError('invalid_provider')
@@ -216,7 +217,11 @@ def _council_contract(brief):
         if (not isinstance(efforts, list) or not efforts or any(e not in order for e in efforts)
                 or brief['effort'] != max(efforts, key=order.index)):
             raise ValueError('council_maximum_effort_required')
+    elif set(reasoning) == {'enabled'}:
+        if not direct or reasoning['enabled'] is not True or brief['effort'] != 'enabled':
+            raise ValueError('invalid_council_reasoning')
     elif set(reasoning) == {'default_enabled'}:
+        if direct: raise ValueError('council_maximum_reasoning_unverified')
         if (not grouped or council['group'] != 'Free' or reasoning['default_enabled'] is not True
                 or brief['effort'] != 'default'):
             raise ValueError('invalid_council_reasoning')
@@ -326,6 +331,7 @@ def direct_payload(brief, workspace):
             + json.dumps(inputs, ensure_ascii=False, separators=(',', ':')))])
     if 'output_capacity' in brief['council']: payload['max_tokens'] = council_output_capacity(brief)
     if 'efforts' in brief['capabilities']['reasoning']: payload['reasoning'] = dict(effort=brief['effort'])
+    elif 'enabled' in brief['capabilities']['reasoning']: payload['reasoning'] = dict(enabled=True)
     return payload
 
 

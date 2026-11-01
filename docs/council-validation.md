@@ -1,5 +1,31 @@
 # Council validation
 
+## Free text integration — 1 November 2026
+
+Free is available for text-only Council. Runtime selection uses three distinct
+zero-rate `:free` variants, pinned providers and an external chair, with no native
+or paid substitution. Balanced remains recommended. The standard 1200-second
+600/360/240 budget and omitted default `max_tokens` are unchanged.
+
+The port retains the previously observed two complete Free runs: fourteen terminal
+requests, zero reported/audited external inference cost, and nine passing Python
+checks. Those observations cover the selected models/routes and supplied questions;
+their answers still contained unsupported claims. They establish bounded execution
+evidence, not equal capability across groups or future provider availability.
+
+All 260 Council/worker regressions passed. Controlled integration exercises a
+full seven-request external-only Council,
+fresh chair identity, enabled-only thinking through worker preparation and the
+direct requester, zero-rate initial/fallback guards, repository rejection and
+historical read-only handling. Selectable reasoning uses its greatest supported
+effort; documented on/off thinking is explicitly enabled without claiming a hidden
+maximum. Native prompt generation and local timing remain covered separately.
+
+No additional live inference or account/settings change accompanies this port.
+Package checks and controlled endpoint runs remain distinct from the retained
+live provider qualification. Native forwarding limitations in the latency record
+below remain open for paid groups.
+
 ## Coordination latency — 1 November 2026
 
 The runtime supplies complete native text prompts and their SHA-256 from verified

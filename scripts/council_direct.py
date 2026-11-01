@@ -33,7 +33,7 @@ def _payload(payload):
     if (not isinstance(payload, dict) or not required <= set(payload)
             or set(payload) - required - {'reasoning', 'max_tokens'}
             or not isinstance(payload['model'], str) or not re.fullmatch(r'[\w.-]+/[\w./:-]+', payload['model'])
-            or payload['model'].lower().endswith(':free') or payload['model'].lower() == 'openrouter/free'
+            or payload['model'].lower() == 'openrouter/free'
             or payload['stream'] is not False
             or ('max_tokens' in payload and (type(payload['max_tokens']) is not int
                 or not 1 <= payload['max_tokens'] <= 2**31 - 1))):
@@ -44,10 +44,13 @@ def _payload(payload):
             or not isinstance(provider['only'], list) or len(provider['only']) != 1
             or not isinstance(provider['only'][0], str) or not re.fullmatch(r'[\w./:-]+', provider['only'][0])):
         raise ValueError()
-    if 'reasoning' in payload and (not isinstance(payload['reasoning'], dict)
-            or set(payload['reasoning']) != {'effort'}
-            or payload['reasoning']['effort'] not in ('minimal', 'low', 'medium', 'high', 'xhigh', 'max')):
-        raise ValueError()
+    if 'reasoning' in payload:
+        reasoning = payload['reasoning']
+        if not isinstance(reasoning, dict): raise ValueError()
+        if set(reasoning) == {'enabled'}:
+            if reasoning['enabled'] is not True: raise ValueError()
+        elif set(reasoning) != {'effort'} or reasoning['effort'] not in ('minimal', 'low', 'medium', 'high', 'xhigh', 'max'):
+            raise ValueError()
     messages = payload['messages']
     if (not isinstance(messages, list) or len(messages) != 1
             or any(not isinstance(item, dict) or set(item) != {'role', 'content'}

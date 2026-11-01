@@ -148,7 +148,7 @@ class CouncilRecoveryTests(CouncilCase):
                     if historical: value.pop('flow', None)
                     else: value.update(flow='peer-review', mode='repository', group='Free')
                     council._save(self.run, value)
-                expected = 'historical_council_read_only' if historical else 'free_council_temporarily_disabled'
+                expected = 'historical_council_read_only' if historical else 'free_council_zero_rate_variant_required'
                 for operation in (
                         lambda: council.investigate_failure(self.run, 'investigate', 'member-one'),
                         lambda: council.record_investigation(self.run, 'investigate', 'member-one', {}),
@@ -414,7 +414,7 @@ class CouncilRecoveryTests(CouncilCase):
             value['group'] = 'Free'
             council._save(self.run, value)
         for seat in (self.seat(4), self.native_seat()):
-            with self.assertRaisesRegex(ValueError, 'free_council_temporarily_disabled'):
+            with self.assertRaisesRegex(ValueError, 'free_council_zero_rate_variant_required'):
                 council.replace_candidate(self.run, 'investigate', 'member-one', seat)
         with council._locked(self.run) as value:
             value['group'] = 'Balanced'

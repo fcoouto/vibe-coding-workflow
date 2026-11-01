@@ -22,6 +22,98 @@ except ImportError:
 
 
 class DirectTests(CouncilCase):
+    def test_free_unverified_default_reasoning_cannot_start_or_enter_fallbacks(self):
+        roster = {key: self.seat('vendor/' + key + ':free')
+                  for key in ('member-one', 'member-two', 'member-three')}
+        for seat in roster.values():
+            seat['pricing'].update(prompt_usd_per_million=0, completion_usd_per_million=0)
+        self.request.update(group='Free', chair='member-one', roster=roster,
+                            recovery=True, fallbacks={key: [] for key in roster})
+        unknown = copy.deepcopy(roster['member-one'])
+        unknown['capabilities']['reasoning'] = {'default_enabled': True}
+        unknown['effort'] = 'default'
+        for fallback in (False, True):
+            request = copy.deepcopy(self.request)
+            if fallback:
+                unknown['model'] = unknown['canonical_model'] = unknown['capabilities']['model'] = 'vendor/backup:free'
+                request['fallbacks']['member-one'] = [unknown]
+            else:
+                request['roster']['member-one'] = unknown
+            with self.subTest(fallback=fallback), self.assertRaisesRegex(ValueError, 'council_maximum_reasoning_unverified'):
+                council.prepare(self.repo, request)
+        with self.assertRaisesRegex(ValueError, 'council_maximum_reasoning_unverified'):
+            workers._council_contract(dict(unknown, transport='openrouter-chat', council=dict(
+                run_id='round', phase='investigate', member_id='member-one', group='Free', chair='member-one')))
+
+    def test_enabled_only_reasoning_is_transmitted_without_an_effort_label(self):
+        self.request['roster']['member-two']['capabilities']['reasoning'] = {'enabled': True}
+        self.request['roster']['member-two']['effort'] = 'enabled'
+        run = self.prepare()
+        brief = json.loads((run / 'brief.json').read_text())
+        payload = workers.direct_payload(brief, run / 'workspace')
+        self.assertEqual(payload['reasoning'], {'enabled': True})
+        self.assertIsNone(self.send(payload)['failure'])
+        for reasoning in ({'enabled': False}, {'enabled': 1}, {'enabled': True, 'effort': 'max'}):
+            brief['capabilities']['reasoning'] = reasoning
+            with self.assertRaises(ValueError):
+                workers.direct_payload(brief, run / 'workspace')
+
+    def test_free_peer_review_has_three_external_seats_and_fresh_external_chair(self):
+        self.reply['usage']['cost'] = 0
+        roster = {key: self.seat('vendor/' + key + ':free')
+                  for key in ('member-one', 'member-two', 'member-three')}
+        for seat in roster.values():
+            seat['pricing'].update(prompt_usd_per_million=0, completion_usd_per_million=0)
+        self.request.update(group='Free', chair='member-one', roster=roster,
+                            recovery=True, fallbacks={key: [] for key in roster})
+        self.run = Path(council.prepare(self.repo, self.request)['run'])
+        manifest = json.loads((self.run / 'manifest.json').read_text())
+        self.assertEqual(manifest['timeout_seconds'], 1200)
+        self.assertEqual(manifest['phase_seconds'], dict(investigate=600, critique=360, synthesis=240))
+        attempts = set()
+        for phase in ('investigate', 'critique', 'synthesis'):
+            for member in (('member-one',) if phase == 'synthesis' else roster):
+                packet = council.packet(self.run, phase, member)
+                worker = Path(packet['worker_run'])
+                self.reply['model'] = roster[member]['model']
+                result = self.execute(worker)
+                self.assertEqual(result['state'], 'awaiting_verification')
+                self.assertNotIn(result['attempt_id'], attempts)
+                attempts.add(result['attempt_id'])
+                council.verify_external(self.run, phase, member, 'accepted', ['Controlled completed response'])
+        status = council.status(self.run)
+        self.assertEqual(len(attempts), 7)
+        self.assertEqual(status['outcome'], 'complete')
+        self.assertEqual(status['external_total_usd'], 0)
+        self.assertTrue(status['all_local_execution_stopped'])
+        self.assertEqual(len(self.calls), 7)
+        for _, _, payload in self.calls:
+            self.assertTrue(payload['model'].endswith(':free'))
+            self.assertFalse(payload['provider']['allow_fallbacks'])
+            self.assertNotIn('max_tokens', payload)
+
+    def test_free_initial_and_fallback_models_cannot_use_paid_or_native_routes(self):
+        roster = {key: self.seat('vendor/' + key + ':free')
+                  for key in ('member-one', 'member-two', 'member-three')}
+        for seat in roster.values():
+            seat['pricing'].update(prompt_usd_per_million=0, completion_usd_per_million=0)
+        self.request.update(group='Free', chair='member-one', roster=roster,
+                            recovery=True, fallbacks={key: [] for key in roster})
+        paid_price = copy.deepcopy(roster['member-one'])
+        paid_price['pricing']['completion_usd_per_million'] = .01
+        paid_route = copy.deepcopy(roster['member-one'])
+        paid_route['model'] = paid_route['canonical_model'] = paid_route['capabilities']['model'] = 'vendor/paid'
+        for candidate in (paid_price, paid_route, self.native_seat()):
+            for fallback in (False, True):
+                request = copy.deepcopy(self.request)
+                if fallback: request['fallbacks']['member-one'] = [candidate]
+                else: request['roster']['member-one'] = candidate
+                with self.subTest(candidate=candidate['model'], fallback=fallback), self.assertRaisesRegex(
+                        ValueError, 'free_council_zero_rate_variant_required|invalid_council_topology'):
+                    council.prepare(self.repo, request)
+        self.assertFalse(self.calls)
+
+
     def setUp(self):
         super().setUp()
         self.assertIsNotNone(direct, 'direct tool-free requester must exist')
@@ -160,9 +252,9 @@ class DirectTests(CouncilCase):
                 self.assertEqual(result['failure']['category'], 'invalid_request')
         self.assertEqual(len(self.calls), 1)
 
-    def test_free_routes_block_direct_send_and_main_before_auth_or_network(self):
+    def test_free_router_blocks_direct_send_and_main_before_auth_or_network(self):
         import subprocess
-        for model in ('vendor/model:free', 'openrouter/free'):
+        for model in ('openrouter/free',):
             payload = dict(self.payload, model=model)
             with patch.object(direct.onboarding, '_read_file', side_effect=AssertionError('must not read auth')):
                 result = self.send(payload)

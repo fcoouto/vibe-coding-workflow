@@ -34,8 +34,8 @@ runtime stamps `flow: "peer-review"`; mode/flow remain fixed across attempts:
 | `research` | Shared Markdown, empty permitted |
 | `phase_seconds` | Exactly positive integer `investigate`, `critique`, `synthesis`, totaling declared timeout |
 | `mode` | Exactly `text` or `repository`, selected from the required work |
-| `group` | Exactly `Frontier` or `Balanced` |
-| `chair` | Selected native member ID |
+| `group` | `Frontier`, `Balanced`, or text-only `Free` |
+| `chair` | Selected native member ID for Frontier/Balanced; selected external member for Free |
 | `roster` | Exactly `member-one`, `member-two`, `member-three`, using kind-specific schemas below |
 | `timeout_seconds` | Optional integer 1..2**31-1, default 1200 |
 | `recovery` | Optional exact Boolean `true`; grouped requests only; enables version 3 |
@@ -70,16 +70,24 @@ These declarations do not prove hard native limits.
 Each available external seat has exactly `kind: "external"`, `model`,
 `model_display_name`, `provider`, `effort`, `input_tokens`, `output_tokens`, `steps`,
 `selection`, `capabilities`, `permission_qualification`, `canonical_model`, `pricing`.
+Free seats and replacements are external, use explicit `:free` IDs, and require
+zero observed input/output rates. Canonical models remain distinct.
 `canonical_model` is the nonempty observed model identity, separate from `model`,
 the exact routable request ID. `pricing` contains exactly numeric nonnegative
 `prompt_usd_per_million`, `completion_usd_per_million`, and nonempty bounded
 `source`, `observed_at`. Retain discovery
 provenance in selection. These checks and the pinned original contract are checked
 again at launch; editing a worker brief cannot change the pinned contract.
+For documented on/off thinking without an effort selector, text seats may use
+`reasoning: {enabled: true}` with `effort: "enabled"`. The transport sends the
+enabled flag without an invented effort mapping. Require source-backed control
+semantics; acceptance or reasoning-token usage does not prove maximum effort.
+Repository mode rejects this shape.
 `capabilities` requires `model`, `provider`, `context_length`, `max_output_tokens`,
 `tools`, `reasoning`, `observed_at`, `source`; optional `max_input_tokens` supplies
 a narrower input limit. Model/provider match the seat. `reasoning` is exactly
-`{"efforts":[...]}` or `{"fixed":"<observed effort>"}`. Selectable labels in order
+`{"efforts":[...]}`, `{"fixed":"<observed effort>"}`, or text-only
+`{"enabled":true}` as described above. Selectable labels in order
 are `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; choose the greatest observed
 supported label. Fixed behavior emits no reasoning override. Positive integer token targets are at most 2**31-1 and remain advisory,
 independent of endpoint limits. The API output ceiling uses the smaller observed
@@ -169,8 +177,8 @@ operational stop/accounting settlement remain available without inference. Keep
 original Free records, prices, reports, verdicts and feedback readable and unchanged.
 No new member/resume/recovery inference or verdict mutation is permitted. Use a
 new identity with current consent and mode for new deliberation; never retrofit
-old manifests. Free is blocked at preparation and every inference entry, including
-direct helpers and replacements. Historical native owner cleanup uses the
+old manifests. New Free deliberations require current peer-review text mode and
+the zero-rate variant contract. Historical native owner cleanup uses the
 [stop-only receipt](../../../clients/codex-council.md#historical-native-stop-settlement),
 not current-run report admission.
 

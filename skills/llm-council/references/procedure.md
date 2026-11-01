@@ -13,7 +13,7 @@ Keep this workflow available; read the linked sections only when applicable.
 | --- | --- |
 | Before choosing a roster or backups | Applicable [selection](selection.md) sections; tool qualification only for repository mode |
 | Before preparing or issuing an action | Relevant [protocol](protocol.md) section |
-| Before inference | Codex [identity](../../../clients/codex-council.md#host-identity-and-controls), native admission/dispatch/receipts, and version-3 [supervisor ownership](../../../clients/codex-council.md#isolated-recovery-supervisors); protocol [consent and cancellation](protocol.md#status-cancellation-and-consent) |
+| Before inference | Codex [identity](../../../clients/codex-council.md#host-identity-and-controls) and version-3 [supervisor ownership](../../../clients/codex-council.md#isolated-recovery-supervisors); native admission/dispatch/receipts only for a native participant; protocol [consent and cancellation](protocol.md#status-cancellation-and-consent) |
 | On technical failure, interruption or cancellation cleanup | Applicable [recovery](recovery.md) sections; load actions and investigation limits before recovery work |
 | Before critique or synthesis | Protocol [execution observations](protocol.md#execution-observations) |
 | Before delivery | Protocol [accounting](protocol.md#accounting-and-qualification-reporting) |
@@ -31,7 +31,7 @@ deliberation does not enroll, install, log in, enable routes or change credentia
 ## 2. Select and prepare
 
 Follow [selection](selection.md) for the group, task priorities, eligible roster,
-fresh native chair, availability boundaries and bounded preapproved backups.
+fresh chair, availability boundaries and bounded preapproved backups.
 
 Choose `mode` from the work needed, without another user menu:
 
@@ -92,7 +92,8 @@ returned private path and ownership.
    including missing/malformed rankings; there is no aggregate scoring or low-rank
    exclusion. Late evidence stays outside the sealed round and is labeled unreviewed.
 3. **Synthesize freshly.** Request `member` with `phase: "synthesis"` and the pinned
-   chair ID. Follow Codex fresh native dispatch. Its separate sealed
+   chair ID. Dispatch by kind: a fresh native child for Frontier/Balanced or one
+   fresh stateless external request for Free. Its separate sealed
    `synthesis-snapshot` contains original evidence, all usable anonymous initials
    and critiques, research and `__council__/execution-observations.md`. Ask the chair
    for a direct answer, evidence-based resolution of disagreements, explicit

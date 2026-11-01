@@ -122,9 +122,9 @@ class CouncilFlowTests(CouncilCase):
             self.prepare()
         self.assertFalse((self.root / 'round-one-investigate-external-one').exists())
 
-    def test_free_prepare_and_all_inference_paths_blocked(self):
+    def test_free_unqualified_repository_and_paid_tampering_blocked(self):
         self.grouped_request('Free')
-        with self.assertRaisesRegex(ValueError, 'free_council_temporarily_disabled'):
+        with self.assertRaisesRegex(ValueError, 'free_text_qualification_required'):
             self.prepare()
         self.assertFalse((self.root / 'council-round-one').exists())
         # Even an on-disk Free marker cannot reopen an otherwise current paid run.
@@ -148,12 +148,12 @@ class CouncilFlowTests(CouncilCase):
         for operation in (lambda: council.packet(self.run, 'investigate', 'member-three'),
                           lambda: council.resume_member(self.run, 'investigate', 'member-one'),
                           launch_guard, cli_guard):
-            with self.assertRaisesRegex(ValueError, 'free_council_temporarily_disabled'):
+            with self.assertRaisesRegex(ValueError, 'free_council_zero_rate_variant_required'):
                 operation()
         with redirect_stdout(StringIO()):
             result = council.workers.execute(Path(packet['worker_run']), self.executable, self.auth)
         self.assertEqual(result['state'], 'unresolved')
-        self.assertEqual(result['failure']['reason'], 'free_council_temporarily_disabled')
+        self.assertEqual(result['failure']['reason'], 'free_council_zero_rate_variant_required')
         self.assertIsNone(result['session_id'])
 
     def test_historical_status_cancel_and_settlement_only(self):
@@ -265,7 +265,7 @@ class CouncilFlowTests(CouncilCase):
             council._save(self.run, value)
         self.assertEqual(council.status(self.run)['external_total_usd'], 0)
         self.assertEqual(council.cancel(self.run)['accepted_participation']['investigate']['accepted'], 1)
-        with self.assertRaisesRegex(ValueError, 'free_council_temporarily_disabled'):
+        with self.assertRaisesRegex(ValueError, 'historical_council_read_only'):
             council.packet(self.run, 'investigate', 'member-two')
         after = json.loads((self.run / 'manifest.json').read_text())
         self.assertEqual(after['roster'], historical['roster'])
@@ -1482,7 +1482,7 @@ class CouncilFlowTests(CouncilCase):
             source='Exact route documentation: reasoning enabled by default; maximum mapping unverified')
         council.workers._council_contract(dict(seat, council=dict(run_id='round-one', phase='investigate',
             member_id='member-one', group='Free', chair='member-one')))
-        with self.assertRaisesRegex(ValueError, 'free_council_temporarily_disabled'):
+        with self.assertRaisesRegex(ValueError, 'free_text_qualification_required'):
             self.prepare()
         self.assertFalse((self.root / 'council-round-one').exists())
 

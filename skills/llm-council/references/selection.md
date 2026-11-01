@@ -9,9 +9,8 @@ gates; the [protocol](protocol.md#prepare-and-seat-schemas) owns seat schemas.
 Follow [worker selection](../../../policies/03-agent-delegation.md#select-capability-and-dispatch)
 for compatible cached official guidance, actual availability, capacity and observed
 controls, preserving coordinator model, reasoning, authentication and subscriptions.
-Ask **Frontier / Balanced (recommended)** and resolve only the chosen group's roster. Free is
-temporarily unavailable; stop an attempted Free invocation without paid
-substitution. Do not prefetch multiple rosters or use fixed commercial lists.
+Ask **Frontier / Balanced (recommended) / Free (text-only)** and resolve only the
+chosen group's roster. Do not prefetch multiple rosters or use fixed commercial lists.
 Native guidance and bounded external discovery/cache supply current participants:
 
 - **Frontier:** strongest eligible native member and two strong external models,
@@ -20,6 +19,12 @@ Native guidance and bounded external discovery/cache supply current participants
   models using [cost-benefit selection](#balanced-cost-benefit). Select its native
   member for this group; do not inherit Frontier's choice or promise native quota savings.
   Justified external overlap between groups is acceptable.
+- **Free:** three eligible external models, with a fresh external chair request.
+  Use explicit `:free` variants with zero observed input/output rates and no
+  native or paid fallback. Discover task-suitable models and pinned routes at
+  runtime; retain missing benchmark/control evidence and capacity limits. If the
+  work requires independent repository inspection, explain that Free supports
+  text only and request another group without paid substitution.
 
 ## Model vendor diversity
 
@@ -137,8 +142,9 @@ disclose that tradeoff rather than silently reverting to a general ranking.
 
 ## Pin the roster and reasoning
 
-Pin the actual roster and chair for this session, not future sessions. Both groups
-have one native and two external seats, with the native member as chair. Three
+Pin the actual roster and chair for this session, not future sessions. Frontier
+and Balanced have one native and two external seats, with the native member as
+chair. Free has three external seats and an external chair. Three
 model identities must differ; canonical observations identify duplicates without
 replacing routable request variants. If a complete qualified group is unavailable,
 disclose the specific blocker and stop before member inference; never start a
@@ -146,8 +152,10 @@ smaller roster, buy replacements or silently switch groups.
 
 Pin external provider endpoints and disable provider fallback. Selectable reasoning
 requires its greatest observed supported effort; documented fixed behavior emits
-no override. Unknown or unsupported maximum controls block admission; never lower
-effort or invent a maximum. Actual upstream telemetry remains unknown where
+no override. Text models with documented on/off thinking and no effort selector
+use explicit `reasoning.enabled: true`; disclose that enabling thinking does not
+establish hidden maximum effort. Unknown or unsupported reasoning controls block
+admission; never lower a supported effort or invent a maximum. Actual upstream telemetry remains unknown where
 unobserved. Recovery follows [actions](recovery.md#actions), within the original
 group and bounds. OpenRouter owns monetary limits; no fresh balance check is
 required and token targets or step/time bounds do not reserve money.

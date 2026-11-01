@@ -81,9 +81,14 @@ def _end(value, phase):
 
 
 def _require_current_flow(value: dict) -> None:
-    _require(value.get('group') != 'Free', 'free_council_temporarily_disabled')
     _require(value.get('flow') == 'peer-review' and value.get('mode') in ('text', 'repository'),
              'historical_council_read_only')
+    if value.get('group') == 'Free':
+        _require(all(seat.get('kind') == 'external' and seat.get('model', '').endswith(':free')
+                     and all(seat.get('pricing', {}).get(key) == 0 for key in
+                             ('prompt_usd_per_million', 'completion_usd_per_million'))
+                     for seat in value['roster'].values()), 'free_council_zero_rate_variant_required')
+        _require(value['mode'] == 'text', 'free_text_qualification_required')
 
 
 def _remaining(value, phase):
@@ -117,7 +122,8 @@ def _identity(value, phase, member):
 def _validate(request):
     _require(len(_json(request)) <= REQUEST_LIMIT, 'council_request_limit')
     _require(isinstance(request, dict) and request.get('mode') in ('text', 'repository'), 'invalid_council_mode')
-    _require(request.get('group') != 'Free', 'free_council_temporarily_disabled')
+    if request.get('group') == 'Free':
+        _require(request['mode'] == 'text', 'free_text_qualification_required')
     required = {'mode', 'run_id', 'question', 'constraints', 'coordinator_chat_id', 'approval_ref',
                 'approved_files', 'research', 'phase_seconds', 'roster'}
     _require(isinstance(request, dict) and required <= set(request)
