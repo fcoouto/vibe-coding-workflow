@@ -144,6 +144,7 @@ def configuration(brief, workspace=None):
     read = {'*': 'deny', **{name: 'allow' for name in brief['files']}}
     return {'$schema': 'https://opencode.ai/config.json', 'share': 'disabled',
             'autoupdate': False, 'plugin': [], 'mcp': {}, 'instructions': [],
+            'formatter': False, 'lsp': False,
             'permission': {'*': 'deny', 'read': read, 'glob': 'allow', 'grep': 'allow'},
             'agent': {'pilot': {'description': 'Bounded read-only investigation', 'mode': 'primary',
                                 'steps': brief['steps'],
