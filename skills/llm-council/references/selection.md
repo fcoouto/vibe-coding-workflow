@@ -9,7 +9,7 @@ gates; the [protocol](protocol.md#prepare-and-seat-schemas) owns seat schemas.
 Follow [worker selection](../../../policies/03-agent-delegation.md#select-capability-and-dispatch)
 for compatible cached official guidance, actual availability, capacity and observed
 controls, preserving coordinator model, reasoning, authentication and subscriptions.
-Ask **Frontier / Balanced** and resolve only the chosen group's roster. Free is
+Ask **Frontier / Balanced (recommended)** and resolve only the chosen group's roster. Free is
 temporarily unavailable; stop an attempted Free invocation without paid
 substitution. Do not prefetch multiple rosters or use fixed commercial lists.
 Native guidance and bounded external discovery/cache supply current participants:
