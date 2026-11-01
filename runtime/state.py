@@ -293,7 +293,7 @@ def _metadata_record(row):
     name = row[0]
     value = json_object(row[8])
     _fields(value, ("version", "owner", "created_at", "class", "bytes", "status", "closed_at",
-                    "dependencies", "targets", "export", "managed"), ("screening",))
+                    "dependencies", "targets", "export", "managed"), ("screening", "screening_result"))
     if type(value["version"]) is not int or value["version"] not in (1, 2):
         raise StateError("Unsupported evidence metadata")
     owner = value["owner"]
@@ -364,6 +364,29 @@ def _metadata_record(row):
                 or not value["targets"] or value["dependencies"] or value["export"] is not None
                 or value["created_at"] != owner["created_at"]):
             raise StateError("Screening accounting requires its live temporary owner anchor")
+    if "screening_result" in value:
+        pointer = _screening_result(value["screening_result"])
+        if ("screening" not in value or value["screening"]["revision"] != 2
+                or value["screening"]["last_receipt"]["ticket"] != pointer["ticket"]):
+            raise StateError("Screening result requires its exact terminal receipt")
+    return value
+
+
+def _screening_result(value):
+    _fields(value, ("version", "ticket", "plan_directory", "directory_binding", "plan_id", "projection_digest"))
+    if type(value["version"]) is not int or value["version"] != 1:
+        raise StateError("Unsupported screening result")
+    _screening_ticket(value["ticket"])
+    path = _canonical_path(value["plan_directory"])
+    binding = value["directory_binding"]
+    _fields(binding, ("directory", "parents"))
+    _canonical_binding(binding["directory"])
+    _metadata_parents(path, binding["parents"])
+    if set(binding["parents"]) != {str(p) for p in path.parents}:
+        raise StateError("Incomplete screening plan parent bindings")
+    if not isinstance(value["plan_id"], str) or not re.fullmatch(r"[0-9a-f]{32}", value["plan_id"]):
+        raise StateError("Invalid screening plan identity")
+    _canonical_hash(value["projection_digest"])
     return value
 
 

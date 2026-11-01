@@ -22,6 +22,11 @@ class OnboardingTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="vibe-onboarding-")
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name).resolve()
+        # Automatic Inspect must never discover the developer's machine storage.
+        self.isolated_home = self.base / "isolated-home"
+        self.home_patch = patch.dict(os.environ, HOME=str(self.isolated_home))
+        self.home_patch.start()
+        self.addCleanup(self.home_patch.stop)
         self.repo = self.base / "target"
         self.repo.mkdir()
         self.git("init", "-q")

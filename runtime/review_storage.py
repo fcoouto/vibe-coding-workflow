@@ -759,10 +759,10 @@ def _enrolled_result(selected, acquisitions, budget, *, scope=None):
     return result
 
 
-def acquire_enrolled_accounting(target, *, deadline=None):
+def acquire_enrolled_accounting(target, *, deadline=None, budget=None):
     """Resolve existing Project accounting facts without activation, setup or writes."""
     try:
-        budget = _budget(deadline)
+        budget = budget if budget is not None else _budget(deadline)
         _require(isinstance(target, (str, Path)) and len(str(target)) <= 4096)
         selected = Path(target).resolve(strict=True)
         if selected.is_file():
@@ -812,7 +812,8 @@ def _temporary_project_result(scope, budget, *, scope_guard, control=None):
                     and _observe_temporary_project(scope['project_root'], scope['member_checkouts'],
                         scope['membership'], budget) == facts)
             return control.access(config, context,
-                lambda owners: _existing_project_owner(owners, facts, budget), reobserve, budget)
+                lambda owners: _existing_project_owner(owners, facts, budget), reobserve, budget,
+                publication=dict(kind='temporary-project-owner', targets=targets, **facts))
         with evidence._context_database(context) as db:
             owners = _owners(config, context, db, budget=budget)
             existing = _existing_project_owner(owners, facts, budget)
@@ -874,10 +875,10 @@ def resolve_project_owner(project_scope, *, deadline=None):
     return _project_owner_result(project_scope, deadline=deadline)
 
 
-def _project_owner_result(project_scope, *, deadline=None, control=None):
+def _project_owner_result(project_scope, *, deadline=None, control=None, budget=None):
     from runtime import onboarding as d3
     try:
-        budget = _budget(deadline)
+        budget = budget if budget is not None else _budget(deadline)
         d3._bounded(project_scope)
         scope = d3._project_scope(project_scope)
         root = Path(scope['project_root'])
@@ -941,7 +942,8 @@ def _temporary_target_result(target, *, budget=None, scope_guard=None, control=N
                     _require(observe() == observed and _configuration_snapshot(path, descriptor) == snapshot
                              and _ready_context(config, parents, **guard) == context)
                 return control.access(config, context,
-                    lambda owners: _existing_owner(owners, observed, budget=budget), reobserve, budget)
+                    lambda owners: _existing_owner(owners, observed, budget=budget), reobserve, budget,
+                    publication=dict(kind='temporary-target-owner', targets=[observed], target=observed))
             with evidence._context_database(context) as db:
                 owners = _owners(config, context, db, budget=budget)
                 existing = _existing_owner(owners, observed, budget=budget)
