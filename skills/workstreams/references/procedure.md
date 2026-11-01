@@ -1,14 +1,14 @@
 # Workstreams controls
 
-For enable, disable and status, this procedure defines the complete interface.
-Load implementation code or additional runtime sections only to diagnose a failed
-control or answer an explicit implementation question.
+This procedure covers feature status and enable/disable requests. Load operation
+details only for the route requested.
 
-Use the installed package's `scripts/workflow.py delegation workstreams` controls in
-the explicitly selected, supported enrolled checkout. Reuse its accepted private
-runtime authority. Do not enroll another checkout, initialize state or change
-authentication through this control route. An account connection, installation or copied
-handoff does not enable Workstreams.
+Use the installed package's `scripts/workflow.py delegation workstreams` controls
+in the explicitly selected, supported enrolled checkout. Select one feature:
+`resource_admission` or `capacity_recovery`. Mutations compare
+`expected_revision` with that feature's current revision; on conflict, reread that
+feature's status and reconcile intent. The two revisions are independent. Do not
+enroll another checkout, initialize state or change authentication here.
 
 ```text
 python3 -I -B <package>/scripts/workflow.py delegation workstreams status --cwd <checkout>
@@ -16,44 +16,63 @@ python3 -I -B <package>/scripts/workflow.py delegation workstreams enable --cwd 
 python3 -I -B <package>/scripts/workflow.py delegation workstreams disable --cwd <checkout>
 ```
 
-Supply one JSON object on stdin. Status uses `{"client":"codex"}`; mutations use
-`{"client":"codex","expected_revision":N}` with the exact revision returned by
-status. On conflict reread and reconcile intent; never overwrite another change.
-Report the selected scope and saved result. Repeated identical controls preserve
-the setting. First task creation in a new supported Codex runtime scope saves
-enabled revision 1. Existing scopes retain their preference; an absent legacy
-preference stays disabled. The first explicit disable is saved even if already
-off; later identical controls preserve its revision. Status is offline and read-only.
-Unsupported or invalid authority is an error, never evidence of disabled state.
+Supply one JSON object on stdin identifying `client` and `feature`; mutations also
+require that feature's `expected_revision`. For example:
 
-Enablement permits suitable Workstreams work under the [execution contract](../../../clients/workstreams.md).
-It performs no native dispatch, graph build, provider setup or model call.
-Other integrations retain their independent enablement, route permissions and supervision.
+```json
+{"client":"codex","feature":"resource_admission"}
+{"client":"codex","feature":"capacity_recovery"}
+{"client":"codex","feature":"resource_admission","expected_revision":12}
+{"client":"codex","feature":"capacity_recovery","expected_revision":4}
+```
 
-Disable stops new managed implementer admissions/continuations. Necessary D5
-review of existing output remains available so acceptance can finish. Existing results still require
-collection, independent review and reconciliation; uncertain owners retain their
-claims. Show disabled-but-active work explicitly. Stopping a worker is a separate
-user request. Normal delegation may continue once ownership is reconciled.
-Re-enable cannot revive stale dispatch permission or reset consumed budgets.
+The revision numbers illustrate the JSON type; use the current revision for the
+selected feature. Status and resource controls return only `ok`, `control_scope`,
+`scope_id`, `checkout`, `feature`, `enabled` and `revision`. They do not read
+recovery state. A missing or unknown feature and extra request fields are rejected;
+there is no implicit combined setting. Status is read-only: it does not initialize
+state, start workers, reserve resources or create schedules.
 
-Human continuation after shutdown reads the current mode and actual native/file
-state first. Preserve pauses and limits. Saved enablement and successful local
-controls do not establish observed native execution. For an explicit capability
-or readiness question, consult the
-[latest readiness report](../../../docs/workstreams-main-port.md);
-routine controls do not require reading qualification history.
+New supported scopes start with both features enabled only when no saved choice
+exists. Preserve each separate saved choice. A feature with no separate saved
+choice derives from the historical combined local choice, when present; never
+overwrite a separate choice. An existing scope with no saved or historical choice
+remains disabled. The first feature mutation saves both effective choices so later
+legacy combined changes cannot overwrite either separate preference. Explicit
+onboarding does not need a separate activation announcement; explain useful next
+steps, blockers or decisions. Repeating the same setting preserves its revision.
+Unsupported or invalid authority is an error, never evidence that a feature is off.
 
-The status field `unresolved_assignments` counts managed implementer reservations,
-including prepared and uncertain attempts; it does not establish known-running
-worker count. `drained` applies to those reservations, not all native activity.
-Inspect existing D5/D6 records separately for pending reviewers or ordinary jobs
-before claiming that every owner stopped or taking over resources.
+Enabling resource admission permits eligible heavy phases under the
+[resource procedure](../../../clients/workstreams-resources.md). Enabling capacity
+recovery permits eligible workflow parents to register under the
+[recovery procedure](../../../clients/workstreams-recovery.md). Neither toggle
+starts a worker or creates a schedule. Ordinary delegation and shared safety do
+not depend on either preference.
 
-## Registered parent cleanup
+Disabling resource admission blocks new resource-managed phases but leaves ordinary
+delegation, existing reservation status, cancellation of unlaunched waits, and safe
+release/reconciliation available. Occupied or uncertain owners retain claims.
 
-When disabling a checkout with registered recovery parents, load the
-[temporary monitor procedure](../../../clients/workstreams-recovery.md). Withdraw
-only registrations for that checkout, then reconcile the shared schedule. Delete
-it when no eligible parents remain; other checkouts may still need it. Status
-requests can report monitor membership and suspension without creating a schedule.
+Disabling capacity recovery first runs its read-only preflight. If original-path
+owners, deliveries or schedule operations are unresolved, the operation exits 1,
+returns `ok:false`, `preference_changed:false`, the original-path `error` and a
+`recovery` result with `ready:false`; settings remain untouched. After an
+acknowledged change, the control withdraws affected registrations and returns
+the preference fields plus `recovery` with the compact `wanted`, `schedule_id`,
+`pending`, `suspended`, available `historical_registrations` and `next_action`.
+Finish any required native schedule reconciliation; delete the shared schedule
+only when no eligible parents remain. If registry reconciliation fails after the
+setting is written, the command exits 1 and reports the actual `preference_changed`
+value and recovery action without silently rolling back. Pending schedule work
+does not block ordinary delegation or resource admission. Neither disable stops
+a running command or clears ownership.
+Re-enable rechecks current authority; it cannot revive stale permission or reset
+consumed budgets, deadlines, delivery intents or manual schedule suspension. Keep
+historical artifacts and their readers at their original paths. Do not migrate,
+repin or reset old task records; if a local scope cannot be reconciled, leave it
+on its existing path.
+
+Feature-control replies identify the selected checkout and preference only. Use
+the resource or recovery status operation for operational lifecycle details. A
+successful local control does not establish native execution or recovery.

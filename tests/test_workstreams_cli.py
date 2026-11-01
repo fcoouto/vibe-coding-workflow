@@ -53,6 +53,30 @@ class WorkstreamsCliTests(unittest.TestCase):
     def registry(self, action='status', **request):
         return parent_recovery.control(self.directory, action, request)
 
+    def test_ordinary_worker_context_marker_survives_native_lifecycle_with_features_off(self):
+        self.feature('resource_admission', False)
+        self.feature('capacity_recovery', False)
+        for invalid in ('C12', 'WS42.00', 'WS42/01', 'WS42.01.BUILD'):
+            code, rejected = self.cli('prepare', self.f.prepare_request(workstream_context_id=invalid), ordinary=True)
+            self.assertEqual(code, 1, rejected)
+        self.assertEqual(delegation.delegation_status(self.scope, 'codex', self.recovery.thread)['assignments'], [])
+        request = self.f.prepare_request(workstream_context_id='WS42.01')
+        self.assertFalse({'workstream_revision', 'workstream_limits', 'continuation_limits'} & request.keys())
+        code, child = self.cli('prepare', request, ordinary=True)
+        self.assertEqual(code, 0, child)
+        self.assertEqual(child['task_name'], 'worker_ws42_01_build_' + child['attempt_id'])
+        binding = delegation.prepared_native_assignment(self.scope, child['attempt_id'])
+        self.assertEqual(binding['workstream_context_id'], 'WS42.01')
+        observed = self.f.lifecycle_observation(child)
+        with patch('runtime.adapters.codex.observe_native_worker', return_value=observed):
+            code, observation = self.cli('observe', self.f.request(attempt_id=child['attempt_id'],
+                parent_turn_id=observed['receipt']['parent_turn_id'], spawn_item_id=observed['receipt']['spawn_item_id']), ordinary=True)
+        self.assertEqual(code, 0, observation)
+        code, settled = self.cli('reconcile', self.f.worker_reconciliation_request(child), ordinary=True)
+        self.assertEqual(code, 0, settled)
+        self.assertEqual(settled['status'], 'settled')
+        self.assertEqual(delegation.prepared_native_assignment(self.scope, child['attempt_id'])['task_name'], binding['task_name'])
+
     def test_new_assignment_commands_reject_combined_mode_fields(self):
         limits = dict(context_id='WS42.01', rationale='Original bounded fixture', output_tokens=1000,
             context_tokens=8000, max_steps=10, max_seconds=60, max_continuations=1, backoff_seconds=0)

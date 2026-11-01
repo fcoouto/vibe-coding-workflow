@@ -1,32 +1,38 @@
 # Workstreams execution
 
-Load only for a suitable assignment after saved Workstreams enablement is observed.
-Use [delegation](delegation.md) for worker selection, admission, native observation
-and reconciliation. For independent acceptance, load the applicable D5
+Load only for managed child delivery or when a Workstreams-specific operation is
+needed. Ordinary delegation always uses [shared delegation safety](delegation.md),
+regardless of either feature preference. For independent acceptance, load the applicable D5
 [planning](evidence-plan.md), [request fields](evidence.md#request-fields)
 and [completion](evidence-completion.md) sections under delegation's
 section-loading rule.
-Ordinary delegation remains available while Workstreams is off. Management requests
-use the management route of the [Workstreams skill](../skills/workstreams/SKILL.md).
+Management requests use the controls route of the
+[Workstreams skill](../skills/workstreams/SKILL.md).
 
-This is the current operating contract. Resource-aware heavy execution is implemented with separate qualification.
-New supported Codex runtime scopes start enabled. Existing preferences remain; use
-Workstreams only when beneficial. Availability alone starts no workers.
+Resource admission and capacity recovery are independent preferences. New supported
+scopes start with both enabled only if no saved choices exist; preserve each
+existing choice, including a legacy combined preference. Availability alone starts
+no workers or schedules.
 
 ## Heavy execution
 
-Before an implementer, reviewer or coordinator starts a heavy local phase, load
-[resource admission](workstreams-resources.md). Use its enrolled command helper,
-shared host reservations and bounded rechecks. Ordinary context admission retains
-existing task concurrency/ownership checks. Resource telemetry failure permits
-admission through the remaining gates; it never overrides ownership or budgets.
+Before an implementer, reviewer or coordinator starts a heavy local phase, check
+the current `resource_admission` preference and load
+[resource admission](workstreams-resources.md). The run request uses the current
+`resource_revision`. If resource admission is disabled, ordinary delegation
+continues without a helper-managed heavy launch. Shared task concurrency,
+dependency, continuation and ownership checks always apply. Telemetry failure
+permits admission only through the remaining gates; it never overrides ownership
+or budgets.
 
 ## Runtime controls
 
-Before preparing or sending a managed worker dispatch or continuation, load the
-[dispatch and continuation protocol](workstreams-protocol.md). It owns request
-fields, one-use permissions and delivery reconciliation. Management-only requests
-use the separate management procedure and do not load this execution contract.
+For managed child dispatch or continuation, load the
+[dispatch and continuation protocol](workstreams-protocol.md). It owns native
+identity and one-use delivery reconciliation. Ordinary task continuation uses
+base delegation's allocated `continuation_limits`; it does not depend on a
+Workstreams, resource or recovery revision. Management-only requests use the
+separate management procedure and do not load this execution contract.
 
 ## Contexts and ownership
 
@@ -59,17 +65,18 @@ remaining execution procedures.
 
 ## Dispatch, acceptance and recovery
 
-Read current mode at dispatch/continuation boundaries. Use the runtime's team
-revision and one-use permission controls; an unsent preparation cannot survive
-disable/re-enable. These controls coordinate participating callers and do not
-make an external native tool call atomic. A lost response requires inspection
-of the existing identity and history, not blind resend.
+Recheck task identity, ownership, current revision and one-use delivery authority
+at dispatch/continuation boundaries. Feature revisions gate only their own
+resource or recovery operations. No optional feature revision is required for
+ordinary delegation. A lost response requires inspection of the same identity
+and history, not blind resend.
 
 Workers implement, run relevant checks and self-review. Use required independent
 review, then coordinator assessment and integration. Release dependencies only
-after their accepted outputs are available in the dependent checkout. While
-enabled, resume ready work on that event. Reuse check evidence only while its
-candidate, scope and environment remain valid; rerun affected proof after changes.
+after their accepted outputs are available in the dependent checkout. Resume ready
+work on completion/dependency events with bounded rechecks. Reuse check evidence
+only while its candidate, scope and environment remain valid; rerun affected proof
+after changes.
 
 Choose output/context allocation, steps, time, concurrency and recovery allowances
 from each assignment and supported route. Retain consumed attempts across fixes,
@@ -91,13 +98,14 @@ state and remaining task allowance. Unknown retry intent cannot establish those
 child conditions. Parent capacity recovery follows the separate monitor procedure
 below, including its user-authorized waiver of native retry-exhaustion proof.
 `rateLimitExceeded` and `usageLimitExceeded` wait for human `continue`.
-Coordinator shutdown also waits for human continuation. Activated parents use
-the [temporary shared recovery monitor](workstreams-recovery.md) for registration,
-native schedule lifecycle and recovery admission. Load that procedure on activation,
-human continuation and final departure. On return inspect current mode, files,
-native activity and budgets.
-Disable leaves collection/review/reconciliation active and prevents automatic
-team wake-ups; preserve existing ownership before normal delegation takes over.
+Coordinator shutdown also waits for human continuation. An eligible activated
+parent uses the [temporary shared recovery monitor](workstreams-recovery.md) only
+when `capacity_recovery` is enabled; registration carries the current
+`recovery_revision` and needs no resource lease. Load that procedure on activation,
+monitor run and final departure. Reconcile current task, files, native activity and
+budgets before continuing. Recovery uncertainty does not block ordinary delegation
+or resource admission. Disabling a feature leaves collection/review/reconciliation
+available and preserves occupied or uncertain ownership.
 
 ## Graphify and proportional evidence
 

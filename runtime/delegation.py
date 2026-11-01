@@ -1344,8 +1344,8 @@ def _prepare_native(scope, request, *, role):
         _continuation_limits(request)
     state._text(request['dispatch_id'], 'stable dispatch id', 128)
     if 'workstream_context_id' in request:
-        _require(role == 'review' and isinstance(request['workstream_context_id'], str),
-            'Visible review grouping requires an immutable review context ID')
+        _require(role in {'worker', 'review'} and isinstance(request['workstream_context_id'], str),
+            'Visible native grouping requires an immutable context ID')
         _native_name('0' * 32, role, request)
     if 'workstream_revision' in request or 'workstream_limits' in request:
         from runtime.workstreams import validate_admission
@@ -1823,7 +1823,7 @@ def _worker_scope(scope, claims, files=()):
 
 
 def _assignment_context(request, role):
-    if role == 'worker':
+    if role == 'worker' and 'workstream_context_id' not in request:
         limits = request.get('workstream_limits', {})
         _require(isinstance(limits, dict), 'Invalid Workstreams allocation fields')
         return limits.get('context_id')

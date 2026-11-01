@@ -1,17 +1,19 @@
 # Resource-aware heavy execution
 
-Load for heavy builds, tests, browser/database workloads or local-model execution
-inside an enabled Workstreams assignment. Ordinary editing uses existing D6
-admission; many contexts can coexist. This is cooperative admission, not OS
-containment. Task budgets and native/account limits still apply.
+Load for a heavy build, test, browser/database workload or other resource-intensive
+local phase. Check `resource_admission` before a new helper-managed launch. This
+feature is independent of capacity recovery and ordinary delegation. Admission is
+cooperative, not OS containment; task budgets and native/account limits still apply.
 
 Use the installed `scripts/workflow.py delegation workstreams ACTION --cwd CHECKOUT`
 with one JSON object on stdin. Actions are `resource-run`, `resource-status`,
-`resource-cancel` and `resource-release`. All carry current task identity (`client`,
-`session_id`, `task_id`, `scope_ref`, `expected_revision`), original `attempt_id`,
-current `workstream_revision`, and a stable `phase_id`. Use an admitted D6 worker,
-review or coordinator assignment. The helper checks current pins, task, mode,
-dependencies and ownership. It never repins old tasks.
+`resource-cancel` and `resource-release`. A new `resource-run` carries current task
+identity (`client`, `session_id`, `task_id`, `scope_ref`, `expected_revision`),
+original `attempt_id`, current `resource_revision` and a stable `phase_id`. Use an
+admitted coordinator, worker or reviewer assignment. The helper checks current
+pins, task, resource preference, dependencies and ownership. It never repins old
+tasks. Status, cancel and release remain available after disable and retain their
+original assignment/phase authority; they do not require an enabled resource feature.
 
 For `resource-run`, add `argv` (an argument array, no shell wrapping required),
 `cpu`, `memory_bytes`, `capacity_cpu` and `capacity_memory_bytes`. Demand and the
@@ -34,11 +36,14 @@ High CPU utilization alone does not veto work. Memory estimates conservatively
 count active declared memory as well as observed consumption, which can reduce
 concurrency. No automatic profiler or model-driven monitor is added.
 
-A waiting result includes `reason` and `next_recheck`. Older ready competing
+A disabled resource preference blocks new helper-managed runs, not ordinary
+delegation. Disabling does not cancel a running command or erase a reservation.
+Existing safe cleanup and status remain available. A waiting result includes
+`reason` and `next_recheck`. Older ready competing
 requests precede newer requests; blocked requests do not reserve heavy capacity.
 Use completion/dependency events and bounded helper rechecks while a participant
 is active. `wait_seconds` performs deterministic rechecks without extra model turns,
-rechecking mode/task/dependencies each time. At the bound, return to coordination;
+rechecking the resource preference, task and dependencies each time. At the bound, return to coordination;
 never loop beyond task deadline or create another schedule. Human continuation
 resumes after all participants shut down.
 

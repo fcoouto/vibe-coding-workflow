@@ -185,11 +185,21 @@ coordinator settings/authentication. Examples are illustrative, not native evide
 }
 ```
 
+Ordinary delegation may allocate immutable `continuation_limits` with
+`max_continuations` and `backoff_seconds`. Shared continuation and acceptance
+checks apply whether resource admission and capacity recovery are on or off.
+Ordinary plan, prepare and continuation requests require neither feature revision.
+Only a heavy resource operation uses `resource_revision`; only parent recovery
+registration uses `recovery_revision`. New `delegation prepare` and
+`delegation coordinator reserve` requests reject `workstream_revision` or
+`workstream_limits` before reserving work. Existing original records and their
+readers retain their historical fields.
+
 Optional retry fields: `retry_of` is the original attempt; `diagnostic` records
 `prior_attempt_id`, `cause`, `evidence`, `change` after diagnosis.
-Never reset original attempts/resources/deadline. Workstreams workers additionally
-supply both `workstream_revision` and task-derived `workstream_limits`; use the
-[dispatch protocol](workstreams-protocol.md) for those fields and the one-use send.
+Never reset original attempts/resources/deadline. Managed child naming and delivery
+use the [dispatch protocol](workstreams-protocol.md); do not add a combined
+Workstreams revision to ordinary delegation or continuation.
 Native review admission uses D5's [review preparation](evidence-review-prepare.md)
 and [common request fields](evidence.md#request-fields),
 not the worker brief above.
