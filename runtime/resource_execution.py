@@ -22,7 +22,11 @@ def _authority(scope, request, cleanup=False):
         if cleanup:
             state._compatible(scope, task)
         if not cleanup:
-            if record['data']['role']!='review':
+            if 'resource_revision' in request:
+                workstreams._feature_permission(scope, 'resource_admission', request['resource_revision'])
+            else:
+                # Historical requests retain their original combined revision reader.
+                workstreams._feature_permission(scope, 'resource_admission', request['workstream_revision'])
                 workstreams._permission(scope, request['workstream_revision'])
             d6._require(task['state'] in {'TRIAGE', 'READY', 'WORKING', 'REVIEW'} and
                 not any(c['status']=='pending' and c['kind'] in {'blocker','decision'} for c in task['conditions']),
@@ -32,7 +36,7 @@ def _authority(scope, request, cleanup=False):
         if not cleanup:
             job=next((j for j in plan['jobs'] if j['id']==record['data']['job_id']),None)
             if job is not None:
-                workstreams.validate_dependencies(scope,task,plan,job,records)
+                d6.validate_dependencies(scope,task,plan,job,records)
             claims=d6._claims(job['claims']) if job is not None else record['data']['claims']
             d6._resources_available(scope,db,claims,records if record['data']['role']=='review' else [r for r in records if r['id']!=record['id']])
         return record, plan
@@ -46,26 +50,32 @@ def _eligible(owner):
         scope=resolve_project(SimpleNamespace(client=owner['client'],cwd=Path(owner['cwd'])),state.PACKAGE)
         if scope is None or scope.runtime is None:
             return True
+        setting = workstreams._feature(scope, 'resource_admission')
+        if not setting['enabled'] or ('resource_revision' in owner and owner['resource_revision'] != setting['revision']):
+            return False
         with state._database(scope) as db:
             task=state._task(db,state._scope_id(scope),owner['client'],owner['session_id'],owner['task_id'])
             if task is None:
                 return False
             if task['pins']!=owner['pins']:
                 return True
-            mode=workstreams._load(scope)
             rows=d6._ledger(scope,db)
             record=next((r for r in rows if r['id']==owner['attempt_id']),None)
             if record is None or record['data']['status']=='settled':
                 return False
+            if 'resource_revision' not in owner:
+                legacy = workstreams._load(scope)
+                revision = record['body']['request'].get('workstream_revision')
+                if not legacy['enabled'] or revision != legacy['revision'] or revision != setting['revision']:
+                    return False
             plan=d6._task_plan(scope,task)
             job=next((j for j in plan['jobs'] if j['id']==record['data']['job_id']),None)
             if job is not None:
                 try:
-                    workstreams.validate_dependencies(scope,task,plan,job,rows)
+                    d6.validate_dependencies(scope,task,plan,job,rows)
                 except state.StateError:
                     return False
-            review=record['data']['role']=='review'
-            return (mode['enabled'] or review) and task['state'] in {'TRIAGE','READY','WORKING','REVIEW'} and not any(
+            return task['state'] in {'TRIAGE','READY','WORKING','REVIEW'} and not any(
                 c['status']=='pending' and c['kind'] in {'blocker','decision'} for c in task['conditions'])
     except (ValueError,OSError,KeyError,TypeError):
         return True
@@ -74,10 +84,13 @@ def _eligible(owner):
 def operate(scope, directory, action, request):
     """Run only once per phase; uncertain execution retains capacity for reconciliation."""
     from runtime import resource_admission as host
-    evidence._request(request, ('attempt_id','workstream_revision','phase_id'),
-        ('cpu','memory_bytes','capacity_cpu','capacity_memory_bytes','argv','wait_seconds','timeout_seconds','disk_bytes'))
+    evidence._request(request, ('attempt_id','phase_id'),
+        ('resource_revision','workstream_revision','cpu','memory_bytes','capacity_cpu','capacity_memory_bytes','argv','wait_seconds','timeout_seconds','disk_bytes'))
     state._text(request['phase_id'], 'resource phase', 128)
     d6._require(action in {'run','status','release','cancel'}, 'Unknown resource action')
+    revisions = {'resource_revision', 'workstream_revision'} & request.keys()
+    d6._require(len(revisions) == 1 if action == 'run' else len(revisions) <= 1,
+        'Use one resource revision or the original legacy Workstreams revision')
     record, plan = _authority(scope, request, cleanup=action in {'release','cancel','status'})
     owner = dict(record['owner'], attempt_id=record['id'], pins=record['body']['pins'],cwd=str(scope.repository_root))
     identity = hashlib.sha256(evidence._raw(dict(owner=owner,phase=request['phase_id']))).hexdigest()
@@ -101,6 +114,9 @@ def operate(scope, directory, action, request):
         payload=dict(id=identity,owner=owner)
         if action=='release': payload['stopped_proof']=proof
         return host.control(directory,action,payload)
+    if 'resource_revision' in request:
+        # Keep permission outside the phase identity, so toggles cannot permit replay.
+        owner['resource_revision'] = request['resource_revision']
     argv=request.get('argv')
     d6._require(isinstance(argv,list) and argv and all(isinstance(a,str) and '\x00' not in a for a in argv), 'Expected command argv')
     wait=request.get('wait_seconds',0);timeout=request.get('timeout_seconds',plan['limits']['deadline']-time.time())

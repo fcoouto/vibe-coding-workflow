@@ -260,11 +260,11 @@ class ParentRecoveryTests(unittest.TestCase):
         fixture.plan(plan)
         # This case starts with a legacy, never-enabled checkout.
         workstreams._path(fixture.scope).unlink(missing_ok=True)
-        request = fixture.request(workstream_revision=1)
+        request = fixture.request(recovery_revision=1)
         with self.assertRaises(Exception):
             self.api.register(fixture.scope, self.directory, request)
         self.assertFalse(self.directory.exists())
-        workstreams.control(fixture.scope, 'enable', dict(client='codex', expected_revision=0))
+        workstreams.control(fixture.scope, 'enable', dict(client='codex', feature='capacity_recovery', expected_revision=0))
         result = self.api.register(fixture.scope, self.directory, request)
         saved = result['parents'][fixture.identity['session_id']]['parent']
         self.assertEqual(saved['deadline'], plan['limits']['deadline'])
@@ -278,16 +278,16 @@ class ParentRecoveryTests(unittest.TestCase):
         fixture=AdmissionTests(methodName='runTest'); fixture.setUp()
         self.addCleanup(fixture.doCleanups)
         fixture.plan()
-        workstreams.control(fixture.scope, 'enable', dict(client='codex',
-            expected_revision=workstreams.control(fixture.scope,'status',dict(client='codex'))['revision']))
-        request=fixture.request(workstream_revision=1)
+        workstreams.control(fixture.scope, 'enable', dict(client='codex', feature='capacity_recovery',
+            expected_revision=workstreams._feature(fixture.scope, 'capacity_recovery')['revision']))
+        request=fixture.request(recovery_revision=1)
         self.api.register(fixture.scope, self.directory, request)
         thread=fixture.identity['session_id']; now=int(time.time())
         observation=dict(thread_status='idle',turn_status='failed',turn_id='failed',error_code='serverOverloaded',will_retry=False)
         with patch('runtime.startup.resolve_project',return_value=fixture.scope):
             self.api.observe(self.directory,dict(thread_id=thread,observation=observation),state.PACKAGE)
-            workstreams.control(fixture.scope,'disable',dict(client='codex',expected_revision=1))
-            workstreams.control(fixture.scope,'enable',dict(client='codex',expected_revision=2))
+            workstreams.control(fixture.scope,'disable',dict(client='codex',feature='capacity_recovery',expected_revision=1))
+            workstreams.control(fixture.scope,'enable',dict(client='codex',feature='capacity_recovery',expected_revision=2))
             with patch('runtime.parent_recovery.time.time',return_value=now+60):
                 self.assertFalse(self.api.observe(self.directory,dict(thread_id=thread,observation=observation),state.PACKAGE)['send'])
             self.assertFalse(self.call('status')['parents'][thread]['eligible'])
@@ -298,4 +298,251 @@ class ParentRecoveryTests(unittest.TestCase):
         with patch('runtime.startup.resolve_project',return_value=fixture.scope), patch('runtime.parent_recovery.time.time',return_value=now+120):
             self.assertFalse(self.api.observe(self.directory,dict(thread_id=thread,observation=observation),state.PACKAGE)['send'])
         with self.assertRaises(Exception):
-            self.api.register(fixture.scope,self.directory,fixture.identity | dict(expected_revision=old['revision']+1,workstream_revision=3))
+            self.api.register(fixture.scope,self.directory,fixture.identity | dict(expected_revision=old['revision']+1,recovery_revision=3))
+
+
+class IndependentRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        from runtime import parent_recovery, workstreams
+        from tests.test_delegation import AdmissionTests
+        self.api, self.settings = parent_recovery, workstreams
+        self.fixture = AdmissionTests('runTest')
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.fixture.plan()
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.directory = Path(temp.name).resolve() / 'monitor'
+        self.thread = self.fixture.identity['session_id']
+
+    def feature(self, name, enabled):
+        current = self.settings._feature(self.fixture.scope, name)
+        return self.settings.control(self.fixture.scope, 'enable' if enabled else 'disable',
+            dict(client='codex', feature=name, expected_revision=current['revision']))
+
+    def register(self):
+        revision = self.settings._feature(self.fixture.scope, 'capacity_recovery')['revision']
+        return self.api.register(self.fixture.scope, self.directory,
+            self.fixture.request(recovery_revision=revision))
+
+    def call(self, action, **request):
+        return self.api.control(self.directory, action, request)
+
+    def reconcile(self):
+        return self.api.reconcile_feature(self.fixture.scope, self.directory)
+
+    def test_registration_uses_only_recovery_preference_in_all_four_combinations(self):
+        for resource, recovery in ((False, False), (False, True), (True, False), (True, True)):
+            with self.subTest(resource=resource, recovery=recovery):
+                self.feature('resource_admission', resource)
+                self.feature('capacity_recovery', recovery)
+                self.directory = self.directory.parent / ('monitor-' + str(resource) + str(recovery))
+                if recovery:
+                    saved = self.register()['parents'][self.thread]['parent']
+                    self.assertEqual(saved['identity'], self.fixture.identity)
+                    self.assertIn('recovery_revision', saved)
+                    self.assertNotIn('workstream_revision', saved)
+                else:
+                    with self.assertRaises(ValueError):
+                        self.register()
+                    self.assertFalse(self.directory.exists())
+
+    def test_resource_revision_does_not_invalidate_recovery_but_stale_recovery_does(self):
+        from runtime import state
+        self.register()
+        self.feature('resource_admission', False)
+        parent = self.call('status')['parents'][self.thread]['parent']
+        with patch('runtime.startup.resolve_project', return_value=self.fixture.scope):
+            self.assertEqual(self.api._authority(parent, state.PACKAGE)[0], 'eligible')
+            self.feature('capacity_recovery', False)
+            self.feature('capacity_recovery', True)
+            self.assertEqual(self.api._authority(parent, state.PACKAGE)[0], 'stopped')
+        with self.assertRaises(ValueError):
+            self.api.register(self.fixture.scope, self.directory, self.fixture.request(recovery_revision=1))
+
+    def test_disable_withdraws_only_scope_and_last_departure_deletes_shared_schedule(self):
+        self.register()
+        parent = self.call('status')['parents'][self.thread]['parent']
+        other = parent | dict(thread_id='other', cwd='/other',
+            identity=parent['identity'] | dict(session_id='other'))
+        self.call('register', parent=other)
+        op = self.call('schedule', observed='absent')
+        self.call('record-schedule', token=op['token'], result='created', schedule_id='shared')
+        self.feature('capacity_recovery', False)
+        report = self.reconcile()
+        self.assertFalse(report['parents'][self.thread]['eligible'])
+        self.assertTrue(report['parents']['other']['eligible'])
+        self.assertEqual(self.call('schedule', observed='active', schedule_id='shared')['operation'], 'none')
+        self.call('withdraw', thread_id='other')
+        op = self.call('schedule', observed='active', schedule_id='shared')
+        self.assertEqual(op['operation'], 'delete')
+        self.call('record-schedule', token=op['token'], result='deleted', schedule_id='shared')
+        self.assertIsNone(self.call('status')['schedule_id'])
+        self.assertIn(self.thread, self.call('status')['parents'])
+
+    def test_reenable_preserves_consumed_intent_episode_and_manual_suspension(self):
+        from runtime import state
+        import time
+        now = int(time.time())
+        self.register()
+        observation = dict(thread_status='idle', turn_status='failed', turn_id='failed',
+            error_code='serverOverloaded', will_retry=None)
+        with patch('runtime.startup.resolve_project', return_value=self.fixture.scope):
+            with patch('runtime.parent_recovery.time.time', return_value=now):
+                self.api.observe(self.directory, dict(thread_id=self.thread, observation=observation), state.PACKAGE)
+            with patch('runtime.parent_recovery.time.time', return_value=now + 60):
+                ready = self.api.observe(self.directory, dict(thread_id=self.thread, observation=observation), state.PACKAGE)
+            self.call('record-send', thread_id=self.thread, token=ready['token'], result='uncertain')
+            before = self.call('status')['parents'][self.thread]
+            self.call('suspend')
+            self.feature('capacity_recovery', False)
+            self.reconcile()
+            self.feature('capacity_recovery', True)
+            after = self.reconcile()
+            self.assertTrue(after['suspended'])
+            row = after['parents'][self.thread]
+            self.assertFalse(row['eligible'])
+            for key in ('parent', 'episode', 'intent', 'last_send', 'consumed_turns'):
+                self.assertEqual(row[key], before[key])
+            with self.assertRaisesRegex(ValueError, 'uncertain delivery'):
+                self.api.reactivate(self.directory, dict(thread_id=self.thread), state.PACKAGE)
+
+    def test_uncertain_schedule_blocks_recovery_send_until_acknowledged(self):
+        import time
+        now = int(time.time())
+        self.register()
+        op = self.call('schedule', observed='absent')
+        self.call('record-schedule', token=op['token'], result='uncertain', schedule_id='shared')
+        observation = dict(thread_status='idle', turn_status='failed', turn_id='failed',
+            error_code='serverOverloaded', will_retry=None, authority='eligible')
+        self.api.control(self.directory, 'observe', dict(thread_id=self.thread, observation=observation), now=now)
+        result = self.api.control(self.directory, 'observe', dict(thread_id=self.thread, observation=observation), now=now+60)
+        self.assertFalse(result['send'])
+        self.assertEqual(result['pending']['operation'], 'create')
+        self.call('record-schedule', token=op['token'], result='created', schedule_id='shared')
+        result = self.api.control(self.directory, 'observe', dict(thread_id=self.thread, observation=observation), now=now+120)
+        self.assertFalse(result['send'])
+        result = self.api.control(self.directory, 'observe', dict(thread_id=self.thread, observation=observation), now=now+180)
+        self.assertTrue(result['send'])
+
+    def test_cli_reconciles_disabled_scope_without_touching_other_controls(self):
+        import io
+        import os
+        from contextlib import redirect_stdout
+        from types import SimpleNamespace
+        from scripts import workstreams_recovery
+        self.directory = self.directory.parent / 'workstreams-recovery'
+        self.register()
+        self.feature('capacity_recovery', False)
+        output = io.StringIO()
+        with patch('sys.argv', ['workstreams_recovery.py', 'reconcile-feature', '--cwd', str(self.fixture.scope.repository_root)]), \
+             patch('sys.stdin', SimpleNamespace(buffer=io.BytesIO(b'{}'))), \
+             patch.dict(os.environ, {'CODEX_HOME': str(self.directory.parent)}), \
+             patch('runtime.startup.resolve_project', return_value=self.fixture.scope), redirect_stdout(output):
+            self.assertEqual(workstreams_recovery.main(), 0)
+        self.assertEqual(json.loads(output.getvalue())['wanted'], 'absent')
+        self.assertFalse(self.call('status')['parents'][self.thread]['eligible'])
+
+    def test_historical_scope_preflight_and_separate_toggle_never_revive_old_permission(self):
+        from runtime import state
+        parent = self.register()['parents'][self.thread]['parent']
+        parent['workstream_revision'] = parent.pop('recovery_revision')
+        self.directory = self.directory.parent / 'historical'
+        self.call('register', parent=parent)
+        self.assertFalse(self.api.preflight_feature(self.fixture.scope, self.directory)['ready'])
+        with patch('runtime.startup.resolve_project', return_value=self.fixture.scope):
+            self.assertEqual(self.api._authority(parent, state.PACKAGE)[0], 'eligible')
+        self.feature('resource_admission', False)
+        with patch('runtime.startup.resolve_project', return_value=self.fixture.scope):
+            self.assertEqual(self.api._authority(parent, state.PACKAGE)[0], 'eligible')
+        self.feature('capacity_recovery', False)
+        report = self.reconcile()
+        self.assertEqual(report['historical_registrations'], [self.thread])
+        self.assertFalse(report['parents'][self.thread]['eligible'])
+        with patch('runtime.startup.resolve_project', return_value=self.fixture.scope):
+            self.assertEqual(self.api._authority(parent, state.PACKAGE)[0], 'stopped')
+            self.feature('capacity_recovery', True)
+            self.assertEqual(self.api._authority(parent, state.PACKAGE)[0], 'stopped')
+            with self.assertRaises(ValueError):
+                self.api.reactivate(self.directory, dict(thread_id=self.thread), state.PACKAGE)
+        self.assertTrue(self.api.preflight_feature(self.fixture.scope, self.directory)['ready'])
+        with self.assertRaises(ValueError):
+            self.register()
+        self.assertEqual(self.call('status')['parents'][self.thread]['parent'], parent)
+
+    def test_human_reactivation_keeps_deadline_and_consumed_send_allowance(self):
+        from runtime import state
+        import time
+        now = int(time.time())
+        self.register()
+        observation = dict(thread_status='idle', turn_status='failed', turn_id='failed',
+            error_code='serverOverloaded', will_retry=None)
+        def observe(at, **changes):
+            with patch('runtime.parent_recovery.time.time', return_value=at):
+                return self.api.observe(self.directory, dict(thread_id=self.thread,
+                    observation=observation | changes), state.PACKAGE)
+        with patch('runtime.startup.resolve_project', return_value=self.fixture.scope):
+            observe(now)
+            ready = observe(now + 60)
+            self.call('record-send', thread_id=self.thread, token=ready['token'], result='sent')
+            before = self.call('status')['parents'][self.thread]
+            self.feature('capacity_recovery', False)
+            self.reconcile()
+            self.feature('capacity_recovery', True)
+            self.reconcile()
+            observe(now + 120, turn_id='resumed', thread_status='active', turn_status='inProgress')
+            with patch('runtime.parent_recovery.time.time', return_value=now + 120):
+                self.api.reactivate(self.directory, dict(thread_id=self.thread), state.PACKAGE)
+            after = self.call('status')['parents'][self.thread]
+            for key in ('episode', 'last_send', 'consumed_turns'):
+                self.assertEqual(after[key], before[key])
+            self.assertEqual(after['parent']['deadline'], before['parent']['deadline'])
+            self.assertEqual(after['parent']['pins'], before['parent']['pins'])
+            self.assertFalse(observe(now + 180)['send'])
+            self.assertTrue(observe(now + 180, turn_id='next-failure')['send'])
+
+    def test_historical_preflight_waits_for_uncertain_schedule_control(self):
+        parent = self.register()['parents'][self.thread]['parent']
+        parent['workstream_revision'] = parent.pop('recovery_revision')
+        self.directory = self.directory.parent / 'historical-control'
+        self.call('register', parent=parent)
+        op = self.call('schedule', observed='absent')
+        self.call('record-schedule', token=op['token'], result='uncertain', schedule_id='shared')
+        self.call('withdraw', thread_id=self.thread)
+        self.assertFalse(self.api.preflight_feature(self.fixture.scope, self.directory)['ready'])
+        self.call('record-schedule', token=op['token'], result='created', schedule_id='shared')
+        op = self.call('schedule', observed='active', schedule_id='shared')
+        self.call('record-schedule', token=op['token'], result='deleted', schedule_id='shared')
+        self.assertTrue(self.api.preflight_feature(self.fixture.scope, self.directory)['ready'])
+
+    def test_inactive_historical_scope_can_disable_while_other_parent_needs_pending_monitor(self):
+        for operation in ('create', 'delete'):
+            with self.subTest(operation=operation):
+                self.directory = self.directory.parent / ('other-pending-' + operation)
+                self.feature('capacity_recovery', True)
+                parent = self.register()['parents'][self.thread]['parent']
+                historical = parent | dict(thread_id='old-A',
+                    identity=parent['identity'] | dict(session_id='old-A', task_id='old-task'))
+                historical['workstream_revision'] = historical.pop('recovery_revision')
+                self.call('register', parent=historical)
+                self.call('withdraw', thread_id='old-A')
+                other = parent | dict(thread_id='B', cwd='/other-checkout',
+                    identity=parent['identity'] | dict(session_id='B'))
+                self.call('register', parent=other)
+                pending = self.call('schedule', observed='absent')
+                if operation == 'delete':
+                    self.call('record-schedule', token=pending['token'], result='created', schedule_id='shared')
+                    self.call('withdraw', thread_id=self.thread)
+                    self.call('withdraw', thread_id='B')
+                    pending = self.call('schedule', observed='active', schedule_id='shared')
+                    self.call('reactivate', thread_id='B')
+                    self.call('reactivate', thread_id=self.thread)
+                self.assertEqual(pending['operation'], operation)
+                before = self.call('status')
+                self.assertTrue(self.api.preflight_feature(self.fixture.scope, self.directory)['ready'])
+                self.feature('capacity_recovery', False)
+                after = self.reconcile()
+                self.assertFalse(after['parents'][self.thread]['eligible'])
+                self.assertTrue(after['parents']['B']['eligible'])
+                self.assertEqual(after['parents']['old-A'], before['parents']['old-A'])
+                self.assertEqual(after['pending'], before['pending'])

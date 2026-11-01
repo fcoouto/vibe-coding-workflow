@@ -13,12 +13,21 @@ class ResourceExecutionTests(unittest.TestCase):
         self.fixture = test_workstreams.WorkstreamsTests('runTest')
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
-        self.prepared = self.fixture.prepare()
+        self.fixture.enable()
+        self.fixture.fixture.plan()
+        self.prepared = self.fixture.fixture.prepare()
         self.directory = Path(tempfile.mkdtemp()).resolve() / 'host'
         self.request = self.fixture.fixture.request(attempt_id=self.prepared['attempt_id'],
-            workstream_revision=self.fixture.control('status')['revision'], phase_id='unit-check',
+            resource_revision=self.feature('status')['revision'], phase_id='unit-check',
             cpu=1, memory_bytes=1024, capacity_cpu=2, capacity_memory_bytes=1024*1024,
             argv=[sys.executable, '-c', 'print("verified")'], wait_seconds=0)
+
+    def feature(self, action, feature='resource_admission', scope=None):
+        scope = scope or self.fixture.scope
+        request = dict(client='codex', feature=feature)
+        if action != 'status':
+            request['expected_revision'] = self.fixture.api.control(scope, 'status', request)['revision']
+        return self.fixture.api.control(scope, action, request)
 
     def call(self, action='run', **updates):
         api=importlib.import_module('runtime.resource_execution')
@@ -39,7 +48,7 @@ class ResourceExecutionTests(unittest.TestCase):
         self.assertEqual(released['state'],'released')
 
     def test_disabled_mode_never_launches(self):
-        self.fixture.control('disable',self.fixture.control('status')['revision'])
+        self.feature('disable')
         with self.assertRaises(ValueError): self.call()
         self.assertFalse(self.directory.exists())
 
@@ -123,16 +132,16 @@ class ResourceExecutionTests(unittest.TestCase):
         with patch('runtime.resource_admission.measure',return_value=sample):
             result=self.call()
         self.assertFalse(result['admitted'])
-        self.fixture.control('disable',self.fixture.control('status')['revision'])
+        self.feature('disable')
         result=self.call('cancel')
         self.assertEqual(result['state'],'cancelled')
 
     def test_toggle_cannot_duplicate_original_phase(self):
         self.call()
-        self.fixture.control('disable',self.fixture.control('status')['revision'])
-        enabled=self.fixture.enable()
+        self.feature('disable')
+        enabled=self.feature('enable')
         with self.assertRaises(ValueError):
-            self.call(workstream_revision=enabled['revision'])
+            self.call(resource_revision=enabled['revision'])
 
     def test_invalid_disk_demand_is_not_a_telemetry_failure(self):
         with self.assertRaises(ValueError): self.call(disk_bytes=-1)
@@ -144,19 +153,101 @@ class ResourceExecutionTests(unittest.TestCase):
         self.assertFalse(result['released'])
         self.assertTrue(result['uncertain'])
 
-    def test_admitted_review_can_execute_after_disable(self):
+    def test_feature_combinations_apply_to_every_role(self):
         from tests import test_delegation
-        from runtime import resource_execution, workstreams
-        stage=test_delegation.Stage4NativeReviewTests('runTest')
-        stage.setUp()
-        self.addCleanup(stage.doCleanups)
-        stage.plan(stage.review_plan())
-        enabled=workstreams.control(stage.scope,'enable',dict(client='codex',
-            expected_revision=workstreams.control(stage.scope,'status',dict(client='codex'))['revision']))
-        prepared=stage.prepared()
-        disabled=workstreams.control(stage.scope,'disable',dict(client='codex',expected_revision=enabled['revision']))
-        request=stage.request(**{k:v for k,v in self.request.items() if k not in stage.identity},
-            )
-        request.update(attempt_id=prepared['attempt_id'],workstream_revision=disabled['revision'])
-        result=resource_execution.operate(stage.scope,self.directory,'run',request)
-        self.assertEqual(result['returncode'],0)
+        from runtime import resource_execution, delegation
+        for role in ('worker', 'review', 'coordinator'):
+            for resource, recovery in ((False, False), (False, True), (True, False), (True, True)):
+                with self.subTest(role=role, resource=resource, recovery=recovery):
+                    stage = (test_delegation.Stage4NativeReviewTests if role == 'review' else
+                        test_delegation.AdmissionTests)('runTest')
+                    stage.setUp()
+                    self.addCleanup(stage.doCleanups)
+                    stage.plan(stage.review_plan() if role == 'review' else stage.plan_value())
+                    if role == 'review':
+                        prepared = stage.prepared()
+                    elif role == 'worker':
+                        prepared = stage.prepare()
+                    else:
+                        prepared = delegation.reserve_coordinator(stage.scope, stage.operation_request())
+                    self.feature('enable' if recovery else 'disable', 'capacity_recovery', stage.scope)
+                    setting = self.feature('enable' if resource else 'disable', scope=stage.scope)
+                    request = stage.request(**{k:v for k,v in self.request.items() if k not in stage.identity})
+                    request.update(attempt_id=prepared['attempt_id'], resource_revision=setting['revision'])
+                    directory = self.directory / role / str(resource) / str(recovery)
+                    if resource:
+                        self.assertEqual(resource_execution.operate(stage.scope, directory, 'run', request)['returncode'], 0)
+                    else:
+                        with self.assertRaisesRegex(ValueError, 'Feature is disabled'):
+                            resource_execution.operate(stage.scope, directory, 'run', request)
+                        self.assertFalse(directory.exists())
+
+    def test_recovery_change_does_not_stale_resource_but_resource_change_does(self):
+        self.feature('disable', 'capacity_recovery')
+        self.assertEqual(self.call()['returncode'], 0)
+        self.feature('disable')
+        self.feature('enable')
+        with self.assertRaisesRegex(ValueError, 'revision changed'):
+            self.call(phase_id='fresh-phase')
+        self.assertEqual(len(self.call('status')['reservations']), 1)
+
+    def test_disable_keeps_occupied_owner_and_cleanup_uses_original_identity(self):
+        self.call()
+        self.feature('disable')
+        self.assertEqual(next(iter(self.call('status')['reservations'].values()))['state'], 'active')
+        with self.assertRaises(ValueError):
+            self.call('cancel')
+        with self.assertRaises(ValueError):
+            self.call('release')
+        self.fixture.observe(self.prepared)
+        fixture = self.fixture.fixture
+        fixture.api.reconcile_assignment(fixture.scope, fixture.worker_reconciliation_request(self.prepared, outcome='failed'))
+        self.assertEqual(self.call('release')['state'], 'released')
+
+    def test_disabled_wait_does_not_block_other_checkout(self):
+        self.assert_ineligible_wait_does_not_block()
+
+    def test_stale_wait_after_reenable_does_not_block_other_checkout(self):
+        self.assert_ineligible_wait_does_not_block(reenable=True)
+
+    def test_legacy_stale_wait_after_reenable_does_not_block_other_checkout(self):
+        self.assert_ineligible_wait_does_not_block(reenable=True, legacy=True)
+
+    def assert_ineligible_wait_does_not_block(self, reenable=False, legacy=False):
+        import time
+        from runtime import resource_admission, resource_execution
+        sample = dict(sampled_at=int(time.time()), available_memory_bytes=0, pressure=True)
+        with patch('runtime.resource_admission.measure', return_value=sample):
+            if legacy:
+                request = dict(self.request)
+                request['workstream_revision'] = request.pop('resource_revision')
+                first = resource_execution.operate(self.fixture.scope, self.directory, 'run', request)
+            else:
+                first = self.call()
+        self.feature('disable')
+        if reenable:
+            self.feature('enable')
+        request = dict(id='another-checkout', owner=dict(task_id='other'), cpu=1, memory_bytes=1,
+            capacity_cpu=2, capacity_memory_bytes=1024*1024, deadline=int(time.time())+60, ready=True)
+        with patch('runtime.startup.resolve_project', return_value=self.fixture.scope):
+            result = resource_admission.control(self.directory, 'request', request,
+                eligible=resource_execution._eligible, probe_key='fresh',
+                probe=lambda: dict(sampled_at=int(time.time()), available_memory_bytes=1024*1024, pressure=False))
+        self.assertTrue(result['admitted'])
+        saved = self.call('status')['reservations'][first['id']]
+        self.assertEqual(saved['state'], 'waiting')
+        self.assertFalse(saved['request']['ready'])
+        self.assertEqual(self.call('cancel')['state'], 'cancelled')
+
+    def test_legacy_request_still_reads_original_revision_and_cannot_bypass_disable(self):
+        legacy = dict(self.request)
+        legacy['workstream_revision'] = legacy.pop('resource_revision')
+        api = importlib.import_module('runtime.resource_execution')
+        self.assertEqual(api.operate(self.fixture.scope, self.directory, 'run', legacy)['returncode'], 0)
+        self.feature('disable')
+        with self.assertRaises(ValueError):
+            api.operate(self.fixture.scope, self.directory, 'run', legacy | dict(phase_id='legacy-new'))
+        self.assertEqual(len(api.operate(self.fixture.scope, self.directory, 'status', legacy)['reservations']), 1)
+        self.feature('enable')
+        with self.assertRaisesRegex(ValueError, 'revision changed'):
+            api.operate(self.fixture.scope, self.directory, 'run', legacy | dict(phase_id='stale-legacy'))

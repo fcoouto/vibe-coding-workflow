@@ -159,7 +159,7 @@ class WorkstreamsTests(unittest.TestCase):
         from scripts import workflow
         output = io.StringIO()
         with patch('sys.argv', ['workflow.py', 'delegation', 'workstreams', 'status', '--cwd', str(self.fixture.repo)]), \
-                patch('sys.stdin', SimpleNamespace(buffer=io.BytesIO(b'{"client":"codex"}'))), \
+                patch('sys.stdin', SimpleNamespace(buffer=io.BytesIO(b'{"client":"codex","feature":"resource_admission"}'))), \
                 patch('runtime.startup.resolve_project', return_value=self.scope), redirect_stdout(output):
             exit_code = workflow.control_main()
         self.assertEqual(exit_code, 0, output.getvalue())

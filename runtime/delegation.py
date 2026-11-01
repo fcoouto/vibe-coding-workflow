@@ -823,7 +823,6 @@ def _record(scope, row):
             evidence._read(scope, data['reconciliation'])
             _require(isinstance(data['result'], dict) and data['result'].get('outcome') in
                      {'completed', 'failed', 'cancelled'}, 'Settled assignment has no reconciled result')
-        from runtime.workstreams import validate_record
         validate_record(data, lambda reference: evidence._read(scope, reference))
         return dict(id=identity, owner=owner, data=data, body=body)
     except (ValueError, TypeError, KeyError, RecursionError):
@@ -1003,9 +1002,7 @@ def _admission(scope, db, task, plan, job, claims, records, request):
     _require(counters['attempts_consumed'] < limits['max_attempts'] and
              counters['resource_units_consumed'] + request['resource_units'] <= limits['max_resource_units'],
              'Original finite delegation budget is exhausted')
-    if any('workstream_continuation' in r['data'] for r in owner_history):
-        from runtime.workstreams import validate_dependencies
-        validate_dependencies(scope, task, plan, job, records)
+    validate_dependencies(scope, task, plan, job, records)
     previous = [r for r in own if r['data']['job_id'] == job['id']]
     _require(len(previous) < job['max_attempts'], 'Original job attempt budget is exhausted')
     for dependency in job['dependencies']:
@@ -1172,9 +1169,7 @@ def _coordinator_job(scope, task, request, claims, records):
     _require(plan['limits']['deadline'] > _now(), 'Original delegation deadline has elapsed')
     owner = dict(scope_id=state._scope_id(scope), **{key: task[key] for key in ('client', 'session_id', 'task_id')})
     history = [r for r in records if all(r['owner'][key] == value for key, value in owner.items())]
-    if any('workstream_continuation' in r['data'] for r in history):
-        from runtime.workstreams import validate_dependencies
-        validate_dependencies(scope, task, plan, selected, records)
+    validate_dependencies(scope, task, plan, selected, records)
     _require(sum(r['data']['role'] == 'coordinator' and r['data']['job_id'] == selected['id'] for r in history) < selected['max_attempts'],
              'Original coordinator job attempt budget is exhausted')
     for dependency in selected['dependencies']:
@@ -1343,12 +1338,14 @@ def _prepare_native(scope, request, *, role):
     """Reserve before native spawn, returning launch admission only on a new committed row."""
     evidence._request(request, ('dispatch_id', 'job_id', 'selection', 'control_observation',
         'discovery_expectation', 'guidance', 'resource_units', *(('brief',) if role == 'worker' else
-        ('coverage', 'criteria', 'assignment'))), ('retry_of', 'diagnostic', 'workstream_revision', 'workstream_limits', 'workstream_context_id'))
+        ('coverage', 'criteria', 'assignment'))), ('retry_of', 'diagnostic', 'workstream_revision', 'workstream_limits', 'workstream_context_id', 'continuation_limits'))
     request = json_object(evidence._raw(request))
+    if 'continuation_limits' in request:
+        _continuation_limits(request)
     state._text(request['dispatch_id'], 'stable dispatch id', 128)
     if 'workstream_context_id' in request:
-        _require(role == 'review' and isinstance(request['workstream_context_id'], str),
-            'Visible review grouping requires an immutable review context ID')
+        _require(role in {'worker', 'review'} and isinstance(request['workstream_context_id'], str),
+            'Visible native grouping requires an immutable context ID')
         _native_name('0' * 32, role, request)
     if 'workstream_revision' in request or 'workstream_limits' in request:
         from runtime.workstreams import validate_admission
@@ -1683,7 +1680,6 @@ def reconcile_assignment(scope, request):
                    if not name.startswith('instruction:') and original['fingerprints'].get(name) != candidate['fingerprints'].get(name)}
         _require(changed <= set(assessment['changed_paths']), 'Partial-change assessment omits actual candidate paths')
     if 'workstream_continuation' in record['data']:
-        from runtime.workstreams import validate_settlement
         validate_settlement(scope, record, assessment['outcome'])
     latest = _worker_history(scope, record['data']['observation']) if record['data']['role'] == 'worker' else []
     if assessment['outcome'] == 'completed' and record['data']['role'] == 'worker':
@@ -1827,7 +1823,7 @@ def _worker_scope(scope, claims, files=()):
 
 
 def _assignment_context(request, role):
-    if role == 'worker':
+    if role == 'worker' and 'workstream_context_id' not in request:
         limits = request.get('workstream_limits', {})
         _require(isinstance(limits, dict), 'Invalid Workstreams allocation fields')
         return limits.get('context_id')
@@ -1846,3 +1842,304 @@ def _validate_version_provenance(receipt):
     for key in VERSION_PROVENANCE_FIELDS:
         if key in receipt:
             state._text(receipt[key], 'observed ' + key, 256)
+
+# Historic workstream_* artifact keys remain readable without changing task pins.
+CONTINUATION_LIMITATIONS = ['Send admission is cooperative and one-use; native delivery is neither atomic nor exactly-once', 'Requested allocations are not hard native execution enforcement']
+CONTINUATION_TRANSIENT = {'responseStreamConnectionFailed', 'httpConnectionFailed', 'responseStreamDisconnected', 'serverOverloaded', 'responseTooManyFailedAttempts', 'internalServerError'}
+CONTINUATION_LIMIT_FAILURES = {'rateLimitExceeded', 'usageLimitExceeded'}
+
+
+def _continuation_limits(request):
+    if 'continuation_limits' not in request:
+        _require('workstream_limits' in request, 'Original assignment has no continuation allocation')
+        return request['workstream_limits']
+    _require('workstream_limits' not in request, 'Continuation allocation must have one authority')
+    value = request['continuation_limits']
+    state._fields(value, ('max_continuations', 'backoff_seconds'))
+    for key in value:
+        state._integer(value[key], 'continuation ' + key)
+        _require(value[key] < 2**53, 'Continuation allocation exceeds finite bounds')
+    return value
+
+
+def validate_record(value, read):
+    """Validate additive immutable references without changing original assignment authority."""
+    for key in ('workstream_dispatch', 'workstream_continuation'):
+        if key in value:
+            _reference(value[key])
+            read(value[key])
+
+
+
+def _continuation_request(request, fields, optional=()):
+    evidence._request(request, ('attempt_id', *fields), optional)
+    state._text(request['attempt_id'], 'Workstreams attempt', 128)
+    return json_object(evidence._raw(request))
+
+
+def _continuation_owned(scope, db, request, records, *, allow_settled=False):
+    record = _assignment(scope, db, request, records=records)
+    task = _assignment_task(scope, db, request)
+    _require(record['body']['pins'] == task['pins'],
+        'Continuation requires the original owner and pins')
+    _require(allow_settled or record['data']['status'] != 'settled', 'Reconciled ownership cannot resume without reacquisition')
+    _require(task['state'] not in {'BLOCKED', 'WAITING', 'PAUSED', 'CANCELLED'} and not any(
+        c['kind'] in {'blocker', 'decision'} and c['status'] == 'pending' for c in task['conditions']),
+        'Task blockers, pauses or pending decisions prevent continuation')
+    records = [r for r in records if r['id'] != record['id']]
+    _resources_available(scope, db, record['data']['claims'], records)
+    plan = _task_plan(scope, task)
+    _require(plan['limits']['deadline'] > _now(), 'Original delegation deadline has elapsed')
+    job = next(job for job in plan['jobs'] if job['id'] == record['data']['job_id'])
+    _worker_scope(scope, job['claims'], record['body']['request']['brief']['files'])
+    current_claims = _claims(job['claims'])
+    _resources_available(scope, db, current_claims, records)
+    own = [r for r in records if all(r['owner'][key] == record['owner'][key]
+        for key in ('scope_id', 'client', 'session_id', 'task_id'))]
+    _require(not any(r['data']['job_id'] == job['id'] and
+        r['data']['revision'] > record['data']['revision'] for r in own),
+        'Superseded same-job child cannot resume; reconcile the current attempt')
+    validate_dependencies(scope, task, plan, job, [record, *records])
+    descendants = {job['id']}
+    while True:
+        expanded = descendants | {j['id'] for j in plan['jobs'] if set(j['dependencies']) & descendants}
+        if expanded == descendants:
+            break
+        descendants = expanded
+    _require(not any(r['data']['job_id'] in descendants and r['data']['status'] != 'settled' for r in own),
+        'An admitted dependent still relies on the original accepted output')
+    return record, task
+
+
+def _continuation_candidate(scope, record, task):
+    return evidence.capture_candidate(scope, _assignment_plan(scope, record, task))
+
+
+def _continuation_save(scope, db, record, task, field, value):
+    reference = evidence._artifact(scope, value)
+    record['data'][field] = reference
+    db.execute('update assignments set data=? where id=?', (evidence._raw(record['data']).decode(), record['id']))
+    task['revision'] += 1
+    state._save(db, state._scope_id(scope), task)
+    return reference
+
+
+def _continuation_ownership(records):
+    return evidence._digest([dict(id=r['id'], owner=r['owner'], data={k: v for k, v in r['data'].items()
+        if k != 'workstream_continuation'}) for r in sorted(records, key=lambda r: r['id'])])
+
+
+def _continuation_intent(scope, record):
+    reference = record['data'].get('workstream_continuation')
+    if reference is None:
+        return None
+    value = evidence._read(scope, reference)
+    state._fields(value, ('version', 'token', 'state', 'used', 'remaining_continuations', 'workstream_revision',
+        'owner', 'assignment', 'pins', 'native_identity', 'observation', 'candidate', 'ownership_digest',
+        'task_revision', 'reason', 'prompt', 'human_continue', 'retry_at', 'proof', 'previous',
+        'delivery', 'delivery_ref', 'prior_reconciliation', 'prior_result', 'current_claims'))
+    _require(value['version'] == 1 and value['owner'] == record['owner'] and
+        value['assignment'] == record['data']['assignment'] and value['pins'] == record['body']['pins'] and
+        value['state'] in {'prepared', 'consumed', 'recorded'} and re.fullmatch('[0-9a-f]{32}', value['token']),
+        'Continuation intent binding is invalid')
+    state._integer(value['used'], 'continuation allocation consumed', 1)
+    maximum = _continuation_limits(record['body']['request'])['max_continuations']
+    _require(value['used'] <= maximum and value['remaining_continuations'] == maximum - value['used'],
+        'Continuation allocation binding changed')
+    return value
+
+
+def _continuation_receipt(scope, record):
+    history = _worker_history(scope, record['data']['observation'])
+    current = history[0][1] if history else None
+    _require(current is not None and current['status'] == 'observed' and not current['error'] and
+        current['conflict'] is None and isinstance(current['receipt'], dict),
+        'Continuation requires current unambiguous native history')
+    receipt = current['receipt']
+    _require(receipt['turn_status'] in {'completed', 'interrupted', 'failed'} and
+        receipt.get('will_retry') is not True and receipt['worker_id'] and receipt['worker_turn_id'],
+        'Native work or host retry remains active or uncertain')
+    return receipt
+
+
+def _continuation_recovery(receipt, reason, human):
+    code = receipt.get('failure_code')
+    if receipt['turn_status'] == 'failed':
+        _require(code in CONTINUATION_TRANSIENT | CONTINUATION_LIMIT_FAILURES, 'Unknown failure requires reconciliation, not resend')
+        _require(human or code not in CONTINUATION_LIMIT_FAILURES, 'Capacity limits require human continue; no automatic retry')
+        _require(human or receipt.get('will_retry') is False,
+            'Automatic continuation requires observed host retry completion')
+        _require(reason == 'transient', 'Failed child requires a recognized recovery reason')
+    elif receipt['turn_status'] == 'interrupted':
+        _require(human, 'Interrupted child requires human continue')
+    else:
+        _require(reason != 'transient', 'Transient continuation requires an observed failure')
+
+
+def prepare_continuation(scope, request):
+    """Persist bounded same-child intent only after current independent stopped-writer proof."""
+    request = _continuation_request(request, ('reason', 'prompt', 'human_continue', 'host_proof'), ('retry_at', 'workstream_revision'))
+    _require(request['reason'] in {'follow-up', 'review-fixes', 'transient'} and type(request['human_continue']) is bool,
+        'Invalid Workstreams continuation reason')
+    state._text(request['prompt'], 'bounded continuation prompt', 32768)
+    retry_at = request.get('retry_at', 0)
+    state._integer(retry_at, 'continuation retry time')
+    proof = evidence._read_host_proof(scope, request['host_proof'])
+    with _reservation_write(scope) as db:
+        if 'workstream_revision' in request:
+            from runtime.workstreams import _permission
+            _permission(scope, request.get('workstream_revision'))
+        _require(db is not None, 'Missing native assignment state')
+        records = _ledger(scope, db)
+        record, task = _continuation_owned(scope, db, request, records, allow_settled=True)
+        receipt = _continuation_receipt(scope, record)
+        _continuation_recovery(receipt, request['reason'], request['human_continue'])
+        previous = _continuation_intent(scope, record)
+        candidate = _continuation_candidate(scope, record, task)
+        ownership = _continuation_ownership(records)
+        unsent = previous is not None and previous['state'] == 'prepared'
+        if previous:
+            changed = (previous['workstream_revision'] != request.get('workstream_revision') or
+                previous['task_revision'] != task['revision'] or previous['observation'] != record['data']['observation'] or
+                previous['ownership_digest'] != ownership or previous['candidate']['digest'] != evidence._digest(candidate))
+            progressed = previous['native_identity']['worker_turn_id'] != receipt['worker_turn_id']
+            _require((unsent and changed) or
+                (previous['state'] == 'recorded' and progressed) or
+                (previous['state'] == 'consumed' and progressed and request['human_continue']),
+                'Prior continuation delivery is unresolved; observe the original child before reassessing')
+        limits = _continuation_limits(record['body']['request'])
+        used = (previous['used'] if previous else 0) + (0 if unsent else 1)
+        _require(used <= limits['max_continuations'], 'Original continuation allocation is exhausted; human input required')
+        _validate_operation_proof(scope, record, task, proof, current_candidate_digest=evidence._digest(candidate))
+        native = proof['native_identity']
+        if previous:
+            _require(all(native[key] == previous['native_identity'][key] for key in
+                ('client_surface', 'native_version', 'parent_session_id', 'parent_turn_id', 'spawn_item_id', 'task_name', 'worker_id')),
+                'Same-child continuation identity changed')
+        earliest = int(_now()) + (limits['backoff_seconds'] if request['reason'] == 'transient' else 0)
+        value = dict(version=1, token=uuid.uuid4().hex, state='prepared', used=used,
+            remaining_continuations=limits['max_continuations'] - used, workstream_revision=request.get('workstream_revision'),
+            owner=record['owner'], assignment=record['data']['assignment'], pins=task['pins'], native_identity=native,
+            observation=record['data']['observation'], candidate=evidence._artifact(scope, candidate), ownership_digest=ownership,
+            task_revision=task['revision'] + 1, reason=request['reason'], prompt=request['prompt'],
+            human_continue=request['human_continue'], retry_at=max(retry_at, earliest),
+            proof=evidence._artifact(scope, proof),
+            previous=record['data'].get('workstream_continuation'), delivery=None, delivery_ref=None,
+            prior_reconciliation=record['data']['reconciliation'], prior_result=record['data']['result'],
+            current_claims=_claims(next(j for j in _task_plan(scope, task)['jobs']
+                if j['id'] == record['data']['job_id'])['claims']))
+        _continuation_save(scope, db, record, task, 'workstream_continuation', value)
+        return _continuation_reply(record, task, value)
+
+
+def _continuation_reply(record, task, value, admitted=False):
+    reply = dict(ok=True, attempt_id=record['id'], revision=task['revision'], token=value['token'],
+        worker_id=value['native_identity']['worker_id'], task_name=record['data']['binding']['task_name'],
+        state=value['state'], send_admitted=admitted, native_delivery='unobserved',
+        remaining_continuations=value['remaining_continuations'], retry_at=value['retry_at'],
+        delivery=value['delivery'], limitations=list(CONTINUATION_LIMITATIONS))
+    if admitted:
+        reply['prompt'] = value['prompt']
+    return reply
+
+
+def consume_continuation(scope, request):
+    """Consume immediately before the native same-child send; loss requires reconciliation."""
+    request = _continuation_request(request, ('token',), ('workstream_revision',))
+    with _reservation_write(scope) as db:
+        if 'workstream_revision' in request:
+            from runtime.workstreams import _permission
+            _permission(scope, request.get('workstream_revision'))
+        _require(db is not None, 'Missing native assignment state')
+        records = _ledger(scope, db)
+        record, task = _continuation_owned(scope, db, request, records, allow_settled=True)
+        value = _continuation_intent(scope, record)
+        _require(value is not None and value['token'] == request['token'] and value['state'] == 'prepared' and
+            value['workstream_revision'] == request.get('workstream_revision') and value['task_revision'] == task['revision'],
+            'Continuation permission is stale or already consumed')
+        _require(value['retry_at'] <= _now(), 'Continuation backoff has not elapsed')
+        _require(value['observation'] == record['data']['observation'] and
+            value['ownership_digest'] == _continuation_ownership(records) and
+            value['candidate']['digest'] == evidence._digest(_continuation_candidate(scope, record, task)),
+            'Continuation candidate, native observation or shared ownership changed')
+        _continuation_receipt(scope, record)
+        plan = _task_plan(scope, task)
+        current_claims = _claims(next(j for j in plan['jobs'] if j['id'] == record['data']['job_id'])['claims'])
+        _require(current_claims == value['current_claims'], 'Continuation physical resource aliases changed')
+        if record['data']['status'] == 'settled':
+            active = [r for r in records if r['data']['role'] in NATIVE_ROLES and r['data']['status'] != 'settled']
+            own = [r for r in active if all(r['owner'][k] == record['owner'][k]
+                for k in ('scope_id', 'client', 'session_id', 'task_id'))]
+            _require(len(own) < plan['limits']['max_parallel_workers'] and
+                len(active) < min([plan['limits']['host_capacity']] + [r['data']['host_capacity'] for r in active]),
+                'Managed worker capacity is exhausted during reacquisition')
+            _invalidate_ready(db, scope, task, current_claims)
+            if task['state'] == 'DONE':
+                task['state'] = 'REVIEW'
+            record['data'].update(status='observed', reconciliation=None, result=None)
+        value = dict(value, state='consumed')
+        _continuation_save(scope, db, record, task, 'workstream_continuation', value)
+        return _continuation_reply(record, task, value, admitted=True)
+
+
+def record_continuation(scope, request):
+    """Retain delivery assertions even while disabled; never release or reassign ownership."""
+    request = _continuation_request(request, ('token', 'delivery', 'delivery_ref'))
+    _require(request['delivery'] in {'sent', 'uncertain'}, 'Invalid continuation delivery outcome')
+    state._text(request['delivery_ref'], 'continuation delivery reference', 4096)
+    with _reservation_write(scope) as db:
+        record = _assignment(scope, db, request)
+        task = _assignment_task(scope, db, request)
+        value = _continuation_intent(scope, record)
+        _require(value is not None and value['token'] == request['token'] and value['state'] == 'consumed',
+            'Continuation delivery has no exact consumed permission')
+        value = dict(value, state='recorded', delivery=request['delivery'], delivery_ref=request['delivery_ref'])
+        _continuation_save(scope, db, record, task, 'workstream_continuation', value)
+        return _continuation_reply(record, task, value)
+
+
+def validate_dependencies(scope, task, plan, job, records):
+    """A reopened prerequisite invalidates old direct and transitive acceptance."""
+    own = [r for r in records if r['owner']['scope_id'] == state._scope_id(scope) and
+        all(r['owner'][key] == task[key] for key in ('client', 'session_id', 'task_id'))]
+    jobs = {j['id']: j for j in plan['jobs']}
+    latest = {}
+    for row in own:
+        key=row['data']['job_id']
+        if key not in latest or row['data']['revision']>latest[key]['data']['revision']:
+            latest[key]=row
+    checked={}
+    pending=[(identity,False) for identity in job['dependencies']]
+    while pending:
+        identity,expanded=pending.pop()
+        if identity in checked:
+            continue
+        if not expanded:
+            pending.append((identity,True))
+            pending.extend((parent,False) for parent in jobs[identity]['dependencies'] if parent not in checked)
+            continue
+        row=latest.get(identity)
+        _require(row is not None and row['data']['role']==jobs[identity]['role'] and row['data']['status']=='settled' and
+            row['data']['result']['outcome']=='completed','Required delegation dependency prerequisite is not reconciled and complete')
+        retained = evidence._read(scope, row['data']['reconciliation'])
+        revision = retained.get('revision')
+        if revision is None and row['data']['role'] == 'check':
+            proof = retained.get('proof', {})
+            _require(retained.get('version') == 2 and proof.get('kind') == 'check-writer-reconciliation'
+                and proof.get('attempt_id') == row['id'], 'Invalid check prerequisite reconciliation')
+            revision = proof.get('expected_revision')
+            state._integer(revision, 'check reconciliation proof revision', 1)
+            revision += 1
+        state._integer(revision,'prerequisite reconciliation revision',1)
+        _require(all(revision>checked[parent] for parent in jobs[identity]['dependencies']),
+            'Prior dependent acceptance predates reopened prerequisite work')
+        checked[identity]=revision
+
+
+def validate_settlement(scope, record, outcome):
+    if outcome == 'completed' and 'workstream_continuation' in record['data']:
+        intent = _continuation_intent(scope, record)
+        if intent['state'] in {'consumed', 'recorded'}:
+            receipt = _continuation_receipt(scope, record)
+            _require(receipt['worker_turn_id'] != intent['native_identity']['worker_turn_id'],
+                'Completed continuation requires a newly observed native result')
