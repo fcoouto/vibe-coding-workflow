@@ -64,6 +64,12 @@ def control_main():
             if name == "status":
                 action.add_argument("--client", required=True, choices=("codex",))
                 action.add_argument("--session", required=True)
+        workstreams = delegation_actions.add_parser("workstreams", add_help=False)
+        workstream_actions = workstreams.add_subparsers(dest="workstream_action", required=True)
+        for name in ("enable", "disable", "status", "consume-dispatch", "prepare-continuation",
+                     "consume-continuation", "record-continuation", "resource-run", "resource-status",
+                     "resource-release", "resource-cancel"):
+            workstream_actions.add_parser(name, add_help=False).add_argument("--cwd", required=True)
         guidance = delegation_actions.add_parser("guidance", add_help=False)
         guidance_actions = guidance.add_subparsers(dest="guidance_action", required=True)
         for name in ("status", "claim", "record"):
@@ -134,7 +140,22 @@ def control_main():
             return 0
         if args.command == "delegation":
             from runtime import delegation
-            if args.delegation_action == "guidance":
+            if args.delegation_action == "workstreams":
+                from runtime import workstreams
+                action = args.workstream_action
+                if action.startswith("resource-"):
+                    from runtime import resource_execution
+                    report = resource_execution.operate(scope, resource_execution.host_directory(),
+                        action.removeprefix("resource-"), request)
+                elif action in {"enable", "disable", "status"}:
+                    report = workstreams.control(scope, action, request)
+                else:
+                    operation = {"consume-dispatch": workstreams.consume_dispatch,
+                        "prepare-continuation": workstreams.prepare_continuation,
+                        "consume-continuation": workstreams.consume_continuation,
+                        "record-continuation": workstreams.record_continuation}
+                    report = operation[action](scope, request)
+            elif args.delegation_action == "guidance":
                 report = {"status": delegation.guidance_status, "claim": delegation.claim_guidance,
                           "record": delegation.record_guidance}[args.guidance_action](scope, request)
             elif args.delegation_action == "status":

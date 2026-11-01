@@ -344,6 +344,52 @@ class GuidanceTests(unittest.TestCase):
         self.assertTrue(self.claim()["claimed"])
 
 
+    def test_version_only_update_reuses_original_guidance_without_publication(self):
+        original = self.publish()
+        before = {path: path.read_bytes() for path in self.cache_path().parent.iterdir()}
+        changed = self.request["applicability"] | dict(client_version="future-client")
+        result = self.status(applicability=changed, profile_ids=["small"])
+        self.assertTrue(result["usable"])
+        self.assertEqual(result["freshness"], "verified")
+        self.assertEqual(result["recommendations"], self.guidance["recommendations"])
+        for key in ("checked_at", "snapshot_ref", "snapshot_digest"):
+            self.assertEqual(result[key], original[key])
+        self.assertFalse(self.claim(applicability=changed)["claimed"])
+        self.assertEqual({path: path.read_bytes() for path in before}, before)
+
+    def test_failed_refresh_does_not_retry_for_version_only_update(self):
+        for published in (False, True):
+            with self.subTest(published=published):
+                self.scope = replace(self.scope, runtime=replace(self.scope.runtime,
+                    state_dir=self.base / ('private-' + str(published))))
+                if published:
+                    self.publish()
+                claim = self.claim("maintenance", "offline-" + str(published))
+                self.api().record_guidance(self.scope, self.request | dict(token=claim["token"],
+                    generation=claim["generation"], coordinator_ref="coordinator:offline", failure="Offline"))
+                changed = self.request["applicability"] | dict(client_version="future-client")
+                result = self.status(applicability=changed)
+                self.assertEqual(result["freshness"], "stale" if published else "unavailable")
+                self.assertEqual(result["usable"], published)
+                self.assertFalse(self.claim(applicability=changed)["claimed"])
+
+    def test_version_only_update_cannot_rebind_an_outstanding_refresh_claim(self):
+        claim = self.claim()
+        changed = self.request["applicability"] | dict(client_version="future-client")
+        with self.assertRaisesRegex(state.StateError, "claim expired, changed or superseded"):
+            self.api().record_guidance(self.scope, self.request | dict(applicability=changed,
+                token=claim["token"], generation=claim["generation"], coordinator_ref="coordinator:offline", failure="Offline"))
+        self.assertTrue(self.record(claim)["usable"])
+
+    def test_capability_change_requires_refresh_without_a_version_change(self):
+        self.publish()
+        changed = self.request["applicability"] | dict(capability_fingerprint="c" * 64)
+        result = self.status(applicability=changed)
+        self.assertFalse(result["usable"])
+        self.assertEqual(result["freshness"], "incompatible")
+        self.assertTrue(self.claim(applicability=changed)["claimed"])
+
+
 class AdmissionTests(unittest.TestCase):
     def setUp(self):
         from tests.test_evidence import EvidenceTests
@@ -527,7 +573,7 @@ class AdmissionTests(unittest.TestCase):
             self.api.prepare_assignment(self.scope, request)
         self.catalog['catalog'][0]['model'] = 'new-native-model'
         for key, value in (('parent_model_provider', None), ('capability_digest', 'f' * 64),
-                           ('client_surface', 'codex-desktop'), ('native_version', 'changed')):
+                           ('client_surface', 'codex-desktop')):
             with self.subTest(key=key):
                 before = self.catalog[key]
                 self.catalog[key] = value
@@ -1885,6 +1931,26 @@ class AdmissionTests(unittest.TestCase):
                 self.api.prepare_assignment(self.scope, request | delta)
 
 
+    def test_native_receipt_keeps_admitted_version_when_observer_updates(self):
+        self.plan()
+        prepared = self.prepare()
+        self.observe_worker(prepared)
+        observed = self.lifecycle_observation(prepared, current_observer_version='0.165.0',
+            parent_creation_version='0.164.0-alpha.11.1', worker_creation_version='0.164.0-alpha.11.1')
+        self.assertEqual(self.observe_worker(prepared, observed)['status'], 'observed')
+        with state._database(self.scope) as db:
+            record = next(row for row in self.api._ledger(self.scope, db) if row['id'] == prepared['attempt_id'])
+        receipt = self.api._worker_history(self.scope, record['data']['observation'])[0][1]['receipt']
+        self.assertEqual(receipt['native_version'], '0.163.0')
+        self.assertEqual(receipt['current_observer_version'], '0.165.0')
+        self.assertEqual(record['data']['binding']['native_version'], '0.163.0')
+        request = self.request(attempt_id=prepared['attempt_id'], parent_turn_id='parent-turn', spawn_item_id='spawn-item')
+        for key in ('current_observer_version', 'parent_creation_version', 'worker_creation_version'):
+            bad = dict(observed, receipt=observed['receipt'] | {key: None})
+            with self.subTest(key=key), self.assertRaises(state.StateError):
+                self.api._worker_receipt(self.scope, record, request, bad)
+
+
 class Stage3ModelFreeTests(unittest.TestCase):
     def setUp(self):
         self.fixture = test_evidence.EvidenceTests(methodName='runTest')
@@ -2622,3 +2688,21 @@ class Stage4NativeReviewTests(unittest.TestCase):
         self.assertEqual(replay['attempt']['id'], committed[0]['evidence']['attempts'][0]['id'])
         self.assertEqual(replay['task']['delegation']['attempts_consumed'], 1)
         self.assertEqual(replay['task']['delegation']['resource_units_consumed'], 1)
+
+
+    def test_review_collection_keeps_admitted_version_across_observer_updates(self):
+        self.plan(self.review_plan())
+        prepared = self.prepared()
+        binding = evidence.prepared_native_review(self.scope, prepared['attempt_id'])
+        self.assertEqual(binding['native_version'], '0.163.0')
+        self.assertEqual(binding.get('client_surface'), 'codex-cli')
+        observed = self.observed(prepared, current_observer_version='0.165.0',
+            parent_creation_version='0.164.0-alpha.11.1', worker_creation_version='0.164.0-alpha.11.1')
+        self.assertEqual(self.observe(prepared, observed)['status'], 'observed')
+        collection = self.collection(prepared, observed)
+        collection['receipt'].update(current_observer_version='0.166.0', parent_creation_version='0.164.0-alpha.11.1',
+            worker_creation_version='0.164.0-alpha.11.1')
+        result = self.collect(prepared, collection)
+        receipt = evidence._read(self.scope, result['attempt']['collected'])['receipt']
+        self.assertEqual(receipt['native_version'], '0.163.0')
+        self.assertEqual(receipt['current_observer_version'], '0.166.0')

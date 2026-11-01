@@ -129,3 +129,15 @@ candidates are excluded. Historical records remain read-only under new pins;
 original-runtime reconciliation and the existing approved fresh-authority update
 remain required. Source validation and actual native hook observation are
 reported separately.
+
+## Workstreams main-runtime port · 1 November 2026
+
+The user selected Workstreams and its essential dependencies instead of importing the 88-commit development ancestry. The port uses main's existing schema-2 task, evidence and delegation authority. It preserves the independently merged Naming/status rules and omits canonical3 lifecycle/accounting, OpenRouter and observability extensions.
+
+The [unified skill](../skills/workstreams/SKILL.md) routes naming, saved management controls and suitable enabled execution. [Mode controls](../skills/workstreams/references/procedure.md) preserve existing choices, keep missing legacy preferences Off, and default only new supported scopes On. Disabled mode retains ordinary delegation and collection/reconciliation. [Dispatch](../clients/workstreams-protocol.md) preserves exact scope, original budgets and one-use sends; consumption retains the immutable prompt while preparation/delivery replies omit it.
+
+[Resources](../clients/workstreams-resources.md) admit heavy phases cooperatively, share host reservations and memory-only telemetry, retain disk-specific checks, and permit telemetry failure through the remaining gates. Task-derived job counts replace the arbitrary 32-job cap; input bounds, ownership, finite budgets, freshness and physical scopes remain. [Parent recovery](../clients/workstreams-recovery.md) retains one temporary shared monitor while parents are eligible, deletion after the final departure, one-minute retries within the original 60-minute episode, and human handling for pauses, limits and shutdown. Parent and child retry rules remain distinct.
+
+[Operation schemas](../clients/delegation-requests.md) replace routine implementation discovery, retaining narrow authoritative lookups for incomplete public stop-proof and cache-publication schemas. Evidence guides preserve every original main request paragraph exactly once; [completion](../clients/evidence-completion.md) and [retirement](../clients/evidence-retirement.md) retain their separate triggers. [Naming](../clients/workstreams-naming.md) moves main's existing rules exactly apart from heading depth; [title synchronization](../clients/workstreams-titles.md) retains manual-edit and event-repair behavior.
+
+The [port boundary](workstreams-main-port.md) separates source validation from exact-package native observation. No old authority, pin, claim, attempt or budget is rewritten. No source test or earlier package observation establishes live compatibility for this candidate.

@@ -8,9 +8,10 @@
 
 For task controls, read [task runtime](clients/runtime.md); for accepted checks, review and completion, load [evidence](clients/evidence.md); for native delegated work only, load [native delegation](clients/delegation.md). Local readiness covers current task evidence and grants no merge authority. D7's [bounded fixture inspector](clients/repository-gate.md) is implemented but always exits 1; production evidence sources, publishing and repository enforcement remain unqualified.
 
-For parent/child names, uniform task statuses and event-driven title updates, use
-[Workstreams naming](skills/workstreams/SKILL.md). Managed titles require explicit
-adoption; preserve manual edits and native identity.
+Use [Workstreams](skills/workstreams/SKILL.md) for suitable coordinated contexts,
+saved mode controls, resource admission, recovery and managed titles. New supported
+Codex runtime scopes start enabled; existing preferences remain. Managed titles
+require explicit adoption. See the [main-runtime boundary](docs/workstreams-main-port.md).
 
 ## Prepare your Workspace
 

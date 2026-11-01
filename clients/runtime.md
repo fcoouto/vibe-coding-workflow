@@ -41,7 +41,7 @@ For managed display titles, read [title synchronization](workstreams-titles.md).
 
 ## Coordinator resource claims
 
-Use these model-free controls only when already authorized coordinator work needs a shared resource reservation. They require no native plan, discovery, model selection or guidance. Direct checks reserve their own resources through [evidence](evidence.md#request-fields).
+Use these model-free controls only when already authorized coordinator work needs a shared resource reservation. They require no native plan, discovery, model selection or guidance. Direct checks reserve their own resources through [checks and reconciliation](evidence-checks.md), with the [common fields](evidence.md#request-fields).
 
 ```sh
 python3 -I -B /path/to/package/scripts/workflow.py delegation coordinator reserve --cwd /checkout < reservation.json

@@ -17,7 +17,13 @@ PACKAGE = Path(__file__).resolve().parents[1]
 RPC_TIMEOUT = 5
 TOTAL_TIMEOUT = 15
 MAX_OUTPUT = 512 * 1024
-KNOWN_VERSIONS = {"0.163.0", "0.164.0-alpha.11.1"}
+# Historical observations only; support is determined by the live protocol contract.
+NATIVE_COMPATIBILITY = {
+    ("0.163.0", "0.163.0", "codex-cli", "exec", "codex_exec"),
+    ("0.164.0-alpha.11.1", "0.164.0-alpha.11.1", "codex-desktop", "vscode", "Codex Desktop"),
+    ("0.165.0", "0.165.0-alpha.1.2", "codex-desktop", "vscode", "Codex Desktop"),
+}
+KNOWN_VERSIONS = {pair[0] for pair in NATIVE_COMPATIBILITY}
 HASH = re.compile(r"sha256:[0-9a-f]{64}(?:/sha256:[0-9a-f]{64})?\Z")
 SOURCES = {"system", "user", "project", "mdm", "sessionFlags", "plugin", "cloudRequirements",
            "cloudManagedConfig", "legacyManagedConfigFile", "legacyManagedConfigMdm", "unknown"}
@@ -270,10 +276,11 @@ def inspect_runtime(scope, executable):
             failed = True
     try:
         observed = version(executable, deadline)
-        report["native"] = {"status": "passed" if observed in KNOWN_VERSIONS else "unknown_version", "version": observed}
-        incomplete |= observed not in KNOWN_VERSIONS
+        report["native"] = {"status": "observed", "version": observed,
+                            "version_evidence": "recorded" if observed in KNOWN_VERSIONS else "unrecorded"}
         if scope is not None:
             response = discover(executable, scope.repository_root, deadline)
+            report["native"]["status"] = "passed"
             if definitions is not None:
                 report["hooks"] = inspect_hooks(response, scope, definitions)
                 failed |= report["hooks"]["status"] == "failed"

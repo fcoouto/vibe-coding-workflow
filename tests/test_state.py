@@ -27,6 +27,7 @@ class StateTests(unittest.TestCase):
         self.base = Path(self.temp.name).resolve()
         self.scope = ProjectScope("project", self.base / "repo", self.base / "repo/.git", "policy",
                                   RuntimeSettings(2, self.base / "private"))
+        self.scope.git_common_dir.mkdir(parents=True)
         self.request = dict(client="codex", session_id="session", task_id="task", scope_ref="request:1",
                             mode="editable", decision_ref="user:1")
 
@@ -414,6 +415,8 @@ class StateTests(unittest.TestCase):
         database.unlink()
         self.assertEqual(self.event("Stop").action, "pass")
         self.assertFalse(database.exists())
+        from runtime import workstreams
+        workstreams._path(self.scope).unlink()
         directory.rmdir()
         directory.symlink_to(self.base, target_is_directory=True)
         with self.assertRaises(self.api().StateError):

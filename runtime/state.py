@@ -45,7 +45,7 @@ def runtime_fingerprint():
     """Pin installed runtime sources, dispatcher and adapter contents, by relative path."""
     digest = hashlib.sha256()
     paths = sorted((PACKAGE / "runtime").glob("*.py")) + sorted((PACKAGE / "runtime/adapters").glob("*.py"))
-    paths.extend((PACKAGE / "scripts/workflow.py", PACKAGE / "scripts/workstreams_family.py"))
+    paths.extend((PACKAGE / "scripts/workflow.py", PACKAGE / "scripts/workstreams_family.py", PACKAGE / "scripts/workstreams_recovery.py"))
     for path in sorted(paths):
         digest.update(str(path.relative_to(PACKAGE)).encode() + b"\0" + path.read_bytes() + b"\0")
     return digest.hexdigest()
@@ -390,8 +390,11 @@ def start_task(scope, request):
             _save(db, scope_id, current)
         elif replacement is not None:
             raise StateError("No bound task matches the requested replacement")
-        db.execute("insert or ignore into checkouts values(?,?,?,?,0)",
+        registered = db.execute("insert or ignore into checkouts values(?,?,?,?,0)",
                    (scope_id, scope.project_id, str(scope.repository_root), str(scope.git_common_dir)))
+        if registered.rowcount == 1:
+            from runtime.workstreams import initialize_default
+            initialize_default(scope, db)
         task = {field: request[field] for field in ("client", "session_id", "task_id", "scope_ref", "mode", "decision_ref")}
         task.update(state="TRIAGE", revision=1, pins=pins, reason="Task started", reference=request["decision_ref"],
                     conditions=[], turn_id=None, turn_uncertain=True)

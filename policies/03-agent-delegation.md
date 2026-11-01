@@ -24,6 +24,8 @@ Apply with the [shared contract rules](00-index.md).
 - For new behavior and bug fixes, write the focused test or executable reproduction first, observe failure for the intended reason, then implement and rerun it. For behavior-preserving refactors, establish a passing baseline and rerun affected tests. Documentation and trivial nonbehavior edits need relevant static checks, not tests that restate the edit. Missing required proof remains a blocker under [Tests and Builds](05-tests-and-builds.md), not an implicit exception. Implementers self-review and report completion, a blocker or a pending decision; parallel dispatch preserves this discipline.
 - Split work at separable context boundaries. Keep tightly coupled work together. Use narrow specialist roles with distinct triggers; retain a standing role only for a recurring need.
 
+Workstreams starts enabled for new supported Codex runtime scopes and preserves existing preferences. Use it only when beneficial. Its [skill](../skills/workstreams/SKILL.md) routes naming, enable/disable/status and suitable execution. Off retains ordinary delegation. Saved mode grants no route, ownership, budget or integration authority; load the applicable execution procedure before managed work.
+
 ## Ownership and parallel work
 
 1. Reserve canonical writable files and mutable resources before dispatch, including path aliases, ancestor overlaps, ports, build directories, databases and services. Parallel tasks need disjoint files, independent or isolated mutable resources, and no direct or transitive dependencies. Unknown scope means serialize or combine the affected tasks. Different sections of one file are not independent scopes.
