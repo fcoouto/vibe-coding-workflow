@@ -26,6 +26,18 @@ actual repository/direct ceilings, structured context diagnostics, owned-request
 capacity recovery and unchanged maximum effort/deadlines. Package validation does
 not establish provider execution, billing or installed-skill loading.
 
+Observed source-based Balanced text execution used the approved 515-byte fictional
+life case, existing enrolled consent/authentication, native Sol/ultra,
+Sonnet/max and Gemini/high. All three investigations, three critiques and fresh
+native synthesis completed in 768.2 seconds, without corrections or replacements.
+Sonnet's 128,000-token endpoint ceiling was separate from its advisory 16,384-token
+target: it returned 31,677 and 51,653 completion tokens, including 30,205 and 49,844
+reasoning tokens; both ended normally. Four OpenRouter generations totaled
+USD 0.87454. All local owners stopped; source/phase hashes remained intact. This
+qualifies this observed runtime path, not installed-skill loading, native Task
+lifecycle admission, cancellation or general model reliability. Free admission
+was denied without inference; comparative evaluation was not run.
+
 ## Current peer-review contract, 31 October 2026
 
 The [approved design](superpowers/specs/2026-10-31-council-simplification-design.md)
