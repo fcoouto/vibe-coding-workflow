@@ -16,20 +16,25 @@ def main():
     from runtime.startup import MAX_INPUT, StartupError, json_object, resolve_project
     parser = argparse.ArgumentParser()
     parser.add_argument('action', choices=('status', 'register', 'withdraw', 'reactivate', 'suspend',
-        'schedule', 'record-schedule', 'observe', 'record-send'))
+        'schedule', 'record-schedule', 'observe', 'record-send', 'reconcile-feature'))
     parser.add_argument('--cwd', type=Path)
     parser.add_argument('--full', action='store_true', help='Include complete private registry details for diagnosis')
     args = parser.parse_args()
     try:
         request = json_object(sys.stdin.buffer.read(MAX_INPUT + 1))
         directory = Path(os.environ.get('CODEX_HOME', str(Path.home() / '.codex'))) / 'workstreams-recovery'
-        if args.action == 'register':
+        if args.action in {'register', 'reconcile-feature'}:
             if args.cwd is None:
-                raise ValueError('Registration requires the enrolled checkout')
+                raise ValueError('Recovery activation requires the enrolled checkout')
             scope = resolve_project(SimpleNamespace(client='codex', cwd=args.cwd), PACKAGE)
             if scope is None or scope.runtime is None:
-                raise ValueError('Registration requires an enrolled workflow task')
-            report = parent_recovery.register(scope, directory, request)
+                raise ValueError('Recovery activation requires an enrolled workflow task')
+            if args.action == 'register':
+                report = parent_recovery.register(scope, directory, request)
+            else:
+                if request:
+                    raise ValueError('Feature reconciliation takes no request fields')
+                report = parent_recovery.reconcile_feature(scope, directory)
         elif args.action == 'reactivate':
             report = parent_recovery.reactivate(directory, request, PACKAGE)
         elif args.action == 'observe':

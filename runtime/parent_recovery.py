@@ -40,7 +40,8 @@ def _validate(data):
         _require(type(parent['eligible']) is bool and isinstance(parent['parent'], dict) and
             parent['parent'].get('thread_id') == thread_id, 'Corrupt parent registration')
         state._integer(parent['parent']['deadline'], 'original recovery deadline')
-        state._integer(parent['parent']['workstream_revision'], 'admitted mode revision', 1)
+        revision_key = _revision_key(parent['parent'])
+        state._integer(parent['parent'][revision_key], 'admitted recovery revision', 1)
         _require(isinstance(parent['consumed_turns'], list) and all(isinstance(t, str) for t in parent['consumed_turns']), 'Corrupt consumed turns')
         episode = parent['episode']
         if episode is not None:
@@ -59,22 +60,55 @@ def _validate(data):
             state._text(intent['turn_id'], 'delivery source turn', 256)
 
 
+def _revision_key(parent):
+    historical = 'workstream_revision' in parent
+    _require(historical != ('recovery_revision' in parent), 'Ambiguous recovery revision')
+    return 'workstream_revision' if historical else 'recovery_revision'
+
+
+def preflight_feature(scope, directory):
+    """Check before changing preferences; unresolved historical scopes stay original."""
+    from runtime import workstreams
+    workstreams._feature(scope, 'capacity_recovery')
+    report = control(directory, 'status', {})
+    scope_root = scope.repository_root.resolve()
+    needed_elsewhere = any(row['eligible'] and Path(row['parent']['cwd']).resolve() != scope_root
+        for row in report['parents'].values())
+    pending = [thread_id for thread_id, row in report['parents'].items()
+        if Path(row['parent']['cwd']).resolve() == scope_root and
+        _revision_key(row['parent']) == 'workstream_revision' and
+        (row['eligible'] or row['intent'] or report['pending'] and not needed_elsewhere or
+         report['schedule_id'] and report['wanted'] == 'absent')]
+    return report | dict(ready=not pending, historical_registrations=pending,
+        reason='Reconcile original recovery registrations before changing this preference' if pending else None)
+
+
+def reconcile_feature(scope, directory):
+    """Withdraw stale recovery permissions; native schedule deletion remains external."""
+    from runtime import workstreams
+    feature = workstreams._feature(scope, 'capacity_recovery')
+    if not Path(directory).exists():
+        return control(directory, 'status', {})
+    return control(directory, 'reconcile-feature', dict(cwd=str(scope.repository_root),
+        enabled=feature['enabled'], recovery_revision=feature['revision']))
+
+
 def register(scope, directory, request):
     """Register only the current enabled workflow task, preserving original pins."""
     from runtime import workstreams
-    state._fields(request, ('client', 'session_id', 'task_id', 'scope_ref', 'expected_revision', 'workstream_revision'))
+    state._fields(request, ('client', 'session_id', 'task_id', 'scope_ref', 'expected_revision', 'recovery_revision'))
     state._identity(request)
     with state._database(scope) as db:
         _require(db is not None, 'Workflow task authority is missing')
         task = d6._assignment_task(scope, db, request)
         bound = state._task(db, state._scope_id(scope), 'codex', request['session_id'])
         _require(bound is not None and bound['task_id'] == task['task_id'], 'Parent is no longer the bound task')
-        workstreams._permission(scope, request['workstream_revision'])
+        workstreams._feature_permission(scope, 'capacity_recovery', request['recovery_revision'])
         _require(task['state'] in {'TRIAGE', 'READY', 'WORKING', 'REVIEW'}, 'Parent task is not in progress')
         plan = d6._task_plan(scope, task)
         parent = dict(thread_id=task['session_id'], cwd=str(scope.repository_root),
             identity={key:task[key] for key in ('client', 'session_id', 'task_id', 'scope_ref')},
-            pins=task['pins'], deadline=plan['limits']['deadline'], workstream_revision=request['workstream_revision'])
+            pins=task['pins'], deadline=plan['limits']['deadline'], recovery_revision=request['recovery_revision'])
         return control(directory, 'register', dict(parent=parent))
 
 
@@ -94,8 +128,13 @@ def _authority(parent, package, *, reauthorize=False):
                     _require(task['pins'] == parent['pins'] and
                         all(task[key] == value for key, value in identity.items()), 'Parent authority changed')
                     state._compatible(scope, task)
-                    mode = workstreams._load(scope)
-                    eligible = (mode['enabled'] and (reauthorize or mode['revision'] == parent['workstream_revision']) and
+                    revision_key = _revision_key(parent)
+                    mode = workstreams._feature(scope, 'capacity_recovery')
+                    if revision_key == 'workstream_revision':
+                        original = workstreams._load(scope)
+                        if any(mode[key] != original[key] for key in ('enabled', 'revision')):
+                            return 'stopped', mode['revision']
+                    eligible = (mode['enabled'] and (reauthorize or mode['revision'] == parent[revision_key]) and
                         task['state'] in {'TRIAGE', 'READY', 'WORKING', 'REVIEW'} and not any(c['status'] == 'pending' and
                         c['kind'] in {'blocker', 'decision'} for c in task['conditions']))
                     return ('eligible' if eligible else 'stopped'), mode['revision']
@@ -122,9 +161,10 @@ def observe(directory, request, package):
 def reactivate(directory, request, package):
     """Human continuation reauthorizes current mode without renewing the episode."""
     state._fields(request, ('thread_id',), ('schedule_absent',))
-    authority, revision = _authority(_saved(directory, request), package, reauthorize=True)
+    saved = _saved(directory, request)
+    authority, revision = _authority(saved, package, reauthorize=True)
     _require(authority == 'eligible', 'Human continuation requires current eligible task authority')
-    return control(directory, 'reactivate', request | dict(workstream_revision=revision))
+    return control(directory, 'reactivate', request | {_revision_key(saved): revision})
 
 
 def _archive_expired(directory, data, now):
@@ -185,10 +225,32 @@ def control(directory, action, request, *, now=None):
 
 
 def _operate(data, action, request, now, rollback):
+    if action == 'reconcile-feature':
+        state._fields(request, ('cwd', 'enabled', 'recovery_revision'))
+        state._text(request['cwd'], 'recovery checkout')
+        _require(type(request['enabled']) is bool, 'Invalid recovery preference')
+        state._integer(request['recovery_revision'], 'current recovery revision', 0)
+        historical = []
+        for thread_id, record in data['parents'].items():
+            parent = record['parent']
+            if Path(parent['cwd']).resolve() != Path(request['cwd']).resolve():
+                continue
+            if _revision_key(parent) == 'workstream_revision':
+                historical.append(thread_id)
+            if not request['enabled'] or parent[_revision_key(parent)] != request['recovery_revision']:
+                record['eligible'] = False
+        return dict(historical_registrations=historical)
     if action == 'register':
         state._fields(request, ('parent',))
         parent = request['parent']
-        state._fields(parent, ('thread_id', 'cwd', 'identity', 'pins', 'deadline', 'workstream_revision'))
+        state._fields(parent, ('thread_id', 'cwd', 'identity', 'pins', 'deadline'), ('workstream_revision', 'recovery_revision'))
+        revision_key = _revision_key(parent)
+        state._integer(parent[revision_key], 'admitted recovery revision', 1)
+        if revision_key == 'recovery_revision':
+            _require(not any(_revision_key(row['parent']) == 'workstream_revision' and
+                Path(row['parent']['cwd']).resolve() == Path(parent['cwd']).resolve() and
+                (row['eligible'] or row['intent']) for row in data['parents'].values()),
+                'Reconcile original recovery registrations before switching this scope')
         state._identity(parent['identity'])
         _require(parent['thread_id'] == parent['identity']['session_id'], 'Parent must match the workflow session')
         state._text(parent['cwd'], 'parent checkout')
@@ -254,7 +316,7 @@ def _operate(data, action, request, now, rollback):
     parent = data['parents'].get(request['thread_id'])
     _require(parent is not None, 'Parent is not registered')
     if action in {'withdraw', 'reactivate'}:
-        state._fields(request, ('thread_id',), ('schedule_absent', 'workstream_revision') if action == 'reactivate' else ())
+        state._fields(request, ('thread_id',), ('schedule_absent', 'workstream_revision', 'recovery_revision') if action == 'reactivate' else ())
         if action == 'withdraw':
             parent['eligible'] = False
         else:
@@ -266,9 +328,12 @@ def _operate(data, action, request, now, rollback):
             parent['eligible'] = now < parent['parent']['deadline'] and (
                 parent['episode'] is None or now < parent['episode']['deadline'])
             data['suspended'] = False
-            if 'workstream_revision' in request:
-                state._integer(request['workstream_revision'], 'current mode revision', 1)
-                parent['parent']['workstream_revision'] = request['workstream_revision']
+            revision_key = _revision_key(parent['parent'])
+            other_key = 'workstream_revision' if revision_key == 'recovery_revision' else 'recovery_revision'
+            _require(other_key not in request, 'Original recovery revision authority changed')
+            if revision_key in request:
+                state._integer(request[revision_key], 'current recovery revision', 1)
+                parent['parent'][revision_key] = request[revision_key]
         return {}
     if action == 'record-send':
         state._fields(request, ('thread_id', 'token', 'result'))
@@ -295,7 +360,7 @@ def _operate(data, action, request, now, rollback):
         parent['intent'] = None
     parent['last_turn'] = turn
     result = dict(send=False, deadline=episode['deadline'] if episode else None)
-    if (rollback or data['suspended'] or not parent['eligible'] or parent['intent'] or
+    if (rollback or data['suspended'] or data['pending'] or not parent['eligible'] or parent['intent'] or
             observation['authority'] != 'eligible' or observation['thread_status'] != 'idle' or
             observation['turn_status'] != 'failed' or observation['error_code'] != 'serverOverloaded' or
             not turn or turn in parent['consumed_turns']):
