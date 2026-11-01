@@ -483,7 +483,8 @@ class AdmissionTests(unittest.TestCase):
         with state._database(self.scope, write=True) as db:
             data = self.raw_assignment(attempt_id)
             data.update(status='settled', result=dict(outcome=status), reconciliation=evidence._artifact(
-                self.scope, dict(fixture='independent stopped-writer boundary', attempt_id=attempt_id)))
+                self.scope, dict(fixture='independent stopped-writer boundary', attempt_id=attempt_id,
+                    revision=self.request()['expected_revision'])))
             db.execute('update assignments set data=? where id=?', (json.dumps(data), attempt_id))
 
     def second_owner(self, number, claims=None, limits=None, scope=None):
