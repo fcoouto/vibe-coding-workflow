@@ -108,6 +108,13 @@ class CouncilFlowTests(CouncilCase):
             self.prepare()
         self.assertFalse((self.root / 'council-round-one').exists())
 
+    def test_repository_native_retains_inspection_instead_of_text_prompt(self):
+        self.prepare()
+        packet = council.packet(self.run, 'investigate', 'native')
+        self.assertNotIn('prompt', packet)
+        self.assertNotIn('prompt_sha256', packet)
+        self.assertTrue((Path(packet['snapshot']) / 'evidence.txt').is_file())
+
     def test_repository_requires_captured_approved_files(self):
         (self.repo / '.env').write_text('SYNTHETIC_PRIVATE_FIXTURE=excluded')
         self.request['approved_files'] = self.approved(['.env'])

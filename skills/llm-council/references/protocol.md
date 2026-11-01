@@ -213,6 +213,13 @@ timing certainty and `outcome`. Accounting keys are `known_external_subtotal_usd
 and nullable `external_total_usd`; `upstream_cancellation_confirmed: false` means
 unconfirmed, not proof that billing stopped. Stop keys are
 `all_local_execution_stopped` and exact owners in `stop_requests`.
+Status `timings` maps issued phase/member keys to locally recorded wall-clock
+`issued_at` and, after verification, `verified_at`. Missing historical observations
+stay absent. Join these with worker `progress.jsonl` startup, transport-result and
+terminal events, and actual native host observations, to distinguish dispatch,
+request duration and handoff delay. A transport result is a local helper result, including local failures; it does
+not establish a provider response. These records do not change monotonic budgets
+or establish provider queue time, internal reasoning, billing or upstream stop.
 Cancel records stop-new-work
 intent and returns owners to terminate; it is not evidence that they stopped. Stop
 those exact owned processes/children and inspect actual local-stop evidence before

@@ -358,6 +358,7 @@ def _seal_external_verification(value, phase, member, path, result):
     _retain_session(item, result)
     item['verification'] = dict(sha256=_digest(_read(path / 'result.json', workers.LIMIT + REPORT_LIMIT)),
                                 session_id=result.get('session_id'))
+    item.setdefault('timing', {})['verified_at'] = time.time()
     if value.get('mode') == 'text':
         item['verification'].update(transport=result['transport'], attempt_id=result['attempt_id'],
             request_sha256=result['request_sha256'])
@@ -734,22 +735,37 @@ def _packet(run: Path, phase: str, member: str, *, native_receipt=None) -> dict:
                          and native_receipt['phase'] == phase and native_receipt['member_id'] == member, 'native_admission_identity')
                 _require(all(item.get('native_admission', {}).get('reference') != native_receipt['reference']
                              for item in (recovery.owners(value) if value.get('version') == 3 else value['members'].values())), 'native_admission_already_used')
+            observations = '\n\n'.join(value.get('phase_execution', {}).get(item, '')
+                for item in PHASES if item in value.get('phase_execution', {}))
+            prompt_fields = {}
+            if value['mode'] == 'text':
+                snapshot.verify(source, manifest)
+                inputs = {name: _read(source / name, snapshot.MAX_FILE).decode('utf-8')
+                          for name in sorted(manifest['files'])}
+                snapshot.verify(source, manifest)
+                prompt = (objective + '\nUse only the supplied evidence; do not use tools, files, browsing or delegation.'
+                    + '\n\nApproved evidence and phase reports (JSON):\n'
+                    + json.dumps(inputs, ensure_ascii=False, separators=(',', ':')))
+                if observations and '__council__/execution-observations.md' not in inputs:
+                    prompt += '\n\nExecution observations:\n' + observations
+                prompt_fields = dict(prompt=prompt, prompt_sha256=_digest(prompt.encode('utf-8')))
+            _remaining(value, phase)
             issued_id = str(uuid.uuid4())
             value['members'][key] = dict(kind='native', issued_id=issued_id, native_admission=native_receipt or {},
-                                         supervisor_id=seat['supervisor_id'])
+                                         supervisor_id=seat['supervisor_id'], timing=dict(issued_at=time.time()))
+            if prompt_fields: value['members'][key]['prompt_sha256'] = prompt_fields['prompt_sha256']
             if value.get('version') == 3: recovery.bind_attempt(value, phase, member)
             _save(run, value)  # The guard precedes returning a dispatch brief; never a host receipt.
             return dict(base, kind='native', issued_id=issued_id, model=seat['model'], reasoning_effort=seat['effort'],
                         fork_turns='none', input_tokens=seat['input_tokens'], output_tokens=seat['output_tokens'],
-                        steps=seat['steps'], reports=reports,
-                        execution_observations='\n\n'.join(value.get('phase_execution', {}).get(item, '')
-                            for item in PHASES if item in value.get('phase_execution', {})),
+                        steps=seat['steps'], reports=reports, **prompt_fields,
+                        execution_observations=observations,
                         research=_read(run / 'research.md', REPORT_LIMIT).decode('utf-8') if phase != 'investigate' and not recovery.catch_up(value, phase, member) else '')
         _require(native_receipt is None, 'native_admission_for_external')
         brief = _external_brief(value, phase, member, list(manifest['files']), _remaining(value, phase))
         if value.get('version') == 3:
             value['members'][key] = dict(kind='external', worker_run=str(_worker_path(value, phase, member)),
-                                         preparation_timeout_seconds=brief['timeout_seconds'])
+                                         preparation_timeout_seconds=brief['timeout_seconds'], timing=dict(issued_at=time.time()))
             recovery.bind_attempt(value, phase, member)
             _save(run, value)
     # Existing worker identity owns exclusivity; settings admission never nests under this lock.
@@ -781,7 +797,7 @@ def _prepare_external(run, value, phase, member, brief, source, manifest):
             _require(value['members'].get(key, {}).get('worker_run') == str(worker_run), 'council_worker_identity_changed')
             value['members'][key].pop('preparation_failure', None)
         else:
-            value['members'][key] = dict(kind='external', worker_run=str(worker_run))
+            value['members'][key] = dict(kind='external', worker_run=str(worker_run), timing=dict(issued_at=time.time()))
         if value.get('mode') == 'text':
             prepared = onboarding.read_request(_read(worker_run / 'result.json', workers.LIMIT), workers.LIMIT)
             value['members'][key].update(direct_attempt_id=prepared['attempt_id'],
@@ -965,6 +981,7 @@ def record_native(run: Path, phase: str, member: str, receipt: dict) -> None:
         limitations = ['Native execution ' + key.removeprefix('observed_') + ' telemetry unavailable.'
                        for key in ('observed_model', 'observed_effort') if receipt[key] is None and receipt['child_id'] is not None]
         item['receipt'] = dict(receipt, failure=failure, limitations=limitations, state='accepted' if receipt['accepted'] and on_time and not value['cancelled'] else 'rejected', on_time=on_time)
+        item.setdefault('timing', {})['verified_at'] = time.time()
         name = ('native-' + item['issued_id'] + '.md' if value.get('version') == 3 else phase + '-native.md')
         raw = _report(receipt['report'])
         changes._atomic(run, name, raw)
@@ -973,8 +990,9 @@ def record_native(run: Path, phase: str, member: str, receipt: dict) -> None:
 
 
 def _status(run, value):
+    timings = {key: dict(item['timing']) for key, item in value['members'].items() if item.get('timing')}
     if value.get('version') == 3:
-        return recovery.status(run, value)
+        return dict(recovery.status(run, value), timings=timings)
     phases = {phase: _observations(value, phase) for phase in PHASES}
     accepted = {phase: {member for member, item in observed.items() if item.get('state') == 'accepted'}
                 for phase, observed in phases.items()}
@@ -1001,7 +1019,7 @@ def _status(run, value):
                     dict(worker_run=str(_worker_path(value, phase, member))) if _external(value, member) else {})
                 stop.append(dict(phase=phase, member=member, **{key: owner[key] for key in ('issued_id', 'supervisor_id', 'worker_run') if key in owner},
                                  **({'child_id': item['child_id']} if 'child_id' in item else {})))
-    return dict(run=str(run), phase=value['phase'], cancelled=value['cancelled'],
+    return dict(run=str(run), phase=value['phase'], cancelled=value['cancelled'], timings=timings,
                 outcome='complete' if complete else 'incomplete' if incomplete else 'partial',
                 accepted_participation={phase: dict(accepted=len(accepted[phase]), expected=1 if phase == 'synthesis' else 3) for phase in PHASES},
                 fresh_synthesis_available=chair in accepted['synthesis'],

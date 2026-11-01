@@ -324,7 +324,7 @@ class DirectTests(CouncilCase):
 
     def test_disputed_claims_reach_critique_and_synthesis_unchanged(self):
         self.request['recovery'] = True
-        claims = ['There is no external forcing function.', 'Assume a three-hour drive.',
+        claims = ['There is no external forcing function.\nDissent: café ≠ certainty.', 'Assume a three-hour drive.',
                   'Relocation is the only reasonable conclusion.']
         self.run = Path(council.prepare(self.repo, self.request)['run'])
         children = []
@@ -339,6 +339,7 @@ class DirectTests(CouncilCase):
                         self.assertEqual((Path(packet['snapshot']) / f'__council__/initial-{number}.md').read_text(), claim)
                     self.assertIn('rank', packet['objective'].lower())
                 if packet['kind'] == 'native':
+                    self.assert_native_prompt(packet)
                     receipt = self.native_receipt(packet, reports[index])
                     children.append(receipt['child_id'])
                     council.record_native(self.run, phase, member, receipt)
@@ -347,6 +348,7 @@ class DirectTests(CouncilCase):
                     self.execute(Path(packet['worker_run']))
                     council.verify_external(self.run, phase, member, 'accepted', ['Complete response within scope'])
         chair = council.packet(self.run, 'synthesis', 'member-one')
+        self.assert_native_prompt(chair)
         for number, claim in enumerate(claims, 1):
             self.assertEqual((Path(chair['snapshot']) / f'__council__/initial-{number}.md').read_text(), claim)
         self.assertIn('ranking omitted', (Path(chair['snapshot']) / '__council__/critique-3.md').read_text())
@@ -361,7 +363,70 @@ class DirectTests(CouncilCase):
                          (self.run / ('native-' + chair['issued_id'] + '.md')).read_text(), synthesis)
         self.assertEqual(len(self.calls), 4)
         for _, _, payload in self.calls[2:]:
-            for claim in claims: self.assertIn(claim, json.dumps(payload))
+            inputs = json.loads(payload['messages'][0]['content'].split('Approved evidence and phase reports (JSON):\n', 1)[1])
+            for number, claim in enumerate(claims, 1):
+                self.assertEqual(inputs[f'__council__/initial-{number}.md'], claim)
+
+    def assert_native_prompt(self, packet):
+        prompt = packet['prompt']
+        self.assertEqual(packet['prompt_sha256'], hashlib.sha256(prompt.encode('utf-8')).hexdigest())
+        encoded = prompt.split('Approved evidence and phase reports (JSON):\n', 1)[1]
+        inputs, end = json.JSONDecoder().raw_decode(encoded)
+        for name in packet['snapshot_manifest']['files']:
+            self.assertEqual(inputs[name].encode('utf-8'), (Path(packet['snapshot']) / name).read_bytes())
+        observations = packet['execution_observations']
+        if '__council__/execution-observations.md' in inputs:
+            self.assertEqual(inputs['__council__/execution-observations.md'], observations)
+            self.assertFalse(encoded[end:].strip())
+        elif observations:
+            self.assertEqual(encoded[end:], '\n\nExecution observations:\n' + observations)
+        self.assertEqual(packet['reasoning_effort'], 'max')
+        for denied in (str(self.repo), str(self.auth), str(self.run), self.request['coordinator_chat_id']):
+            self.assertNotIn(denied, prompt)
+
+    def test_native_text_prompt_preserves_evidence_and_original_deadline(self):
+        evidence = 'Exact Unicode evidence: café\n"quoted" \\ path\n'
+        (self.repo / 'evidence.txt').write_text(evidence)
+        self.request['approved_files'] = self.approved(['evidence.txt'])
+        self.run = Path(council.prepare(self.repo, self.request)['run'])
+        before = json.loads((self.run / 'manifest.json').read_text())
+        packet = council.packet(self.run, 'investigate', 'member-one')
+        self.assert_native_prompt(packet)
+        saved = json.loads((self.run / 'manifest.json').read_text())
+        self.assertEqual(saved['members']['investigate:member-one']['prompt_sha256'], packet['prompt_sha256'])
+        self.assertEqual(packet['deadline_monotonic'], before['started_monotonic'] + 600)
+        self.assertEqual(before['timeout_seconds'], 1200)
+        self.assertEqual(before['phase_seconds'], dict(investigate=600, critique=360, synthesis=240))
+        with self.assertRaisesRegex(ValueError, 'already_issued'):
+            council.packet(self.run, 'investigate', 'member-one')
+
+    def test_private_timing_tracks_issuance_and_verification_without_renewal(self):
+        for recovery in (False, True):
+            with self.subTest(recovery=recovery):
+                self.request['run_id'] = 'timing-' + str(recovery).lower()
+                if recovery: self.request['recovery'] = True
+                self.run = Path(council.prepare(self.repo, self.request)['run'])
+                before = json.loads((self.run / 'manifest.json').read_text())
+                packet = council.packet(self.run, 'investigate', 'member-one')
+                issued = council.status(self.run)['timings']['investigate:member-one']
+                self.assertGreaterEqual(issued['issued_at'], before['started_wall'])
+                self.assertNotIn('verified_at', issued)
+                council.record_native(self.run, 'investigate', 'member-one', self.native_receipt(packet))
+                worker = council.packet(self.run, 'investigate', 'member-two')
+                self.execute(Path(worker['worker_run']))
+                council.verify_external(self.run, 'investigate', 'member-two', 'accepted', ['Observed complete local response'])
+                status = council.status(self.run)
+                self.assertEqual(status['timings'], council.status(self.run)['timings'])
+                for member in ('member-one', 'member-two'):
+                    times = status['timings']['investigate:' + member]
+                    self.assertGreaterEqual(times['verified_at'], times['issued_at'])
+                events = [json.loads(line) for line in (Path(worker['worker_run']) / 'progress.jsonl').read_text().splitlines()]
+                phases = [event['phase'] for event in events]
+                self.assertLess(phases.index('Starting'), phases.index('Transport result received'))
+                self.assertLess(phases.index('Transport result received'), phases.index('Awaiting verification'))
+                after = json.loads((self.run / 'manifest.json').read_text())
+                self.assertEqual(after['started_monotonic'], before['started_monotonic'])
+                self.assertEqual(after['phase_seconds'], before['phase_seconds'])
 
     def test_missing_ranking_keeps_critique(self):
         self.run = Path(council.prepare(self.repo, self.request)['run'])
@@ -391,6 +456,19 @@ class DirectTests(CouncilCase):
             self.assertIsNone(result['session_id'])
             self.assertEqual(len(self.processes), 1)
             self.assertIsNotNone(self.processes[0].poll())
+            progress = self.root / result['task_id'] / 'progress.jsonl'
+            events = [json.loads(line)['phase'] for line in progress.read_text().splitlines()] if progress.exists() else []
+            self.assertNotIn('Transport result received', events)
+
+    def test_local_failure_records_transport_result_without_provider_response(self):
+        self.auth_file.write_text('{}')
+        worker = self.prepare()
+        result = self.execute(worker)
+        self.assertEqual(result['failure']['category'], 'authentication')
+        self.assertFalse(self.calls)
+        events = [json.loads(line)['phase'] for line in (worker / 'progress.jsonl').read_text().splitlines()]
+        self.assertIn('Transport result received', events)
+        self.assertNotIn('Response received', events)
 
     def test_fresh_attempt_hash_not_fake_session(self):
         run = self.prepare()

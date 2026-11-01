@@ -665,6 +665,7 @@ def _execute(run, brief, executable, auth_data, publish, *, launch_guard=None, d
                         if not isinstance(event, dict): raise ValueError('invalid_event')
                         if direct:
                             if finished_steps: raise ValueError('invalid_event')
+                            emit('Transport result received')
                             finished_steps = 1
                             response = event.get('response')
                             if not isinstance(response, str) or len(response.encode()) > 128 * 1024:

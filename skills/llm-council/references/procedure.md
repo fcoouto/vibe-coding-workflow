@@ -131,7 +131,12 @@ remain immutable. Carry anonymous execution observations into later phases.
 Retain actual external process handles and native ownership. Send observed progress
 or truthful waiting updates within 60 seconds where supported. External startup
 and 20-second silence updates describe activity, not invented reasoning/retries.
-Respect actual capacity; three seats do not imply three available host slots.
+Dispatch ready independent seats before waiting, within actual capacity; three
+seats do not imply three available host slots. Use host completion/attention events
+and bounded process waits. Verify each terminal report promptly, preserving slower
+seats and the all-owner phase barrier. Prepare the next phase as soon as that
+barrier clears. Keep comparative evaluation and billing reconciliation outside
+live deliberation; required privacy, ownership and admission checks stay inside it.
 
 Use [status/cancellation](protocol.md#status-cancellation-and-consent) for exact
 owners. Follow [recovery](recovery.md) only for technical failures or interrupted

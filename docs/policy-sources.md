@@ -55,6 +55,14 @@ historical Free sessions or apply factual filtering to current reports.
 
 ### Council amendments
 
+The user-approved [latency plan](superpowers/plans/2026-11-01-council-latency.md)
+preserves maximum reasoning, the 1200-second cumulative budget and disabled Free.
+Codex controls own unchanged forwarding of the generated, hash-bound native text
+prompt; procedure supervision owns capacity-aware dispatch and prompt settlement.
+Protocol timing observations reuse private member/progress records without
+claiming provider internals or independently authenticated native delivery.
+Controlled prompt, timing, repository and deadline checks cover these paths.
+
 The user-approved Council-only discovery update reuses the existing proposal
 metadata cache and leaves Delegation unchanged. Selection owns task-relevant
 benchmark discovery, exact-route price evidence, comparison gaps and one bounded
