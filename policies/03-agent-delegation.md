@@ -8,7 +8,7 @@ Apply with the [shared contract rules](00-index.md).
 
 | Element | Contract |
 | --- | --- |
-| Trigger | Before starting a task or dispatching a worker; reassess after material scope changes, failed attempts or capacity changes. |
+| Trigger | Before starting a task or dispatching a worker; reassess after material scope changes, failed attempts, stalled repair/validation progress or capacity changes. |
 | Decision | Use deterministic tooling or direct execution when sufficient. Delegate for useful context isolation, specialization, required independence or genuinely independent parallel work. Select worker capability and verification by complexity, ambiguity, consequences and total effort, including retries and review. |
 | Required action | When delegating, define a bounded worker brief, select an authorized worker model/effort using applicable platform guidance, reserve writable files and mutable resources, and verify returned work before integration. Apply the procedures below. |
 | Evidence | Record the rationale, task/worker identity, guidance version/freshness, requested/configured/observed worker model and reasoning, ownership, actual checks, verified outcome and limitations. Unknown settings remain unknown; do not invent usage or savings measurements. |
@@ -39,5 +39,14 @@ Workstreams starts enabled for new supported Codex runtime scopes and preserves 
 - Review each wave's task changes before starting the next wave. Resolve blocking findings and verify affected checks before releasing dependent work; final integration review does not replace these reviews. Keep one coordinator progress entry per completed wave.
 - Required independent review cannot be replaced by the implementer's self-review. Choose review scope and specialists by risk and evidence; apply [Security Review](04-security-review.md) when its trigger applies. Set review scope, requested rounds and stop conditions before dispatch. Internal fixes do not restart the round count. Further rounds need new risk, an evidence gap or a user request.
 - The coordinator inspects the diff, deduplicates findings by root cause, checks their evidence and disposition, validates integration, and records actual checks and residual uncertainty. When findings overlap, reassess dependencies before the next wave. Verify reviewer identity through observed dispatch or a trusted integration; a report's claimed identity or success is insufficient.
-- Diagnose failure before retrying: context, implementation, tooling or capability. Escalate only when warranted; an unchanged attempt needs new evidence. Escalation never resets the task budget.
+- Diagnose failure before retrying: context, implementation, tooling or capability. An unchanged attempt needs new evidence; apply [stuck-pattern escalation](#stuck-pattern-escalation) before further repairs.
 - Confirm an interrupted worker has stopped before taking over its files. Inspect partial changes and resume from verified state. Uncertain workers retain ownership; elapsed time alone does not release it. Continue independent authorized work while dependent work waits.
+
+## Stuck-pattern escalation
+
+Applies to coordinator work and delegated work. A stuck pattern includes recurring root causes, fixes undoing earlier fixes, or repair/validation cycles producing new findings without converging on the same acceptance criteria. A new finding alone is not a stall; repeated churn without verified progress is.
+
+1. On detection, immediately stop the affected repair cycle and notify the coordinator/user. Do not try one more fix, wait for a fixed retry count, or treat fresh findings as permission to continue.
+2. Escalate to an independent worker with stronger task-relevant diagnostic capability, selected through [worker selection](#select-capability-and-dispatch). Provide the target, acceptance criteria, attempted fixes, finding history, check results and remaining budget. Request a root-cause diagnosis and bounded recovery plan before further edits.
+3. Preserve the coordinator's model, reasoning and authentication, permissions, ownership and original time, attempt, resource and review-round limits. Escalation consumes remaining allowances; it never resets them. If no suitable authorized worker or budget is available, report the blocker and continue only independent work.
+4. Resume affected repairs only after the coordinator accepts an evidence-backed diagnosis, a changed approach and a focused verification plan. Record the escalation and decision; retain unresolved findings and required quality gates.
