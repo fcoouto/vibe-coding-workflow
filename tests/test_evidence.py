@@ -351,6 +351,26 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(after['state'], 'REVIEW')
         self.assertEqual(after['revision'], ready['revision'] + 1)
 
+    def test_evidence_status_recaptures_file_edit_after_readiness_capture(self):
+        self.ready_proof_fixture()
+        ready = self.verify()['task']
+        verified_digest = self.api._read(self.scope, ready['evidence']['verification'])['candidate_digest']
+        original = self.api._blockers
+        edited = []
+        def blockers(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if not edited:
+                (self.repo / 'app.py').write_text('value = 2\n')
+                edited.append(True)
+            return result
+        with patch.object(self.api, '_blockers', side_effect=blockers):
+            status = self.api.evidence_status(self.scope, 'codex', 'parent')
+        self.assertTrue(edited)
+        self.assertNotEqual(status['evidence']['candidate_digest'], verified_digest)
+        self.assertTrue(status['evidence']['blockers'])
+        current = self.api.capture_candidate(self.scope, self.api._load_plan(self.scope, self.identity))
+        self.assertEqual(status['evidence']['candidate_digest'], self.api._digest(current))
+
     def test_status_uses_newly_accepted_d6_resources_when_candidate_is_unchanged(self):
         from runtime import delegation
         self.ready_proof_fixture()
