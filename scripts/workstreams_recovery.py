@@ -2,7 +2,6 @@
 """Private shared-monitor controls; native App operations run through supported tools."""
 import argparse
 import json
-import os
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -22,7 +21,7 @@ def main():
     args = parser.parse_args()
     try:
         request = json_object(sys.stdin.buffer.read(MAX_INPUT + 1))
-        directory = Path(os.environ.get('CODEX_HOME', str(Path.home() / '.codex'))) / 'workstreams-recovery'
+        directory = parent_recovery.default_directory()
         if args.action in {'register', 'reconcile-feature'}:
             if args.cwd is None:
                 raise ValueError('Recovery activation requires the enrolled checkout')

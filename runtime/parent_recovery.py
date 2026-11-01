@@ -9,6 +9,10 @@ from runtime import delegation as d6, evidence, state
 from runtime.startup import json_object
 
 
+def default_directory():
+    return Path(os.environ.get('CODEX_HOME', str(Path.home() / '.codex'))) / 'workstreams-recovery'
+
+
 def _require(condition, reason):
     if not condition:
         raise ValueError(reason)
