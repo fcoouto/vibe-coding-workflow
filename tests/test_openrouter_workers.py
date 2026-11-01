@@ -814,13 +814,13 @@ class CouncilWorkerTests(CouncilCase):
         first = self.prepare()
         second = self.prepare(task_id='council-two', output_tokens=6000,
             capabilities=dict(self.brief['capabilities'], reasoning={'fixed': 'high'}))
-        for run, output, fixed in [(first, 4096, False), (second, 6000, True)]:
+        for run, fixed in [(first, False), (second, True)]:
             brief = json.loads((run / 'brief.json').read_text())
             model = self.api.configuration(brief)['provider']['openrouter']['models']['vendor/model']
-            self.assertEqual(model['options']['maxOutputTokens'], output)
+            self.assertEqual(model['options']['maxOutputTokens'], 8000)
             self.assertEqual(model['options']['provider'], {'only': ['provider'], 'allow_fallbacks': False})
             self.assertEqual('reasoning' in model['options'], not fixed)
-            self.assertEqual(model['limit']['input'], 10000)
+            self.assertEqual(model['limit']['input'], 12000)
             self.api._verify_council_copy(run / 'workspace', brief['evidence']['workspace_manifest'])
             self.assertTrue((run / 'workspace/.git').is_dir())
         self.assertNotEqual(first / 'workspace', second / 'workspace')
@@ -829,7 +829,7 @@ class CouncilWorkerTests(CouncilCase):
         self.assertEqual(self.api.configuration(pilot)['provider']['openrouter']['models']['vendor/model']['options']['maxOutputTokens'], 2048)
 
     def test_council_rejects_unverified_limits_effort_and_markers(self):
-        cases = [dict(output_tokens=8001), dict(input_tokens=12001), dict(input_tokens=17000),
+        cases = [dict(output_tokens=0), dict(input_tokens=True), dict(input_tokens=2**31),
             dict(effort='low'), dict(capabilities=dict(self.brief['capabilities'], tools=False)),
             dict(capabilities=dict(self.brief['capabilities'], provider='other')),
             dict(council=dict(self.brief['council'], phase='synthesis')),
@@ -978,7 +978,7 @@ class CouncilWorkerTests(CouncilCase):
                 config = self.api.configuration(brief)
                 model = config['provider']['openrouter']['models'][brief['model']]
                 self.assertEqual(set(model['options']), {'maxOutputTokens', 'provider'})
-                self.assertEqual(model['options']['maxOutputTokens'], brief['output_tokens'])
+                self.assertEqual(model['options']['maxOutputTokens'], 8000)
                 self.assertEqual(model['options']['provider'], {'only': ['provider'], 'allow_fallbacks': False})
                 self.assertTrue(model['tool_call'])
                 self.assertEqual(brief['effort'], 'default')

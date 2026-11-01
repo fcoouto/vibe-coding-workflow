@@ -55,6 +55,14 @@ historical Free sessions or apply factual filtering to current reports.
 
 ### Council amendments
 
+The user-approved [advisory token correction](superpowers/plans/2026-11-01-council-advisory-tokens.md)
+keeps token targets in prompts, derives API ceilings from endpoint capacity and
+retains maximum reasoning. Protocol defines these separate fields; procedure
+defines acceptance; recovery defines the source-backed capacity correction within
+existing attempts and deadlines. Direct/worker/recovery fixtures cover advisory
+targets, actual ceilings, unchanged reasoning and bounded corrections. Free stays
+disabled and comparative evaluation remains deferred.
+
 The user-approved [Council reliability amendment](superpowers/specs/2026-10-29-council-design.md#reliability-amendment-30-october-2026)
 adds bounded local recovery and useful reduced-panel delivery. Its contract coverage
 is maintained here for authoring, outside routine loading paths:

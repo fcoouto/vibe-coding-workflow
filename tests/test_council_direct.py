@@ -538,9 +538,51 @@ class DirectTests(CouncilCase):
             self.prepare()
         self.assertEqual(self.calls, [])
 
-    def test_text_context_fit_rejects_before_send(self):
+    def test_text_allowances_are_advisory_and_wire_uses_endpoint_capacity(self):
         self.request['question'] = 'x' * 12000
-        for seat in list(self.request['roster'].values())[1:]: seat['input_tokens'] = 1000
-        with self.assertRaisesRegex(ValueError, 'council_endpoint_limit'):
-            self.execute(self.prepare())
-        self.assertEqual(self.calls, [])
+        for seat in self.request['roster'].values():
+            seat.update(input_tokens=1, output_tokens=1)
+        result = self.execute(self.prepare())
+        self.assertEqual(result['state'], 'awaiting_verification')
+        payload = self.calls[0][2]
+        self.assertEqual(payload['max_tokens'], 8000)
+        self.assertEqual(payload['reasoning'], {'effort': 'max'})
+        self.assertIn('advisory', payload['messages'][0]['content'])
+        packet = council.packet(self.run, 'investigate', 'member-one')
+        self.assertIn('advisory', packet['objective'])
+
+    def test_advisory_targets_can_exceed_provider_capacity(self):
+        self.request['roster']['member-two'].update(input_tokens=50000, output_tokens=50000)
+        result = self.execute(self.prepare())
+        self.assertEqual(result['state'], 'awaiting_verification')
+        self.assertEqual(self.calls[0][2]['max_tokens'], 8000)
+
+    def test_structured_context_failure_remains_distinct_from_bad_request(self):
+        self.http_status = 400
+        for error in (dict(code='context_length_exceeded'),
+                      dict(code=400, metadata=dict(error_type='context_length_exceeded'))):
+            self.reply = dict(error=dict(error, message='PRIVATE provider diagnostic'))
+            failure = self.send()['failure']
+            self.assertEqual(failure, dict(category='context', status_code=400))
+        self.reply = dict(error=dict(code=400, message='context_length_exceeded PRIVATE'))
+        self.assertEqual(self.send()['failure'], dict(category='invalid_request', status_code=400))
+
+    def test_live_context_failure_can_correct_capacity_without_changing_targets(self):
+        self.request.update(recovery=True, fallbacks={member: [] for member in council.GROUP_MEMBERS})
+        complete = self.reply
+        self.http_status, self.reply = 400, dict(error=dict(code='context_length_exceeded'))
+        first = self.execute(self.prepare())
+        self.assertEqual(first['failure']['category'], 'context')
+        opened = council.investigate_failure(self.run, 'investigate', 'member-two')
+        council.record_investigation(self.run, 'investigate', 'member-two', dict(
+            candidate_id=opened['candidate_id'], failure_id=opened['failure_id'], searches=0, reads=1,
+            sources=[dict(url='https://docs.example.org/context', checked_at=time.time(), authority='official',
+                          applicability='Controlled endpoint requires a lower output ceiling')],
+            corrections=[dict(kind='output_capacity', source=0, max_output_tokens=6000)]))
+        council.correct_candidate(self.run, 'investigate', 'member-two', 0)
+        packet = council.packet(self.run, 'investigate', 'member-two')
+        self.http_status, self.reply = 200, complete
+        result = self.execute(Path(packet['worker_run']))
+        self.assertEqual(result['state'], 'awaiting_verification')
+        self.assertEqual([call[2]['max_tokens'] for call in self.calls], [8000, 6000])
+        self.assertTrue(all(call[2]['reasoning'] == {'effort': 'max'} for call in self.calls))

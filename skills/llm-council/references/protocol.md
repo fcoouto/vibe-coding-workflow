@@ -64,8 +64,8 @@ Native seat required keys are `kind: "native"`, `model`, `effort`,
 `supervisor_id`; optional Boolean `lifecycle_active` follows the
 [Codex contract](../../../clients/codex-council.md). Native effort labels in order
 are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`; choose the
-greatest observed supported label. Token allowances are integers 1..2**31-1 and
-steps 1..64. These are supervisor declarations, not proof of hard native limits.
+greatest observed supported label. Token targets are advisory integers 1..2**31-1; steps are 1..64.
+These declarations do not prove hard native limits.
 
 Each available external seat has exactly `kind: "external"`, `model`,
 `model_display_name`, `provider`, `effort`, `input_tokens`, `output_tokens`, `steps`,
@@ -81,10 +81,11 @@ again at launch; editing a worker brief cannot change the pinned contract.
 a narrower input limit. Model/provider match the seat. `reasoning` is exactly
 `{"efforts":[...]}` or `{"fixed":"<observed effort>"}`. Selectable labels in order
 are `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; choose the greatest observed
-supported label. Fixed behavior emits no reasoning override. Positive integer token
-values are at most 2**31-1: output fits endpoint output, input fits its input limit,
-and input plus output fits context. Steps are integers 1..64, with the text
-restriction below. OpenCode input limits are planning metadata, not exact counters.
+supported label. Fixed behavior emits no reasoning override. Positive integer token targets are at most 2**31-1 and remain advisory,
+independent of endpoint limits. The API output ceiling uses the smaller observed
+`max_output_tokens` and `context_length`; OpenCode input capacity uses observed
+`max_input_tokens` or context. Providers enforce actual input/context limits.
+Steps are integers 1..64, with the text restriction below.
 
 | Mode | Additional capability and qualification fields |
 | --- | --- |
@@ -103,8 +104,9 @@ supported reasoning and finite output. It accepts no tools, history, prior respo
 ID, endpoint override or redirects and adds no HTTP retry layer. Only approved
 question/constraints, exact evidence, shared research and applicable anonymous
 phase packets enter the payload; local storage/authentication paths stay private.
-UTF-8 input bytes plus a 1,024-byte envelope reserve must fit `input_tokens` before
-send. Oversize input blocks; nothing is truncated.
+Token targets enter the prompt as guidance, never input-byte gates or API output
+ceilings. Nothing is truncated to fit a target. An observed context failure may
+justify a bounded capacity correction below; never lower reasoning.
 
 Only the child reads the saved `openrouter` provider record in
 `<auth_data>/opencode/auth.json`, requiring `type: "api"` and private-file checks.
@@ -154,6 +156,9 @@ technical condition, never a factual disagreement. Safe known diagnostic fields
 are retained; arbitrary/private fields are dropped. Blank rejection may derive
 `incomplete_output`; observed lateness may derive `deadline`. Acceptance with a
 failure is invalid. Native receipts use this same optional failure contract.
+For direct HTTP 400/413 responses, exact structured `error.code` or
+`error.metadata.error_type` equal to `context_length_exceeded` identifies context
+overflow. Provider message text alone does not establish that diagnosis.
 
 ## Older runs and native receipts
 

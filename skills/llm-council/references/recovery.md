@@ -4,7 +4,8 @@ Read the applicable section when a seat has a technical failure, an action is
 interrupted, cancellation needs cleanup, or a round needs replacement. Before
 inference, [selection](selection.md#preapprove-recovery-candidates) declares the
 candidate envelope and the [Codex supervisor contract](../../../clients/codex-council.md#isolated-recovery-supervisors)
-assigns ownership. No failure may expand that envelope. General command and consent
+assigns ownership. No failure may expand candidate, step, time or spending bounds. Token targets
+remain advisory. General command and consent
 contracts live in the [protocol](protocol.md#status-cancellation-and-consent).
 
 ## Retry boundaries
@@ -100,9 +101,15 @@ index, and exactly one supported shape:
 
 - `{kind: "workspace_guidance", source}` clarifies the copied root, approved relative
   paths and required result without changing source evidence or conclusions.
-- `{kind: "output_steps", source, output_tokens, steps}` sets positive integers
-  within the original seat envelope; at least one changes. OpenCode's step setting
-  is a prompt threshold, not a hard tool-call cap. Preserve supported reasoning.
+- `{kind: "output_steps", source, output_tokens, steps}` adjusts the advisory output
+  target and positive steps within the original step allowance; at least one
+  changes. OpenCode steps are a prompt threshold, not a hard tool-call cap.
+- `{kind: "output_capacity", source, max_output_tokens}` corrects an external API
+  ceiling after an observed context failure or `incomplete_output` with terminal
+  reason `length`. It must change the current ceiling and fit observed endpoint
+  output/context capacity. Check capacity before replacing a token-exhausted model;
+  never lower reasoning, treat partial output as complete, or renew time/spending
+  authority. This uses the same two-correction allowance, not an extra retry.
 - `{kind: "request_representation", source, representation: "output_limit_only"}`
   Repository only: removes the duplicate provider-specific output option, retaining
   the adapter's model output limit, model/provider/tools and reasoning. This is the

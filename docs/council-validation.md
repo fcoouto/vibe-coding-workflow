@@ -1,8 +1,42 @@
 # Council validation
 
-Current contract checked on **31 October 2026**, Europe/Amsterdam. Council is a
+Current contract checked on **1 November 2026**, Europe/Amsterdam. Council is a
 user extension with [source coverage](policy-sources.md). Validation authorizes no
 run, route activation, installation or paid inference.
+
+## Advisory token targets, 1 November 2026
+
+The [approved correction](superpowers/plans/2026-11-01-council-advisory-tokens.md)
+keeps input/output targets advisory and maximum reasoning intact. Actual endpoint
+capacity supplies transport ceilings. Token exhaustion remains a technical failure
+when no complete answer exists; bounded recovery checks capacity before fallback.
+Free remains unavailable. Comparative evaluation remains deferred.
+
+Representative instruction walks checked these decisions separately from client
+execution:
+
+| Scenario | Applicable instructions and decision |
+| --- | --- |
+| Text life question with very small token targets | Entry, procedure, selection, protocol direct transport and native dispatch: pass exact approved evidence, include advisory guidance, retain maximum reasoning, and accept complete safe text exceeding targets. Recovery stays unloaded on success. |
+| Repository question with different candidate capacities | Repository qualification and protocol capacity fields: use actual endpoint input/output limits, preserve copied evidence and maximum effort; replacement may change token targets while retaining original steps, deadline and spending authority. Text authentication internals stay unloaded. |
+| Truncated output or structured context overflow | Load recovery only after the observed technical failure. Check current ceiling against source-backed endpoint/context capacity; apply a distinct supported correction within existing attempts and deadline. Do not accept partial text, lower reasoning or retry for factual disagreement. |
+
+Local fixtures exercise advisory targets above/below capacity, native guidance,
+actual repository/direct ceilings, structured context diagnostics, owned-request
+capacity recovery and unchanged maximum effort/deadlines. Package validation does
+not establish provider execution, billing or installed-skill loading.
+
+Observed source-based Balanced text execution used the approved 515-byte fictional
+life case, existing enrolled consent/authentication, native Sol/ultra,
+Sonnet/max and Gemini/high. All three investigations, three critiques and fresh
+native synthesis completed in 768.2 seconds, without corrections or replacements.
+Sonnet's 128,000-token endpoint ceiling was separate from its advisory 16,384-token
+target: it returned 31,677 and 51,653 completion tokens, including 30,205 and 49,844
+reasoning tokens; both ended normally. Four OpenRouter generations totaled
+USD 0.87454. All local owners stopped; source/phase hashes remained intact. This
+qualifies this observed runtime path, not installed-skill loading, native Task
+lifecycle admission, cancellation or general model reliability. Free admission
+was denied without inference; comparative evaluation was not run.
 
 ## Current peer-review contract, 31 October 2026
 
