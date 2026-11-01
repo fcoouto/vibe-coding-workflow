@@ -6,6 +6,70 @@ run, route activation, installation or paid inference.
 
 ## Council cost discovery, 1 November 2026
 
+### Live Balanced validation
+
+The user approved merging the cost-aware changes and a live Balanced run over the
+same harmless 515-byte fictional life scenario. Feature merge `ea56ebc` preserved
+22 unrelated local files, including a verified three-way overlay of the user's
+source-map edits. Package validation and all 26 cache tests passed on the merged
+checkout. Live execution used the clean source checkout with Council runtime files
+matching the merged commit; unrelated in-progress runtime changes in the primary
+checkout prevented its fixture admission and were left untouched.
+
+The configured cache was fresh but covered only Free candidates. It was reused
+and its gap disclosed, without forced refresh or publication. Bounded session-only
+discovery inspected 12 catalog rows, 16 Intelligence results and five candidate
+models' exact endpoints. Versioned Qwen evidence distinguished the older 53.4
+result from the current model's 33.6. No publisher-page lookup or model probe was
+needed. Selection retained missing life-domain evidence and unknown expected usage.
+
+| Participant | Configured maximum reasoning and pinned route | Observed external cost, both rounds |
+| --- | --- | --- |
+| Native GPT-6.1 Sol | ultra; fresh native child per phase and chair | Separate subscription usage; monetary cost unknown |
+| Claude Haiku 5.5, canonical 20261007 | max; Anthropic | USD 0.0634284 |
+| Gemini 4 Argon, canonical 20261013 | high; Google AI Studio flex | USD 0.0328820 |
+
+For the bounded, non-crisis question, selection judged Haiku capable while
+acknowledging its weaker broad benchmark evidence. Sonnet's 20-fold listed token
+rate premium lacked an established task-specific benefit here. Argon's stronger
+broad reasoning evidence versus Flash and prior low same-scope volume supported
+its selection; neither benchmark proves personal judgment or quality parity.
+Three developers were retained; higher-priced and alternative-developer recovery
+candidates were declared but unused.
+
+All three investigations, three critiques and fresh synthesis were accepted.
+The final status reported complete participation and all local execution stopped,
+with about 691 seconds elapsed within the original 1200-second budget. There were
+four external requests, no corrections, replacements or extra rounds. Initial
+pre-spawn contention was inspected before retry; a lost launcher return was
+recovered from the completed original attempt without another inference.
+
+Generation audits matched pinned canonical models/providers and confirmed total
+external cost USD 0.0963104. Haiku used 125,813 completion tokens including 122,931
+reasoning tokens; its two generation times totaled about 482 seconds. Argon used
+5,917 completion tokens including 3,829 reasoning tokens. Reasoning is included
+once. Both Haiku responses exceeded the advisory 16,384-token target and remained
+accepted. Wire checks confirmed maximum effort, endpoint output ceilings,
+tool-free stateless requests and disabled provider fallback.
+
+The chair received all six anonymous reports and corrected unsupported assumptions
+that three-hour travel is easy, moving necessarily sacrifices current supports,
+or relocation is irreversible. No report was rejected for substantive disagreement.
+The verdict recommended the reversible visiting trial alongside relocation research,
+without deciding the person's values or treating agreement as evidence.
+
+This is source-level live qualification on the existing disposable checkout, not
+installed-skill loading or native lifecycle qualification. Native configured
+model/effort and fresh child identities were independently observed; upstream
+execution effort remains unknown. Snapshot hashes were verified; native text
+delivery is coordinator-attested rather than encrypted-prompt byte-attested.
+Only approved fictional evidence and applicable anonymous reports were transmitted.
+OpenRouter's existing account/provider retention settings were retained. A Free
+preparation probe was denied before inference. Comparative evaluation remains
+deferred; this run establishes neither quality parity nor measured savings.
+
+### Instruction and cache checks
+
 The [Council-only update](superpowers/plans/2026-11-01-council-cost-discovery.md)
 keeps discovery in selection and reuses the existing metadata cache. It retains
 benchmark run context, exact-route prices and comparison gaps without changing
