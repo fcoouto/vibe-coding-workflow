@@ -12,7 +12,7 @@ from pathlib import Path
 from runtime.adapters import session_start
 from runtime.adapters.session_start import diagnostic, render
 from runtime.engine import HookResult, RuntimeEvent
-from runtime.doctor import NativeProcess, ObservationError, validate_initialize, version
+from runtime.doctor import MAX_OUTPUT, NativeProcess, ObservationError, validate_initialize, version
 from runtime.startup import StartupError, AcceptedScope, json_object
 
 
@@ -129,6 +129,8 @@ def _native_reader(methods, *, on_notification=None):
             if method not in methods:
                 raise ObservationError("unsupported_method")
             sequence += 1
+            if method == "thread/items/read":
+                return process.request(sequence, method, params, response_limit=MAX_OUTPUT)
             return process.request(sequence, method, params)
 
         initialized = request("initialize", {"clientInfo": {"name": "vibe-workflow-native-observer", "version": "1"},
@@ -167,22 +169,58 @@ def _native_chain(scope, binding, attempt_id, prefix, parent_turn_id, spawn_item
     task_name = _review_id(binding["task_name"])
     if task_name != native_task_name(attempt_id, prefix.removesuffix("_"), binding.get("workstream_context_id")):
         raise ObservationError("assignment_marker_invalid")
-    if (not isinstance(spawn, dict) or spawn.get("id") != spawn_item_id
-            or spawn.get("type") != "subAgentActivity" or spawn.get("kind") != "started"):
+    if not isinstance(spawn, dict) or spawn.get("id") != spawn_item_id:
         raise ObservationError("spawn_unverified")
-    child = _review_id(spawn.get("agentThreadId"))
-    agent_path = spawn.get("agentPath")
-    if (child == parent or not isinstance(agent_path, str) or len(agent_path) > 4096
-            or not agent_path.startswith("/") or agent_path.rsplit("/", 1)[-1] != task_name):
-        raise ObservationError("child_mismatch")
+    if spawn.get("type") == "subAgentActivity":
+        if spawn.get("kind") != "started":
+            raise ObservationError("spawn_unverified")
+        child = _review_id(spawn.get("agentThreadId"))
+        agent_path = spawn.get("agentPath")
+        if (child == parent or not isinstance(agent_path, str) or len(agent_path) > 4096
+                or not agent_path.startswith("/") or agent_path.rsplit("/", 1)[-1] != task_name):
+            raise ObservationError("child_mismatch")
+        mechanism = "codex-native-agent-path"
+    elif spawn.get("type") == "collabAgentToolCall":
+        receivers = spawn.get("receiverThreadIds")
+        if (spawn.get("tool") != "spawnAgent" or spawn.get("status") != "completed"
+                or spawn.get("senderThreadId") != parent or not isinstance(receivers, list) or len(receivers) != 1):
+            raise ObservationError("spawn_unverified")
+        child = _review_id(receivers[0])
+        if child == parent or not isinstance(spawn.get("prompt"), str):
+            raise ObservationError("child_mismatch")
+        from runtime.evidence import _digest
+        envelope = json_object(spawn["prompt"].encode("utf-8"), limit=MAX_OUTPUT)
+        review = prefix == "review_"
+        digest = binding.get("ledger_assignment_digest", binding["assignment_digest"])
+        body = envelope.get("ownership" if review else "assignment")
+        if (not isinstance(body, dict) or _digest(body) != digest
+                or not isinstance(body.get("binding"), dict) or body["binding"].get("task_name") != task_name):
+            raise ObservationError("assignment_unverified")
+        expected = (dict(assignment=body["request"]["assignment"], ledger_assignment_digest=digest,
+            report_contract=body["report_contract"] | dict(attempt_id=attempt_id,
+                candidate_digest=binding["candidate_digest"], coverage=body["review"]["coverage"]), ownership=body)
+            if review else dict(assignment_digest=digest, assignment=body))
+        if _digest(envelope) != _digest(expected):
+            raise ObservationError("assignment_unverified")
+        mechanism, agent_path = "codex-native-collab-call", None
+    else:
+        raise ObservationError("spawn_unverified")
     thread = _native_metadata(scope, request, child, observed_version)
     source = thread.get("source")
     subagent = source.get("subAgent") if isinstance(source, dict) else None
     origin = subagent.get("thread_spawn") if isinstance(subagent, dict) else None
     if (thread.get("parentThreadId") != parent or not isinstance(origin, dict)
-            or origin.get("parent_thread_id") != parent or origin.get("agent_path") != agent_path):
+            or origin.get("parent_thread_id") != parent):
         raise ObservationError("child_mismatch")
-    return parent_thread, spawn, thread, agent_path
+    if mechanism == "codex-native-agent-path":
+        if origin.get("agent_path") != agent_path:
+            raise ObservationError("child_mismatch")
+    else:
+        agent_path = origin.get("agent_path")
+        if agent_path is not None and (not isinstance(agent_path, str) or not agent_path.startswith("/")
+                or len(agent_path) > 4096 or any(not char.isprintable() for char in agent_path)):
+            raise ObservationError("child_mismatch")
+    return parent_thread, spawn, thread, agent_path, mechanism
 
 
 def _native_final(request, child, turn):
@@ -228,7 +266,7 @@ def collect_native_review(scope, attempt_id, parent_turn_id, spawn_item_id):
     binding = prepared_native_review(scope, attempt_id)
     try:
         with _native_reader(REVIEW_METHODS) as (observed_version, request):
-            parent_thread, spawn, thread, agent_path = _native_chain(scope, binding, attempt_id, "review_",
+            parent_thread, spawn, thread, agent_path, mechanism = _native_chain(scope, binding, attempt_id, "review_",
                 parent_turn_id, spawn_item_id, request, observed_version)
             parent, child, task_name = binding["parent_session_id"], thread["id"], binding["task_name"]
             requested_model, requested_effort = spawn.get("model"), spawn.get("reasoningEffort")
@@ -259,7 +297,7 @@ def collect_native_review(scope, attempt_id, parent_turn_id, spawn_item_id):
                 raise ObservationError("report_mismatch")
             if latest() != review_turn or prepared_native_review(scope, attempt_id) != binding:
                 raise ObservationError("review_changed")
-            return {"receipt": {"version": 1, "mechanism": "codex-native-agent-path",
+            return {"receipt": {"version": 1, "mechanism": mechanism,
                     "task_name": task_name, "agent_path": agent_path,
                     "native_version": _review_id(binding.get("native_version", observed_version)),
                     "current_observer_version": observed_version,
@@ -379,7 +417,7 @@ def _observe_native_assignment(scope, attempt, parent_turn_id, spawn_item_id, *,
         requested_effort = _native_setting(binding.get("requested_effort"))
         admitted_version = _review_id(binding.get("native_version"))
         with _native_reader(REVIEW_METHODS) as (observed_version, request):
-            parent, spawn, thread, agent_path = _native_chain(scope, binding, attempt, "review_" if review else "worker_",
+            parent, spawn, thread, agent_path, mechanism = _native_chain(scope, binding, attempt, "review_" if review else "worker_",
                 parent_turn_id, spawn_item_id, request, observed_version)
             originator = _native_surface(parent, binding.get("client_surface"), observed_version)
             child = thread["id"]
@@ -401,7 +439,7 @@ def _observe_native_assignment(scope, attempt, parent_turn_id, spawn_item_id, *,
             item_id, result = _native_final(request, child, turn) if status == "completed" else (None, None)
             if latest() != (turn, status, failure_code, will_retry) or prepared(scope, attempt) != binding:
                 raise ObservationError("assignment_changed")
-            receipt = dict(version=2, mechanism="codex-native-agent-path", attempt_id=attempt,
+            receipt = dict(version=2, mechanism=mechanism, attempt_id=attempt,
                 task_name=binding["task_name"], agent_path=agent_path, native_version=admitted_version,
                 current_observer_version=observed_version, parent_creation_version=parent["cliVersion"],
                 worker_creation_version=thread["cliVersion"],

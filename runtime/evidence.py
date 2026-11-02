@@ -5691,6 +5691,7 @@ def prepared_native_review(scope, attempt_id):
             record = delegation._linked_review(scope, state._scope_id(scope), task, attempt,
                 delegation._ledger(scope, db, assignment_id=attempt_id))
             native_binding = delegation._native_binding(record)
+            native_binding['ledger_assignment_digest'] = attempt['ledger_assignment_digest']
         plan = _read(scope, task['evidence']['plan'])
         assignment = _read(scope, attempt['assignment'])['prompt']
     _require(_digest(capture_candidate(scope, plan)) == attempt['candidate_digest'], 'Native review candidate is stale')
@@ -5740,6 +5741,8 @@ def _review_quality_matches(scope, attempt, record, collected=None, *, context=N
             receipt['candidate_digest'] == attempt['candidate_digest'] and
             all(receipt[key] == actual[key] for key in ('parent_session_id', 'parent_turn_id', 'spawn_item_id', 'native_version')) and
             all(receipt[key] == actual[field] for key, field in correspondence.items()) and
+            ((receipt['mechanism'] == 'codex-native-collab-call') ==
+             (actual['mechanism'] == 'codex-native-collab-call')) and
             receipt.get('task_name') == actual['task_name'] and receipt.get('agent_path') == actual['agent_path'] and
             receipt['report_digest'] == hashlib.sha256(latest['result'].encode()).hexdigest() and
             json_object(latest['result']) == collected['report'])
@@ -5771,7 +5774,7 @@ def collect_review(scope, request):
                            'reviewer_id', 'review_turn_id', 'report_item_id', 'assignment_digest', 'candidate_digest',
                            'report_digest', 'requested_model', 'requested_effort'), ('task_name', 'agent_path', *delegation.VERSION_PROVENANCE_FIELDS))
     delegation._validate_version_provenance(receipt)
-    _require(type(receipt['version']) is int and receipt['version'] == VERSION and receipt['mechanism'] in {'codex-persisted-history', 'codex-native-agent-path'} and
+    _require(type(receipt['version']) is int and receipt['version'] == VERSION and receipt['mechanism'] in {'codex-persisted-history', 'codex-native-agent-path', 'codex-native-collab-call'} and
              receipt['parent_session_id'] == request['session_id'] and receipt['parent_turn_id'] == request['parent_turn_id'] and
              receipt['spawn_item_id'] == request['spawn_item_id'] and receipt['reviewer_id'] != request['session_id'] and
              receipt['assignment_digest'] == attempt['assignment_digest'] and receipt['candidate_digest'] == attempt['candidate_digest'],
@@ -5779,6 +5782,12 @@ def collect_review(scope, request):
     if receipt['mechanism'] == 'codex-native-agent-path':
         _require(receipt.get('task_name') == attempt['task_name'] and isinstance(receipt.get('agent_path'), str)
                  and receipt['agent_path'].split('/')[-1] == attempt['task_name'], 'Native prepared task marker is unverified')
+    elif receipt['mechanism'] == 'codex-native-collab-call':
+        _require(receipt.get('task_name') == attempt['task_name'] and 'agent_path' in receipt,
+                 'Native prepared collaboration assignment is unverified')
+        if receipt['agent_path'] is not None:
+            state._text(receipt['agent_path'], 'observed native path', 4096)
+            _require(receipt['agent_path'].startswith('/'), 'Native collaboration path is invalid')
     for key in ('reviewer_id', 'review_turn_id', 'report_item_id', 'report_digest', 'native_version'):
         state._text(receipt[key], 'observed ' + key)
     _require(_review_quality_matches(scope, attempt, record, observed),

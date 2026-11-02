@@ -8,11 +8,12 @@ from pathlib import Path
 import sys
 import subprocess
 import tempfile
+import time
 import types
 import unittest
 from unittest.mock import patch
 
-from runtime import doctor
+from runtime import doctor, evidence
 from runtime.adapters import codex
 from runtime.startup import ProjectScope, StartupError
 
@@ -80,6 +81,8 @@ for line in sys.stdin:
             result = responses.get("items_second", responses["items"]) if params.get("cursor") else responses["items"]
     else: raise RuntimeError("Unexpected RPC")
     if mode == "oversized": result = {{"data": "x" * (600 * 1024)}}
+    if mode == "oversized-notification" and method == "thread/items/read":
+        print(json.dumps({{"method": "fixture/notification", "params": {{"data": "x" * (128 * 1024)}}}}), flush=True)
     print(json.dumps({{"id": request["id"], "result": result}}), flush=True)
 ''')
         path.chmod(0o700)
@@ -95,6 +98,7 @@ for line in sys.stdin:
                 raise StartupError("candidate changed")
             return copy.deepcopy(binding or self.binding)
         module.prepared_native_review = prepared_native_review
+        module._digest = evidence._digest
         with patch.dict(sys.modules, {"runtime.evidence": module}):
             yield calls
 
@@ -103,6 +107,206 @@ for line in sys.stdin:
             result = codex.collect_native_review(self.scope, "attempt", "parent-turn", "spawn")
         self.assertEqual(len(calls), 2)
         return result
+
+    def v1_fixture(self, review=False):
+        responses, binding = self.review_assignment_fixture() if review else self.worker_fixture()
+        body = dict(binding=dict(task_name=binding["task_name"]), request=dict(assignment="Prepared fixture"),
+                    report_contract={}, review=dict(coverage=["general"]))
+        digest = evidence._digest(body)
+        binding["assignment_digest"] = digest
+        envelope = (dict(ledger_assignment_digest=digest, ownership=body, assignment="Prepared fixture",
+                         report_contract=dict(attempt_id="attempt", candidate_digest=binding["candidate_digest"],
+                                              coverage=["general"])) if review else dict(assignment_digest=digest, assignment=body))
+        responses["spawn"]["data"][0]["item"] = dict(id="spawn", type="collabAgentToolCall",
+            tool="spawnAgent", status="completed", senderThreadId="parent", receiverThreadIds=["child"],
+            prompt=json.dumps(envelope), model="gpt-6-luna", reasoningEffort="medium")
+        responses["child"]["thread"]["source"]["subAgent"]["thread_spawn"].pop("agent_path")
+        return responses, binding
+
+    def test_v1_collab_call_correlates_prepared_assignment_without_inventing_agent_path(self):
+        for review in (False, True):
+            responses, binding = self.v1_fixture(review)
+            observed = (self.observe_review_assignment(responses, binding) if review else
+                        self.observe_worker(responses, binding))
+            receipt = observed["receipt"]
+            self.assertEqual(receipt["mechanism"], "codex-native-collab-call")
+            self.assertIsNone(receipt["agent_path"])
+            self.assertEqual((receipt["parent_session_id"], receipt["parent_turn_id"], receipt["spawn_item_id"],
+                              receipt["worker_id"], receipt["worker_turn_id"], receipt["result_item_id"]),
+                             ("parent", "parent-turn", "spawn", "child", "child-turn", "final"))
+            self.assertEqual(receipt["assignment_digest"], binding["assignment_digest"])
+            self.assertEqual(receipt["requested_model"], "requested-model")
+            self.assertEqual(receipt["configured_model"], "configured-model")
+            self.assertEqual(receipt["spawn_observed_model"], "gpt-6-luna")
+            self.assertEqual(receipt["native_version"], "0.163.0")
+            self.assertEqual(receipt["current_observer_version"], "0.163.0")
+            self.assertEqual(observed["result"], self.text)
+            self.assertIsNone(receipt["execution_model"])
+            self.assertIsNone(receipt["execution_effort"])
+            self.assertFalse(receipt["descendants_stopped"])
+            self.assertEqual(receipt["prompt_delivery"], "unverified")
+        responses, lifecycle_binding = self.v1_fixture(review=True)
+        binding = self.binding | dict(ledger_assignment_digest=lifecycle_binding["assignment_digest"])
+        receipt = self.collect(responses, binding=binding)["receipt"]
+        self.assertEqual(receipt["mechanism"], "codex-native-collab-call")
+        self.assertIsNone(receipt["agent_path"])
+        self.assertEqual(receipt["assignment_digest"], self.binding["assignment_digest"])
+        self.assertNotEqual(receipt["assignment_digest"], binding["ledger_assignment_digest"])
+        responses["child"]["thread"]["source"]["subAgent"]["thread_spawn"]["agent_path"] = "/actual/native/path"
+        self.assertEqual(self.collect(responses, binding=binding)["receipt"]["agent_path"], "/actual/native/path")
+        self.assertEqual(self.collect()["receipt"]["mechanism"], "codex-native-agent-path")
+
+    def test_v1_large_prepared_review_uses_bounded_real_subprocess_transport(self):
+        responses, lifecycle_binding = self.v1_fixture(review=True)
+        assignment = "x" * 65536
+        plaintext_digest = hashlib.sha256(assignment.encode()).hexdigest()
+        spawn = responses["spawn"]["data"][0]["item"]
+        envelope = json.loads(spawn["prompt"])
+        envelope["assignment"] = envelope["ownership"]["request"]["assignment"] = assignment
+        ledger_digest = evidence._digest(envelope["ownership"])
+        envelope["ledger_assignment_digest"] = ledger_digest
+        spawn["prompt"] = json.dumps(envelope)
+        report = self.report | dict(assignment_digest=plaintext_digest)
+        text = json.dumps(report)
+        responses["items"]["data"][0]["item"]["text"] = text
+        binding = self.binding | dict(assignment=assignment, assignment_digest=plaintext_digest,
+                                      ledger_assignment_digest=ledger_digest)
+        initialization = dict(codexHome="/private/native", platformFamily="unix", platformOs="macos", userAgent="fixture")
+        results = [initialization, responses["parent"], responses["spawn"], responses["child"],
+                   responses["turns"], responses["items"], responses["turns"]]
+        frames = [json.dumps(dict(id=number, result=result)).encode() + b"\n"
+                  for number, result in enumerate(results, 1)]
+        self.assertGreater(len(spawn["prompt"].encode()), doctor.MAX_INPUT)
+        self.assertGreater(len(frames[2]), doctor.MAX_INPUT)
+        self.assertLess(sum(map(len, frames)), doctor.MAX_OUTPUT)
+        self.assertNotEqual(plaintext_digest, ledger_digest)
+        collected = self.collect(responses, binding=binding)
+        self.assertEqual(collected["report"], report)
+        self.assertEqual(collected["receipt"]["assignment_digest"], plaintext_digest)
+        self.assertEqual(collected["receipt"]["mechanism"], "codex-native-collab-call")
+        self.assertIsNone(collected["receipt"]["agent_path"])
+        lifecycle_binding["assignment_digest"] = ledger_digest
+        observed = self.observe_review_assignment(responses, lifecycle_binding)
+        self.assertEqual(observed["receipt"]["assignment_digest"], ledger_digest)
+        self.assertEqual(observed["result"], text)
+        self.assertFalse(observed["receipt"]["descendants_stopped"])
+
+    def test_native_selected_response_limit_preserves_default_notification_and_total_bounds(self):
+        params = dict(threadId="parent", turnId="parent-turn", itemIds=["spawn"])
+        cases = (("default128", 128 * 1024, None, "normal"),
+                 ("selected-over512", 512 * 1024, doctor.MAX_OUTPUT, "normal"),
+                 ("notification-over128", 1, doctor.MAX_OUTPUT, "oversized-notification"))
+        for label, size, limit, mode in cases:
+            responses = copy.deepcopy(self.responses)
+            responses["spawn"] = dict(data="x" * size)
+            notifications = []
+            process = doctor.NativeProcess([self.executable(responses, mode)], time.monotonic() + 5,
+                                           on_notification=notifications.append)
+            try:
+                kwargs = {} if limit is None else dict(response_limit=limit)
+                with self.subTest(case=label), self.assertRaises(doctor.ObservationError):
+                    process.request(1, "thread/items/read", params, **kwargs)
+                self.assertEqual(notifications, [])
+            finally:
+                process.close()
+        responses = copy.deepcopy(self.responses)
+        responses["spawn"] = dict(data="x" * (270 * 1024))
+        frame = json.dumps(dict(id=1, result=responses["spawn"])).encode() + b"\n"
+        self.assertLess(len(frame), doctor.MAX_OUTPUT)
+        self.assertGreater(2 * len(frame), doctor.MAX_OUTPUT)
+        process = doctor.NativeProcess([self.executable(responses)], time.monotonic() + 5)
+        try:
+            self.assertEqual(process.request(1, "thread/items/read", params, response_limit=doctor.MAX_OUTPUT), responses["spawn"])
+            self.assertGreater(process.bytes_read, doctor.MAX_INPUT)
+            with self.assertRaisesRegex(doctor.ObservationError, "output_limit"):
+                process.request(2, "thread/items/read", params, response_limit=doctor.MAX_OUTPUT)
+            self.assertGreater(process.bytes_read, doctor.MAX_OUTPUT)
+        finally:
+            process.close()
+        process = doctor.NativeProcess([self.executable()], time.monotonic() + 5)
+        try:
+            with self.assertRaises(doctor.ObservationError):
+                process.request(1, "thread/items/read", params, response_limit=doctor.MAX_OUTPUT + 1)
+        finally:
+            process.close()
+        responses = copy.deepcopy(self.responses)
+        responses["parent"]["padding"] = "x" * (128 * 1024)
+        with patch.object(codex.shutil, "which", return_value=self.executable(responses)):
+            with codex._native_reader(codex.REVIEW_METHODS) as (_, request):
+                with self.assertRaises(doctor.ObservationError):
+                    request("thread/read", dict(threadId="parent", includeTurns=False))
+
+    def test_v1_collab_call_mismatch_fails_closed(self):
+        for review in (False, True):
+            baseline, binding = self.v1_fixture(review)
+            cases = []
+            def changed(label, mutate):
+                responses = copy.deepcopy(baseline)
+                mutate(responses)
+                cases.append((label, responses))
+            changed("parent turn", lambda r: r["spawn"]["data"][0].update(turnId="other"))
+            changed("call", lambda r: r["spawn"]["data"][0]["item"].update(id="other"))
+            for field, values in (("senderThreadId", (None, "other")), ("tool", (None, "sendInput")),
+                                  ("status", ("failed", "inProgress", None)),
+                                  ("receiverThreadIds", ([], ["child", "other"], ["parent"], "child", [None])),
+                                  ("prompt", (None, "not JSON", "{}", '{"assignment":{},"assignment":{}}'))):
+                for value in values:
+                    changed(field + repr(value), lambda r, field=field, value=value:
+                            r["spawn"]["data"][0]["item"].update({field: value}))
+            for field, value in (("id", "other"), ("parentThreadId", "other"), ("cwd", "/other"),
+                                  ("source", None)):
+                changed("child " + field, lambda r, field=field, value=value: r["child"]["thread"].update({field: value}))
+            changed("independent origin", lambda r:
+                    r["child"]["thread"]["source"]["subAgent"]["thread_spawn"].update(parent_thread_id="other"))
+            changed("caller origin only", lambda r: (r["child"]["thread"].pop("source"),
+                    r["spawn"]["data"][0]["item"].update(threadSource={"parent_thread_id": "parent"}, parentTurnId="parent-turn")))
+            for value in (False, "", "relative/path", "x" * 4097, "line\nbreak"):
+                changed("bad actual path", lambda r, value=value:
+                        r["child"]["thread"]["source"]["subAgent"]["thread_spawn"].update(agent_path=value))
+            for mutation in ("digest", "body", "name", "extra", "outer"):
+                responses = copy.deepcopy(baseline)
+                spawn = responses["spawn"]["data"][0]["item"]
+                envelope = json.loads(spawn["prompt"])
+                body = envelope["ownership" if review else "assignment"]
+                if mutation == "digest":
+                    envelope["ledger_assignment_digest" if review else "assignment_digest"] = "f" * 64
+                elif mutation == "body":
+                    body["request"]["assignment"] = "Changed immutable request"
+                elif mutation == "name":
+                    body["binding"]["task_name"] = "other"
+                elif mutation == "extra":
+                    envelope["unprepared"] = True
+                elif review:
+                    envelope["assignment"] = "Changed outer assignment"
+                else:
+                    envelope["assignment_digest"] = None
+                spawn["prompt"] = json.dumps(envelope)
+                cases.append((mutation, responses))
+            if review:
+                responses = copy.deepcopy(baseline)
+                spawn = responses["spawn"]["data"][0]["item"]
+                envelope = json.loads(spawn["prompt"])
+                envelope["report_contract"]["coverage"] = ["other"]
+                spawn["prompt"] = json.dumps(envelope)
+                cases.append(("altered outer report contract", responses))
+            # Even a matching digest cannot replace the generated immutable task name.
+            responses = copy.deepcopy(baseline)
+            envelope = json.loads(responses["spawn"]["data"][0]["item"]["prompt"])
+            body = envelope["ownership" if review else "assignment"]
+            body["binding"]["task_name"] = "other"
+            digest = evidence._digest(body)
+            envelope["ledger_assignment_digest" if review else "assignment_digest"] = digest
+            responses["spawn"]["data"][0]["item"]["prompt"] = json.dumps(envelope)
+            observer = self.observe_review_assignment if review else self.observe_worker
+            with self.subTest(review=review, case="matching digest wrong name"), self.assertRaises(StartupError):
+                observer(responses, binding | dict(assignment_digest=digest))
+            for label, responses in cases:
+                with self.subTest(review=review, case=label), self.assertRaises(StartupError):
+                    observer(responses, binding)
+        malformed_v2, binding = self.worker_fixture()
+        malformed_v2["spawn"]["data"][0]["item"]["type"] = "collabAgentToolCall"
+        with self.assertRaises(StartupError):
+            self.observe_worker(malformed_v2, binding)
 
     def test_receipt_fetches_actual_report_and_only_read_only_methods(self):
         for version in ("0.163.0", "0.164.0-alpha.11.1"):

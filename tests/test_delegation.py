@@ -2072,6 +2072,39 @@ class AdmissionTests(unittest.TestCase):
                 self.api.prepare_assignment(self.scope, request | delta)
 
 
+    def test_v1_receipt_observation_keeps_writer_ownership_until_independent_stop_proof(self):
+        self.plan()
+        prepared = self.prepare()
+        binding = self.api.prepared_native_assignment(self.scope, prepared['attempt_id'])
+        observed = self.lifecycle_observation(prepared, mechanism='codex-native-collab-call',
+            agent_path='/actual/' + binding['task_name'])
+        self.assertEqual(self.observe_worker(prepared, observed)['status'], 'observed')
+        self.assertTrue(self.observe_worker(prepared, observed)['replayed'])
+        # Keep the same valid path to isolate a mechanism-only identity conflict.
+        route = deepcopy(observed); route['receipt']['mechanism'] = 'codex-native-agent-path'
+        self.assertEqual(self.observe_worker(prepared, route)['status'], 'uncertain')
+        first_conflict = evidence._read(self.scope, self.raw_assignment(prepared['attempt_id'])['observation'])['conflict']
+        child = deepcopy(observed); child['receipt']['worker_id'] = 'different-child'
+        self.assertEqual(self.observe_worker(prepared, child)['status'], 'uncertain')
+        latest = evidence._read(self.scope, self.raw_assignment(prepared['attempt_id'])['observation'])
+        self.assertNotEqual(first_conflict, latest['conflict'])
+        self.assertEqual(latest['receipt']['worker_id'], 'child')
+        for flag in (None, 'stopped', 'descendants_stopped'):
+            request = self.worker_reconciliation_request(prepared, outcome='failed', changed_paths=[],
+                proof_delta={flag: False} if flag else None)
+            if flag is None:
+                request.pop('host_proof')
+            with self.subTest(flag=flag), self.assertRaises(state.StateError):
+                self.api.reconcile_assignment(self.scope, request)
+            self.assertNotEqual(self.raw_assignment(prepared['attempt_id'])['status'], 'settled')
+            with self.assertRaises(state.StateError):
+                self.api.reserve_coordinator(self.scope, self.operation_request(claims=[self.path_claim()]))
+        # Fixture host proof models independently inspected stopping, not native qualification.
+        exact = self.worker_reconciliation_request(prepared, outcome='failed', changed_paths=[])
+        self.assertEqual(self.api.reconcile_assignment(self.scope, exact)['status'], 'settled')
+        self.assertTrue(self.api.reconcile_assignment(self.scope, exact)['replayed'])
+        self.assertEqual(self.api.delegation_status(self.scope, 'codex', 'parent')['capacity']['unresolved_managed_workers'], 0)
+
     def test_native_receipt_keeps_admitted_version_when_observer_updates(self):
         self.plan()
         prepared = self.prepare()
@@ -2573,6 +2606,51 @@ class Stage4NativeReviewTests(unittest.TestCase):
         with state._database(self.scope) as db:
             attempts = state._task(db, state._scope_id(self.scope), 'codex', 'parent')['evidence']['attempts']
         self.assertEqual([a['id'] for a in attempts], [prepared['attempt_id']])
+
+    def test_v1_review_collection_matches_linked_lifecycle_and_plaintext_assignment(self):
+        self.plan(self.review_plan())
+        prepared = self.prepared()
+        binding = evidence.prepared_native_review(self.scope, prepared['attempt_id'])
+        self.assertEqual(binding['ledger_assignment_digest'], prepared['ledger_assignment_digest'])
+        self.assertEqual(binding['assignment_digest'], prepared['assignment_digest'])
+        self.assertNotEqual(binding['ledger_assignment_digest'], binding['assignment_digest'])
+        observed = self.observed(prepared, mechanism='codex-native-collab-call', agent_path=None)
+        self.assertEqual(observed['receipt']['assignment_digest'], binding['ledger_assignment_digest'])
+        self.assertEqual(self.observe(prepared, observed)['status'], 'observed')
+        collection = self.collection(prepared, observed)
+        collection['receipt']['mechanism'] = 'codex-native-collab-call'
+        self.assertEqual(collection['receipt']['assignment_digest'], binding['assignment_digest'])
+        for key, value in (('mechanism', 'codex-native-agent-path'), ('task_name', 'review_other'),
+                           ('reviewer_id', 'other-child'), ('parent_turn_id', 'other-parent-turn'),
+                           ('review_turn_id', 'other-turn'), ('report_item_id', 'other-report'),
+                           ('report_digest', 'f' * 64), ('candidate_digest', 'f' * 64),
+                           ('assignment_digest', binding['ledger_assignment_digest'])):
+            bad = deepcopy(collection); bad['receipt'][key] = value
+            with self.subTest(key=key), self.assertRaises(state.StateError):
+                self.collect(prepared, bad)
+        bad = deepcopy(collection); bad['report']['assignment_digest'] = binding['ledger_assignment_digest']
+        with self.assertRaises(state.StateError):
+            self.collect(prepared, bad)
+        with state._database(self.scope) as db:
+            record = next(row for row in self.api._ledger(self.scope, db) if row['id'] == prepared['attempt_id'])
+        path_history = deepcopy(self.api._worker_history(self.scope, record['data']['observation']))
+        native_path = '/root/' + observed['receipt']['task_name']
+        path_history[0][1]['receipt']['agent_path'] = native_path
+        matching = deepcopy(collection); matching['receipt']['agent_path'] = native_path
+        # Isolate route correspondence with identical valid paths; retain real null-path history below.
+        with patch.object(self.api, '_worker_history', return_value=path_history):
+            self.assertTrue(evidence._review_quality_matches(self.scope, prepared['attempt'], record, matching))
+            mismatched = deepcopy(matching); mismatched['receipt']['mechanism'] = 'codex-native-agent-path'
+            with self.subTest(case='mechanism only with identical valid paths'), self.assertRaises(state.StateError):
+                self.collect(prepared, mismatched)
+        self.assertEqual(self.collect(prepared, collection)['attempt']['status'], 'collected')
+        self.assertNotEqual(self.raw_assignment(prepared['attempt_id'])['status'], 'settled')
+        assessed = evidence.assess_review(self.scope, self.request(attempt_id=prepared['attempt_id'], assessment=dict(
+            coverage=['general', 'security'], criteria=['works'], qualification='Independent fixture expertise',
+            independence='Separate observed fixture reviewer', semantic_coverage='Read requirements and code',
+            dispositions=[], decision_refs=['user:accepted'])))
+        self.assertEqual(assessed['attempt']['status'], 'assessed')
+        self.assertNotEqual(self.raw_assignment(prepared['attempt_id'])['status'], 'settled')
 
     def test_review_collection_correlates_lifecycle_and_assessment_never_settles(self):
         self.plan(self.review_plan())

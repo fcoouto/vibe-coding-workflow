@@ -45,6 +45,15 @@ identity fields, backed by independent inspection of the exact parent/task marke
 Missing history does not establish this branch. Review proofs also require the
 original linked D5 review attempt and plaintext assignment binding.
 
+Native V1 `codex-native-collab-call` receipts correlate the completed spawn call's
+prepared JSON envelope with the immutable assignment, original parent and independently
+read child origin. Its `agent_path` is the actual optional native source value, or
+null; no path is inferred. D5 plaintext assignment and D6 ledger digests remain distinct.
+Collection and assessment retain ownership until the exact independent stop proof.
+Fixture compatibility does not qualify native execution, read-only enforcement or
+successful close. Close, archive, interrupt, a completed turn and parent exit alone
+do not prove that native, tool, background or resource descendants stopped.
+
 ## Check
 
 Use `kind:"check-writer-reconciliation"`. Add original `candidate_digest`, fresh

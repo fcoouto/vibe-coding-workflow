@@ -160,7 +160,9 @@ class NativeProcess:
         finally:
             _HOOK_STREAM.reset(token)
 
-    def request(self, identity, method, params):
+    def request(self, identity, method, params, *, response_limit=MAX_INPUT):
+        if type(response_limit) is not int or not 0 < response_limit <= MAX_OUTPUT:
+            raise ObservationError("invalid_response_limit")
         self.send({"id": identity, "method": method, "params": params})
         deadline = min(time.monotonic() + RPC_TIMEOUT, self.deadline)
         while True:
@@ -171,16 +173,18 @@ class NativeProcess:
                 if not chunk:
                     raise ObservationError("unavailable")
                 self.buffer += chunk
-                if len(self.buffer) > MAX_INPUT:
+                if len(self.buffer) > response_limit:
                     raise ObservationError("output_limit")
             raw, self.buffer = self.buffer.split(b"\n", 1)
             try:
-                response = json_object(raw)
+                response = json_object(raw, limit=response_limit)
             except (ValueError, RecursionError, UnicodeError):
                 raise ObservationError("malformed_response") from None
             if response.get("jsonrpc", "2.0") != "2.0":
                 raise ObservationError("malformed_response")
             if "id" not in response:
+                if len(raw) > MAX_INPUT:
+                    raise ObservationError("output_limit")
                 if not isinstance(response.get("method"), str) or "result" in response or "error" in response:
                     raise ObservationError("malformed_response")
                 if self.on_notification is not None:
