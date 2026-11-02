@@ -1,4 +1,5 @@
 """Workstreams protocol fixtures; no actual native dispatch or execution qualification."""
+from tests.fixture_canonical_birth import test_acquisition
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 import importlib
@@ -27,8 +28,9 @@ class WorkstreamsTests(unittest.TestCase):
         self.scope = self.fixture.scope
         self.assertIsNotNone(importlib.util.find_spec('runtime.workstreams'), 'Workstreams runtime missing')
         self.api = importlib.import_module('runtime.workstreams')
-        # Protocol cases model legacy scopes before first-use defaults existed.
-        self.api._path(self.scope).unlink(missing_ok=True)
+        # Opt-in protocol cases retain an explicit saved disabled choice.
+        current=self.api.control(self.scope,'status',dict(client='codex'))
+        self.api.control(self.scope,'disable',dict(client='codex',expected_revision=current['revision']))
         self.limits = dict(context_id='WS42.01', rationale='One bounded parser outcome with review fixes',
             output_tokens=12000, context_tokens=64000, max_steps=40, max_seconds=1200,
             max_continuations=3, backoff_seconds=0)
@@ -68,8 +70,13 @@ class WorkstreamsTests(unittest.TestCase):
         self.assertEqual(self.control('enable', first['revision'])['revision'], first['revision'])
         with self.assertRaises(state.StateError):
             self.control('disable', 0)
-        other = replace(self.scope, project_id='other')
-        self.assertFalse(self.api.control(other, 'status', dict(client='codex'))['enabled'])
+        from tests.fixture_canonical_birth import fresh_canonical
+        _,acquired,_=fresh_canonical(self)
+        other=acquired.resolution.scope
+        separate=self.api.control(other,'status',dict(client='codex'))
+        self.assertTrue(separate['enabled'])
+        self.api.control(other,'disable',dict(client='codex',expected_revision=separate['revision']))
+        self.assertFalse(self.api.control(other,'status',dict(client='codex'))['enabled'])
         self.assertFalse(self.control('disable', first['revision'])['enabled'])
 
     def test_off_preserves_ordinary_d6_but_workstreams_require_opt_in(self):
@@ -160,7 +167,7 @@ class WorkstreamsTests(unittest.TestCase):
         output = io.StringIO()
         with patch('sys.argv', ['workflow.py', 'delegation', 'workstreams', 'status', '--cwd', str(self.fixture.repo)]), \
                 patch('sys.stdin', SimpleNamespace(buffer=io.BytesIO(b'{"client":"codex","feature":"resource_admission"}'))), \
-                patch('runtime.startup.resolve_project', return_value=self.scope), redirect_stdout(output):
+                patch('runtime.startup.acquire_project_entry',side_effect=lambda *args,**kwargs:test_acquisition(self.scope)), redirect_stdout(output):
             exit_code = workflow.control_main()
         self.assertEqual(exit_code, 0, output.getvalue())
         self.assertFalse(json.loads(output.getvalue())['enabled'])
@@ -305,9 +312,7 @@ class WorkstreamsTests(unittest.TestCase):
         intent = self.api.prepare_continuation(self.scope, self.continuation(prepared))
         request = self.fixture.request(attempt_id=prepared['attempt_id'], workstream_revision=self.control('status')['revision'],
             token=intent['token'])
-        payload = dict(scope=dict(project_id=self.scope.project_id, repository_root=str(self.scope.repository_root),
-            git_common_dir=str(self.scope.git_common_dir), policy_digest=self.scope.policy_digest,
-            runtime=dict(schema_version=self.scope.runtime.schema_version, state_dir=str(self.scope.runtime.state_dir))),
+        payload = dict(acquisition=str(self.fixture.fixture.test_acquisition),
             guards=str(self.fixture.root / 'authority-guards'), request=request)
         program = """
 import json, sys
@@ -315,12 +320,8 @@ from pathlib import Path
 from runtime import changes, state, workstreams
 from runtime.startup import ProjectScope, RuntimeSettings
 payload = json.load(sys.stdin)
-value = payload['scope']
-runtime = value.pop('runtime')
-value['repository_root'] = Path(value['repository_root'])
-value['git_common_dir'] = Path(value['git_common_dir'])
-runtime['state_dir'] = Path(runtime['state_dir'])
-scope = ProjectScope(**value, runtime=RuntimeSettings(**runtime))
+from tests.fixture_canonical_birth import acquire_test_scope
+scope = acquire_test_scope(payload['acquisition'])
 changes.LOCK_ROOT = Path(payload['guards'])
 try:
     result = workstreams.consume_continuation(scope, payload['request'])

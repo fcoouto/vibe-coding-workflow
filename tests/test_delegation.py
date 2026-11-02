@@ -1,4 +1,5 @@
 """Private guidance-cache fixtures; no network, models or live client changes."""
+from tests.fixture_canonical_birth import fixture_artifact
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import replace
@@ -24,11 +25,12 @@ from runtime.startup import ProjectScope, RuntimeSettings
 
 class GuidanceTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="vibe-guidance-")
-        self.addCleanup(self.temp.cleanup)
-        self.base = Path(self.temp.name).resolve()
-        self.scope = ProjectScope("project", self.base / "repo", self.base / "repo/.git", "policy",
-                                  RuntimeSettings(state.SCHEMA_VERSION, self.base / "private"))
+        from tests.fixture_canonical_birth import fresh_canonical
+        self._canonical_peer=self._testMethodName=='test_shared_projects_and_concurrent_refresh_have_only_one_holder'
+        fixture, self.acquisition, _ = fresh_canonical(self)
+        if self._canonical_peer:
+            self.peer_scope=next(a.resolution.scope for root,a in fixture.member_acquisitions.items() if root!=str(fixture.repo))
+        self.base, self.scope = fixture.base, self.acquisition.resolution.scope
         self.request = dict(client_surface="codex-desktop", applicability=dict(
             client_version="1.0", capability_fingerprint="a" * 64))
         self.guidance = dict(schema_version=1, client_surface="codex-desktop", checked_at="2026-01-01T00:00:00Z",
@@ -77,7 +79,8 @@ class GuidanceTests(unittest.TestCase):
         self.assertEqual(evidence._read(self.scope, reference), self.guidance)
         self.assertEqual(reference["digest"], result["snapshot_digest"])
         self.assertEqual(len(result["snapshot_digest"]), 64)
-        self.assertFalse((self.scope.runtime.state_dir / "runtime.sqlite3").exists())
+        self.assertTrue((self.scope.runtime.state_dir/"runtime.sqlite3").is_file())
+        with state._database(self.scope) as db:self.assertEqual(db.execute("select count(*) from tasks").fetchone()[0],0)
 
     def test_failure_preserves_last_good_bytes_time_and_suppresses_routine_storms(self):
         original = self.publish()
@@ -168,7 +171,7 @@ class GuidanceTests(unittest.TestCase):
     def test_shared_projects_and_concurrent_refresh_have_only_one_holder(self):
         api = self.api()
         barrier = threading.Barrier(15)
-        other = replace(self.scope, project_id="other", repository_root=self.base / "another")
+        other = self.peer_scope
         def run(number):
             barrier.wait(timeout=5)
             return api.claim_guidance(other if number % 2 else self.scope, self.request | dict(
@@ -225,8 +228,8 @@ class GuidanceTests(unittest.TestCase):
         from runtime import evidence
         original = evidence._artifact
         clock = [1800000000]
-        def prepare(scope, value):
-            reference = original(scope, value)
+        def prepare(scope, value, **kwargs):
+            reference = original(scope, value, **kwargs)
             clock[0] += 2
             return reference
         with patch.object(api, "_now", side_effect=lambda: clock[0]):
@@ -360,8 +363,9 @@ class GuidanceTests(unittest.TestCase):
     def test_failed_refresh_does_not_retry_for_version_only_update(self):
         for published in (False, True):
             with self.subTest(published=published):
-                self.scope = replace(self.scope, runtime=replace(self.scope.runtime,
-                    state_dir=self.base / ('private-' + str(published))))
+                from tests.fixture_canonical_birth import fresh_canonical
+                fixture,acquired,_=fresh_canonical(self)
+                self.base,self.scope=fixture.base,acquired.resolution.scope
                 if published:
                     self.publish()
                 claim = self.claim("maintenance", "offline-" + str(published))
@@ -397,12 +401,20 @@ class AdmissionTests(unittest.TestCase):
         self.api = delegation
         self.assertTrue(hasattr(delegation, 'plan_delegation'), 'assignment admission implementation missing')
         self.fixture = EvidenceTests(methodName='runTest')
+        self.fixture._canonical_peer = getattr(self,'_canonical_peer',False) or self._testMethodName in {
+            'test_cross_scope_claims_and_explicit_shared_services_conflict',
+            'test_unknown_old_check_resources_in_another_checkout_block_dispatch'}
+        self.fixture._canonical_linked = self._testMethodName in {
+            'test_linked_checkout_git_marker_is_coordinator_owned',
+            'test_actual_private_worktree_git_metadata_is_coordinator_owned',
+            'test_git_marker_retarget_during_discovery_blocks_commit',
+            'test_git_private_alias_retarget_with_unchanged_marker_blocks_commit',
+            'test_git_commondir_byte_change_during_discovery_blocks_commit',
+            'test_git_common_alias_retarget_after_candidate_capture_blocks_commit'}
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
-        from runtime.startup import policy_digest
-        self.fixture.scope = replace(self.fixture.scope, policy_digest=policy_digest(state.PACKAGE),
-            runtime=RuntimeSettings(state.SCHEMA_VERSION, self.fixture.root / 'admission-state'))
         self.scope = self.fixture.scope
+        if self.fixture._canonical_peer:self.peer_scope=self.fixture.peer_scope
         self.identity = dict(self.fixture.identity)
         state.start_task(self.scope, self.identity | dict(mode='editable', decision_ref='user:accepted'))
         self.fixture.plan()
@@ -482,9 +494,9 @@ class AdmissionTests(unittest.TestCase):
         from runtime import evidence
         with state._database(self.scope, write=True) as db:
             data = self.raw_assignment(attempt_id)
-            data.update(status='settled', result=dict(outcome=status), reconciliation=evidence._artifact(
-                self.scope, dict(fixture='independent stopped-writer boundary', attempt_id=attempt_id,
-                    revision=self.request()['expected_revision'])))
+            data.update(status='settled', result=dict(outcome=status), reconciliation=fixture_artifact(
+                self.scope,self.identity,dict(fixture='independent stopped-writer boundary', attempt_id=attempt_id,
+                    revision=self.request()['expected_revision']),db=db))
             db.execute('update assignments set data=? where id=?', (json.dumps(data), attempt_id))
 
     def second_owner(self, number, claims=None, limits=None, scope=None):
@@ -541,7 +553,7 @@ class AdmissionTests(unittest.TestCase):
         self.assertEqual(len(report['assignments']), 1)
         binding = self.api.prepared_native_assignment(self.scope, first['attempt_id'])
         self.assertEqual(set(binding), {'attempt_id','parent_session_id','task_name','assignment_digest',
-            'candidate_digest','requested_model','requested_effort','client_surface','native_version'})
+            'candidate_digest','requested_model','requested_effort','client_surface','native_version','pins','accepted_identity','scope_id'})
         self.assertEqual(binding['task_name'], 'worker_' + first['attempt_id'])
         self.assertEqual(json.loads(first['prompt'])['assignment_digest'], binding['assignment_digest'])
 
@@ -630,9 +642,7 @@ class AdmissionTests(unittest.TestCase):
         request = self.prepare_request()
         request['brief'].update(resources=[shared], files=[])
         self.api.prepare_assignment(self.scope, request)
-        linked = self.root / 'linked'
-        self.fixture.git('worktree', 'add', '-q', '--detach', str(linked), 'HEAD')
-        other_scope = replace(self.scope, project_id='linked-checkout', repository_root=linked)
+        other_scope = self.peer_scope
         request = self.second_owner(1, [shared], scope=other_scope)
         with self.assertRaises(state.StateError):
             self.api.prepare_assignment(other_scope, request)
@@ -719,9 +729,9 @@ class AdmissionTests(unittest.TestCase):
         plan = evidence._load_plan(scope, identity)
         candidate = evidence.capture_candidate(scope, plan)
         identity_id = __import__('uuid').uuid4().hex
-        attempt = dict(id=identity_id, kind='review', status='reserved', candidate=evidence._artifact(scope, candidate),
+        attempt = dict(id=identity_id, kind='review', status='reserved', candidate=fixture_artifact(scope,identity, candidate),
             candidate_digest=evidence._digest(candidate), plan_digest=evidence._digest(plan), task_name='review_'+identity_id,
-            assignment=evidence._artifact(scope, dict(prompt='Legacy unresolved reviewer')), assignment_digest='a'*64,
+            assignment=fixture_artifact(scope,identity, dict(prompt='Legacy unresolved reviewer')), assignment_digest='a'*64,
             coverage=['general'], criteria=['works'])
         with state._database(scope, write=True) as db:
             task = state._task(db, state._scope_id(scope), identity['client'], identity['session_id'])
@@ -782,26 +792,23 @@ class AdmissionTests(unittest.TestCase):
         self.assert_directory_alias_claims_are_exclusive('symlink', False)
 
     def test_linked_checkout_git_marker_is_coordinator_owned(self):
-        linked = self.root / 'git-linked'
-        self.fixture.git('worktree', 'add', '-q', '--detach', str(linked), 'HEAD')
-        scope = replace(self.scope, project_id='linked-marker', repository_root=linked)
+        scope=self.scope
+        self.assertTrue((scope.repository_root/'.git').is_file())
+        self.assertEqual(Path(self.api._git_directory(scope)),scope.git_dir)
         with self.assertRaises(state.StateError):
-            request = self.second_owner(1, [dict(kind='path', key=str(linked / '.git'), mode='write')], scope=scope)
-            self.api.prepare_assignment(scope, request)
+            request=self.second_owner(1,[dict(kind='path',key=str(scope.repository_root/'.git'),mode='write')])
+            self.api.prepare_assignment(scope,request)
 
     def test_actual_private_worktree_git_metadata_is_coordinator_owned(self):
-        linked = self.root / 'private-linked'
-        self.fixture.git('worktree', 'add', '-q', '--detach', str(linked), 'HEAD')
-        private = Path(subprocess.check_output(['git', '-C', str(linked), 'rev-parse',
-            '--path-format=absolute', '--git-dir'], text=True).strip())
-        relocated = self.root / 'private-git-metadata'
-        shutil.move(str(private), relocated)
-        (relocated / 'commondir').write_text(str(self.scope.git_common_dir) + '\n')
-        (linked / '.git').write_text('gitdir: ' + str(relocated) + '\n')
-        scope = replace(self.scope, project_id='linked-private', repository_root=linked)
+        scope=self.scope
+        private=Path(subprocess.check_output(['git','-C',str(scope.repository_root),'rev-parse',
+            '--path-format=absolute','--git-dir'],text=True).strip())
+        self.assertEqual(private,scope.git_dir)
+        self.assertEqual(Path(self.api._git_directory(scope)),private)
+        # Actual private metadata outside this checkout cannot become a worker write claim.
         with self.assertRaises(state.StateError):
-            request = self.second_owner(1, [dict(kind='path', key=str(relocated / 'HEAD'), mode='write')], scope=scope)
-            self.api.prepare_assignment(scope, request)
+            request=self.second_owner(1,[dict(kind='path',key=str(private/'HEAD'),mode='write')])
+            self.api.prepare_assignment(scope,request)
 
     def operation_request(self, identity=None, **fields):
         identity = identity or self.identity
@@ -859,7 +866,7 @@ class AdmissionTests(unittest.TestCase):
             task = state._task(db, state._scope_id(self.scope), identity['client'], identity['session_id'], identity['task_id'])
         bindings = dict(operation_id='operation-1', operation_digest=record['body']['operation']['digest'],
                         claims_digest=evidence._digest(record['data']['claims']))
-        observed = evidence._artifact(self.scope, bindings | dict(observation='fixture:independent-operation-effects'))
+        observed = fixture_artifact(self.scope,self.identity, bindings | dict(observation='fixture:independent-operation-effects'))
         proof = dict(version=2, kind='coordinator-operation-reconciliation', identity=identity,
             expected_pins=task['pins'], expected_revision=task['revision'], scope_id=state._scope_id(self.scope),
             attempt_id=record['id'], dispatch_id='operation-1', assignment_digest=record['data']['assignment']['digest'],
@@ -889,7 +896,7 @@ class AdmissionTests(unittest.TestCase):
         self.assertEqual(record['body']['d6_plan'], task['delegation']['plan'])
         bindings = dict(operation_id='operation-1', operation_digest=record['body']['operation']['digest'],
                         claims_digest=evidence._digest(record['data']['claims']))
-        observed = evidence._artifact(self.scope, bindings | dict(observation='fixture:resource-effects'))
+        observed = fixture_artifact(self.scope,self.identity, bindings | dict(observation='fixture:resource-effects'))
         proof = dict(version=2, kind='coordinator-operation-reconciliation', identity=self.identity,
             expected_pins=task['pins'], expected_revision=task['revision'], scope_id=state._scope_id(self.scope),
             attempt_id=record['id'], dispatch_id='operation-1', assignment_digest=record['data']['assignment']['digest'],
@@ -1071,7 +1078,7 @@ class AdmissionTests(unittest.TestCase):
                     data['request_digest'] = evidence._digest(body['request'])
                 else:
                     body['pins']['schema_version'] = 2.0
-                data['assignment'] = evidence._artifact(self.scope, body)
+                data['assignment'] = fixture_artifact(self.scope,self.identity, body)
                 owner = original['owner']
                 row = (original['id'], *(owner[k] for k in ('scope_id', 'client', 'session_id', 'task_id', 'dispatch_id')),
                        evidence._raw(data).decode())
@@ -1463,144 +1470,184 @@ class AdmissionTests(unittest.TestCase):
                 replaces=dict(task_id='task', expected_revision=current['revision'])))
         self.assertEqual(self.raw_assignment(prepared['attempt_id'])['status'], 'prepared')
 
-    def test_d4_shared_authority_excludes_foreign_checkout_reservation_after_scan(self):
+    def retained_d4(self, *, command=False, existing=False):
+        """Actual retained D4 operation over original-schema data, never a canonical store loan."""
         from tests.test_changes import ChangesTests
+        d4=ChangesTests('runTest');d4.setUp();self.addCleanup(d4.doCleanups)
+        if existing:
+            old,_,request=d4.existing_enrollment(runtime=True)
+            d4.historical_runtime(old,'empty')
+        else:
+            request=d4.command_request("from pathlib import Path; Path('result.txt').write_text('result')") if command else d4.request()
+        directory=d4.base/'retained-shared-state'
+        record=request['manifest']['enrollment']['record']
+        record['runtime']=dict(schema_version=2,state_dir=str(directory))
+        d4.historical_runtime(record,'empty')
+        request=d4.observe(d4.bind(request['manifest']))
+        return d4,request,directory
+
+    def assert_retained_guard_blocked(self, directory):
         from runtime import changes
-        d4 = ChangesTests(methodName='runTest')
-        d4.setUp()
-        self.addCleanup(d4.doCleanups)
-        request = d4.request()
-        request['manifest']['enrollment']['record']['runtime'] = dict(schema_version=2, state_dir=str(self.scope.runtime.state_dir))
-        request = d4.observe(d4.bind(request['manifest']))
-        self.plan()
-        scanned, finish = threading.Event(), threading.Event()
-        original_scan = changes._guard_writers
-        def scan(*args, **kwargs):
-            original_scan(*args, **kwargs)
+        from runtime.startup import StartupError
+        with self.assertRaises(StartupError):
+            with changes._authority_guards([directory]):self.fail('Retained D4 guard unexpectedly released')
+
+    def test_retained_d4_shared_authority_excludes_owner_after_scan(self):
+        from runtime import changes
+        d4,request,directory=self.retained_d4()
+        before=d4.retained_inventory(directory)
+        binding=dict(transaction_id=request['manifest']['transaction_id'],manifest_digest=request['approval']['manifest_digest'],
+            manifest=request['manifest'],approval=request['approval'],plan=d4.plan())
+        rules=d4.repo/'AGENTS.md'
+        scanned,finish=threading.Event(),threading.Event()
+        original=changes._guard_writers
+        def scan(*args,**kwargs):
+            original(*args,**kwargs)
             if not scanned.is_set():
-                scanned.set()
-                self.assertTrue(finish.wait(timeout=10))
-        with patch.object(changes, '_guard_writers', side_effect=scan):
+                scanned.set();self.assertTrue(finish.wait(timeout=10))
+        with patch.object(changes,'_guard_writers',side_effect=scan):
             with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(changes.apply_plan, d4.directory, request)
+                future=executor.submit(changes.apply_plan,d4.directory,request)
                 try:
-                    self.assertTrue(scanned.wait(timeout=5), 'D4 shared guard was not entered')
-                    with self.assertRaises(state.StateError):
-                        self.prepare()
-                finally:
-                    finish.set()
-                result = future.result(timeout=10)
-        self.assertIn(result['exit_code'], (0, 2), result)
-        self.assertEqual(self.api.delegation_status(self.scope, 'codex', 'parent')['assignments'], [])
-        self.assertEqual((d4.repo / 'AGENTS.md').read_text(), 'product rules\nnew process\n')
+                    self.assertTrue(scanned.wait(timeout=5),'Actual retained D4 writer guard was not reached')
+                    self.assert_retained_guard_blocked(directory)
+                finally:finish.set()
+                result=future.result(timeout=10)
+        self.assertEqual(result['exit_code'],2,result)
+        self.assertEqual(result['completed'],['write-rules'],result)
+        self.assertEqual(result['blocked'],[dict(id='transaction',
+            reason='Collect adoption qualification/reviews and bind observations to current inputs before final enrollment')],result)
+        self.assertEqual((rules.read_bytes(),rules.stat().st_mode&0o777),(b'product rules\nnew process\n',0o644))
+        self.assertFalse((d4.repo/changes.PROJECT_FILE).exists())
+        self.assertIsNone(d4.journal()['enrollment']['backup'])
+        self.assertEqual({key:d4.journal()[key] for key in binding},binding)
+        self.assertEqual(before,d4.retained_inventory(directory))
+        result=changes.resume_plan(d4.directory,d4.observe(request))
+        d4.assert_activation_incompatible(result)
+        self.assertEqual(result['blocked'],[dict(id='transaction',
+            reason='Enrollment runtime state/pins are incompatible; reconcile them before activation')],result)
+        self.assertEqual({key:d4.journal()[key] for key in binding},binding)
+        self.assertEqual(before,d4.retained_inventory(directory))
+        self.assertEqual((rules.read_bytes(),rules.stat().st_mode&0o777),(b'product rules\nnew process\n',0o644))
 
-    def test_uncertain_d4_command_owner_retains_shared_authority_until_reconciled(self):
-        from tests.test_changes import ChangesTests
+    def test_uncertain_retained_d4_command_owner_holds_authority_until_reconciled(self):
         from runtime import changes
-        d4 = ChangesTests(methodName='runTest')
-        d4.setUp()
-        self.addCleanup(d4.doCleanups)
-        request = d4.command_request("from pathlib import Path; Path('result.txt').write_text('result')")
-        request['manifest']['enrollment']['record']['runtime'] = dict(schema_version=2, state_dir=str(self.scope.runtime.state_dir))
-        request = d4.observe(d4.bind(request['manifest']))
-        self.plan()
-        result = changes.apply_plan(d4.directory, request)
-        self.assertEqual(result['exit_code'], 2, result)
+        d4,request,directory=self.retained_d4(command=True)
+        before=d4.retained_inventory(directory)
+        result=changes.apply_plan(d4.directory,request)
+        self.assertEqual(result['exit_code'],2,result)
         self.assertFalse(d4.journal()['receipts']['command']['command']['stopped'])
-        with self.assertRaises(state.StateError):
-            self.prepare()
-        result = changes.resume_plan(d4.directory, d4.observe(request))
-        self.assertIn(result['exit_code'], (0, 2), result)
+        self.assert_retained_guard_blocked(directory)
+        result=changes.resume_plan(d4.directory,d4.observe(request))
+        d4.assert_activation_incompatible(result)
         self.assertTrue(d4.journal()['receipts']['command']['command']['stopped'])
-        self.assertTrue(self.prepare()['launch_admitted'])
+        with changes._authority_guards([directory]):pass
+        self.assertEqual(before,d4.retained_inventory(directory))
 
-    def test_existing_foreign_reservation_blocks_d4_before_mutation(self):
-        from tests.test_changes import ChangesTests
+    def test_existing_retained_foreign_assignment_blocks_d4_before_mutation(self):
         from runtime import changes
-        d4 = ChangesTests(methodName='runTest')
-        d4.setUp()
-        self.addCleanup(d4.doCleanups)
-        request = d4.request()
-        request['manifest']['enrollment']['record']['runtime'] = dict(schema_version=2, state_dir=str(self.scope.runtime.state_dir))
-        request = d4.observe(d4.bind(request['manifest']))
-        self.plan()
-        held = self.prepare()
-        before = (d4.repo / 'AGENTS.md').read_bytes()
-        result = changes.apply_plan(d4.directory, request)
-        self.assertEqual(result['exit_code'], 2, result)
-        self.assertEqual((d4.repo / 'AGENTS.md').read_bytes(), before)
-        self.assertEqual(self.raw_assignment(held['attempt_id'])['status'], 'prepared')
+        from contextlib import closing
+        d4,request,directory=self.retained_d4()
+        # Unsupported original assignment history is a protected unknown owner.
+        with closing(sqlite3.connect(directory/'runtime.sqlite3')) as db,db:
+            db.execute('insert into assignments values(?,?,?,?,?,?,?)',('f'*32,'original-foreign-scope','codex',
+                'original-session','original-task','original-dispatch','{}'))
+        before=d4.retained_inventory(directory)
+        rules=(d4.repo/'AGENTS.md').read_bytes()
+        reached=[];original=changes._writers
+        def inspect(*args,**kwargs):reached.append(True);return original(*args,**kwargs)
+        with patch.object(changes,'_writers',side_effect=inspect):result=changes.apply_plan(d4.directory,request)
+        self.assertTrue(reached)
+        self.assertEqual(result['exit_code'],2,result)
+        self.assertIn('assignment history',result['blocked'][0]['reason'])
+        self.assertEqual((d4.repo/'AGENTS.md').read_bytes(),rules)
+        self.assertEqual(before,d4.retained_inventory(directory))
 
-    def test_d4_rollback_guards_proposed_actual_and_backup_authorities(self):
-        from tests.test_changes import ChangesTests
+    def test_retained_d4_rollback_guards_proposed_actual_and_backup_authorities(self):
         from runtime import changes
-        d4 = ChangesTests(methodName='runTest')
-        d4.setUp()
-        self.addCleanup(d4.doCleanups)
-        old, original, request = d4.existing_enrollment(runtime=True)
-        old_directory = Path(old['runtime']['state_dir'])
-        request['manifest']['enrollment']['record']['runtime'] = dict(schema_version=2, state_dir=str(self.scope.runtime.state_dir))
-        request = d4.bind(request['manifest'])
-        result = changes.apply_plan(d4.directory, d4.observe(request))
-        for _ in range(2):
-            if result['exit_code'] == 0:
-                break
-            result = changes.resume_plan(d4.directory, d4.observe(request))
-        self.assertEqual(result['exit_code'], 0, result)
-        seen = []
-        original_scan = changes._guard_writers
-        def scan(*args, **kwargs):
-            original_scan(*args, **kwargs)
-            for directory in (old_directory, self.scope.runtime.state_dir):
-                blocked_scope = replace(self.scope, runtime=replace(self.scope.runtime, state_dir=directory))
-                with self.assertRaises(state.StateError):
-                    with self.api._reservation_write(blocked_scope):
-                        pass
-                seen.append(directory)
-        with patch.object(changes, '_guard_writers', side_effect=scan):
-            result = changes.rollback_plan(d4.directory, d4.observe(request))
-            if result['exit_code'] == 2:
-                result = changes.rollback_plan(d4.directory, d4.observe(request))
-        self.assertEqual(result['exit_code'], 0, result)
-        self.assertEqual(set(seen), {old_directory, self.scope.runtime.state_dir})
-        self.assertEqual((d4.repo / '.vibe-coding-workflow/project.json').read_bytes(), original)
-        self.assertFalse(old_directory.exists())
-        self.assertEqual(changes.rollback_plan(d4.directory, request)['exit_code'], 0)
+        d4,request,directory=self.retained_d4(existing=True)
+        old_directory=d4.base/'task-state'
+        before={path:d4.retained_inventory(path) for path in (old_directory,directory)}
+        pointer=d4.repo/changes.PROJECT_FILE;original_enrollment=pointer.read_bytes()
+        rules=d4.repo/'AGENTS.md';original_rules=(rules.read_bytes(),rules.stat().st_mode&0o777)
+        binding=dict(transaction_id=request['manifest']['transaction_id'],manifest_digest=request['approval']['manifest_digest'],
+            manifest=request['manifest'],approval=request['approval'],plan=d4.plan())
+        result=changes.apply_plan(d4.directory,request)
+        self.assertEqual(result['exit_code'],2,result)
+        self.assertEqual(result['completed'],['write-rules'],result)
+        self.assertEqual(result['blocked'],[dict(id='transaction',
+            reason='Collect adoption qualification/reviews and bind observations to current inputs before final enrollment')],result)
+        self.assertEqual((rules.read_bytes(),rules.stat().st_mode&0o777),(b'product rules\nnew process\n',0o644))
+        self.assertFalse(pointer.exists())
+        self.assertEqual((d4.directory/d4.journal()['enrollment']['backup']).read_bytes(),original_enrollment)
+        self.assertEqual({key:d4.journal()[key] for key in binding},binding)
+        for path in before:self.assertEqual(before[path],d4.retained_inventory(path))
+        result=changes.resume_plan(d4.directory,d4.observe(request))
+        d4.assert_activation_incompatible(result)
+        self.assertEqual(result['blocked'],[dict(id='transaction',
+            reason='Enrollment runtime state/pins are incompatible; reconcile them before activation')],result)
+        seen=[];held=[];original=changes._guard_writers;original_writers=changes._writers
+        def inspect(*args,**kwargs):
+            result=original_writers(*args,**kwargs)
+            if kwargs.get('scope') is not None:
+                self.assertTrue(changes._held_authority_guards([old_directory,directory]))
+                held.append(kwargs['scope'].runtime.state_dir)
+            return result
+        def scan(*args,**kwargs):
+            original(*args,**kwargs)
+            for path in (old_directory,directory):
+                with self.assertRaisesRegex(changes.Pending,
+                        '^Shared state authority has an active or uncertain D4 operation; resume its bound journal$'):
+                    with changes._authority_guards([path]):self.fail('Retained rollback authority unexpectedly released')
+                seen.append(path)
+        with patch.object(changes,'_writers',side_effect=inspect),patch.object(changes,'_guard_writers',side_effect=scan):
+            result=changes.rollback_plan(d4.directory,d4.observe(request))
+            self.assertEqual(set(held),{old_directory,directory})
+            self.assertEqual(set(seen),{old_directory,directory})
+            self.assertEqual(result['exit_code'],2,result)
+            self.assertEqual(result['blocked'],[dict(id='enrollment',
+                reason='Prior enrollment stays inactive until client/runtime compatibility is qualified')],result)
+            self.assertEqual(d4.journal()['receipts']['write-rules']['status'],'rolled_back')
+            self.assertEqual((rules.read_bytes(),rules.stat().st_mode&0o777),original_rules)
+            self.assertFalse(pointer.exists())
+            self.assertEqual((d4.directory/d4.journal()['enrollment']['backup']).read_bytes(),original_enrollment)
+            self.assertEqual({key:d4.journal()[key] for key in binding},binding)
+            for path in before:self.assertEqual(before[path],d4.retained_inventory(path))
+            result=changes.rollback_plan(d4.directory,d4.observe(request))
+        self.assertEqual(set(held),{old_directory,directory})
+        self.assertEqual(set(seen),{old_directory,directory})
+        self.assertEqual(result['exit_code'],2,result)
+        self.assertEqual(result['blocked'],[dict(id='enrollment',
+            reason='Prior enrollment is stale or incompatible and remains inactive')],result)
+        self.assertFalse(pointer.exists())
+        self.assertEqual((rules.read_bytes(),rules.stat().st_mode&0o777),original_rules)
+        self.assertEqual((d4.directory/d4.journal()['enrollment']['backup']).read_bytes(),original_enrollment)
+        self.assertEqual({key:d4.journal()[key] for key in binding},binding)
+        for path in before:self.assertEqual(before[path],d4.retained_inventory(path))
 
-    def test_missing_d4_journal_does_not_release_uncertain_authority_owner(self):
-        from tests.test_changes import ChangesTests
+    def test_missing_retained_d4_journal_does_not_release_uncertain_owner(self):
         from runtime import changes
-        d4 = ChangesTests(methodName='runTest')
-        d4.setUp()
-        self.addCleanup(d4.doCleanups)
-        request = d4.command_request("from pathlib import Path; Path('result.txt').write_text('result')")
-        request['manifest']['enrollment']['record']['runtime'] = dict(schema_version=2, state_dir=str(self.scope.runtime.state_dir))
-        request = d4.observe(d4.bind(request['manifest']))
-        self.plan()
-        self.assertEqual(changes.apply_plan(d4.directory, request)['exit_code'], 2)
-        journal = d4.directory / 'transaction.json'
-        saved = journal.read_bytes()
-        journal.unlink()
-        with self.assertRaises(state.StateError):
-            self.prepare()
-        self.assertEqual(changes.resume_plan(d4.directory, request)['exit_code'], 1)
-        with self.assertRaises(state.StateError):
-            self.prepare()
-        journal.write_bytes(saved)
-        journal.chmod(0o600)
-        changes.resume_plan(d4.directory, d4.observe(request))
-        self.assertTrue(self.prepare()['launch_admitted'])
+        d4,request,directory=self.retained_d4(command=True)
+        before=d4.retained_inventory(directory)
+        self.assertEqual(changes.apply_plan(d4.directory,request)['exit_code'],2)
+        journal=d4.directory/'transaction.json';saved=journal.read_bytes();journal.unlink()
+        self.assert_retained_guard_blocked(directory)
+        self.assertEqual(changes.resume_plan(d4.directory,request)['exit_code'],1)
+        self.assert_retained_guard_blocked(directory)
+        journal.write_bytes(saved);journal.chmod(0o600)
+        d4.assert_activation_incompatible(changes.resume_plan(d4.directory,d4.observe(request)))
+        with changes._authority_guards([directory]):pass
+        self.assertEqual(before,d4.retained_inventory(directory))
 
     def assert_git_routing_change_is_rejected_at_commit(self, change):
         from runtime import evidence
-        linked = self.root / 'routing-linked'
-        self.fixture.git('worktree', 'add', '-q', '--detach', str(linked), 'HEAD')
+        linked = self.repo
         private = Path(subprocess.check_output(['git', '-C', str(linked), 'rev-parse',
             '--path-format=absolute', '--git-dir'], text=True).strip())
-        spare = self.root / 'spare-private'
+        spare = self.repo / 'spare-private'
         shutil.copytree(private, spare)
         (spare / 'commondir').write_text(str(self.scope.git_common_dir) + '\n')
-        scope = replace(self.scope, project_id='routing-linked', repository_root=linked)
+        scope = self.scope
         target = spare / 'HEAD'
         alias = self.root / 'routing-alias'
         if change == 'private-alias':
@@ -1609,11 +1656,13 @@ class AdmissionTests(unittest.TestCase):
         elif change == 'common-alias':
             alias.symlink_to(self.scope.git_common_dir, target_is_directory=True)
             (private / 'commondir').write_text(str(alias) + '\n')
-            spare_common = self.root / 'spare-common'
+            spare_common = self.repo / 'spare-common'
             shutil.copytree(self.scope.git_common_dir, spare_common)
             target = spare_common / 'config'
         request = self.second_owner(1, [dict(kind='path', key=str(target), mode='write')], scope=scope)
+        mutated = []
         def mutate():
+            mutated.append(change)
             if change == 'marker':
                 (linked / '.git').write_text('gitdir: ' + str(spare) + '\n')
             elif change == 'private-alias':
@@ -1627,12 +1676,12 @@ class AdmissionTests(unittest.TestCase):
         if change == 'common-alias':
             original = evidence._artifact
             changed = False
-            def publish(owner, value):
+            def publish(artifact_scope, value, **kwargs):
                 nonlocal changed
-                if owner == scope and not changed:
+                if artifact_scope == scope and not changed:
                     changed = True
                     mutate()
-                return original(owner, value)
+                return original(artifact_scope, value, **kwargs)
             interception = patch.object(evidence, '_artifact', side_effect=publish)
         else:
             original = self.discover.side_effect
@@ -1643,6 +1692,7 @@ class AdmissionTests(unittest.TestCase):
         with interception:
             with self.assertRaises(state.StateError):
                 self.api.prepare_assignment(scope, request)
+        self.assertTrue(mutated, 'The intended late Git routing mutation was not reached')
         with state._database(scope) as db:
             self.assertEqual(db.execute('select count(*) from assignments').fetchone()[0], 0)
             task = state._task(db, state._scope_id(scope), request['client'], request['session_id'], request['task_id'])
@@ -1742,9 +1792,9 @@ class AdmissionTests(unittest.TestCase):
         from runtime import evidence
         value = self.plan_value()
         original_artifact = evidence._artifact
-        def publish(scope, content):
+        def publish(scope, content, **kwargs):
             value['limits']['max_attempts'] = 9
-            return original_artifact(scope, content)
+            return original_artifact(scope, content, **kwargs)
         with patch.object(evidence, '_artifact', side_effect=publish):
             planned = self.plan(value)
         self.assertEqual(evidence._read(self.scope, planned['plan'])['limits']['max_attempts'], 8)
@@ -1842,9 +1892,8 @@ class AdmissionTests(unittest.TestCase):
     def test_unknown_old_check_resources_in_another_checkout_block_dispatch(self):
         from runtime import evidence
         self.plan()
-        linked = self.root / 'check-linked'
-        self.fixture.git('worktree', 'add', '-q', '--detach', str(linked), 'HEAD')
-        other_scope = replace(self.scope, project_id='other-checkout', repository_root=linked)
+        other_scope = self.peer_scope
+        linked = other_scope.repository_root
         other = self.second_owner(1, [dict(kind='path', key=str(linked / 'app.py'), mode='read')], scope=other_scope)
         identity = {key: other[key] for key in ('client', 'session_id', 'task_id', 'scope_ref', 'expected_revision')}
         self.legacy_unlinked_review_fixture(other_scope, identity)
@@ -2032,7 +2081,7 @@ class Stage3ModelFreeTests(unittest.TestCase):
             claims_digest=evidence._digest(row['data']['claims']))
         observation = ('Fixture synchronous write returned; no descendants; output SHA-256 ' +
             hashlib.sha256(output.read_bytes()).hexdigest()) if write_output else 'Fixture verifier/Git operation and descendants independently inspected stopped'
-        observed = evidence._artifact(self.scope, bindings | dict(observation=observation))
+        observed = fixture_artifact(self.scope,self.identity, bindings | dict(observation=observation))
         proof = dict(version=2, kind='coordinator-operation-reconciliation', identity=self.identity.copy(),
             expected_pins=task['pins'], expected_revision=task['revision'], scope_id=state._scope_id(self.scope),
             attempt_id=attempt_id, dispatch_id=row['owner']['dispatch_id'], assignment_digest=row['data']['assignment']['digest'],
@@ -2283,7 +2332,7 @@ class Stage3ModelFreeTests(unittest.TestCase):
         proof = self.coordinator_proof(first['attempt_id'])
         wrong_resources = evidence._read(self.scope, proof['resource_observations']) | dict(claims_digest='f' * 64)
         changes_to_proof = [dict(operation_id='another-operation'), dict(claims_digest='f' * 64),
-            dict(resource_observations=evidence._artifact(self.scope, wrong_resources))]
+            dict(resource_observations=fixture_artifact(self.scope,self.identity, wrong_resources))]
         original, original_row = self.task(), self.record(first['attempt_id'])
         for delta in changes_to_proof:
             with self.subTest(delta=delta):
@@ -2393,7 +2442,7 @@ class Stage4NativeReviewTests(unittest.TestCase):
         self.assertEqual(prepared['revision'], request['expected_revision'] + 1)
         binding = self.api.prepared_native_review_assignment(self.scope, prepared['attempt_id'])
         self.assertEqual(set(binding), {'attempt_id','parent_session_id','task_name','assignment_digest','candidate_digest',
-            'requested_model','requested_effort','client_surface','native_version'})
+            'requested_model','requested_effort','client_surface','native_version','pins','accepted_identity','scope_id'})
         self.assertEqual(binding['task_name'], 'review_' + prepared['attempt_id'])
         self.assertEqual(prepared['assignment_digest'], hashlib.sha256(request['assignment'].encode()).hexdigest())
         self.assertEqual(binding['assignment_digest'], prepared['ledger_assignment_digest'])
@@ -2658,10 +2707,13 @@ class Stage4NativeReviewTests(unittest.TestCase):
         self.plan(self.review_plan())
         request = self.review_request()
         committed = []
-        def lose_response(scope, db, original_request, record, admitted=False):
-            self.assertTrue(admitted)
+        prepare_native = delegation._prepare_native
+        def lose_response(scope, original_request, *, role):
+            response = prepare_native(scope, original_request, role=role)
+            self.assertTrue(response['launch_admitted'])
             with state._database(scope) as visible:
                 records = self.api._ledger(scope, visible)
+                record = next(r for r in records if r['id'] == response['attempt']['id'])
                 self.assertEqual([r['id'] for r in records], [record['id']])
                 task = state._task(visible, state._scope_id(scope), 'codex', 'parent')
             self.assertEqual(task['revision'], request['expected_revision'] + 1)
@@ -2676,7 +2728,7 @@ class Stage4NativeReviewTests(unittest.TestCase):
             with state._database(scope) as visible:
                 committed.append(deepcopy(state._task(visible, state._scope_id(scope), 'codex', 'parent')))
             raise RuntimeError('fixture committed review response lost')
-        with patch.object(evidence, '_review_response', side_effect=lose_response):
+        with patch.object(delegation, '_prepare_native', side_effect=lose_response):
             with self.assertRaisesRegex(RuntimeError, 'fixture committed review response lost'):
                 evidence.prepare_review(self.scope, request)
         with patch('runtime.adapters.codex.discover_native_workers', side_effect=AssertionError('replay discovered')), \

@@ -26,7 +26,13 @@ def _binding(scope):
 
 
 def _load(scope):
-    return _load_bound(_path(scope), _binding(scope) if _path(scope).parent.exists() and state._path(scope).exists() else None)
+    value = _load_bound(_path(scope), _binding(scope) if _path(scope).parent.exists() and state._path(scope).exists() else None)
+    from runtime.startup import AcceptedScope
+    if value['revision'] == 0 and isinstance(scope, AcceptedScope):
+        with state._database(scope) as db:
+            if db is not None and state._checkout_row(db, scope) is not None:
+                value['enabled'] = True
+    return value
 
 
 def _load_bound(path, binding):

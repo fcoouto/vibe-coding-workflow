@@ -1,4 +1,5 @@
 """Deterministic recovery policy; no provider outage or native send is simulated as real."""
+from tests.fixture_canonical_birth import test_acquisition
 import importlib
 import json
 import tempfile
@@ -258,13 +259,14 @@ class ParentRecoveryTests(unittest.TestCase):
         self.addCleanup(fixture.doCleanups)
         plan = fixture.plan_value()
         fixture.plan(plan)
-        # This case starts with a legacy, never-enabled checkout.
-        workstreams._path(fixture.scope).unlink(missing_ok=True)
-        request = fixture.request(recovery_revision=1)
+        current=workstreams._feature(fixture.scope,'capacity_recovery')
+        disabled=workstreams.control(fixture.scope,'disable',dict(client='codex',feature='capacity_recovery',expected_revision=current['revision']))
+        request = fixture.request(recovery_revision=disabled['revision'])
         with self.assertRaises(Exception):
             self.api.register(fixture.scope, self.directory, request)
         self.assertFalse(self.directory.exists())
-        workstreams.control(fixture.scope, 'enable', dict(client='codex', feature='capacity_recovery', expected_revision=0))
+        enabled=workstreams.control(fixture.scope,'enable',dict(client='codex',feature='capacity_recovery',expected_revision=disabled['revision']))
+        request=fixture.request(recovery_revision=enabled['revision'])
         result = self.api.register(fixture.scope, self.directory, request)
         saved = result['parents'][fixture.identity['session_id']]['parent']
         self.assertEqual(saved['deadline'], plan['limits']['deadline'])
@@ -284,7 +286,7 @@ class ParentRecoveryTests(unittest.TestCase):
         self.api.register(fixture.scope, self.directory, request)
         thread=fixture.identity['session_id']; now=int(time.time())
         observation=dict(thread_status='idle',turn_status='failed',turn_id='failed',error_code='serverOverloaded',will_retry=False)
-        with patch('runtime.startup.resolve_project',return_value=fixture.scope):
+        with patch('runtime.startup.acquire_project_entry',side_effect=lambda *args,**kwargs:test_acquisition(fixture.scope)):
             self.api.observe(self.directory,dict(thread_id=thread,observation=observation),state.PACKAGE)
             workstreams.control(fixture.scope,'disable',dict(client='codex',feature='capacity_recovery',expected_revision=1))
             workstreams.control(fixture.scope,'enable',dict(client='codex',feature='capacity_recovery',expected_revision=2))
@@ -295,7 +297,7 @@ class ParentRecoveryTests(unittest.TestCase):
         old=state.task_status(fixture.scope,'codex',thread)['task']
         state.start_task(fixture.scope,fixture.identity | dict(task_id='replacement',mode='editable',decision_ref='user:new',
             replaces=dict(task_id=old['task_id'],expected_revision=old['revision'])))
-        with patch('runtime.startup.resolve_project',return_value=fixture.scope), patch('runtime.parent_recovery.time.time',return_value=now+120):
+        with patch('runtime.startup.acquire_project_entry',side_effect=lambda *args,**kwargs:test_acquisition(fixture.scope)), patch('runtime.parent_recovery.time.time',return_value=now+120):
             self.assertFalse(self.api.observe(self.directory,dict(thread_id=thread,observation=observation),state.PACKAGE)['send'])
         with self.assertRaises(Exception):
             self.api.register(fixture.scope,self.directory,fixture.identity | dict(expected_revision=old['revision']+1,recovery_revision=3))
@@ -352,7 +354,7 @@ class IndependentRecoveryTests(unittest.TestCase):
         self.register()
         self.feature('resource_admission', False)
         parent = self.call('status')['parents'][self.thread]['parent']
-        with patch('runtime.startup.resolve_project', return_value=self.fixture.scope):
+        with patch('runtime.startup.acquire_project_entry',side_effect=lambda *args,**kwargs:test_acquisition(self.fixture.scope)):
             self.assertEqual(self.api._authority(parent, state.PACKAGE)[0], 'eligible')
             self.feature('capacity_recovery', False)
             self.feature('capacity_recovery', True)
@@ -387,7 +389,7 @@ class IndependentRecoveryTests(unittest.TestCase):
         self.register()
         observation = dict(thread_status='idle', turn_status='failed', turn_id='failed',
             error_code='serverOverloaded', will_retry=None)
-        with patch('runtime.startup.resolve_project', return_value=self.fixture.scope):
+        with patch('runtime.startup.acquire_project_entry',side_effect=lambda *args,**kwargs:test_acquisition(self.fixture.scope)):
             with patch('runtime.parent_recovery.time.time', return_value=now):
                 self.api.observe(self.directory, dict(thread_id=self.thread, observation=observation), state.PACKAGE)
             with patch('runtime.parent_recovery.time.time', return_value=now + 60):
@@ -438,7 +440,7 @@ class IndependentRecoveryTests(unittest.TestCase):
         with patch('sys.argv', ['workstreams_recovery.py', 'reconcile-feature', '--cwd', str(self.fixture.scope.repository_root)]), \
              patch('sys.stdin', SimpleNamespace(buffer=io.BytesIO(b'{}'))), \
              patch.dict(os.environ, {'CODEX_HOME': str(self.directory.parent)}), \
-             patch('runtime.startup.resolve_project', return_value=self.fixture.scope), redirect_stdout(output):
+             patch('runtime.startup.acquire_project_entry',side_effect=lambda *args,**kwargs:test_acquisition(self.fixture.scope)), redirect_stdout(output):
             self.assertEqual(workstreams_recovery.main(), 0)
         self.assertEqual(json.loads(output.getvalue())['wanted'], 'absent')
         self.assertFalse(self.call('status')['parents'][self.thread]['eligible'])
@@ -450,16 +452,16 @@ class IndependentRecoveryTests(unittest.TestCase):
         self.directory = self.directory.parent / 'historical'
         self.call('register', parent=parent)
         self.assertFalse(self.api.preflight_feature(self.fixture.scope, self.directory)['ready'])
-        with patch('runtime.startup.resolve_project', return_value=self.fixture.scope):
+        with patch('runtime.startup.acquire_project_entry',side_effect=lambda *args,**kwargs:test_acquisition(self.fixture.scope)):
             self.assertEqual(self.api._authority(parent, state.PACKAGE)[0], 'eligible')
         self.feature('resource_admission', False)
-        with patch('runtime.startup.resolve_project', return_value=self.fixture.scope):
+        with patch('runtime.startup.acquire_project_entry',side_effect=lambda *args,**kwargs:test_acquisition(self.fixture.scope)):
             self.assertEqual(self.api._authority(parent, state.PACKAGE)[0], 'eligible')
         self.feature('capacity_recovery', False)
         report = self.reconcile()
         self.assertEqual(report['historical_registrations'], [self.thread])
         self.assertFalse(report['parents'][self.thread]['eligible'])
-        with patch('runtime.startup.resolve_project', return_value=self.fixture.scope):
+        with patch('runtime.startup.acquire_project_entry',side_effect=lambda *args,**kwargs:test_acquisition(self.fixture.scope)):
             self.assertEqual(self.api._authority(parent, state.PACKAGE)[0], 'stopped')
             self.feature('capacity_recovery', True)
             self.assertEqual(self.api._authority(parent, state.PACKAGE)[0], 'stopped')
@@ -481,7 +483,7 @@ class IndependentRecoveryTests(unittest.TestCase):
             with patch('runtime.parent_recovery.time.time', return_value=at):
                 return self.api.observe(self.directory, dict(thread_id=self.thread,
                     observation=observation | changes), state.PACKAGE)
-        with patch('runtime.startup.resolve_project', return_value=self.fixture.scope):
+        with patch('runtime.startup.acquire_project_entry',side_effect=lambda *args,**kwargs:test_acquisition(self.fixture.scope)):
             observe(now)
             ready = observe(now + 60)
             self.call('record-send', thread_id=self.thread, token=ready['token'], result='sent')
