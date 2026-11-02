@@ -206,10 +206,12 @@ class ExistingStoreAdmissionTests(unittest.TestCase):
             self.assertNotEqual(record['data']['status'],'settled')
 
     def test_same_journal_resume_and_rollback_preserve_original_history(self):
-        self.owner.assert_applied_configured(self.prepared,self.invoke())
+        result = self.invoke()
+        self.assertEqual((result['state'], result['exit_code'], result['qualified']), ('applied', 0, False), result)
         journal=(self.fixture.directory/'transaction.json')
         identity=changes._load_journal(self.fixture.directory)['transaction_id']
-        self.owner.assert_applied_configured(self.prepared,self.invoke(operation='resume'))
+        result = self.invoke(operation='resume')
+        self.assertEqual((result['state'], result['exit_code'], result['qualified']), ('applied', 0, False), result)
         self.assertEqual(changes._load_journal(self.fixture.directory)['transaction_id'],identity)
         self.assert_original_history()
         result=self.invoke(operation='rollback')

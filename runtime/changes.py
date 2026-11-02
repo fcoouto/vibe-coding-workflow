@@ -4,7 +4,7 @@ A manifest declares an approved effect contract. It is not a command sandbox or
 an authentication mechanism. Receipts prove local file observations only.
 """
 
-from contextlib import ExitStack, closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, replace
 import fcntl
@@ -498,7 +498,7 @@ def _atomic(directory, name, raw, mode=0o600, target=False, guard=None, temporar
         os.close(fd)
 
 
-def _journal(path):
+def _journal(path, *, file_only=False):
     try:
         raw = d3._read_file(path / "transaction.json", MAX_JOURNAL, private=True)
     except FileNotFoundError:
@@ -506,7 +506,7 @@ def _journal(path):
     result = d3.read_request(raw, limit=MAX_JOURNAL)
     d3._object(result, ("schema_version", "transaction_id", "manifest_digest", "manifest", "approval", "plan", "state", "receipts", "enrollment", "blocked", "directories", "observations"), ("birth",) if result.get("schema_version") == 2 else ())
     if result.get("schema_version") == 2:
-        return _scoped_journal_shape(result)
+        return _scoped_journal_shape(result, file_only=file_only)
     d3._require(result["schema_version"] == 1 and result["state"] in
                 ("prepared", "applying", "interrupted", "applied", "blocked", "rollback_partial", "rolled_back"), "Invalid D4 journal")
     return result
@@ -519,7 +519,7 @@ def _save(path, journal):
         _atomic(path, "transaction.json", json.dumps(journal, sort_keys=True, ensure_ascii=True).encode() + b"\n")
 
 
-def _load_journal(path):
+def _load_journal(path, *, file_only=False):
     lock = path / ".d4-journal.lock"
     if not lock.exists():
         try:
@@ -528,7 +528,7 @@ def _load_journal(path):
         except FileExistsError:
             pass
     with _lock(lock):
-        return _journal(path)
+        return _journal(path, file_only=file_only)
 
 
 def _fingerprint(root, relative):
@@ -1443,7 +1443,7 @@ def _run(plan_dir, request, operation):
 
 
 def apply_plan(plan_dir, request, *, host=None):
-    """Prepare/apply currently approved effects; enrollment activation is mandatory and last."""
+    """Apply approved effects, then publish configured or qualified active enrollment."""
     return _public_operation(plan_dir, request, "apply", host)
 
 
@@ -1453,7 +1453,7 @@ def resume_plan(plan_dir, request, *, host=None):
 
 
 def rollback_plan(plan_dir, request, *, host=None):
-    """Deactivate owned enrollment, restore effects backwards, then restore compatible prior enrollment."""
+    """Restore owned effects backwards; active enrollment also requires scoped reconciliation."""
     return _public_operation(plan_dir, request, "rollback", host)
 
 
@@ -1512,14 +1512,17 @@ def _public_operation(plan_dir, request, operation, host):
             return _run(plan_dir, request, operation)
         _public_host(host)
         request = deepcopy(request)
-        _public_entry(host, path, plan, request, operation)
         d3._require(request.get('schema_version') == 2, 'Request schema differs from canonical plan')
-        _validate_scoped(request, plan)
         def authorize(selected_path, selected_plan, selected_request, selected_operation, *, authorities=None):
             _public_entry(host, selected_path, selected_plan, selected_request, selected_operation, authorities=authorities)
         result = _run_scoped(path, request, operation, host=host, entry_authorizer=authorize)
-        if operation != 'rollback' and result['exit_code'] == 0 and not result.get('qualified'):
-            result = dict(result, exit_code=2, next_step='Collect current mandatory qualification and resume the same approved transaction')
+        if (operation != 'rollback' and result['exit_code'] == 0 and not result.get('qualified')
+                and (not _file_configuration(request['manifest'], plan) or getattr(host.owner, '_creation', None) is not None)):
+            configured = all(entry['activation']['status'] == 'configured'
+                for _, _, entry in _scoped_entries(request['manifest']['enrollment']['record']).values())
+            result = dict(result, exit_code=2, next_step=(
+                'Configuration is complete; use a separately authorized operation to activate managed runtime'
+                if configured else 'Collect current mandatory qualification and resume the same approved transaction'))
             result['blocked'] = [*result['blocked'], dict(id='qualification', reason='Configuration is applied; mandatory qualification remains unobserved')]
         return result
     except (StartupError, OSError, ValueError, TypeError, KeyError, sqlite3.Error) as error:
@@ -1979,7 +1982,21 @@ def _scoped_prior(plan):
     return authority, authority["record"]
 
 
-def _validate_scoped(request, plan):
+def _file_configuration(manifest, plan):
+    """File-only configured records do not create or operate a managed runtime."""
+    _, prior = _scoped_prior(plan)
+    records = [record for record in (prior, manifest['enrollment']['record']) if record]
+    if any(record.get('schema_version') != 2 or record['shared_policy'] or
+           any(entry['activation']['status'] != 'configured' for _, _, entry in _scoped_entries(record).values())
+           for record in records):
+        return False
+    originals, _, _ = _scoped_originals(plan)
+    return all(originals[action['id']]['kind'] in ('write', 'delete')
+               and action['recovery'] == 'file-preimages' and action['execution'] is None
+               for action in manifest['actions'])
+
+
+def _validate_scoped(request, plan, *, operation=None):
     d3._bounded(request)
     d3._project_plan_shape(plan)
     d3._require(plan["schema_version"] == 2 and plan["review_digest"] == d3._review_digest(plan), "Frozen scoped proposal changed")
@@ -1990,8 +2007,10 @@ def _validate_scoped(request, plan):
                 "Unsupported scoped transaction schema")
     d3._require(isinstance(m["transaction_id"], str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", m["transaction_id"]), "Invalid transaction ID")
     d3._require(m["plan"] == {k: plan[k] for k in ("plan_id", "revision", "review_digest", "current_input_digest")}
-        and m["pins"] == dict(package_pins=plan["package_pins"], toolkit_commit=plan["sources"]["declared"]["toolkit"]["commit"], sources_digest=d3._digest(plan["sources"]))
-        and plan["package_pins"] == d3._package_pins(), "Scoped plan/package/source pins changed")
+        and m["pins"] == dict(package_pins=plan["package_pins"], toolkit_commit=plan["sources"]["declared"]["toolkit"]["commit"], sources_digest=d3._digest(plan["sources"])),
+        "Scoped plan/source provenance changed")
+    d3._require(operation in ('apply', 'resume', 'rollback') and _file_configuration(m, plan)
+        or plan['package_pins'] == d3._package_pins(), 'Scoped executing package changed')
     d3._require(isinstance(m["actions"],list) and all(isinstance(a,dict) and isinstance(a.get("effects"),list) and isinstance(a.get("preconditions"),list) for a in m["actions"])
                 and sum(len(a["effects"])+len(a["preconditions"]) for a in m["actions"]) <= d3.MAX_PATHS, "Scoped effect/precondition limit exceeded")
     expected_owners = [{k: a[k] for k in ("owner", "identity")} for a in d3._assessments(plan["assessments"])]
@@ -2152,7 +2171,7 @@ def _scoped_task_relevant(checkout_row,roots,task=None,changed_paths=()):
     return physical or any(Path(dependency['path']) in changed_paths for dependency in historical)
 
 
-def _scoped_writers(locations, affected_roots, git_roots=(), *, changed_paths=()):
+def _scoped_writers(locations, affected_roots, git_roots=(), *, changed_paths=(), live_only=False):
     from runtime import delegation, evidence
     claims = [dict(kind="path", key=str(root), mode="write") for root in affected_roots] + [dict(kind="git", key=str(root), mode="write") for root in git_roots]
     # D4's validated finite Project scope has its own bound, separate from assignment claim budgets.
@@ -2173,10 +2192,17 @@ def _scoped_writers(locations, affected_roots, git_roots=(), *, changed_paths=()
             task_state._schema(db, version=version)
             context = selected or (evidence._existing_authority_context(task_state._authority_identity(path), db=db) if version == 3 else None)
             if context: evidence._check_context(context,db)
-            records = delegation._ledger(locator, db, context=context)
+            if live_only:
+                rows = db.execute("select id,scope_id,client,session_id,task_id,dispatch_id,data from assignments "
+                    "where json_extract(data,'$.status') is not 'settled' limit 4097").fetchall()
+                d3._require(len(rows) <= 4096, 'Live assignment inspection bound exceeded')
+                records = [delegation._record(locator, row, db=db, context=context) for row in rows]
+            else:
+                records = delegation._ledger(locator, db, context=context)
             if any(r["data"]["status"] != "settled" and delegation._held_conflict(claims, r["data"]["claims"]) for r in records):
                 raise Pending("Affected foreign or uncertain assignment remains unreconciled")
-            rows = db.execute("select scope_id,client,session_id,task_id from tasks limit 4097").fetchall()
+            condition = " where json_extract(data,'$.lifecycle.safe_closed_at') is null" if live_only else ""
+            rows = db.execute("select scope_id,client,session_id,task_id from tasks" + condition + " limit 4097").fetchall()
             d3._require(len(rows) <= 4096, "Writer history exceeds safe inspection bound")
             for scope_id, client, session, task_id in rows:
                 task = task_state._task(db, scope_id, client, session, task_id)
@@ -5146,12 +5172,12 @@ def inspect_lifecycle_recovery(authorities,task_refs):
             authorities=[],discovered_authorities=[]))
 
 
-def _scoped_journal_shape(journal):
+def _scoped_journal_shape(journal, *, file_only=False):
     d3._object(journal, ("schema_version", "transaction_id", "manifest_digest", "manifest", "approval", "plan", "state", "receipts", "enrollment", "blocked", "directories", "observations"), ("birth",))
     d3._require(type(journal["schema_version"]) is int and journal["schema_version"] == 2 and journal["manifest_digest"] == d3._digest(journal["manifest"])
                 and journal["state"] in ("prepared", "applying", "interrupted", "applied", "blocked", "rollback_partial", "rolled_back"), "Invalid scoped journal")
     d3._require(isinstance(journal["receipts"], dict) and isinstance(journal["directories"], dict) and isinstance(journal["observations"], list), "Invalid scoped recovery containers")
-    if 'birth' in journal:
+    if 'birth' in journal and not file_only:
         birth = journal['birth']
         d3._object(birth, ('version','intent','intent_digest','phase','directories','allocation','committed','certificate'))
         _birth_intent_shape(birth['intent'])
@@ -5167,7 +5193,8 @@ def _scoped_journal_shape(journal):
                 and birth['committed']==dict(baseline=birth['certificate']['baseline'],seed_digest=birth['certificate']['seed_digest']), 'Birth completion receipt changed')
     actions = {a["id"]: a for a in journal["manifest"]["actions"]}
     d3._require(set(journal["receipts"]) <= set(actions), "Unknown scoped receipt")
-    for observation in journal["observations"]: _scoped_observation_shape(observation,journal["manifest"])
+    if not file_only:
+        for observation in journal["observations"]: _scoped_observation_shape(observation,journal["manifest"])
     for identity, receipt in journal["receipts"].items():
         d3._object(receipt, ("owner", "status", "files", "returncode"), ("command",))
         d3._require(receipt["owner"] == actions[identity]["owner"] and receipt["status"] in ("prepared", "started", "completed", "rolled_back"), "Invalid scoped receipt owner/status")
@@ -5640,8 +5667,11 @@ def _run_scoped(plan_dir, request, operation, *, host=None, entry_authorizer=Non
             if entry_authorizer is not None:
                 entry_authorizer(path, plan, request, operation)
         d3._require(plan is not None, "Scoped D3 proposal is required")
-        originals, dependencies, affected, suspend = _validate_scoped(request, plan)
         m = request["manifest"]; root = Path(m["enrollment"]["record"]["project_root"])
+        file_only = _file_configuration(m, plan) and (operation == 'rollback'
+            or getattr(getattr(host, 'owner', None), '_creation', None) is None)
+        originals, dependencies, affected, suspend = _validate_scoped(request, plan,
+            operation=operation if file_only else None)
         authority, prior = _scoped_prior(plan)
         locations = _scoped_runtime_locations([prior, m["enrollment"]["record"]], affected)
         affected_roots,affected_git=_scoped_writer_roots(m)
@@ -5669,7 +5699,7 @@ def _run_scoped(plan_dir, request, operation, *, host=None, entry_authorizer=Non
             owner = dict(schema_version=1, plan_dir=str(path), transaction_id=m["transaction_id"], manifest_digest=d3._digest(m))
             if entry_authorizer is None:
                 locks.enter_context(_scoped_failure_guard(path,ownership,operation))
-            journal = _load_journal(path)
+            journal = _load_journal(path, file_only=file_only)
             if journal is not None:
                 d3._require(journal["schema_version"] == 2 and journal["manifest"] == m and journal["approval"] == request["approval"] and journal["plan"] == plan, "Scoped journal binding changed")
                 if entry_authorizer is None:
@@ -5679,23 +5709,40 @@ def _run_scoped(plan_dir, request, operation, *, host=None, entry_authorizer=Non
                 if prior:
                     raw = d3._read_file(root / PROJECT_FILE, 128 * 1024)
                     d3._require(hashlib.sha256(raw).hexdigest() == m["enrollment"]["before"]["raw_sha256"] and d3.read_request(raw) == prior, "Canonical approved bytes changed")
-            if entry_authorizer is not None and getattr(host.owner, '_creation', None) is not None:
+            if not file_only and entry_authorizer is not None and getattr(host.owner, '_creation', None) is not None:
                 journal = _prepare_birth(path, plan, request, host, owner, journal)
             source_guards = _public_source_guards if entry_authorizer is not None else _scoped_source_guards
+            retained_contexts = ()
+            if file_only:
+                # File recovery retains runtime history; hold exclusion through every mutation.
+                retained_guards = locks.enter_context(_authority_guards(locations, owner))
+                allocation = journal.get('birth', {}).get('allocation') if journal else None
+                allocated = allocation['authority'] if allocation else None
+                if allocated:
+                    d3._require(Path(allocated['directory']) in locations
+                        and task_state._authority_identity(Path(allocated['database'])) == allocated,
+                        'Previously allocated runtime is missing or replaced')
+                retained_contexts = tuple(_recovery_context(allocated if allocated and directory == Path(allocated['directory'])
+                    else task_state._authority_identity(directory / 'runtime.sqlite3'))
+                    for directory, (_, version) in locations.items() if version == 3
+                    and os.path.lexists(directory / 'runtime.sqlite3'))
+                source_guards = lambda *_: nullcontext((retained_guards, ()))
             with source_guards(locations, owner, m) as (authority_locations,source_contexts):
                 if entry_authorizer is not None:
-                    authorities = _public_existing_authorities(locations, source_contexts, plan, m, journal=journal)
-                    entry_authorizer(path, plan, request, operation, authorities=authorities)
+                    if not file_only:
+                        authorities = _public_existing_authorities(locations, source_contexts, plan, m, journal=journal)
+                        entry_authorizer(path, plan, request, operation, authorities=authorities)
                     locks.enter_context(_scoped_failure_guard(path, ownership, operation))
                     ownership['journal'] = journal
-                writer_locations=_scoped_writer_locations(locations,source_contexts)
-                _scoped_writers(writer_locations, affected_roots, affected_git, changed_paths=changed_paths)
+                writer_locations=_scoped_writer_locations(locations,retained_contexts if file_only else source_contexts)
+                _scoped_writers(writer_locations, affected_roots, affected_git, changed_paths=changed_paths, live_only=file_only)
                 for git_dir in git_dirs:
                     marker = _command_owner(git_dir)
                     d3._require(marker is None or marker["plan_dir"] == str(path) and marker["transaction_id"] == m["transaction_id"], "Unresolved command owns an affected checkout")
                 if journal is None:
-                    current, blockers = d3._project_current(plan)
-                    d3._require(not d3._project_changes(plan, current), "Scoped D3 inputs changed before journal")
+                    if not file_only:
+                        current, blockers = d3._project_current(plan)
+                        d3._require(not d3._project_changes(plan, current), "Scoped D3 inputs changed before journal")
                     for action in m["actions"]:
                         for effect in action["effects"]:
                             d3._require(_fingerprint(Path(action["owner"]["root"]),effect["path"]) == effect["before"], "Scoped approved effect preimage changed")
@@ -5710,14 +5757,14 @@ def _run_scoped(plan_dir, request, operation, *, host=None, entry_authorizer=Non
                     ownership["journal"]=journal
                 with _d4_publication_batch(path,journal,source_contexts,request,host,owner,[canonical_location,*authority_locations]):
                     _scoped_register_sources(path,journal,source_contexts)
-                if journal.get('birth'):
+                if not file_only and journal.get('birth'):
                     journal['birth']['phase']='registered'; _save(path,journal)
             def settle_sources():
                 d3._require(not any(r.get("command") and not r["command"]["stopped"] for r in journal["receipts"].values()),
                     "Scoped command descendants remain uncertain; preserve recovery markers")
-                with _scoped_source_guards(locations, owner, m) as (final_locations,source_contexts):
-                    writer_locations=_scoped_writer_locations(locations,source_contexts)
-                    _scoped_writers(writer_locations,affected_roots,affected_git,changed_paths=changed_paths)
+                with source_guards(locations, owner, m) as (final_locations,source_contexts):
+                    writer_locations=_scoped_writer_locations(locations,retained_contexts if file_only else source_contexts)
+                    _scoped_writers(writer_locations,affected_roots,affected_git,changed_paths=changed_paths, live_only=file_only)
                     with _d4_publication_batch(path,journal,source_contexts,request,host,owner,[canonical_location,*final_locations]):
                         _scoped_register_sources(path,journal,source_contexts)
                         for location in [canonical_location,*final_locations]:
@@ -5748,7 +5795,7 @@ def _run_scoped(plan_dir, request, operation, *, host=None, entry_authorizer=Non
             current_record = d3.read_request(d3._read_file(root / PROJECT_FILE, 128 * 1024)) if (root / PROJECT_FILE).exists() else None
             current_locations = _scoped_runtime_locations([current_record], affected)
             d3._require(set(current_locations) <= set(locations), "New authority needs separately reconciled state guards")
-            _scoped_writers(writer_locations, affected_roots, affected_git, changed_paths=changed_paths)
+            _scoped_writers(writer_locations, affected_roots, affected_git, changed_paths=changed_paths, live_only=file_only)
             if operation == "rollback":
                 _scoped_restore(path, journal, current_record, authority_owned, observation)
                 journal["state"] = "rollback_partial" if journal["blocked"] else "rolled_back"
@@ -5756,7 +5803,10 @@ def _run_scoped(plan_dir, request, operation, *, host=None, entry_authorizer=Non
             else:
                 d3._require(journal["state"] not in ("rolled_back", "rollback_partial"), "Rolled back transaction cannot resume application")
                 if not authority_owned: raise Pending("Canonical authority changed outside owned postimages")
-                _scoped_fresh(plan, journal)
+                if file_only:
+                    _check_operation_files(path, journal)
+                else:
+                    _scoped_fresh(plan, journal)
                 if journal["enrollment"] is None:
                     before = _fingerprint(root, str(PROJECT_FILE))
                     backup = _backup(path, root, str(PROJECT_FILE), before, "enrollment.backup")
@@ -5772,8 +5822,8 @@ def _run_scoped(plan_dir, request, operation, *, host=None, entry_authorizer=Non
                         journal["blocked"].append(dict(id=action["id"], reason="Scoped action approval/dependency missing")); continue
                     try:
                         if originals[action["id"]]["target"] != str(PROJECT_FILE):
-                            _scoped_writers(writer_locations, affected_roots, affected_git, changed_paths=changed_paths)
-                            if journal.get('birth'):_birth_current_history(m['enrollment']['record'],journal['birth']['intent']['history'])
+                            _scoped_writers(writer_locations, affected_roots, affected_git, changed_paths=changed_paths, live_only=file_only)
+                            if not file_only and journal.get('birth'):_birth_current_history(m['enrollment']['record'],journal['birth']['intent']['history'])
                             _scoped_apply_action(path, journal, action, originals[action["id"]], observation, descriptors.get(action["owner"].get("git_dir")))
                         completed.add(action["id"])
                     except Pending as error:
@@ -5782,7 +5832,7 @@ def _run_scoped(plan_dir, request, operation, *, host=None, entry_authorizer=Non
                     raise Pending("Required scoped adoption effects are incomplete")
                 activates = any(e[2]["activation"]["status"] == "active" for key, e in _scoped_entries(m["enrollment"]["record"]).items() if key in affected)
                 if activates: _scoped_qualification(journal,observation,m["enrollment"]["record"])
-                _scoped_writers(writer_locations, affected_roots, affected_git, changed_paths=changed_paths)
+                _scoped_writers(writer_locations, affected_roots, affected_git, changed_paths=changed_paths, live_only=file_only)
                 if not _scoped_owned_authority(journal): raise Pending("Canonical preimage ownership changed before publication")
                 _scoped_publish(path, journal, "final", m["enrollment"]["record"])
                 if activates: _scoped_qualification(journal,observation,m["enrollment"]["record"],published=True)

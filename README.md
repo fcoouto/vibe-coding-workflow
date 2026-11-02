@@ -27,6 +27,6 @@ For Claude Code local testing, launch `claude --plugin-dir .` from this checkout
 
 ## Enroll a project
 
-For an explicitly selected existing project, use [onboard-my-project](skills/onboard-my-project/SKILL.md) to inspect and prepare a private enrollment plan. Planning does not change the target. After trusted approval binds the exact plan and application manifest, `onboard apply` makes recoverable changes and activates enrollment only after required adoption evidence qualifies. `onboard resume` reconciles interrupted work; `onboard rollback` restores transaction-owned changes. Each command uses `--plan-dir` and a bounded JSON request on stdin. See [application and recovery](skills/onboard-my-project/references/apply-and-recovery.md). Package validation and adoption evidence do not qualify client execution.
+For an explicitly selected existing project, use [onboard-my-project](skills/onboard-my-project/SKILL.md) to prepare a private plan, apply authorized configuration, activate qualified managed behavior, or undo owned changes. Configuration completes independently of runtime creation and native qualification. Canonical operations use the verified coordinator entry; the JSON CLI is for retained schema-1 requests. See [application and recovery](skills/onboard-my-project/references/apply-and-recovery.md). Package validation and actual client execution remain separate.
 
 [Development guide](AGENTS.md)
