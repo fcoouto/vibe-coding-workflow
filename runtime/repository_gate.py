@@ -66,6 +66,11 @@ class RepositoryReadiness:
         _require(self._active and type(self._source.expires_at) in (int, float)
             and time.monotonic() < self._source.expires_at < float('inf'))
 
+    def _admit_positive(self, db=None):
+        if self.withdrawal_only:
+            return
+        _positive_admission(self._scope, self._request, db=db)
+
     @property
     def withdrawal_only(self):
         self._live()
@@ -91,6 +96,7 @@ class RepositoryReadiness:
     def recheck(self):
         from runtime import evidence, state
         self._live()
+        self._admit_positive()
         if not self.withdrawal_only:
             self._verification.recheck()
         reference = self._source.recheck(self._scope, deepcopy(self._request), deepcopy(self._binding),
@@ -159,6 +165,7 @@ class RepositoryReadiness:
         _require(callable(publish))
         self.recheck()
         def local(db):
+            self._admit_positive(db)
             self._reference = self._record(db)
             return self._source.finalize(publish, db=db)
         result = (self._source.finalize(lambda db: self._publish_withdrawal(db, publish)) if self.withdrawal_only
@@ -182,6 +189,19 @@ class RepositoryReadiness:
         self._active = False
 
 
+def _positive_admission(scope, request, *, db=None):
+    from runtime import evidence, state
+    try:
+        if db is None:
+            with state._database(scope) as reader:
+                task = evidence._task(reader, scope, request, revision=False)
+        else:
+            task = evidence._task(db, scope, request, revision=False)
+        return state._ordinary_capability(scope, task, 'gate-ready')
+    except StartupError:
+        raise GateError('Repository readiness capability is unavailable') from None
+
+
 @contextmanager
 def acquire_readiness(scope, request, publication_binding):
     """Acquire qualified host source plus actual verifier; request JSON is never a source."""
@@ -196,6 +216,8 @@ def acquire_readiness(scope, request, publication_binding):
         'head', 'snapshot', 'repository_id'))
     _require(request.get('publication_id') == publication_binding['id'])
     state._artifact_reference(publication_binding['snapshot'])
+    if request['action'] == 'ready':
+        _positive_admission(scope, request)
     source = _acquire_qualified_readiness_source(scope, deepcopy(request), deepcopy(publication_binding))
     _require(isinstance(source, _QualifiedReadinessSource) and isinstance(source.repository, GitHubDelivery) and
         source.repository.host == publication_binding['host'] and callable(source.repository.mutate) and

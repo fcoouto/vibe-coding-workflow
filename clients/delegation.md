@@ -22,6 +22,8 @@ When policy's refresh triggers apply, call `claim_guidance` before fetching and 
 
 ## Prepare and launch once
 
+Ordinary launch and continuation require their applicable qualified capabilities. For a [qualification task](runtime.md#staged-qualification), admission covers only the retained attempt's exact operations and original allocations. Recheck before a new effect; an expired attempt, later receipt or reacquired reservation cannot renew its deadline or budget. Readback and exact reconciliation remain available without granting another launch.
+
 Run the installed package's `scripts/workflow.py` with the enrolled checkout as `--cwd`. The following controls read bounded JSON on stdin, except assignment status:
 
 | Control after `workflow.py` | Load only this request reference |

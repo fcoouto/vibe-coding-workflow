@@ -46,6 +46,8 @@ Known optional PRs and authorized remote cleanup also retain inventory/evidence 
 
 ## Private manual delivery
 
+Positive readiness and merge authorization require full applicable qualification and ordinary task purpose. A [qualification task](runtime.md#staged-qualification) cannot obtain that authority from a passing canary or later setup advancement. Status, exact reconciliation and negative withdrawal retain their existing bounded owners.
+
 Use `owner.run(scope, action, request)` with `ready`, `reopen` or `settle`; requests contain the existing task identity/revision, `publication_id` and stable `operation_id`. No new public CLI or JSON authority exists.
 
 `ready` supports one required PR, manual merge and no required companions in a task already `WORKING` or `REVIEW`. Preserve existing obligations rather than changing another task to fit this scope. The actual qualified Gate must issue a live private `runtime.repository_gate.RepositoryReadiness` through `acquire_readiness(scope, request, publication_binding)`; the owner supplies the operation's `action` to that acquisition. It must bind current D5/D6/D7 inputs and the exact host-selected GitHub adapter. Raw flags, references and callability cannot authorize promotion. The held context spans metadata effect/readback outside SQLite and local readiness publication through `finalize(publish(db))`; the callback performs no network or nested database write.

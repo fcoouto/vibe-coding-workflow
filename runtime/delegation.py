@@ -1414,7 +1414,56 @@ def _discovery(scope, plan, request):
     return observed, guidance
 
 
+def _qualification_allocation(scope, task, admission, records, *, additional_attempts=0, resource_units=0):
+    """Apply original qualification limits to the existing immutable ledger history."""
+    if admission.mode == 'ordinary':
+        return
+    original = state._canonical_plain(admission.original_attempt)['attempt']
+    reference = original.get('plan_reference')
+    _require(reference is None or reference in (task.get('evidence', {}).get('plan'),
+        task.get('delegation', {}).get('plan')), 'Original qualification plan binding changed')
+    history = [record for record in records if all(record['owner'][key] == value for key, value in
+        dict(scope_id=state._scope_id(scope), **{key:task[key] for key in ('client','session_id','task_id')}).items())
+        and (record['data']['role'] != 'coordinator'
+            or record['body']['request']['operation']['kind'] != 'completion-verification')]
+    limits = admission.limits
+    _require(limits['deadline'] > _now()
+        and len(history) + additional_attempts <= limits['max_attempts']
+        and sum(record['data']['resource_units'] for record in history) + resource_units <= limits['max_resource_units'],
+        'Original qualification execution allocation is expired or exhausted')
+
+
+def _qualification_event_allocation(scope, db, task, admission, event):
+    if admission.mode == 'ordinary':
+        return
+    records = _ledger(scope, db, task=task)
+    owner = dict(scope_id=state._scope_id(scope), **{key:task[key] for key in ('client','session_id','task_id')})
+    additional = 1
+    for record in records:
+        data = record['data']
+        if (not all(record['owner'][key] == value for key, value in owner.items())
+                or record['body']['pins'] != task['pins']
+                or data['role'] not in NATIVE_ROLES or data['status'] != 'observed'
+                or event.tool_name == 'apply_patch' and data['role'] != 'worker'):
+            continue
+        history = _worker_history(scope, data['observation'], db=db)
+        latest = history[0][1] if history else None
+        if (latest is None or latest['status'] != 'observed' or latest['error'] is not None
+                or latest['conflict'] is not None or latest['receipt'] is None):
+            continue
+        receipt = _worker_receipt(scope, record, latest['request'],
+            dict(receipt=latest['receipt'], result=latest['result']))
+        if (receipt['worker_id'] == event.session_id and receipt['worker_turn_id'] == event.turn_id
+                and receipt['turn_status'] == 'inProgress'):
+            additional = 0
+            break
+    _qualification_allocation(scope, task, admission, records, additional_attempts=additional)
+
+
 def _admission(scope, db, task, plan, job, claims, records, request):
+    admission = state._capability(scope, task, 'native-review' if job['role'] == 'review' else 'native-worker')
+    _qualification_allocation(scope, task, admission, records, additional_attempts=1,
+        resource_units=request['resource_units'])
     if job['role'] == 'worker':
         _worker_scope(scope, job['claims'], request['brief']['files'])
     if 'workstream_revision' in request or 'workstream_limits' in request:
@@ -1639,6 +1688,10 @@ def _reserve_operation(scope, request, *, role, _verification=False):
             _require(replay['data']['role'] == role, 'Dispatch identity belongs to another role')
             return _operation_reply(replay)
         task = evidence._task(db, scope, request)
+        operation = ('verify-merge' if request['verification']['purpose'] == 'merge-evidence' else 'verify-completion') if _verification else (
+            'check-run' if role == 'check' else 'operation-coordinator')
+        admission = state._capability(scope, task, operation)
+        _qualification_allocation(scope, task, admission, records, additional_attempts=0 if _verification else 1)
         _require((_verification or task['state'] not in {'BLOCKED', 'WAITING', 'PAUSED'}) and
                  (task['mode'] == 'editable' or all(c['mode'] == 'read' for c in claims)), 'Task cannot reserve this operation')
         _resources_available(scope, db, claims, records)
@@ -1663,6 +1716,8 @@ def _reserve_operation(scope, request, *, role, _verification=False):
             _require(replay['data']['role'] == role, 'Dispatch identity belongs to another role')
             return _operation_reply(replay)
         task = evidence._task(db, scope, request)
+        admission = state._capability(scope, task, operation)
+        _qualification_allocation(scope, task, admission, records, additional_attempts=0 if _verification else 1)
         _require(_claims(request['claims'], maximum=claim_limit) == claims, 'Operation physical resources changed')
         if _verification:
             routing = request['verification']
@@ -1802,6 +1857,7 @@ def _prepare_native(scope, request, *, role):
             _require(replay['data']['role'] == role, 'Dispatch identity belongs to another role')
             return _reply(replay) if role == 'worker' else evidence._review_response(scope, db, request, replay)
         task = evidence._task(db, scope, request)
+        state._capability(scope, task, 'native-review' if role == 'review' else 'native-worker')
         plan = _task_plan(scope, task)
         proof_plan = evidence._read(scope, task['evidence']['plan'])
         plan_digest = task['delegation']['plan']['digest']
@@ -1818,7 +1874,8 @@ def _prepare_native(scope, request, *, role):
     _require(_git_directory(scope) == plan['git_directory'], 'Prepared worktree Git metadata changed')
     git_routing = _git_routing(scope, plan['git_directory'])
     with state._database(scope) as db:
-        evidence._task(db,scope,request)
+        task = evidence._task(db,scope,request)
+        state._capability(scope, task, 'native-review' if role == 'review' else 'native-worker')
     observed, guidance = _discovery(scope, plan, request)
     candidate = evidence.capture_candidate(scope, proof_plan)
     _require(candidate['actual_policy_digest'] == task['pins']['policy_digest'], 'Actual policy changed from accepted task pins')
@@ -2618,6 +2675,8 @@ def consume_continuation(scope, request):
         _require(db is not None, 'Missing native assignment state')
         records = _ledger(scope, db, task=request)
         record, task = _continuation_owned(scope, db, request, records, allow_settled=True)
+        admission = state._capability(scope, task, 'delegation-continue')
+        _qualification_allocation(scope, task, admission, records)
         value = _continuation_intent(scope, record)
         _require(value is not None and value['token'] == request['token'] and value['state'] == 'prepared' and
             value['workstream_revision'] == request.get('workstream_revision') and value['task_revision'] == task['revision'],
@@ -2642,6 +2701,8 @@ def consume_continuation(scope, request):
             if task['state'] == 'DONE':
                 task['state'] = 'REVIEW'
             record['data'].update(status='observed', reconciliation=None, result=None)
+        admission = state._capability(scope, task, 'delegation-continue')
+        _qualification_allocation(scope, task, admission, records)
         value = dict(value, state='consumed')
         _continuation_save(scope, db, record, task, 'workstream_continuation', value)
         return _continuation_reply(record, task, value, admitted=True)
@@ -2663,6 +2724,8 @@ def prepare_continuation(scope, request):
         _require(db is not None, 'Missing native assignment state')
         records = _ledger(scope, db, task=request)
         record, task = _continuation_owned(scope, db, request, records, allow_settled=True)
+        admission = state._capability(scope, task, 'delegation-continue')
+        _qualification_allocation(scope, task, admission, records)
         receipt = _continuation_receipt(scope, record)
         _continuation_recovery(receipt, request['reason'], request['human_continue'])
         previous = _continuation_intent(scope, record)
@@ -2688,6 +2751,8 @@ def prepare_continuation(scope, request):
                 ('client_surface', 'native_version', 'parent_session_id', 'parent_turn_id', 'spawn_item_id', 'task_name', 'worker_id')),
                 'Same-child continuation identity changed')
         earliest = int(_now()) + (limits['backoff_seconds'] if request['reason'] == 'transient' else 0)
+        admission = state._capability(scope, task, 'delegation-continue')
+        _qualification_allocation(scope, task, admission, records)
         value = dict(version=1, token=uuid.uuid4().hex, state='prepared', used=used,
             remaining_continuations=limits['max_continuations'] - used, workstream_revision=request.get('workstream_revision'),
             owner=record['owner'], assignment=record['data']['assignment'], pins=task['pins'], native_identity=native,

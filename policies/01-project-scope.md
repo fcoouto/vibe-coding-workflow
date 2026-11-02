@@ -23,6 +23,8 @@ Apply with the [shared contract rules](00-index.md).
 
 For Codex, qualification establishes required behavior observed during setup for the selected project, checkout, client capabilities and runtime configuration. Later activation checks enrolled scope, accepted policy and currently observable configuration. It does not prove that each later session loaded or obeys the controls; invisible session-local disablement or stale loaded controls may escape detection. Missing required setup or current-configuration evidence, or an observed relevant configuration change, blocks dependent activation. Preserve native observation origin, reviews, writer reconciliation, recovery and repository enforcement.
 
+An explicitly approved disposable qualification target may use staged acceptance through the [setup procedure](../skills/onboard-my-project/references/apply-and-recovery.md#staged-disposable-qualification). Its active scope establishes observed frontend startup and host safety, while onboarding remains incomplete. Genuine Toolkit task-guard evidence is required before ordinary managed work. Until then, only its exact authorized bounded qualification attempt may exercise a pending mechanism. This exception does not relax activation for ordinary projects or the primary pilot, qualify another client surface, or grant READY, merge or publication authority.
+
 ## When instructions conflict
 
 Inventory the conflicting rules, their sources and affected actions before proposing edits. Reuse the user's selected onboarding mode within its scope; if none exists, ask which mode to use. No conflict means no extra mode question or inferred future preference.

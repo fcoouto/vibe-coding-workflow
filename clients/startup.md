@@ -28,6 +28,8 @@ Apply the [scope guarantee](../policies/01-project-scope.md#authority-and-activa
 
 Codex `qualification.current` contains `client`, `configuration_digest` and `hook_owner`. Historical surface/version stay in `qualification.binding`; they are not assertions about the current session. Legacy five-field current inputs remain readable without rewriting stored facts. Other clients retain their existing current-surface checks. Startup eligibility never qualifies an unobserved surface-specific operation.
 
+For an explicitly approved disposable qualification target, `AcceptedScope.qualification` carries only its retained receipt reference, verified behavior keys and computed full-coverage result. The complete catalog and pending evidence stay in the existing D4 setup journal. Active startup does not establish full onboarding or a working Toolkit task guard: pending dependent use requires its exact qualification admission, and ordinary managed work requires actual guard evidence. Legacy fully qualified scopes retain their original interpretation. See [staged qualification](../skills/onboard-my-project/references/apply-and-recovery.md#staged-disposable-qualification).
+
 ## Runtime limits
 
 Require Git and Python 3.11+ on the hook PATH. Current file operations require POSIX; Windows and non-Git projects remain unqualified. Input is limited to 128 KiB, Git lookup to two seconds and each hook to five seconds. Startup performs no writes, network requests or model calls. Interpreter isolation prevents project Python files or environment imports from replacing runtime modules.

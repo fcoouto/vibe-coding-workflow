@@ -94,12 +94,12 @@ class SetupSourceFixture(unittest.TestCase):
         root=Path(identity['repository_root']);source=self.package/'hooks/codex.json'
         content_hash=api.plugin_content_hash(self.package,dict(paths=0,bytes=0,deadline=time.monotonic()+10))
         self.proof=dict(reference='fixture:independently-observed-semantic-result',sha256='d'*64)
-        self.assessment=dict(cases=[dict(id=name,evidence=[self.proof]) for name in api.BEHAVIOR_CASES],
-            requirements=[dict(id=name,evidence=[self.proof]) for name in requirements],
+        self.assessment=dict(cases=[dict(id=name,status="verified",evidence=[self.proof]) for name in api.BEHAVIOR_CASES],
+            requirements=[dict(id=name,status="verified",evidence=[self.proof]) for name in requirements],
             general_review=[self.proof],security_review=[self.proof],semantic_assessment=dict(
                 complete=True,catalog_complete=True,conflicts_checked=True,instructions_checked=True,source_provenance_checked=True))
         if partial:self.assessment['cases'].pop()
-        definitions=json.loads(source.read_bytes())['hooks'];hooks=[];events=[];states={}
+        definitions=json.loads(source.read_bytes())['hooks'];hooks=[];states={}
         for index,(name,groups) in enumerate(definitions.items()):
             event=name[0].lower()+name[1:];handler=groups[0]['hooks'][0]
             label={'SessionStart':'session_start','PreToolUse':'pre_tool_use','PostToolUse':'post_tool_use','Stop':'stop','Interrupt':'interrupt'}[name]
@@ -109,13 +109,9 @@ class SetupSourceFixture(unittest.TestCase):
                 handlerType='command',enabled=True,isManaged=False,displayOrder=index,timeoutSec=handler['timeout'],
                 command=handler['command'].replace('${PLUGIN_ROOT}',str(self.package)),matcher=groups[0].get('matcher'),
                 currentHash='sha256:'+'a'*64+'/'+content_hash,trustStatus='trusted'))
-            run=dict(id='run-'+str(index),eventName=event,sourcePath=str(source),source='plugin',scope='turn',
-                executionMode='sync',handlerType='command',startedAt=index,status='running')
-            events.extend([dict(method='hook/started',params=dict(threadId='setup',turnId='turn',run=run)),
-                dict(method='hook/completed',params=dict(threadId='setup',turnId='turn',
-                    run=run|dict(status='completed',completedAt=index+1,durationMs=1)))])
-        user=dict(features=dict(hooks=True,plugins=True),plugins={self.plugin_id:dict(enabled=True)},hooks=dict(state=states))
-        lines=['model = "first-model"','[features]','hooks = true','plugins = true',
+        user=dict(features=dict(hooks=True,plugins=True),plugins={self.plugin_id:dict(enabled=True)},hooks=dict(state=states),
+            unrelated_secret='fixture-sentinel-never-a-real-secret')
+        lines=['model = "first-model"','unrelated_secret = "fixture-sentinel-never-a-real-secret"','[features]','hooks = true','plugins = true',
             '[plugins.'+json.dumps(self.plugin_id)+']','enabled = true']
         for key,value in states.items():
             lines += ['[hooks.state.'+json.dumps(key)+']','enabled = true',
@@ -132,30 +128,34 @@ class SetupSourceFixture(unittest.TestCase):
             responses['config/read']['layers'].insert(0,dict(name=dict(type='sessionFlags'),config=dict(hooks=dict(state=states)),version='fixture'))
         if managed_requirement:
             responses['configRequirements/read']['requirements']=dict(featureRequirements=dict(hooks=True))
-        source_code=('import json,sys\n'+f'responses={responses!r}\nevents={([] if direct else events)!r}\n'+
-            'for line in sys.stdin:\n request=json.loads(line)\n method=request.get("method")\n'+
-            ' if "id" not in request: continue\n'+
-            ' if method=="thread/read":\n  for event in events: print(json.dumps(event),flush=True)\n'+
-            ' print(json.dumps({"id":request["id"],"result":responses[method]}),flush=True)\n')
-        collector=doctor.HookCollector(thread_id='setup',turn_id='turn',source_path=str(source))
-        if direct:
-            for event in events:collector(event)
-        child=doctor.NativeProcess([sys.executable,'-I','-B','-c',source_code],time.monotonic()+20,on_notification=collector)
-        try:
-            child.request(1,'initialize',{})
-            child.send(dict(method='initialized'))
-            result=api.collect_setup(child,[collector],identity,transaction,self.assessment,request_id=10)
-        finally:child.close()
+        payload=dict(binding=dict(accepted_scope_digest=onboarding._digest(identity),
+                attempt_ref=dict(reference='fixture:fake-native-owner',sha256='b'*64),transaction_id=transaction),
+            package_root=str(self.package),native=dict(surface='codex-desktop' if desktop else 'codex-cli',
+                version='0.165.0',threads=[dict(id='setup',surface='codex-cli',version='0.165.0',originator='codex_exec')],
+                executable=dict(path=str(Path(sys.executable).resolve()),sha256='e'*64)),codex_home=str(self.home),
+            hooks=responses['hooks/list'],layers=responses['config/read']['layers'],
+            requirements=responses['configRequirements/read']['requirements'],
+            observations={name:[self.proof] for name in api.BEHAVIOR_CASES},bootstrap=[self.proof],pending_reason=None)
+        witness=object()
+        def fake_native_owner(value):
+            if value is not witness or direct:raise doctor.ObservationError('Not an issued fake host witness')
+            return copy.deepcopy(payload)
+        # Test-only host injection; Native's owned frontend/transport has separate tests.
+        with patch.object(doctor,'_native_witness_content',side_effect=fake_native_owner):
+            result=api.collect_setup(witness,identity,transaction,self.assessment)
+
         return result
 
 
 class SetupSourceTests(SetupSourceFixture):
-    def test_genuine_fake_stream_and_complete_assessment_create_immutable_source(self):
+    def test_fake_native_owner_and_complete_assessment_create_immutable_source(self):
         api=self.setup_api();observed=self.observe();content=startup._canonical_plain(observed.content)
         self.assessment['cases'].clear()
         self.assertEqual(len(content['assessment']['cases']),len(api.BEHAVIOR_CASES))
         self.assertEqual(content['native']['surface'],'codex-cli')
-        self.assertEqual(len(content['runs']),5)
+        self.assertEqual(content['runs'],[])
+        self.assertEqual(set(content['source']['observations']),set(api.BEHAVIOR_CASES))
+        self.assertNotIn('fixture-sentinel-never-a-real-secret',json.dumps(content))
         self.assertEqual(api.current_configuration(content['configuration'],self.checkout)['digest'],content['configuration']['digest'])
 
     def test_model_account_changes_do_not_invalidate_but_disable_and_trust_changes_do(self):
@@ -199,12 +199,11 @@ class SetupSourceTests(SetupSourceFixture):
         for options in (dict(partial=True),dict(desktop=True),dict(session_override=True),dict(managed_requirement=True)):
             with self.subTest(options=options),self.assertRaises(startup.StartupError):self.observe(**options)
 
-    def test_plain_json_or_direct_collector_cannot_be_persisted_as_owner_source(self):
+    def test_plain_json_or_unissued_witness_cannot_be_persisted_as_owner_source(self):
         api=self.setup_api();observed=self.observe()
         with self.assertRaises(startup.StartupError):
             api.receipt_binding(startup._canonical_plain(observed.content),self.base)
-        collector=doctor.HookCollector(thread_id='setup',turn_id='turn',source_path=str(self.package/'hooks/codex.json'))
-        with self.assertRaises(startup.StartupError):api.collect_setup(None,[collector],self.identity,'transaction',self.assessment)
+        with self.assertRaises(startup.StartupError):api.collect_setup(None,self.identity,'transaction',self.assessment)
         with self.assertRaises(startup.StartupError):self.observe(direct=True)
 
 
@@ -253,7 +252,8 @@ class SetupJournalTests(SetupSourceFixture):
                         runtime_digest=state.runtime_fingerprint(),clients=['codex'],package_root=str(state.PACKAGE)))
                 source=next(s for s in observed if s.content['identity']['checkout_id']==key[1]);assessment=startup._canonical_plain(source.content['assessment'])
                 proof['qualification'].append(dict(zip(('repository_id','checkout_id','client'),key))|dict(
-                    requirements=assessment['requirements'],general_review=assessment['general_review'],security_review=assessment['security_review'],scope_observations=facts))
+                    requirements=[{name:row[name] for name in ('id','evidence')} for row in assessment['requirements']],
+                    general_review=assessment['general_review'],security_review=assessment['security_review'],scope_observations=facts))
             resumed=request|dict(observations=proof);decision=birth.decision(fixture,resumed,'resume',(context,))
             result=onboard_coordinator.run_verified_operation(decision,fixture.directory,resumed)
             self.assertEqual(result['exit_code'],0,result);self.assertTrue(result['qualified'],result)

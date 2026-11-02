@@ -142,10 +142,15 @@ def completion_requirements(scope, db, task: dict, *, context=None) -> dict:
     adopted = 'delivery_policy' in task.get('accepted_identity', {})
     if 'delivery' not in task:
         required = adopted and task['mode'] == 'editable'
-        return dict(delivery_required=required, delivery_complete=not required,
+        result = dict(delivery_required=required, delivery_complete=not required,
                     pending=[], blockers=['Delivery scope decision is missing'] if required else [], waiting_for_merge=False)
-    plan = _read_plan(scope, task, db=db, context=context)
-    return _scope_requirements(plan, read=lambda reference: evidence._read(scope, reference, db=db, context=context))
+    else:
+        plan = _read_plan(scope, task, db=db, context=context)
+        result = _scope_requirements(plan, read=lambda reference: evidence._read(scope, reference, db=db, context=context))
+    if 'qualification_attempt' in task:
+        result.update(delivery_complete=False, waiting_for_merge=False)
+        result['blockers'].append('Qualification task cannot authorize ordinary delivery')
+    return result
 
 
 def _scope_requirements(plan, *, read=None, readiness_required=True):
@@ -256,6 +261,10 @@ def implementation_task(task):
 
 def apply_completion(task, requirements, implementation_verified):
     """Called only by the completion writer, after all independent work is verified."""
+    if 'qualification_attempt' in task:
+        if task['state'] in {'READY', 'DONE'}:
+            task['state'] = 'REVIEW'
+        return
     if not implementation_verified:
         if task['state'] == 'DONE':
             task['state'] = 'REVIEW'
@@ -362,6 +371,8 @@ def _manual_delivery(scope, action, request, owner):
     digest = evidence._digest(request)
     with state._database(scope) as db:
         task = evidence._task(db, scope, request, revision=False)
+        if action != 'reopen':
+            state._ordinary_capability(scope, task, 'delivery-ready' if action == 'ready' else 'delivery-merge')
         _require('delivery' in task, 'Delivery scope is missing')
         plan = _read_plan(scope, task, db=db)
         publication = next((p for p in plan['publications'] if p['id'] == request['publication_id']), None)
@@ -420,6 +431,7 @@ def _manual_delivery(scope, action, request, owner):
         if action == 'ready':
             with state._database(scope) as db:
                 current = evidence._task(db, scope, request, revision=False)
+                state._ordinary_capability(scope, current, 'delivery-ready')
                 _require(current['delivery']['plan'] == previous_plan, 'Delivery scope changed before metadata effect')
                 _ready_verification(scope, db, current, publication, held.local_verification)
         operation = dict(publication=deepcopy(publication), head=publication['candidate']['head'],
@@ -430,6 +442,8 @@ def _manual_delivery(scope, action, request, owner):
         held.recheck()
         def publish(db):
             current = evidence._task(db, scope, request, revision=False)
+            if action == 'ready':
+                state._ordinary_capability(scope, current, 'delivery-ready')
             _require(current['delivery']['plan'] == previous_plan
                 and current['state'] not in {'PAUSED', 'BLOCKED', 'CANCELLED'}, 'Delivery changed before publication')
             if action == 'ready':

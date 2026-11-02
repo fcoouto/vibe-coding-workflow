@@ -502,3 +502,137 @@ NATIVE_FAILURE_CODES = {"contextWindowExceeded", "sessionBudgetExceeded", "usage
     "rateLimitExceeded", "flexUnavailable", "serverOverloaded", "cyberPolicy",
     "misalignmentPolicyViolation", "tooManyDenials", "internalServerError", "unauthorized",
     "badRequest", "threadRollbackFailed", "sandboxError", "other"}
+
+
+def _setup_executable(process):
+    from runtime import onboarding as d3
+    path = Path(process.argv[0]).resolve(strict=True)
+    d3._no_links(path)
+    info = path.stat()
+    if not path.is_file():
+        raise ObservationError('executable_unavailable')
+    binding = dict(device=info.st_dev,inode=info.st_ino,size=info.st_size,mtime_ns=info.st_mtime_ns,ctime_ns=info.st_ctime_ns)
+    # Large native binaries retain their actual file binding without exceeding the read cap.
+    digest = None
+    if info.st_size <= MAX_OUTPUT:
+        raw = d3._read_file(path,MAX_OUTPUT,expected_binding=dict(device=info.st_dev,inode=info.st_ino))
+        digest = hashlib.sha256(raw).hexdigest()
+    return dict(path=str(path),binding=binding,sha256=digest)
+
+
+def _setup_partial(process, projection):
+    from runtime import doctor, startup
+    if not isinstance(process,NativeProcess) or process.launch_cwd != projection['identity']['repository_root']:
+        raise ObservationError('setup_launch_mismatch')
+    header = startup._canonical_plain(process.cli_header())
+    executable = _setup_executable(process)
+    binding = dict(accepted_scope_digest=startup._canonical_digest(projection['identity']),
+        attempt_ref=projection['attempt']['reference'],transaction_id=projection['transaction_id'])
+    options = process.argv[2:process.argv.index('--')] if '--' in process.argv[2:] else process.argv[2:]
+    overrides = any(value in ('-c','--config','-p','--profile','--enable','--disable')
+        or value.startswith(('--config=','--profile=','--enable=','--disable='))
+        or value.startswith(('-c','-p')) and value not in ('-c','-p') for value in options)
+    launch = dict(cwd=process.launch_cwd,codex_home=process.launch_codex_home,configuration_overrides_present=overrides)
+    thread = dict(id=header['thread_id'],surface='codex-cli',launch=launch,capture_binding=binding)
+    executable_source = dict(reference=executable['path']+'#native-executable-binding',
+        sha256=startup._canonical_digest(executable))
+    return dict(binding=binding,package_root=str(doctor.PACKAGE),
+        native=dict(surface='codex-cli',version=None,threads=[thread],executable=executable),
+        codex_home=process.launch_codex_home,hooks=None,layers=None,requirements=None,
+        observations={},bootstrap=[header['source'],executable_source],
+        pending_reason='metadata_and_frontend_behavior_unobserved')
+
+
+def _setup_witness(content):
+    from runtime.doctor import NativeSetupWitness, _NATIVE_WITNESS_ISSUER
+    return NativeSetupWitness(content,_issuer=_NATIVE_WITNESS_ISSUER)
+
+
+def observe_cli_basic(process, attempt):
+    """Retain only genuine original CLI facts; metadata and behavior may be pending."""
+    from runtime import setup_observation, startup
+    projection = startup._canonical_plain(setup_observation.qualification_attempt_projection(
+        attempt,operation='observe-cli-basic',case_id='startup-context',process=process))
+    try:
+        return _setup_witness(_setup_partial(process,projection))
+    except (OSError,ValueError,TypeError,KeyError,RecursionError):
+        raise ObservationError('cli_setup_observation_unavailable') from None
+
+
+def observe_setup_metadata(process, attempt):
+    """Corroborate the retained CLI using only this separately claimed API process."""
+    from runtime import doctor, setup_observation, startup
+    projection = startup._canonical_plain(setup_observation.qualification_attempt_projection(
+        attempt,operation='observe-setup-metadata',case_id='startup-context',process=process))
+    if not isinstance(process,NativeProcess):
+        raise ObservationError('setup_metadata_source_mismatch')
+    original = startup._canonical_plain(setup_observation.setup_capture_projection(attempt,process=process))
+    try:
+        if (not isinstance(process,NativeProcess) or tuple(process.argv[1:]) != ('app-server','--listen','stdio://')
+                or process.identity is not None or process.bytes_read or process.process.stdin is None
+                or original['package_root'] != str(doctor.PACKAGE)
+                or original['binding']['accepted_scope_digest'] != startup._canonical_digest(projection['identity'])
+                or process.launch_cwd != projection['identity']['repository_root']
+                or original['codex_home'] is None or process.launch_codex_home != original['codex_home']
+                or _setup_executable(process) != original['native']['executable']
+                or len(original['native']['threads']) != 1):
+            raise ObservationError('setup_metadata_source_mismatch')
+        retained = original['native']['threads'][0]
+        if (retained['launch']['cwd'] != process.launch_cwd
+                or retained['launch']['codex_home'] != process.launch_codex_home
+                or retained['launch']['configuration_overrides_present']):
+            raise ObservationError('cli_configuration_source_unverified')
+        thread_id = _review_id(retained['id'])
+        if projection['attempt']['native_sessions'] != [thread_id]:
+            raise ObservationError('setup_metadata_session_mismatch')
+        sources = []
+        sequence = 0
+        def request(method, params):
+            nonlocal sequence
+            sequence += 1
+            result = process.request(sequence,method,params)
+            sources.append(startup._canonical_plain(process.response_source))
+            return result
+        initialized = request('initialize',dict(clientInfo=dict(name='vibe-workflow-native-observer',version='1'),
+            capabilities=dict(experimentalApi=True)))
+        if initialized['codexHome'] != original['codex_home']:
+            raise ObservationError('setup_metadata_home_mismatch')
+        process.send(dict(method='initialized'))
+        thread = request('thread/read',dict(threadId=thread_id,includeTurns=False)).get('thread')
+        if (not isinstance(thread,dict) or thread.get('id') != thread_id
+                or thread.get('cwd') != projection['identity']['repository_root']):
+            raise ObservationError('setup_metadata_thread_mismatch')
+        originator = _native_surface(thread,'codex-cli')
+        native_version = _review_id(thread.get('cliVersion'))
+        listed = request('hooks/list',dict(cwds=[process.launch_cwd]))
+        layers = request('config/read',dict(cwd=process.launch_cwd,includeLayers=True)).get('layers')
+        requirements = request('configRequirements/read',{}).get('requirements')
+        if not isinstance(layers,list):
+            raise ObservationError('setup_metadata_layers_unavailable')
+        original['binding'] = dict(accepted_scope_digest=startup._canonical_digest(projection['identity']),
+            attempt_ref=projection['attempt']['reference'],transaction_id=projection['transaction_id'])
+        original['native']['version'] = native_version
+        retained.update(originator=originator,version=native_version)
+        original.update(hooks=listed,layers=layers,requirements=requirements,
+            pending_reason='frontend_behavior_unobserved')
+        original['bootstrap'].extend([projection['attempt']['source_capture'],*sources])
+        return _setup_witness(original)
+    except (OSError,ValueError,TypeError,KeyError,RecursionError):
+        raise ObservationError('setup_metadata_unavailable') from None
+
+
+def observe_managed_case(process, attempt, case_id):
+    """Observe an exact managed source without inferring missing causal effects."""
+    from runtime import setup_observation, startup
+    projection = startup._canonical_plain(setup_observation.qualification_attempt_projection(
+        attempt,case_id=case_id,process=process))
+    try:
+        content = _setup_partial(process,projection)
+        session = content['native']['threads'][0]['id']
+        if (session not in projection['attempt']['native_sessions']
+                or projection['attempt']['task']['session_id'] != session):
+            raise ObservationError('managed_setup_session_mismatch')
+        content['pending_reason'] = 'managed_case_selectors_and_independent_effects_unobserved'
+        return _setup_witness(content)
+    except (OSError,ValueError,TypeError,KeyError,RecursionError):
+        raise ObservationError('managed_setup_observation_unavailable') from None

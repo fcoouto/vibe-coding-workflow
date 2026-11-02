@@ -5293,7 +5293,7 @@ def _redact_output(raw, truncated=False):
                 redaction='Credential-pattern redaction; inspect private diagnostics before sharing')
 
 
-def _execute(scope, check, tool):
+def _execute(scope, check, tool, *, qualification_deadline=None):
     """Drain bounded output for private redacted diagnostics; own only this process group."""
     output = hashlib.sha256()
     captured = bytearray()
@@ -5303,11 +5303,19 @@ def _execute(scope, check, tool):
     outcome = 'not-run'
     code = None
     try:
+        if qualification_deadline is not None:
+            remaining = qualification_deadline - time.time()
+            _require(remaining > 0, 'Original qualification execution deadline has elapsed')
+            qualification_cutoff = time.monotonic() + remaining
         cwd = scope.repository_root / check['cwd']
         _require(cwd.resolve(strict=True) == cwd and cwd.is_dir(), 'Unsafe accepted check cwd')
+        if qualification_deadline is not None:
+            _require(qualification_deadline > time.time(), 'Original qualification execution deadline has elapsed')
         process = subprocess.Popen([tool['path'], *check['argv'][1:]], cwd=cwd, env=check['env'],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
         deadline = time.monotonic() + check['timeout']
+        if qualification_deadline is not None:
+            deadline = min(deadline, qualification_cutoff)
         outcome = 'running'
         with selectors.DefaultSelector() as selector:
             selector.register(process.stdout, selectors.EVENT_READ)
@@ -5373,6 +5381,8 @@ def _check_response(scope, db, request, record, replayed=True):
 
 def _check_admission(scope, db, task, check, claims, records):
     from runtime import delegation
+    admission = state._capability(scope, task, 'check-run')
+    delegation._qualification_allocation(scope, task, admission, records, additional_attempts=1)
     # Exclusive bookkeeping for an unknown read footprint does not grant mutable command effects.
     _require(task['state'] not in {'BLOCKED', 'WAITING', 'PAUSED'} and
         (task['mode'] == 'editable' or check['effects']['kind'] == 'read-only'), 'Task cannot reserve this check')
@@ -5449,8 +5459,15 @@ def run_check(scope, request):
     revision = result['task']['revision']
     execution_owner = deepcopy(result['attempt'])
     with state._database(scope) as db:
-        _task(db,scope,request,revision=False)
-    attempt.update(_execute(scope, check, candidate['tools'][check['id']]))
+        task = _task(db,scope,request,revision=False)
+        admission = state._capability(scope, task, 'check-run')
+        from runtime import delegation
+        delegation._qualification_allocation(scope, task, admission, delegation._ledger(scope, db, task=request))
+    if admission.mode == 'qualification':
+        attempt.update(_execute(scope, check, candidate['tools'][check['id']],
+            qualification_deadline=admission.limits['deadline']))
+    else:
+        attempt.update(_execute(scope, check, candidate['tools'][check['id']]))
     output_ref = _artifact(scope, attempt.pop('private_output'), owner=_artifact_owner(scope, result["task"]))
     try:
         after = capture_candidate(scope, plan)
@@ -6049,14 +6066,19 @@ def _ledger_blockers(scope, db, claims, exclude=None, *, context=None, records=N
 
 def _verification_response(task, blockers, candidate=None, *, requirements=None, purpose='completion'):
     from runtime import delivery
+    qualification = 'qualification_attempt' in task
     delivery_blockers = delivery.completion_blockers(requirements) if requirements and purpose == 'completion' else []
-    return dict(ok=True, verified=not blockers and not delivery_blockers, task=task,
-        implementation_verified=not blockers,
-        delivery_complete=requirements['delivery_complete'] if requirements else False,
-        waiting_for_merge=requirements.get('waiting_for_merge', False) if requirements else False,
+    result = dict(ok=True, admission_mode='qualification' if qualification else 'ordinary',
+        verified=not qualification and not blockers and not delivery_blockers, task=task,
+        implementation_verified=not qualification and not blockers,
+        delivery_complete=not qualification and requirements['delivery_complete'] if requirements else False,
+        waiting_for_merge=not qualification and requirements.get('waiting_for_merge', False) if requirements else False,
         blockers=blockers + delivery_blockers,
         candidate_digest=_digest(candidate) if candidate is not None else None, merge_authority=False,
         limitations=['Local point-in-time evidence; no repository merge gate or filesystem security boundary'])
+    if qualification:
+        result.update(admission_mode='qualification', qualification_verified=not blockers)
+    return result
 
 
 def verify_completion(scope, request):
@@ -6127,6 +6149,7 @@ class _MergeVerification:
 
     def recheck(self):
         self._live()
+        state._ordinary_capability(self._scope, self._task, 'verify-merge')
         candidate = capture_candidate(self._scope, self._plan)
         _require(candidate == self._candidate, 'Held verification candidate changed')
         blockers = _blockers(self._scope, self._task, self._plan, candidate, 'merge-evidence',
@@ -6152,6 +6175,8 @@ class _MergeVerification:
         self._live()
         with delegation._reservation_write(self._scope) as db:
             task, active = self._current(db)
+            if publish is not None:
+                state._ordinary_capability(self._scope, task, 'verify-merge')
             self._publication_db = db
             try:
                 result = publish(db) if publish is not None else None
@@ -6205,6 +6230,10 @@ def _verify_member(scope, request, *, linked=False, _held=False):
     from runtime import delegation
     with state._database(scope) as db:
         task = deepcopy(_task(db, scope, request))
+        admission = state._capability(scope, task, 'verify-merge' if request['purpose'] == 'merge-evidence' else 'verify-completion')
+        if _held:
+            _require(admission.mode == 'ordinary' and 'qualification_attempt' not in task,
+                'Qualification verification cannot issue ordinary merge readiness')
         requirements = delivery.completion_requirements(scope, db, task)
         _require(task['state'] not in {'WAITING', 'BLOCKED', 'PAUSED'}, 'Resolve the task status explicitly before verification')
         _require('evidence' in task, 'Evidence plan is missing')
@@ -6253,6 +6282,7 @@ def _verify_member(scope, request, *, linked=False, _held=False):
     verification_ref = _artifact(scope, verification, owner=_artifact_owner(scope, task))
     with delegation._reservation_write(scope) as db:
         current = _task(db, scope, request)
+        admission = state._capability(scope, current, 'verify-merge' if request['purpose'] == 'merge-evidence' else 'verify-completion')
         actual_generation = db.execute('select generation from checkouts where scope_id=?', (state._scope_id(scope),)).fetchone()[0]
         active = next(record for record in delegation._ledger(scope, db, task=request) if record['id'] == barrier['id'])
         _require(actual_generation == generation and active['data'] == barrier['data'] and
@@ -6266,7 +6296,7 @@ def _verify_member(scope, request, *, linked=False, _held=False):
             verification_ref = _artifact(scope, verification, owner=_artifact_owner(scope, task), db=db)
         current['evidence']['verification'] = verification_ref
         requirements = delivery.completion_requirements(scope, db, current)
-        if not blockers and request['purpose'] == 'completion' and not linked:
+        if not blockers and admission.mode == 'ordinary' and request['purpose'] == 'completion' and not linked:
             delivery.apply_completion(current, requirements, True)
         elif current['state'] == 'DONE' or linked:
             current['state'] = 'REVIEW'
@@ -6481,6 +6511,7 @@ def _linked_snapshot(reference, *, stopped=False):
     with _context_database(context) as db:
         task = state._task(db, reference['scope_id'], reference['client'], reference['session_id'], reference['task_id'])
         _require(task is not None and task['client'] == 'codex' and 'evidence' in task, 'Linked member is unavailable')
+        _require('qualification_attempt' not in task, 'Qualification observations cannot become linked ordinary completion')
         plan = _read(None, task['evidence']['plan'], context=context, db=db)
         _linked_projection(reference, plan)
         verification_ref = task['evidence'].get('verification')
@@ -8194,6 +8225,9 @@ def verify_linked(scope, request, observations):
     _request(request, ('purpose',), ('reuse','security_impact'))
     request=deepcopy(request)
     _require(request['purpose'] in {'completion','merge-evidence'}, 'Invalid linked verification purpose')
+    with state._database(scope) as db:
+        state._ordinary_capability(scope, _task(db, scope, request),
+            'verify-merge' if request['purpose'] == 'merge-evidence' else 'verify-completion')
     _linked_publication_entry(scope,request)
     selected_ref,projection,members=_linked_members(scope,deepcopy(request),observations)
     observe=observations['observe']
@@ -8260,6 +8294,8 @@ def verify_linked(scope, request, observations):
                     if selected_ref['authority'] not in reverse:_commit_foreign_intent(publication,source)
                 with state._database(scope,write=True) as db:
                     current=_task(db,scope,dict(request,expected_revision=selected['task']['revision']))
+                    state._ordinary_capability(scope, current,
+                        'verify-merge' if request['purpose'] == 'merge-evidence' else 'verify-completion')
                     _recheck_linked_rows(scope,db,final)
                     owner=_LinkedOwner(_artifact_owner(scope,current),
                         tuple(_canonical_freeze(d) for d in _publication_dependencies(publication)),publication)
@@ -8385,7 +8421,7 @@ def revalidate_ready(scope, client, session_id):
         return
     try:
         candidate = capture_candidate(scope, plan) if plan and closure is not None else None
-        valid = bool(verification and closure is not None and verification['purpose'] == 'completion' and not verification['blockers'] and
+        valid = bool('qualification_attempt' not in task and verification and closure is not None and verification['purpose'] == 'completion' and not verification['blockers'] and
             verification['candidate_digest'] == _digest(candidate) and not _blockers(scope, task, plan, candidate, 'completion',
                 verification.get('reuse', []), verification.get('security_impact'), resource_closure=closure))
     except (StartupError, OSError):
@@ -8414,6 +8450,8 @@ def evidence_status(scope, client, session_id):
         plan = _read(scope, task['evidence']['plan'])
         if plan.get('version') == 2:
             result['evidence'] = _revalidate_linked(scope, task, update_ready=True)
+            if 'qualification_attempt' in task:
+                result['evidence'].update(admission_mode='qualification', implementation_verified=False, delivery_complete=False)
             with state._database(scope) as db:
                 result['task'] = state._task(db,state._scope_id(scope),client,session_id)
             return result
@@ -8437,4 +8475,8 @@ def evidence_status(scope, client, session_id):
         implementation_blockers = result['evidence']['blockers']
         result['evidence'].update(requirements, implementation_verified=result['evidence'].get('implementation_verified', False))
         result['evidence']['blockers'] = sorted(set(implementation_blockers + delivery.completion_blockers(requirements)))
+        if 'qualification_attempt' in task:
+            result['evidence'].update(admission_mode='qualification',
+                qualification_verified=result['evidence']['implementation_verified'], implementation_verified=False,
+                delivery_complete=False)
     return result

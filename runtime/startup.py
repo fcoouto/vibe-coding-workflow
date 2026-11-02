@@ -454,6 +454,7 @@ class AcceptedScope:
     accepted_identity: object
     accepted_scope_digest: str
     qualification_provenance: object
+    qualification: object = None
 
 
 @dataclass(frozen=True)
@@ -807,7 +808,8 @@ def _compare_canonical_scope(record, *, authority, observation, client, installe
             _canonical_target(dep["target"])
     qualification = observation["qualification"]
     if qualification is not None:
-        _canonical_fields(qualification, "current receipt binding provenance")
+        _canonical_fields(qualification, "current receipt binding provenance" +
+            (" capabilities" if 'capabilities' in qualification else ""))
         current = qualification["current"]
         _canonical_require(isinstance(current, dict))
         _canonical_fields(current, "client configuration_digest hook_owner" +
@@ -822,6 +824,10 @@ def _compare_canonical_scope(record, *, authority, observation, client, installe
             _canonical_qualification(qualification["binding"])
         if qualification["provenance"] is not None:
             _canonical_provenance(qualification["provenance"], "trusted-coordinator")
+        if 'capabilities' in qualification:
+            from runtime.setup_observation import _projection_shape
+            _projection_shape(qualification['capabilities'])
+            _canonical_require(qualification['capabilities']['reference'] == qualification['receipt'])
     location = observation["runtime_location"]
     _canonical_runtime_location(location)
 
@@ -995,13 +1001,17 @@ def _compare_canonical_scope(record, *, authority, observation, client, installe
         return result("configured", "activation_qualified_inactive")
     if activation["status"] == "pending":
         return result("pending", "activation_pending")
+    capabilities = qualification.get('capabilities')
+    if capabilities is not None and 'startup-context' not in capabilities['verified']:
+        return result('configured', 'startup_unqualified')
     if preview:
         return ScopePreview(True, "eligible")
     scope = AcceptedScope(data["project_id"], repo["repository_id"], selected["checkout_id"], project,
         Path(authority["path"]), _canonical_freeze(authority["target"]), data["revision"], Path(selected["root"]),
         primary, Path(selected["git_dir"]), Path(repo["git_common_dir"]), _canonical_freeze(bindings), client,
         config["policy_digest"], config["runtime_digest"], RuntimeSettings(3, Path(config["runtime"]["state_dir"])),
-        _canonical_freeze(identity), digest, _canonical_freeze(qualification["provenance"]))
+        _canonical_freeze(identity), digest, _canonical_freeze(qualification["provenance"]),
+        _canonical_freeze(capabilities) if capabilities is not None else None)
     return ScopeResolution("active", scope, "active")
 
 
