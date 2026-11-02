@@ -112,7 +112,7 @@ def _review_id(value):
 
 
 @contextmanager
-def _native_reader(methods):
+def _native_reader(methods, *, on_notification=None):
     process = None
     deadline = time.monotonic() + REVIEW_TIMEOUT
     try:
@@ -120,7 +120,8 @@ def _native_reader(methods):
         if executable is None:
             raise ObservationError("unavailable")
         observed_version = version(executable, deadline)
-        process = NativeProcess([executable, "app-server", "--listen", "stdio://"], deadline)
+        process = NativeProcess([executable, "app-server", "--listen", "stdio://"], deadline,
+                                on_notification=on_notification)
         sequence = 0
 
         def request(method, params):
