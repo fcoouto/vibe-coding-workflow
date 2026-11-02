@@ -10,6 +10,7 @@
 - Validate with `python3 -B scripts/validate.py`.
 - Create release archives only when requested.
 - Report package validation and observed client execution separately.
+- Use `main` as the integration branch and PR destination. Merge only completed, reviewed slices against current `main`; preserve unfinished work separately and retain newer changes when reconciling older branches.
 
 ## Instruction authoring
 

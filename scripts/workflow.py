@@ -63,7 +63,7 @@ def control_main():
 
     class Parser(argparse.ArgumentParser):
         def error(self, message):
-            raise StartupError("Invalid task, evidence, delegation, doctor or onboard command arguments")
+            raise StartupError("Invalid task, evidence, delivery, delegation, doctor or onboard command arguments")
 
     try:
         parser = Parser(add_help=False)
@@ -92,6 +92,17 @@ def control_main():
         for name in ("prepare", "collect", "assess"):
             action = review_actions.add_parser(name, add_help=False)
             action.add_argument("--cwd", required=True)
+        delivery = commands.add_parser("delivery", add_help=False)
+        delivery_actions = delivery.add_subparsers(dest="action", required=True)
+        for name in ("status", "pending"):
+            action = delivery_actions.add_parser(name, add_help=False)
+            action.add_argument("--cwd", required=True)
+            action.add_argument("--client", required=True, choices=("codex",))
+            if name == "status":
+                action.add_argument("--session", required=True)
+            else:
+                action.add_argument("--cursor")
+                action.add_argument("--limit", type=int, default=32)
         delegation = commands.add_parser("delegation", add_help=False)
         delegation_actions = delegation.add_subparsers(dest="delegation_action", required=True)
         for name in ("plan", "prepare", "observe", "reconcile", "status"):
@@ -176,6 +187,12 @@ def control_main():
             raise StartupError("The requested checkout is not enrolled for this client")
         if scope.runtime is None:
             raise StartupError("Runtime state is not configured for this checkout")
+        if args.command == "delivery":
+            from runtime import delivery
+            report = (delivery.pending(scope, cursor=args.cursor, limit=args.limit) if args.action == "pending" else
+                      delivery.operate(scope, "status", dict(client=client, session_id=args.session)))
+            print(json.dumps(report))
+            return 0
         if args.command == "task" and args.action == "title":
             from runtime.title_sync import operate
             report = operate(scope, args.title_action, request, force=True)
@@ -239,7 +256,7 @@ def control_main():
 
 
 def main():
-    control = len(sys.argv) > 1 and sys.argv[1] in {"task", "doctor", "onboard", "evidence", "delegation"}
+    control = len(sys.argv) > 1 and sys.argv[1] in {"task", "doctor", "onboard", "evidence", "delivery", "delegation"}
     if sys.version_info < (3, 11):
         print(json.dumps({"ok": False, "error": "Vibe Coding Workflow requires Python 3.11+"} if control else
                          {"systemMessage": "Vibe Coding Workflow requires Python 3.11+ on the hook PATH."}))

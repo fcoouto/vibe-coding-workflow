@@ -31,6 +31,8 @@ Present the concrete [Reviewed Configuration](../skills/onboard-my-project/refer
 3. Cover every catalog component, including additions beyond previously known names. Record need, current state, action, scope, dependencies, risk and validation criterion. Outcomes include install/update/integrate, reuse a verified equivalent, justified inapplicability, or a blocker with its resumption condition. Optional choices in a partial-adoption path cannot silently remove items from this full assessment.
 4. Use [Task Planning](02-task-planning.md) and the selected conflict mode for the concrete design and changes. Reuse prior decisions; obtain only missing material decisions. Separate configuration from working integration and required features from optional additions.
 
+Record a repository's delivery policy in its approved canonical enrollment. Recommend manual merge and separate implementation worktrees by default; preserve explicit opt-outs and stricter target rules. List approved targets and merge methods, with separate references for publication, agent merge, and remote-branch cleanup authority. Per-task merge overrides require a recorded decision and do not change repository defaults. Policy adoption uses the existing D4 review, qualification and recovery procedure; saved settings alone do not qualify delivery execution. Local worktree cleanup remains client-owned.
+
 ## Apply compatible changes
 
 - Preserve product contracts, data, customizations, local changes and the existing stack. Reuse working tools and canonical documents. Install missing pieces at the narrowest supported scope through [Tool Integrations](11-tool-integrations.md); out-of-project changes require authorization covering that scope.

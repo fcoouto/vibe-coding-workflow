@@ -16,6 +16,8 @@ Apply with the [shared contract rules](00-index.md).
 
 ## Planning and verification
 
+For an enrolled delivery policy, record the task's effective policy and complete required publication/companion scope before claiming completion. A no-publication decision is explicit. Snapshot the adopted defaults; a task-specific merge override never changes repository settings or grants authority by itself. Keep required unpublished work visible and preserve existing authorization/revocation boundaries.
+
 - Apply [Project Scope](01-project-scope.md) to project boundaries, permissions, instruction conflicts and changed decisions.
 - For open or ambiguous requests, expose the plausible interpretations and clarify the intended outcome, boundaries and constraints before coding. Keep questions focused; skip clarification when scope is already clear.
 - When this clarification-and-plan procedure is needed or explicitly requested, present steps with observable checks and obtain lightweight confirmation before code. Reconfirm only changed parts; preserve existing authorization. Clear, already-authorized tasks follow applicable project approvals without an added universal planning gate.
