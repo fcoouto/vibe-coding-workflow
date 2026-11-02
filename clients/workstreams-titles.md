@@ -50,6 +50,11 @@ implementation and fixes use `WORKING`. A concrete result awaiting acceptance us
 `REVIEW`. Approval that starts another agreed phase returns to `WORKING`; it does
 not complete the whole task. A neutral acknowledgment changes no state.
 
+For required PR delivery, use [delivery completion](delivery.md#completion-and-retention).
+The existing `WAITING` state covers merge waits; its reason identifies the dependency.
+One or several PRs do not change the title format. A child's wait never assigns
+the parent's state or progress; the parent follows its own accepted scope.
+
 Use the existing task update command and its revision checks. Optional
 `milestones` entries are exactly `{id, weight, accepted, reference}`. IDs are
 unique; weights are positive bounded integers; accepted is boolean; references

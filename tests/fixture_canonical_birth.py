@@ -394,9 +394,9 @@ class CanonicalBirthFixture(unittest.TestCase):
             self.assertEqual(member.resolution.status,"active",member.resolution)
         return fixture, acquired, observation
 
-    def accepted_birth(self, *, linked=False, peer=False):
+    def accepted_birth(self, *, linked=False, peer=False, delivery_policy=None):
         """Real D4 birth, followed by explicit synthetic trusted-owner qualification."""
-        prepared=self.prepare(linked=linked,peer=peer)
+        prepared=self.prepare(linked=linked,peer=peer,delivery_policy=delivery_policy)
         self.assert_applied_configured(prepared,self.invoke(prepared))
         fixture=prepared[0]
         path=Path(prepared[1]['manifest']['enrollment']['record']['project_root'])/startup.PROJECT_FILE
@@ -484,7 +484,8 @@ def fresh_canonical(testcase):
     testcase.addCleanup(owner.doCleanups)
     if getattr(testcase,"_canonical_common_git",False):return owner.accepted_common_git_members()
     return owner.accepted_birth(linked=getattr(testcase, "_canonical_linked", False),
-        peer=getattr(testcase, "_canonical_peer", False))
+        peer=getattr(testcase, "_canonical_peer", False),
+        delivery_policy=getattr(testcase, "_delivery_policy", None))
 
 
 def save_test_acquisition(path, fixture, observation):

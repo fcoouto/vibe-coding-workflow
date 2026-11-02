@@ -14,7 +14,7 @@
 
 ## Execution checkpoint
 
-Implementation started from fetched main `44de11fa14bb2dddef02a3fbabb521d9bc10ecc4` on `codex/delivery-lifecycle`. The policy-adoption candidate is implemented and independently reviewed; 11 focused tests pass. Its prescribed broader check has the same 4 failures/22 errors as unchanged main onboarding tests, so Task 1 is not marked fully verified. On 2 November 2026, the user chose to wait for the existing Native Clients work and keep this branch focused. Task 2 is waiting for its production native admission source; this branch will not implement that prerequisite. Resume by inspecting the Native Clients integration on current main, verifying the required source and destination-admission interfaces, and reconciling this branch before continuing. See [execution evidence](../../delivery-validation.md). Remaining tasks have not started; no background watcher or automatic resumption is configured.
+Implementation started from fetched main `44de11fa14bb2dddef02a3fbabb521d9bc10ecc4` on `codex/delivery-lifecycle`. After the user confirmed onboarding rollback, ordinary source/fixture development resumed and main `5a6bcd2c5d882c8e777b29b549f391eb9a09af75` was integrated. Policy adoption, admitted workspace binding and bounded provider reads have independent review and 25 passing focused tests. The earlier broad adoption check matched unchanged main's 4 failures/22 errors; it remains recorded, not waived. Production native qualification and D7 enforcement remain separate activation prerequisites; this branch does not implement them or reenroll the project. Completion gating is next, before provider mutations. See [execution evidence](../../delivery-validation.md). No background watcher is configured.
 
 ## Global Constraints
 

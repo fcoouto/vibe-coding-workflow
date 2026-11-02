@@ -1,5 +1,7 @@
 """Task-owned delivery decisions; recorded references never grant external authority."""
 from copy import deepcopy
+import base64
+import binascii
 import re
 
 from runtime import state
@@ -62,12 +64,18 @@ def effective_policy(saved: dict, override: dict | None) -> dict:
 
 
 def validate_record(value):
-    state._fields(value, ('plan', 'operations'))
+    state._fields(value, ('plan', 'operations'), ('merge_wait',))
     state._artifact_reference(value['plan'])
     _require(isinstance(value['operations'], list) and len(value['operations']) <= 64,
              'Invalid delivery operation history')
     for reference in value['operations']:
         state._artifact_reference(reference)
+    if 'merge_wait' in value:
+        marker = value['merge_wait']
+        state._fields(marker, ('condition_id', 'verification', 'plan'))
+        state._text(marker['condition_id'], 'merge wait condition', 128)
+        state._artifact_reference(marker['verification'])
+        state._artifact_reference(marker['plan'])
 
 
 def _plan(value, saved, override=None):
@@ -111,23 +119,75 @@ def _plan(value, saved, override=None):
     return deepcopy(value)
 
 
-def _read_plan(scope, task, *, db=None):
+def _read_plan(scope, task, *, db=None, context=None):
     from runtime import evidence
-    return evidence._read(scope, task['delivery']['plan'], db=db)
+    return evidence._read(scope, task['delivery']['plan'], db=db, context=context)
 
 
-def completion_requirements(scope, db, task: dict) -> dict:
+def completion_requirements(scope, db, task: dict, *, context=None) -> dict:
     """Local retained facts only; a title or caller's remote claim is never proof."""
     adopted = 'delivery_policy' in task.get('accepted_identity', {})
     if 'delivery' not in task:
         required = adopted and task['mode'] == 'editable'
         return dict(delivery_required=required, delivery_complete=not required,
                     pending=[], blockers=['Delivery scope decision is missing'] if required else [])
-    plan = _read_plan(scope, task, db=db)
+    plan = _read_plan(scope, task, db=db, context=context)
+    return _scope_requirements(plan)
+
+
+def _scope_requirements(plan):
     required = [p['id'] for p in plan['publications'] if p['required']]
     pending = required + ['companion:' + c['task_id'] for c in plan['companions']]
     return dict(delivery_required=bool(pending), delivery_complete=not pending,
                 pending=pending, blockers=[])
+
+
+def completion_blockers(requirements):
+    return requirements['blockers'] + (['Required delivery remains pending: ' + ', '.join(requirements['pending'])]
+        if requirements['pending'] else [])
+
+
+def implementation_task(task):
+    """Exclude only our generated wait when recapturing retained local proof."""
+    marker = task.get('delivery', {}).get('merge_wait')
+    if task['state'] != 'WAITING' or not marker or 'delivery_policy' not in task['accepted_identity']:
+        return task
+    if (marker['verification'] != task.get('evidence', {}).get('verification')
+            or marker['plan'] != task['delivery']['plan']):
+        return task
+    result = deepcopy(task)
+    generated = dict(id=marker['condition_id'], kind='blocker', action='task', status='pending',
+        reason='Implementation verified; required delivery remains pending', reference='delivery:completion')
+    result['conditions'] = [c for c in task['conditions'] if c != generated]
+    return result
+
+
+def apply_completion(task, requirements, implementation_verified):
+    """Called only by the completion writer, after all independent work is verified."""
+    if not implementation_verified or requirements['blockers']:
+        if task['state'] == 'DONE':
+            task['state'] = 'REVIEW'
+        return
+    if requirements['delivery_complete']:
+        task['state'] = 'DONE'
+    else:
+        task.update(state='WAITING', reason='Implementation verified; required delivery remains pending',
+                    reference='delivery:completion')
+        ids = {c['id'] for c in task['conditions']}
+        condition_id = 'delivery:merge'
+        for number in range(1, 65):
+            if condition_id not in ids:
+                break
+            condition_id = 'delivery:merge:' + str(number)
+        condition = dict(id=condition_id, kind='blocker', action='task', status='pending',
+                         reason=task['reason'], reference=task['reference'])
+        task['conditions'].append(condition)
+        task['delivery']['merge_wait'] = dict(condition_id=condition_id,
+            verification=task['evidence']['verification'], plan=task['delivery']['plan'])
+        _require(len(task['conditions']) <= 64, 'Task condition history exceeds its bound')
+    for condition in task['conditions']:
+        if 'continuation' in condition:
+            condition['continuation']['revoked'] = True
 
 
 def operate(scope, action: str, request: dict, *, owner=None) -> dict:
@@ -156,6 +216,47 @@ def operate(scope, action: str, request: dict, *, owner=None) -> dict:
         task['revision'] += 1
         state._save(db, state._scope_id(scope), task)
         return dict(task=task, plan=plan, **completion_requirements(scope, db, task))
+
+
+def pending(scope, *, cursor: str | None = None, limit: int = 32) -> dict:
+    """Inspect at most one bounded page; never scan checkouts or contact a provider."""
+    from runtime import evidence
+    _require(type(limit) is int and 1 <= limit <= 32, 'Pending page limit must be between 1 and 32')
+    context = evidence._evidence_context(scope)
+    authority = evidence._digest([scope.project_id, state._canonical_plain(context.authority_set[0])])
+    after = ['', '', '', '']
+    if cursor is not None:
+        try:
+            state._text(cursor, 'pending cursor', 32768)
+            value = evidence.json_object(base64.b64decode(cursor, altchars=b'-_', validate=True), limit=32768)
+            state._fields(value, ('version', 'authority', 'after'))
+            _require(type(value['version']) is int and value['version'] == 1 and value['authority'] == authority,
+                     'Pending cursor belongs to a different authority')
+            after = value['after']
+            _require(isinstance(after, list) and len(after) == 4, 'Invalid pending cursor')
+            for part in after:
+                state._text(part, 'pending cursor identity', 4096)
+        except (ValueError, TypeError, binascii.Error):
+            raise state.StateError('Invalid pending cursor for this authority') from None
+    records = []
+    with state._database(scope) as db:
+        rows = db.execute('select scope_id,client,session_id,task_id from tasks '
+            'where (scope_id,client,session_id,task_id) > (?,?,?,?) '
+            'order by scope_id,client,session_id,task_id limit ?', (*after, limit + 1)).fetchall()
+        selected = rows[:limit]
+        for identity in selected:
+            task = state._task(db, *identity)
+            _require(task['accepted_identity']['project_id'] == scope.project_id, 'Foreign task in delivery authority')
+            requirements = completion_requirements(None, db, task, context=context)
+            if not requirements['delivery_complete']:
+                records.append(dict(zip(('scope_id', 'client', 'session_id', 'task_id'), identity)) |
+                    dict(state=task['state'], plan=task.get('delivery', {}).get('plan'), **requirements))
+    next_cursor = None
+    if len(rows) > limit:
+        next_cursor = base64.urlsafe_b64encode(evidence._raw(dict(version=1, authority=authority,
+            after=list(selected[-1])))).decode('ascii')
+    return dict(ok=True, records=records, cursor=next_cursor, inspected=len(selected),
+                coverage='known retained tasks in this authority')
 
 
 def _bind_worktree(scope, request, owner):
