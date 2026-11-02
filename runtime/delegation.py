@@ -1436,13 +1436,6 @@ def _admission(scope, db, task, plan, job, claims, records, request):
     validate_dependencies(scope, task, plan, job, records)
     previous = [r for r in own if r['data']['job_id'] == job['id']]
     _require(len(previous) < job['max_attempts'], 'Original job attempt budget is exhausted')
-    for dependency in job['dependencies']:
-        completed = [r for r in owner_history if r['data']['job_id'] == dependency]
-        latest = max(completed, key=lambda r: r['data']['revision']) if completed else None
-        prerequisite = next(item for item in plan['jobs'] if item['id'] == dependency)
-        _require(latest is not None and latest['data']['role'] == prerequisite['role'] and
-                 latest['data']['status'] == 'settled' and latest['data']['result']['outcome'] == 'completed',
-                 'Required delegation dependency is not reconciled and complete')
     if previous:
         latest = max(previous, key=lambda r: r['data']['revision'])
         _require(request.get('retry_of') == latest['id'] and latest['data']['status'] == 'settled',
@@ -1612,12 +1605,6 @@ def _coordinator_job(scope, task, request, claims, records):
     validate_dependencies(scope, task, plan, selected, records)
     _require(sum(r['data']['role'] == 'coordinator' and r['data']['job_id'] == selected['id'] for r in history) < selected['max_attempts'],
              'Original coordinator job attempt budget is exhausted')
-    for dependency in selected['dependencies']:
-        prior = [r for r in history if r['data']['job_id'] == dependency]
-        latest = max(prior, key=lambda r: r['data']['revision']) if prior else None
-        required = next(job for job in plan['jobs'] if job['id'] == dependency)
-        _require(latest is not None and latest['data']['role'] == required['role'] and latest['data']['status'] == 'settled' and
-            latest['data']['result']['outcome'] == 'completed', 'Coordinator job dependency remains unresolved')
     return selected['id']
 
 
@@ -2304,7 +2291,9 @@ def reconcile_assignment(scope, request):
     request = json_object(evidence._raw(request))
     state._text(request['attempt_id'], 'attempt_id', 256)
     with state._database(scope) as db:
-        record = _assignment(scope, db, request, roles=('worker', 'review', 'coordinator'))
+        _require(db is not None, 'Missing native assignment state')
+        records = _ledger(scope, db, task=request)
+        record = _assignment(scope, db, request, roles=('worker', 'review', 'coordinator'), records=records)
         if record['data']['status'] == 'settled':
             artifact = evidence._read(scope, record['data']['reconciliation'])
             _require(artifact.get('request_digest') == evidence._digest(_semantic(request)), 'Settled assignment replay payload changed')
@@ -2312,7 +2301,7 @@ def reconcile_assignment(scope, request):
         task = _assignment_task(scope, db, request)
         generation = db.execute('select generation from checkouts where scope_id=?', (state._scope_id(scope),)).fetchone()[0]
         plan = _assignment_plan(scope, record, task) if record['data']['candidate'] is not None else None
-        reservations = {item['id']: evidence._digest(item['data']) for item in _ledger(scope, db, task=request)}
+        reservations = {item['id']: evidence._digest(item['data']) for item in records}
     assessment = request['assessment']
     state._fields(assessment, ('outcome', 'changed_paths', 'result_assessment', 'partial_change_assessment', 'evidence', 'coordinator_ref'))
     _require(assessment['outcome'] in {'completed', 'failed', 'cancelled'}, 'Unsupported worker outcome')
@@ -2350,9 +2339,11 @@ def reconcile_assignment(scope, request):
         revision=request['expected_revision'] + 1)
     reference = evidence._artifact(scope, artifact, owner=evidence._artifact_owner(scope, task))
     with _reservation_write(scope) as db:
-        current = _assignment(scope, db, request, roles=('worker', 'review', 'coordinator'))
+        _require(db is not None, 'Missing native assignment state')
+        records = _ledger(scope, db, task=request)
+        current = _assignment(scope, db, request, roles=('worker', 'review', 'coordinator'), records=records)
         task = _assignment_task(scope, db, request)
-        _require({item['id']: evidence._digest(item['data']) for item in _ledger(scope, db, task=request)} == reservations,
+        _require({item['id']: evidence._digest(item['data']) for item in records} == reservations,
                  'Shared reservation ownership changed during reconciliation; recapture candidate and proof')
         _require(current['data'] == record['data'] and task['pins'] == record['body']['pins'] and
             db.execute('select generation from checkouts where scope_id=?', (state._scope_id(scope),)).fetchone()[0] == generation,
