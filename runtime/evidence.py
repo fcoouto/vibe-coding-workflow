@@ -2814,6 +2814,20 @@ def _retention_consumers(context,db,owner,releases,recovery,*,budget,d4_facts=No
                 seen.add(key);_require(len(seen)<=4096,'Closed detail dependency traversal exceeds bound')
                 if key in provenance:continue
                 metadata,value=records[key]
+                if key in source_starts and 'birth_handoff' in value:
+                    budget.take(bytes=512)
+                    scope=state._CAPTURE_SQL_SCOPE.get()
+                    if scope is not None:
+                        _require(scope[1] is None and scope[0].comparison is budget,'Birth consumer projection changed its capture owner')
+                        state._capture_registered(scope[0],db)
+                        scope[0].current_acquisition().reserve(requested=2304,live=5632)
+                    fields=('tasks','assignments','artifacts','previous','stopped','supersedes','use_contract')
+                    _require(value['version'] in (1,2) and set(value)<=set(('version','kind','identity','journal','authorities','birth_handoff',*fields)),
+                        'Unsupported birth consumer source schema')
+                    for field in fields:
+                        if field in value:budget.retain(value[field])
+                    # D4 owns the validated birth certificate; its origin edge remains in metadata dependencies.
+                    value={field:value[field] for field in fields if field in value}
                 pending.extend((child,ref) for child in [*metadata['dependencies'],*_artifact_dependencies(value)])
             return False
         for key,(metadata,value) in records.items():
