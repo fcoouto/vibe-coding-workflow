@@ -2159,7 +2159,8 @@ def _worker_receipt(scope, record, request, observed):
     _require(receipt.get('failure_code') is None or isinstance(receipt['failure_code'], str) and
         len(receipt['failure_code']) <= 128, 'Invalid native failure code')
     _require(receipt.get('will_retry') is None or type(receipt['will_retry']) is bool, 'Invalid native host retry intent')
-    _require(type(receipt['version']) is int and receipt['version'] == 2 and receipt['mechanism'] == 'codex-native-agent-path' and
+    _require(type(receipt['version']) is int and receipt['version'] == 2 and
+        receipt['mechanism'] in {'codex-native-agent-path', 'codex-native-collab-call'} and
         all(receipt[key] == value for key, value in binding.items()) and
         all(receipt[key] == request[key] for key in ('parent_turn_id', 'spawn_item_id')) and
         receipt['checkout'] == str(scope.repository_root) and receipt['assignment_digest'] == data['assignment']['digest'] and
@@ -2167,10 +2168,16 @@ def _worker_receipt(scope, record, request, observed):
         receipt['originator'] in ({'codex_exec'} if binding['client_surface'] == 'codex-cli' else {'Codex Desktop','codex_work_desktop'}) and
         receipt['descendants_stopped'] is False and receipt['prompt_delivery'] == 'unverified',
         'Native receipt differs from the exact prepared worker binding')
-    for key in ('worker_id', 'agent_path'):
-        state._text(receipt[key], 'observed ' + key, 4096)
-    _require(receipt['agent_path'].endswith('/' + binding['task_name']) and receipt['turn_status'] in
-        {'completed', 'inProgress', 'interrupted', 'failed', 'unknown'}, 'Native worker locator/status is invalid')
+    state._text(receipt['worker_id'], 'observed worker_id', 4096)
+    if receipt['agent_path'] is not None:
+        state._text(receipt['agent_path'], 'observed agent_path', 4096)
+    if receipt['mechanism'] == 'codex-native-agent-path':
+        _require(isinstance(receipt['agent_path'], str) and receipt['agent_path'].endswith('/' + binding['task_name']),
+                 'Native worker locator is invalid')
+    elif receipt['agent_path'] is not None:
+        _require(receipt['agent_path'].startswith('/'), 'Native worker locator is invalid')
+    _require(receipt['turn_status'] in {'completed', 'inProgress', 'interrupted', 'failed', 'unknown'},
+             'Native worker status is invalid')
     for key in ('parent_model_provider', 'worker_model_provider', 'worker_turn_id', 'result_item_id',
                 'configured_model', 'configured_effort', 'spawn_observed_model', 'spawn_observed_effort',
                 'execution_model', 'execution_effort'):
@@ -2239,7 +2246,7 @@ def observe_assignment(scope, request):
     conflict = prior['conflict'] if prior else None
     previous_receipt = prior['receipt'] if prior else None
     if receipt is not None and previous_receipt is not None:
-        stable = ('client_surface', 'native_version', 'parent_session_id', 'parent_turn_id', 'spawn_item_id',
+        stable = ('mechanism', 'client_surface', 'native_version', 'parent_session_id', 'parent_turn_id', 'spawn_item_id',
                   'worker_id', 'agent_path', 'originator', 'checkout', 'requested_model', 'requested_effort')
         changed = any(receipt[key] != previous_receipt[key] for key in stable)
         changed |= receipt['worker_turn_id'] != previous_receipt['worker_turn_id'] and (
