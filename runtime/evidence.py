@@ -1538,7 +1538,7 @@ def _stop_input_files(task,candidate):
 
 
 def _closure_facts(context, task_ref, db, recovery, *, recovery_files=None, ordinary_peer=None):
-    from runtime import changes,delegation
+    from runtime import changes,delegation,delivery
     _check_context(context,db)
     state._fields(recovery,('complete','dependencies','blockers','roots','requirements','authorities','discovered_authorities'))
     authority=_canonical_plain(context.authority_set[0])
@@ -1546,6 +1546,11 @@ def _closure_facts(context, task_ref, db, recovery, *, recovery_files=None, ordi
     _require(recovery['complete'] is True and not recovery['blockers'] and not recovery['discovered_authorities']
         and sorted(recovery['authorities'],key=_raw)==sorted(expected,key=_raw),'Recovery current source coverage is incomplete or foreign')
     observed=state.inspect_dependencies(db,task_ref);task=observed['task']
+    delivery_requirements = delivery.completion_requirements(None, db, task, context=context)
+    _require(delivery_requirements['delivery_complete'] and not delivery_requirements['blockers'],
+        'Pending delivery must retain its original task and recovery evidence')
+    _require(delivery.retention_requirements(None, db, task, context=context)['retention_complete'],
+        'Known publication or cleanup obligations must retain their original task')
     assignment_blocker='Assignment body requires original task; exact assignment certificate integration is required'
     _require(not [blocker for blocker in observed['blockers'] if blocker!=assignment_blocker],'; '.join(observed['blockers']))
     ready=task['state']=='DONE'
@@ -4217,6 +4222,9 @@ def _linked_publication_plan(scope,request,content,snapshots,acquired,observed_s
     inputs=_linked_inputs(snapshots);projection=_linked_projection(selected['reference'],selected['plan'])
     fresh={}
     shared,delivered,sources,deliveries=_linked_outcomes(projection,_digest(inputs),acquired,snapshots,selected['reference'],observed=fresh)
+    delivered = delivered and _linked_delivery_requirements(snapshots)['delivery_complete']
+    for source in _linked_delivery_sources(inputs):
+        _linked_source(source, observed=fresh);sources.append(source)
     for snapshot in snapshots:
         _linked_source(dict(authority=snapshot['reference']['authority'],reference=snapshot['verification_ref']),observed=fresh)
     blockers=sorted(set(shared+[message for row in snapshots for message in row['blockers']]))
@@ -6030,8 +6038,14 @@ def _ledger_blockers(scope, db, claims, exclude=None, *, context=None, records=N
         (claims is None or delegation._held_overlap(claims, record['data']['claims']))]
 
 
-def _verification_response(task, blockers, candidate=None):
-    return dict(ok=True, verified=not blockers, task=task, blockers=blockers,
+def _verification_response(task, blockers, candidate=None, *, requirements=None, purpose='completion'):
+    from runtime import delivery
+    delivery_blockers = delivery.completion_blockers(requirements) if requirements and purpose == 'completion' else []
+    return dict(ok=True, verified=not blockers and not delivery_blockers, task=task,
+        implementation_verified=not blockers,
+        delivery_complete=requirements['delivery_complete'] if requirements else False,
+        waiting_for_merge=requirements.get('waiting_for_merge', False) if requirements else False,
+        blockers=blockers + delivery_blockers,
         candidate_digest=_digest(candidate) if candidate is not None else None, merge_authority=False,
         limitations=['Local point-in-time evidence; no repository merge gate or filesystem security boundary'])
 
@@ -6041,6 +6055,7 @@ def verify_completion(scope, request):
 
 
 def _verify_member(scope, request, *, linked=False):
+    from runtime import delivery
     _request(request, ('purpose',), ('reuse', 'security_impact'))
     request = deepcopy(request)
     _require(request['purpose'] in {'completion', 'merge-evidence'}, 'Invalid evidence verification purpose')
@@ -6054,6 +6069,7 @@ def _verify_member(scope, request, *, linked=False):
     from runtime import delegation
     with state._database(scope) as db:
         task = deepcopy(_task(db, scope, request))
+        requirements = delivery.completion_requirements(scope, db, task)
         _require(task['state'] not in {'WAITING', 'BLOCKED', 'PAUSED'}, 'Resolve the task status explicitly before verification')
         _require('evidence' in task, 'Evidence plan is missing')
         plan = _read(scope, task['evidence']['plan'])
@@ -6073,7 +6089,7 @@ def _verify_member(scope, request, *, linked=False):
         return sorted(set(blockers))
     blockers = ownership_blockers()
     if blockers:
-        return _verification_response(task, blockers)
+        return _verification_response(task, blockers, requirements=requirements, purpose=request['purpose'])
     dispatch = 'verify:' + str(request['expected_revision']) + ':' + request['purpose']
     barrier_request = {key: request[key] for key in IDENTITY} | dict(dispatch_id=dispatch, claims=resources,
         operation=dict(id=dispatch, kind='completion-verification'), reason='Synchronous accepted D5 verification',
@@ -6084,7 +6100,7 @@ def _verify_member(scope, request, *, linked=False):
     except state.StateError:
         blockers = ownership_blockers()
         if blockers:
-            return _verification_response(task, blockers)
+            return _verification_response(task, blockers, requirements=requirements, purpose=request['purpose'])
         raise
     _require(reserved['reservation_admitted'], 'Existing verifier barrier requires exact operation recovery')
     request['expected_revision'] = reserved['revision']
@@ -6113,11 +6129,9 @@ def _verify_member(scope, request, *, linked=False):
             verification['blockers'] = blockers
             verification_ref = _artifact(scope, verification, owner=_artifact_owner(scope, task), db=db)
         current['evidence']['verification'] = verification_ref
+        requirements = delivery.completion_requirements(scope, db, current)
         if not blockers and request['purpose'] == 'completion' and not linked:
-            current['state'] = 'DONE'
-            for condition in current['conditions']:
-                if 'continuation' in condition:
-                    condition['continuation']['revoked'] = True
+            delivery.apply_completion(current, requirements, True)
         elif current['state'] == 'DONE' or linked:
             current['state'] = 'REVIEW'
         current['revision'] += 1
@@ -6126,7 +6140,7 @@ def _verify_member(scope, request, *, linked=False):
         active['data'].update(status='settled', reconciliation=reconciliation, result=dict(outcome='failed' if blockers else 'completed'))
         db.execute('update assignments set data=? where id=?', (_raw(active['data']).decode(), barrier['id']))
         state._save(db, state._scope_id(scope), current)
-    return _verification_response(current, blockers, candidate)
+    return _verification_response(current, blockers, candidate, requirements=requirements, purpose=request['purpose'])
 
 
 
@@ -6321,6 +6335,7 @@ def _linked_members(scope, request, observations, *, lifecycle=False):
 
 
 def _linked_snapshot(reference, *, stopped=False):
+    from runtime import delivery
     state._task_reference(reference)
     context = _reference_context(reference['authority'])
     with _context_database(context) as db:
@@ -6332,17 +6347,19 @@ def _linked_snapshot(reference, *, stopped=False):
         _require(verification_ref is not None, 'Linked member local verification is missing')
         verification = _read(None, verification_ref, context=context, db=db)
         generation = db.execute('select generation from checkouts where scope_id=?',(reference['scope_id'],)).fetchone()[0]
+        delivery_requirements = delivery.completion_requirements(None, db, task, context=context)
     locator, candidate = _capture_pinned(context, task, plan)
     _require(verification['purpose'] in {'completion','merge-evidence'} and verification['plan_digest'] == _digest(plan)
         and verification['candidate_digest'] == _digest(candidate) and verification['generation'] == generation,
         'Linked member local verification is stale')
-    blockers = list(verification['blockers']) + _blockers(locator, task, plan, candidate, verification['purpose'],
+    blockers = list(verification['blockers']) + _blockers(locator, delivery.implementation_task(task), plan, candidate, verification['purpose'],
         verification.get('reuse',[]), verification.get('security_impact'), resource_closure=verification['resource_closure'], context=context)
     if stopped and task['state']=='CANCELLED':
         with _context_database(context) as db:_stop_verification(context,db,task)
         blockers=[message for message in blockers if message!='Task is cancelled']
     return dict(task=task,plan=plan,candidate=candidate,context=context,generation=generation,
-        verification=verification,verification_ref=verification_ref,blockers=sorted(set(blockers)),reference=reference)
+        verification=verification,verification_ref=verification_ref,blockers=sorted(set(blockers)),reference=reference,
+        delivery_requirements=delivery_requirements)
 
 
 def _linked_stop_content(content):
@@ -6405,7 +6422,8 @@ def _linked_contract(pointer):
 
 def _linked_stop_sources(pointer,authorities):
     """Structural discovery grants no stop or closure authority."""
-    content=_linked_contract(pointer);roots=[pointer,*_linked_source_refs(content['observations'])]
+    content=_linked_contract(pointer);roots=[pointer,*_linked_source_refs(content['observations']),
+                                            *_linked_delivery_sources(content['inputs'])]
     for member in content['members']:
         if member.get('plan') is not None:roots.append(dict(authority=member['task']['authority'],reference=member['plan']))
         if member['verification'] is not None:roots.append(dict(authority=member['task']['authority'],reference=member['verification']))
@@ -6454,7 +6472,15 @@ def _linked_lifecycle_outcomes(content,snapshots,*,observed,consumer):
     """Reproduce actual result facts without promoting them to passing readiness."""
     result=_linked_outcomes(content['projection'],content['inputs_digest'],content['observations'],snapshots,
         content['selected'],observed=observed,require_shared_support=True,consumer=consumer)
-    shared,delivered,_,deliveries=result;local=[]
+    from runtime import delivery
+    shared,delivered,sources,deliveries=result;local=[]
+    for source in _linked_delivery_sources(content['inputs']):
+        plan = _linked_source(source, observed=observed, consumer=consumer, require_admission=True)
+        requirements = delivery._scope_requirements(plan, read=lambda ref: _linked_source(
+            dict(authority=source['authority'], reference=ref), observed=observed, consumer=consumer, require_admission=True))
+        delivered = delivered and requirements['delivery_complete'] and not requirements['blockers']
+        sources.append(source)
+    delivered = delivered and all(row.get('delivery_requirements', {}).get('delivery_complete', True) for row in snapshots)
     for member in content['members']:
         if member['verification'] is None:continue
         verification=_linked_source(dict(authority=member['task']['authority'],reference=member['verification']),observed=observed,
@@ -6464,7 +6490,7 @@ def _linked_lifecycle_outcomes(content,snapshots,*,observed,consumer):
     if content.get('kind')=='linked-verification':
         _require(sorted(set(shared+local))==content['blockers'] and delivered==content['delivery_complete'] and deliveries==content['deliveries'],
             'Linked original result or required delivery observation changed')
-    return result
+    return shared,delivered,sources,deliveries
 
 
 def _linked_basis_root(basis):
@@ -6508,6 +6534,7 @@ def _linked_require_absent_aggregate(context,db,task,reference):
 
 
 def _linked_terminal_snapshot(reference):
+    from runtime import delivery
     context=_reference_context(reference['authority'])
     with _context_database(context) as db:
         task=state._task(db,reference['scope_id'],reference['client'],reference['session_id'],reference['task_id'])
@@ -6517,10 +6544,12 @@ def _linked_terminal_snapshot(reference):
         verification_ref=_stop_verification(context,db,task,allow_absent=True)
         verification=_read(None,verification_ref,context=context,db=db) if verification_ref is not None else None
         bindings=state._ready_stop_bindings(context,db,task)
+        delivery_requirements = delivery.completion_requirements(None, db, task, context=context)
     locator,candidate=_capture_pinned(context,task,plan)
     _,claims,_=_verification_resources(locator,task,plan)
     snapshot=dict(reference=reference,context=context,task=task,plan=plan,plan_ref=plan_ref,candidate=candidate,
-        generation=bindings['generation'],bindings=bindings,verification_ref=verification_ref,verification=verification,resource_closure=claims)
+        generation=bindings['generation'],bindings=bindings,verification_ref=verification_ref,verification=verification,resource_closure=claims,
+        delivery_requirements=delivery_requirements)
     _linked_execution_member(snapshot)
     return snapshot
 
@@ -6531,7 +6560,9 @@ def _linked_terminal_facts(references,selected,acquired,authorities,*,original_a
         all(_linked_projection(s['reference'],s['plan'])==projection for s in snapshots),'Lifecycle scope contracts are incomplete or divergent')
     inputs=_linked_inputs(snapshots);observed={}
     _,delivered,_,deliveries=_linked_outcomes(projection,_digest(inputs),acquired,snapshots,selected,observed=observed,require_shared_support=True,consumer=consumer)
-    roots=_linked_source_refs(acquired)
+    requirements = _linked_delivery_requirements(snapshots)
+    delivered = delivered and requirements['delivery_complete'] and not requirements['blockers']
+    roots=_linked_source_refs(acquired)+_linked_delivery_sources(inputs)
     for snapshot in snapshots:
         roots.append(dict(authority=snapshot['reference']['authority'],reference=snapshot['plan_ref']))
         if snapshot['verification_ref'] is not None:roots.append(dict(authority=snapshot['reference']['authority'],reference=snapshot['verification_ref']))
@@ -6642,7 +6673,7 @@ def _acquire_linked_basis(scope,request,observations):
         with changes._authority_guards([Path(a['directory']) for a in pending.values()]),_current_content_acquisition(scope,request):
             snapshots=[_linked_terminal_snapshot(ref) for ref in references];inputs=_linked_inputs(snapshots)
             if acquired is None:acquired=json_object(_raw(observations['observe'](_canonical_freeze(dict(projection=projection,projection_digest=_digest(projection),inputs=inputs,inputs_digest=_digest(inputs))))),limit=MAX_ARTIFACT)
-            roots=_linked_source_refs(acquired)+[dict(authority=s['reference']['authority'],reference=s['plan_ref']) for s in snapshots]
+            roots=_linked_source_refs(acquired)+_linked_delivery_sources(inputs)+[dict(authority=s['reference']['authority'],reference=s['plan_ref']) for s in snapshots]
             roots.extend(dict(authority=s['reference']['authority'],reference=s['verification_ref']) for s in snapshots if s['verification_ref'] is not None)
             expanded,_=_linked_source_closure(roots,list(pending.values()))
             if {_raw(a) for a in expanded}!=set(pending):
@@ -7411,7 +7442,7 @@ def _observe_linked_preparation_member(context,ref,task,basis,certificate,*,read
 
 def _linked_preparation_steps(pointer,authorities,*,writer=None,read_context=None,read_roster=None,serial_members=False):
     """Complete semantic/source facts; recovery interpretation belongs to the outer acquisition."""
-    from runtime import changes,delegation
+    from runtime import changes,delegation,delivery
     content=_linked_contract(pointer)
     selected=content['selected'];context=_reference_context(selected['authority'])
     with _preparation_database(context,writer) as db:
@@ -7431,6 +7462,8 @@ def _linked_preparation_steps(pointer,authorities,*,writer=None,read_context=Non
         with _preparation_database(context,writer) as db:
             task=state._task(db,ref['scope_id'],ref['client'],ref['session_id'],ref['task_id'])
             _require(task is not None and task.get('writer_stop',{}).get('linked'),'Linked preparation needs every independent stop')
+            _require(delivery.retention_requirements(None, db, task, context=context)['retention_complete'],
+                'Known publication or cleanup obligations must retain their original linked task')
             own_basis=_read(None,task['writer_stop']['linked'],context=context,db=db)
             _require(own_basis==basis,'Linked independent member bases differ')
         job=dict(kind='member-certificate',item=dict(reference=ref,pins=task['pins']),basis=basis)
@@ -7884,8 +7917,29 @@ def _check_linked_preparation_certificate(context,db,certificate,*,preparation_r
 
 
 def _linked_inputs(snapshots):
-    return [dict(task=row['reference'], pins=row['task']['pins'], plan_digest=_digest(row['plan']),
-        candidate_digest=_digest(row['candidate'])) for row in snapshots]
+    result = []
+    for row in snapshots:
+        inputs = dict(task=row['reference'], pins=row['task']['pins'], plan_digest=_digest(row['plan']),
+                      candidate_digest=_digest(row['candidate']))
+        if 'delivery' in row['task']:
+            inputs['delivery_plan'] = dict(authority=row['reference']['authority'], artifact=row['task']['delivery']['plan'])
+        result.append(inputs)
+    return result
+
+
+def _linked_delivery_requirements(snapshots):
+    requirements = [row['delivery_requirements'] for row in snapshots]
+    return dict(delivery_required=any(r['delivery_required'] for r in requirements),
+                delivery_complete=all(r['delivery_complete'] for r in requirements),
+                pending=sorted({p for r in requirements for p in r['pending']}),
+                blockers=sorted({b for r in requirements for b in r['blockers']}),
+                waiting_for_merge=any(not r['delivery_complete'] for r in requirements)
+                    and all(r['delivery_complete'] or r['waiting_for_merge'] for r in requirements))
+
+
+def _linked_delivery_sources(inputs):
+    return [dict(authority=row['delivery_plan']['authority'], reference=row['delivery_plan']['artifact'])
+            for row in inputs if 'delivery_plan' in row]
 
 
 def _linked_outcomes(projection, inputs_digest, acquired, snapshots, selected_ref, *, observed=None,require_shared_support=False,consumer=None):
@@ -7996,6 +8050,7 @@ def verify_linked(scope, request, observations):
     The integration caller verifies original scope/source semantics independently.
     The callback is bounded, local and read-only; no public JSON/CLI route exists.
     """
+    from runtime import delivery
     _request(request, ('purpose',), ('reuse','security_impact'))
     request=deepcopy(request)
     _require(request['purpose'] in {'completion','merge-evidence'}, 'Invalid linked verification purpose')
@@ -8034,6 +8089,8 @@ def verify_linked(scope, request, observations):
                 continue
             observed_sources={}
             shared_blockers,delivered,sources,deliveries=_linked_outcomes(projection,facts['inputs_digest'],acquired,snapshots,selected_ref,observed=observed_sources)
+            for source in _linked_delivery_sources(inputs):
+                _linked_source(source, observed=observed_sources);sources.append(source)
             for row in snapshots:
                 _linked_source(dict(authority=row['reference']['authority'],reference=row['verification_ref']),observed=observed_sources)
             blockers=sorted(set(shared_blockers+[message for row in snapshots for message in row['blockers']]))
@@ -8041,6 +8098,8 @@ def verify_linked(scope, request, observations):
             _require(_linked_inputs(final)==inputs and all(a['task']==b['task'] and a['generation']==b['generation']
                 for a,b in zip(final,snapshots)), 'Linked inputs changed before publication')
             selected=next(row for row in final if row['reference']==selected_ref)
+            requirements = _linked_delivery_requirements(final)
+            delivered = delivered and requirements['delivery_complete']
             content=dict(version=1,kind='linked-verification',purpose=request['purpose'],projection=projection,
                 inputs=inputs,inputs_digest=facts['inputs_digest'],observations=acquired,
                 members=[dict(task=s['reference'],revision=s['task']['revision'],generation=s['generation'],
@@ -8073,9 +8132,7 @@ def verify_linked(scope, request, observations):
                     _check_foreign_intents(publication,writer=(_evidence_context(scope),db))
                     current['evidence']['linked_verification']=pointer
                     if not blockers and request['purpose']=='completion':
-                        current['state']='DONE'
-                        for condition in current['conditions']:
-                            if 'continuation' in condition:condition['continuation']['revoked']=True
+                        delivery.apply_completion(current, requirements, True)
                     elif current['state']=='DONE':current['state']='REVIEW'
                     current['revision']+=1
                     state._save(db,state._scope_id(scope),current)
@@ -8083,8 +8140,9 @@ def verify_linked(scope, request, observations):
                     _check_foreign_intent_sources(publication)
             finally:publication.state['active']=False
             break
-    return dict(ok=True,verified=not blockers,implementation_verified=not blockers,delivery_complete=delivered,
-        merge_authority=False,task=current,blockers=blockers,verification=pointer,deliveries=deliveries)
+    delivery_blockers = delivery.completion_blockers(requirements) if request['purpose']=='completion' else []
+    return dict(ok=True,verified=not blockers and not delivery_blockers,implementation_verified=not blockers,delivery_complete=delivered,
+        merge_authority=False,task=current,blockers=blockers+delivery_blockers,verification=pointer,deliveries=deliveries)
 
 
 def _downgrade_linked(scope, task, db):
@@ -8098,6 +8156,7 @@ def _downgrade_linked(scope, task, db):
 
 def _revalidate_linked(scope, task, *, update_ready=False):
     """Recheck retained source/full inputs and optionally downgrade only this claimant."""
+    from runtime import delivery
     pointer=task['evidence'].get('linked_verification')
     try:
         _require(pointer is not None,'Linked verification is missing')
@@ -8130,14 +8189,16 @@ def _revalidate_linked(scope, task, *, update_ready=False):
             for row in snapshots:
                 _linked_source(dict(authority=row['reference']['authority'],reference=row['verification_ref']),observed=observed_sources)
             blockers=sorted(set(content['blockers']+blockers+[message for row in snapshots for message in row['blockers']]))
-            result=dict(implementation_verified=not blockers,delivery_complete=delivered,deliveries=deliveries,blockers=blockers)
+            requirements = _linked_delivery_requirements(snapshots)
+            result=dict(implementation_verified=not blockers,delivery_complete=delivered and requirements['delivery_complete'],
+                deliveries=deliveries,blockers=blockers+delivery.completion_blockers(requirements))
             mutate_ready=update_ready and task['state']=='DONE'
             with state._database(scope,write=mutate_ready) as db:
                 _recheck_linked_rows(scope,db,snapshots)
                 if _recheck_linked_sources(scope,db,content['observations'],snapshots,observed_sources,aggregate=pointer):
                     result['delivery_complete']=False
                     result['deliveries']=[dict(row,status='unknown') for row in result['deliveries']]
-                if mutate_ready and blockers:_downgrade_linked(scope,task,db)
+                if mutate_ready and result['blockers']:_downgrade_linked(scope,task,db)
             return result
     except (StartupError,OSError,ValueError,KeyError,TypeError,RecursionError):
         result=dict(implementation_verified=False,delivery_complete=False,deliveries=[],
@@ -8166,7 +8227,7 @@ def _closed_status(scope,task):
 
 def revalidate_ready(scope, client, session_id):
     """Status captures actual freshness and rechecks shared ownership before returning ready."""
-    from runtime import delegation
+    from runtime import delegation, delivery
     with state._database(scope) as db:
         task = state._task(db, state._scope_id(scope), client, session_id) if db else None
         if task is None or task['state'] != 'DONE' or task.get('lifecycle',{}).get('safe_closed_at') is not None:
@@ -8195,6 +8256,7 @@ def revalidate_ready(scope, client, session_id):
             return
         _require(current['revision'] == request['expected_revision'], 'Ready task revision changed during freshness capture')
         valid = valid and not _ledger_blockers(scope, db, closure) and not _checkout_attempt_blockers(db, scope, current)
+        valid = valid and delivery.completion_requirements(scope, db, current)['delivery_complete']
         if not valid:
             current.update(state='REVIEW', reason='Completion evidence requires freshness verification', reference='evidence:status')
             current['revision'] += 1
@@ -8202,6 +8264,7 @@ def revalidate_ready(scope, client, session_id):
 
 
 def evidence_status(scope, client, session_id):
+    from runtime import delivery
     result = state.task_status(scope, client, session_id)
     result['scope_id'] = state._scope_id(scope)
     task = result['task']
@@ -8219,11 +8282,19 @@ def evidence_status(scope, client, session_id):
             verification = _read(scope, task['evidence']['verification']) if 'verification' in task['evidence'] else {}
             current = verification.get('candidate_digest') == _digest(candidate)
             _, closure, _ = _verification_resources(scope, task, plan)
-            result['evidence'] = dict(candidate_digest=_digest(candidate), blockers=_blockers(scope, task, plan, candidate, 'completion',
+            result['evidence'] = dict(candidate_digest=_digest(candidate), blockers=_blockers(scope, delivery.implementation_task(task), plan, candidate, 'completion',
                 verification.get('reuse', []) if current else [], verification.get('security_impact') if current else None,
                 resource_closure=closure))
+            result['evidence']['implementation_verified'] = bool(current and verification
+                and not verification.get('blockers') and not result['evidence']['blockers'])
         except StartupError:
             result['evidence'] = dict(blockers=['Candidate capture is incomplete, unstable or unavailable'])
     else:
         result['evidence'] = dict(blockers=['Evidence plan is missing'])
+    if task:
+        with state._database(scope) as db:
+            requirements = delivery.completion_requirements(scope, db, task)
+        implementation_blockers = result['evidence']['blockers']
+        result['evidence'].update(requirements, implementation_verified=result['evidence'].get('implementation_verified', False))
+        result['evidence']['blockers'] = sorted(set(implementation_blockers + delivery.completion_blockers(requirements)))
     return result

@@ -598,7 +598,11 @@ def decode_project_record(record) -> CanonicalRecord:
     repositories = _canonical_rows(value["repositories"])
     _canonical_require(bool(repositories))
     for repo in repositories:
-        _canonical_fields(repo, "repository_id primary_root git_common_dir binding membership checkouts")
+        _canonical_fields(repo, "repository_id primary_root git_common_dir binding membership checkouts" +
+                          (" delivery_policy" if "delivery_policy" in repo else ""))
+        if "delivery_policy" in repo:
+            from runtime.delivery import validate_policy
+            validate_policy(repo["delivery_policy"])
         ids.append(_canonical_text(repo["repository_id"], 128))
         primary = _canonical_path(repo["primary_root"])
         common = _canonical_path(repo["git_common_dir"])
@@ -703,6 +707,8 @@ def canonical_scope_projection(record, *, repository_id, checkout_id, client):
         membership=dict(included=included, authorization=membership["authorization"]),
         configuration={k: config[k] for k in ("policy_digest", "runtime_digest", "runtime")},
         shared_policy=sorted((s for s in data["shared_policy"] if s["path"] in config["shared_dependencies"]), key=lambda s: s["path"]))
+    if "delivery_policy" in repo:
+        identity["delivery_policy"] = repo["delivery_policy"]
     return _canonical_freeze(identity)
 
 

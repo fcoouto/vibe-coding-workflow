@@ -432,6 +432,9 @@ class CanonicalLinkedLifecycleTests(unittest.TestCase):
             task=self.task(f); plan=self.api._read(f.scope,task['evidence']['plan'])
             rows.append(dict(task=self.reference(f),pins=task['pins'],plan_digest=self.api._digest(plan),
                 candidate_digest=self.api._digest(self.api.capture_candidate(f.scope,plan))))
+            if 'delivery' in task:
+                rows[-1]['delivery_plan'] = dict(authority=self.reference(f)['authority'],
+                                                 artifact=task['delivery']['plan'])
         return sorted(rows,key=lambda row:self.api._raw(row['task']))
 
 
