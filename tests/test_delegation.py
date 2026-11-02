@@ -1260,6 +1260,29 @@ class AdmissionTests(unittest.TestCase):
         self.assertTrue(retry['launch_admitted'])
         self.assertEqual(self.api.delegation_status(self.scope, 'codex', 'parent')['budgets']['attempts_consumed'], 2)
 
+    def test_reconciliation_reads_ledger_once_per_transaction_around_capture(self):
+        self.plan()
+        prepared = self.prepare()
+        self.observe_worker(prepared)
+        request = self.worker_reconciliation_request(prepared)
+        actual_ledger, actual_capture = self.api._ledger, evidence.capture_candidate
+        captured, reads = [], []
+
+        def ledger(scope, db, **options):
+            reads.append((bool(captured), db.in_transaction))
+            return actual_ledger(scope, db, **options)
+
+        def capture(*args):
+            candidate = actual_capture(*args)
+            captured.append(True)
+            return candidate
+
+        with patch.object(self.api, '_ledger', side_effect=ledger), \
+                patch.object(evidence, 'capture_candidate', side_effect=capture):
+            result = self.api.reconcile_assignment(self.scope, request)
+        self.assertEqual(result['status'], 'settled')
+        self.assertEqual(reads, [(False, True), (True, True)])
+
     def test_reconciliation_race_cannot_release_changed_revision(self):
         from runtime import evidence
         self.plan()
