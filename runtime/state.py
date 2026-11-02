@@ -370,6 +370,36 @@ def _owner_time():
         raise StateError("Owner creation time is unavailable") from None
 
 
+def _capability(scope, task, operation, *, attempt_ref=None):
+    """Consume Core's retained decision; request data cannot issue admission."""
+    from runtime import setup_observation
+    try:
+        keys = setup_observation.OPERATION_CAPABILITIES[operation]
+        decision = setup_observation.require_capability(scope, keys, task=task,
+            operation=operation, attempt_ref=attempt_ref)
+        if (not isinstance(decision, setup_observation._CapabilityAdmission)
+                or decision.issuer is not setup_observation._ISSUER
+                or decision.mode not in ('ordinary', 'qualification')):
+            raise StateError('Capability admission requires its retained owner')
+        if decision.mode == 'ordinary' and operation in ('task-start', 'task-patch'):
+            decision = setup_observation.require_capability(scope, (*keys, 'post-tool-handling'),
+                task=task, operation=operation)
+        if decision.mode == 'qualification':
+            _canonical_ref(_canonical_plain(decision.attempt_ref))
+            if decision.limits is None or decision.original_attempt is None:
+                raise StateError('Qualification admission lost its original limits')
+        return decision
+    except StartupError as error:
+        raise StateError(str(error)) from None
+
+
+def _ordinary_capability(scope, task, operation):
+    decision = _capability(scope, task, operation)
+    if decision.mode != 'ordinary' or 'qualification_attempt' in task:
+        raise StateError('Qualification evidence cannot authorize ordinary readiness or completion')
+    return decision
+
+
 def _artifact_reference(value):
     _fields(value, ("name", "digest"))
     if not isinstance(value["name"], str) or not re.fullmatch(r"[0-9a-f]{32}\.json", value["name"]):
@@ -1862,7 +1892,11 @@ def _task_unaccounted(db, scope_id, client, session, task_id=None, *, historical
 
 def _validate_task(db,scope_id,client,session,task_id,version,task,*,historical=False):
     _fields(task, ("client", "session_id", "task_id", "scope_ref", "mode", "decision_ref", "state", "revision",
-                   "pins", "reason", "reference", "conditions", "turn_id", "turn_uncertain", *(["accepted_identity"] if version == 3 else [])), ("resolution_ref", "evidence", "retirement", "delegation", "milestones", "delivery", *(["lifecycle","writer_stop"] if version == 3 else [])))
+                   "pins", "reason", "reference", "conditions", "turn_id", "turn_uncertain", *(["accepted_identity"] if version == 3 else [])), ("resolution_ref", "evidence", "retirement", "delegation", "milestones", "delivery", *(["lifecycle","writer_stop","qualification_attempt"] if version == 3 else [])))
+    if 'qualification_attempt' in task:
+        _canonical_ref(task['qualification_attempt'])
+        if task['state'] in {'READY', 'DONE'}:
+            raise StateError('Qualification task cannot acquire ordinary readiness or completion')
     if "delivery" in task:
         from runtime.delivery import validate_record
         validate_record(task["delivery"])
@@ -1941,6 +1975,13 @@ def _save(db, scope_id, task):
         original = json_object(previous[0], limit=4 * 1024 * 1024)
         if original.get('state') not in STATES or original.get('pins') != task['pins']:
             raise StateError('Historical task vocabulary and pins cannot be rewritten')
+        if (original.get('qualification_attempt') != task.get('qualification_attempt')
+                or ('qualification_attempt' in original) != ('qualification_attempt' in task)):
+            raise StateError('Original qualification purpose is immutable')
+    if 'qualification_attempt' in task:
+        _canonical_ref(task['qualification_attempt'])
+        if task['state'] in {'READY', 'DONE'}:
+            raise StateError('Qualification task cannot acquire ordinary readiness or completion')
     if 'milestones' in task:_milestones(task['milestones'])
     _task_projection(db, scope_id, task)
     if task["pins"]["schema_version"] == 3:
@@ -2046,12 +2087,14 @@ def _guard_assignments(db, scope, client, session):
 
 
 def start_task(scope, request):
-    _fields(request, ("client", "session_id", "task_id", "scope_ref", "mode", "decision_ref"), ("replaces",))
+    _fields(request, ("client", "session_id", "task_id", "scope_ref", "mode", "decision_ref"), ("replaces", "attempt_ref"))
     _identity(request, allow_claude=request.get("client") == "claude-code")
     _require_claude_scope(scope, request["client"])
     _text(request["decision_ref"], "decision_ref")
     if request["mode"] not in ("read-only", "editable"):
         raise StateError("Invalid task mode")
+    if 'attempt_ref' in request:
+        _canonical_ref(request['attempt_ref'])
     replacement = request.get("replaces")
     if "replaces" in request:
         _fields(replacement, ("task_id", "expected_revision"))
@@ -2090,6 +2133,8 @@ def start_task(scope, request):
             _compatible(scope, current)
             if any(current[field] != request[field] for field in ("scope_ref", "mode", "decision_ref")):
                 raise StateError("Task mode, scope and decision reference are immutable")
+            if 'attempt_ref' in request and request['attempt_ref'] != current.get('qualification_attempt'):
+                raise StateError('Task cannot select another qualification attempt')
             return _status(db, scope, request["client"], request["session_id"])
         if db.execute("select 1 from tasks where scope_id=? and client=? and session_id=? and task_id=?",
                       (scope_id, request["client"], request["session_id"], request["task_id"])).fetchone():
@@ -2113,6 +2158,9 @@ def start_task(scope, request):
                     conditions=[], turn_id=None, turn_uncertain=True)
         if isinstance(scope, AcceptedScope):
             task["accepted_identity"] = _accepted_identity(scope.accepted_identity)
+        admission = _capability(scope, task, 'task-start', attempt_ref=request.get('attempt_ref'))
+        if admission.mode == 'qualification':
+            task['qualification_attempt'] = _canonical_plain(admission.attempt_ref)
         _save(db, scope_id, task)
         db.execute("insert or replace into bindings values(?,?,?,?)", (scope_id, request["client"], request["session_id"], request["task_id"]))
         return _status(db, scope, request["client"], request["session_id"])
@@ -2179,6 +2227,8 @@ def update_task(scope, request):
             (old_state in {'WAITING','BLOCKED','PAUSED'} and state in {'TRIAGE','READY','WORKING','REVIEW'} and 'resolution_ref' in request))
         if old_state == 'CANCELLED' or not allowed:
             raise StateError("Task state transition is not allowed")
+        if state == 'READY':
+            _ordinary_capability(scope, task, 'task-ready')
         task.update(state=state, reason=request["reason"], reference=request["reference"])
         if 'milestones' in request:task['milestones']=_milestones(request['milestones'])
         if "resolution_ref" in request:
@@ -2255,6 +2305,14 @@ def process_event(scope, event):
                 return HookResult(event.kind,'context','Terminal task remains closed; external completion freshness was observed')
             result, changes = evaluate(event, dict(task=task, turn={"task_id": row[0], "continuation_consumed": row[1]} if row else None,
                                                    receipt={"fingerprint": receipt[0], "conflicted": receipt[1]} if receipt else None))
+            if guarded_mutation(event) and result.action != 'deny':
+                admission = _capability(scope, task, 'task-patch')
+                from runtime import delegation
+                delegation._qualification_event_allocation(scope, db, task, admission, event)
+            if result.action == 'continue':
+                admission = _capability(scope, task, 'task-continue')
+                from runtime import delegation
+                delegation._qualification_event_allocation(scope, db, task, admission, event)
             if changes["generation_delta"]:
                 _checkout_row(db, scope, initialize=True)
                 db.execute("update checkouts set generation=generation+? where scope_id=?", (changes["generation_delta"], scope_id))

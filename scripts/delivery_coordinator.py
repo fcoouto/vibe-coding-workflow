@@ -26,6 +26,11 @@ class DeliveryOperationOwner:
             and scope.accepted_scope_digest == decision['accepted_scope_digest']
             and action == decision['action'] and evidence._digest(request) == decision['request_digest'],
             'Delivery operation differs from independently verified scope or decision')
+        if action in {'ready', 'merge', 'settle'}:
+            with state._database(scope) as db:
+                task = evidence._task(db, scope, request, revision=False)
+                state._ordinary_capability(scope, task,
+                    'delivery-ready' if action == 'ready' else 'delivery-merge')
 
     def run(self, scope, action: str, request: dict) -> dict:
         self.authorize(scope, action, request)

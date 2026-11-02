@@ -2,6 +2,7 @@
 
 import hashlib
 from contextvars import ContextVar
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
@@ -29,10 +30,38 @@ HASH = re.compile(r"sha256:[0-9a-f]{64}(?:/sha256:[0-9a-f]{64})?\Z")
 SOURCES = {"system", "user", "project", "mdm", "sessionFlags", "plugin", "cloudRequirements",
            "cloudManagedConfig", "legacyManagedConfigFile", "legacyManagedConfigMdm", "unknown"}
 _HOOK_STREAM = ContextVar('hook_stream', default=None)
+_NATIVE_WITNESS_ISSUER = object()
 
 
 class ObservationError(Exception):
     """Fixed status only; child output and OS exception messages stay private."""
+
+
+@dataclass(frozen=True, init=False, slots=True, repr=False)
+class NativeSetupWitness:
+    """Native facts only; Core owns semantic assessment and setup acceptance."""
+
+    _content: object
+    _issuer: object
+
+    def __init__(self, content, *, _issuer=None):
+        if _issuer is not _NATIVE_WITNESS_ISSUER:
+            raise ObservationError("unissued_native_witness")
+        from runtime.startup import _canonical_freeze
+        try:
+            raw = json.dumps(content, allow_nan=False).encode()
+            frozen = _canonical_freeze(json_object(raw, limit=MAX_OUTPUT))
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            raise ObservationError("invalid_native_witness") from None
+        object.__setattr__(self, '_content', frozen)
+        object.__setattr__(self, '_issuer', _issuer)
+
+
+def _native_witness_content(witness):
+    if type(witness) is not NativeSetupWitness or getattr(witness, '_issuer', None) is not _NATIVE_WITNESS_ISSUER:
+        raise ObservationError("unissued_native_witness")
+    from runtime.startup import _canonical_plain
+    return _canonical_plain(witness._content)
 
 
 class HookCollector:
@@ -105,7 +134,8 @@ class HookCollector:
 class NativeProcess:
     """Own one child, bounded nonblocking stdout, and no inherited stderr output."""
 
-    def __init__(self, argv, deadline, *, on_notification=None, stdin=subprocess.PIPE):
+    def __init__(self, argv, deadline, *, on_notification=None, stdin=subprocess.PIPE,
+                 cwd=None, env=None, start_new_session=False, pass_fds=()):
         """A trusted synchronous observer must obey the deadline and handle private payloads."""
         if on_notification is not None and not callable(on_notification):
             raise ObservationError("invalid_observer")
@@ -113,12 +143,21 @@ class NativeProcess:
             raise ObservationError("timeout")
         self.on_notification = on_notification
         self.argv = tuple(argv)
+        self.launch_cwd = str(Path(os.fsdecode(cwd) if cwd is not None else os.getcwd()).resolve())
+        launch_environment = os.environ if env is None else env
+        home = launch_environment.get('CODEX_HOME')
+        if not home and isinstance(launch_environment.get('HOME'), str) and launch_environment['HOME']:
+            home = str(Path(launch_environment['HOME'])/'.codex')
+        self.launch_codex_home = str(Path(home).resolve()) if isinstance(home, str) and Path(home).is_absolute() else None
         self.identity = None
+        self.response_source = None
+        self._stdout_offset = 0
         self.deadline = deadline
         self.buffer = b""
         self.bytes_read = 0
         self.process = subprocess.Popen(argv, stdin=stdin, stdout=subprocess.PIPE,
-                                        stderr=subprocess.DEVNULL, bufsize=0)
+                                        stderr=subprocess.DEVNULL, bufsize=0, cwd=cwd, env=env,
+                                        start_new_session=start_new_session, pass_fds=pass_fds)
         self.selector = selectors.DefaultSelector()
         os.set_blocking(self.process.stdout.fileno(), False)
         self.selector.register(self.process.stdout, selectors.EVENT_READ)
@@ -145,6 +184,35 @@ class NativeProcess:
         if self.bytes_read > MAX_OUTPUT:
             raise ObservationError("output_limit")
         return chunk
+
+    def cli_header(self):
+        """Read the original exec JSON header without assigning an RPC identity."""
+        if (self.identity is not None or self.bytes_read or self.buffer or len(self.argv) < 3
+                or self.argv[1] != 'exec' or '--json' not in self.argv[2:]):
+            raise ObservationError("cli_source_unverified")
+        deadline = min(self.deadline, time.monotonic()+RPC_TIMEOUT)
+        while b'\n' not in self.buffer:
+            chunk = self.read(deadline)
+            if not chunk:
+                raise ObservationError("unavailable")
+            self.buffer += chunk
+            if len(self.buffer.split(b'\n', 1)[0]) > MAX_INPUT:
+                raise ObservationError("output_limit")
+        raw, self.buffer = self.buffer.split(b'\n', 1)
+        self._stdout_offset += len(raw)+1
+        try:
+            header = json_object(raw)
+            thread = header.get('thread_id')
+            if (set(header) != {'type', 'thread_id'} or header['type'] != 'thread.started'
+                    or not isinstance(thread, str) or not thread.strip() or len(thread) > 256
+                    or not thread.isprintable()):
+                raise ValueError
+        except (ValueError, RecursionError, UnicodeError):
+            raise ObservationError("malformed_cli_header") from None
+        from runtime.startup import _canonical_freeze
+        return _canonical_freeze(dict(thread_id=thread, source=dict(
+            reference=f'native-process:{self.process.pid}#stdout:0:{len(raw)+1}',
+            sha256=hashlib.sha256(raw+b'\n').hexdigest())))
 
     def send(self, message):
         # Read RPCs only; native hook enumeration may initialize its own trust baselines.
@@ -176,6 +244,8 @@ class NativeProcess:
                 if len(self.buffer) > response_limit:
                     raise ObservationError("output_limit")
             raw, self.buffer = self.buffer.split(b"\n", 1)
+            offset = self._stdout_offset
+            self._stdout_offset += len(raw)+1
             try:
                 response = json_object(raw, limit=response_limit)
             except (ValueError, RecursionError, UnicodeError):
@@ -203,6 +273,10 @@ class NativeProcess:
                 validate_initialize(response['result'])
                 self.identity = {key: response['result'][key] for key in
                     ('codexHome', 'platformFamily', 'platformOs', 'userAgent')}
+            from runtime.startup import _canonical_freeze
+            self.response_source = _canonical_freeze(dict(
+                reference=f'native-process:{self.process.pid}#stdout:{offset}:{len(raw)+1}',
+                sha256=hashlib.sha256(raw+b'\n').hexdigest()))
             return response["result"]
 
 

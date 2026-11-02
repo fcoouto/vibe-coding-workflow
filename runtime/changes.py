@@ -17,6 +17,7 @@ import stat
 import sqlite3
 import subprocess
 import threading
+import time
 import unicodedata
 import uuid
 
@@ -504,7 +505,7 @@ def _journal(path, *, file_only=False):
     except FileNotFoundError:
         return None
     result = d3.read_request(raw, limit=MAX_JOURNAL)
-    d3._object(result, ("schema_version", "transaction_id", "manifest_digest", "manifest", "approval", "plan", "state", "receipts", "enrollment", "blocked", "directories", "observations"), ("birth", "setup_receipts") if result.get("schema_version") == 2 else ())
+    d3._object(result, ("schema_version", "transaction_id", "manifest_digest", "manifest", "approval", "plan", "state", "receipts", "enrollment", "blocked", "directories", "observations"), ("birth", "setup_receipts", "qualification_scope") if result.get("schema_version") == 2 else ())
     if result.get("schema_version") == 2:
         return _scoped_journal_shape(result, file_only=file_only)
     d3._require(result["schema_version"] == 1 and result["state"] in
@@ -5200,10 +5201,13 @@ def inspect_lifecycle_recovery(authorities,task_refs):
 
 
 def _scoped_journal_shape(journal, *, file_only=False):
-    d3._object(journal, ("schema_version", "transaction_id", "manifest_digest", "manifest", "approval", "plan", "state", "receipts", "enrollment", "blocked", "directories", "observations"), ("birth", "setup_receipts"))
+    d3._object(journal, ("schema_version", "transaction_id", "manifest_digest", "manifest", "approval", "plan", "state", "receipts", "enrollment", "blocked", "directories", "observations"), ("birth", "setup_receipts", "qualification_scope"))
     d3._require(type(journal["schema_version"]) is int and journal["schema_version"] == 2 and journal["manifest_digest"] == d3._digest(journal["manifest"])
                 and journal["state"] in ("prepared", "applying", "interrupted", "applied", "blocked", "rollback_partial", "rolled_back"), "Invalid scoped journal")
     d3._require(isinstance(journal["receipts"], dict) and isinstance(journal["directories"], dict) and isinstance(journal["observations"], list), "Invalid scoped recovery containers")
+    if 'qualification_scope' in journal:
+        from runtime.setup_observation import _authorization_shape
+        _authorization_shape(journal['qualification_scope'])
     if 'setup_receipts' in journal:
         from runtime.setup_observation import receipt_shape
         d3._require(isinstance(journal['setup_receipts'], dict) and len(journal['setup_receipts']) <= 64, 'Invalid owner setup receipt collection')
@@ -5229,7 +5233,15 @@ def _scoped_journal_shape(journal, *, file_only=False):
     if not file_only:
         for observation in journal["observations"]: _scoped_observation_shape(observation,journal["manifest"])
     for identity, receipt in journal["receipts"].items():
-        d3._object(receipt, ("owner", "status", "files", "returncode"), ("command",))
+        d3._object(receipt, ("owner", "status", "files", "returncode"), ("command", "setup_capture"))
+        if 'setup_capture' in receipt:
+            from runtime.setup_observation import _capture_shape
+            _capture_shape(receipt['setup_capture'])
+            d3._require('command' in receipt and receipt['setup_capture']['origin'] == dict(
+                transaction_id=journal['transaction_id'],action_id=identity,attempt_id=receipt['command']['attempt_id']),
+                'Native source lost its original command claim')
+            d3._require(receipt['setup_capture']['launch']['command_digest']==d3._digest(actions[identity]['execution']),
+                'Native source changed its original exact command')
         d3._require(receipt["owner"] == actions[identity]["owner"] and receipt["status"] in ("prepared", "started", "completed", "rolled_back"), "Invalid scoped receipt owner/status")
         d3._require(len(receipt["files"]) == len(actions[identity]["effects"]), "Incomplete scoped backup coverage")
         if "command" in receipt:
@@ -5507,7 +5519,7 @@ def _scoped_owned_authority(journal):
     return not any(p["status"] == "published" for p in enrollment["postimages"]) and current == enrollment["before"]["target"]
 
 
-def _scoped_apply_action(path, journal, action, original, observation, checkout_lock):
+def _scoped_apply_action(path, journal, action, original, observation, checkout_lock, *, observer_owner=None):
     root = Path(action["owner"]["root"])
     if action["recovery"] != "file-preimages" or not action["effects"]:
         raise Pending("Scoped operation lacks complete bounded recoverable effects")
@@ -5515,6 +5527,10 @@ def _scoped_apply_action(path, journal, action, original, observation, checkout_
     if action["resources"] != expected_resources or original["kind"] == "external":
         raise Pending("Shared/global or external effects require manual serialization")
     receipt = journal["receipts"].get(action["id"])
+    allocation = (observer_owner.setup_command_allocation(action,journal)
+        if original['kind'] == 'command' and callable(getattr(observer_owner,'setup_command_allocation',None)) else None)
+    setup_action = any(attempt['task'] is None and attempt.get('command_action') == action['id']
+        for attempt in journal.get('qualification_scope',{}).get('attempts',[]))
     for assessment in d3._assessments(journal["plan"]["assessments"]):
         for decision in assessment["decisions"]:
             if decision["disposition"] in ("pending","proposed") and (d3._qualified(assessment["owner"],decision["id"]) in original["decision_ids"] or action["id"] in decision["affected_actions"]):
@@ -5558,6 +5574,10 @@ def _scoped_apply_action(path, journal, action, original, observation, checkout_
                 _save(path, journal); return
             if not action["execution"]["idempotency"] or actual != [e["before"] for e in action["effects"]]:
                 raise Pending("Scoped command outcome requires reviewed manual recovery")
+            if allocation is not None or setup_action:
+                raise Pending('Original bootstrap command allocation is consumed; do not relaunch it')
+        if setup_action and allocation is None:
+            raise Pending('Original bootstrap command requires its trusted observer and finite allocation')
         cwd_target=d3._physical_target(root,Path(action["execution"]["cwd"]),None,{"paths":0,"bytes":0},directory=True)
         d3._require(cwd_target == action["execution"]["cwd_target"], "Actual command cwd physical identity changed")
         receipt["command"] = dict(attempt_id=uuid.uuid4().hex, stopped=False); receipt["status"] = "started"; _save(path, journal)
@@ -5572,11 +5592,39 @@ def _scoped_apply_action(path, journal, action, original, observation, checkout_
                 "Scoped command effect preimage or physical identity changed before launch")
         d3._require(d3._physical_target(root,Path(action["execution"]["cwd"]),None,{"paths":0,"bytes":0},directory=True)
             == action["execution"]["cwd_target"], "Actual command cwd physical identity changed before launch")
-        process = subprocess.Popen(action["execution"]["argv"], cwd=action["execution"]["cwd"], env={k:v for k,v in os.environ.items() if not k.startswith("GIT_")},
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True, pass_fds=(checkout_lock,))
-        try: receipt["returncode"] = process.wait(timeout=action["execution"]["timeout_seconds"])
-        except subprocess.TimeoutExpired:
-            process.kill(); process.wait(); receipt["returncode"] = process.returncode
+        if allocation is not None:
+            from runtime.doctor import NativeProcess, ObservationError
+            deadline = min(time.monotonic()+action['execution']['timeout_seconds'],
+                time.monotonic()+max(0,allocation['limits']['deadline']-time.time()))
+            process = None
+            observation_failed = False
+            try:
+                process = NativeProcess(action['execution']['argv'],deadline,cwd=action['execution']['cwd'],
+                    env={k:v for k,v in os.environ.items() if not k.startswith('GIT_')},
+                    start_new_session=True,pass_fds=(checkout_lock,),stdin=(subprocess.PIPE
+                        if tuple(allocation['operations']) == ('observe-setup-metadata',) else subprocess.DEVNULL))
+                observer_owner.observe_setup_command(process,path,journal,action,receipt['command']['attempt_id'])
+                if tuple(allocation['operations']) == ('observe-setup-metadata',):
+                    process.process.stdin.close()
+                process.buffer = b''
+                while process.read(deadline):pass
+                process.process.wait(timeout=max(0,deadline-time.monotonic()))
+            except (ObservationError,subprocess.TimeoutExpired):
+                observation_failed = True
+            finally:
+                try:
+                    if process is not None:process.close()
+                finally:
+                    if process is not None:receipt['returncode'] = process.process.poll()
+                    _save(path,journal)
+            if observation_failed:
+                raise Pending('Owned setup command observation is unavailable; reconcile its original consumed claim') from None
+        else:
+            process = subprocess.Popen(action["execution"]["argv"], cwd=action["execution"]["cwd"], env={k:v for k,v in os.environ.items() if not k.startswith("GIT_")},
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True, pass_fds=(checkout_lock,))
+            try: receipt["returncode"] = process.wait(timeout=action["execution"]["timeout_seconds"])
+            except subprocess.TimeoutExpired:
+                process.kill(); process.wait(); receipt["returncode"] = process.returncode
         if [_fingerprint(root,e["path"]) for e in action["effects"]] == [e["after"] for e in action["effects"]]:
             for effect,file in zip(action["effects"],receipt["files"]):
                 file["owned_target"]=_scoped_target(root,effect["path"]); file["result_binding"]=file["owned_target"]["binding"]
@@ -5862,7 +5910,8 @@ def _run_scoped(plan_dir, request, operation, *, host=None, entry_authorizer=Non
                         if originals[action["id"]]["target"] != str(PROJECT_FILE):
                             _scoped_writers(writer_locations, affected_roots, affected_git, changed_paths=changed_paths, live_only=file_only)
                             if not file_only and journal.get('birth'):_birth_current_history(m['enrollment']['record'],journal['birth']['intent']['history'])
-                            _scoped_apply_action(path, journal, action, originals[action["id"]], observation, descriptors.get(action["owner"].get("git_dir")))
+                            _scoped_apply_action(path, journal, action, originals[action["id"]], observation, descriptors.get(action["owner"].get("git_dir")),
+                                observer_owner=getattr(host,'owner',None) if entry_authorizer is not None else None)
                         completed.add(action["id"])
                     except Pending as error:
                         journal["blocked"].append(dict(id=action["id"], reason=str(error)))
@@ -5882,10 +5931,13 @@ def _run_scoped(plan_dir, request, operation, *, host=None, entry_authorizer=Non
             _save(path, journal)
             unsettled = any(r.get("command") and not r["command"]["stopped"] for r in journal["receipts"].values())
             if not unsettled:settle_sources()
+            from runtime.setup_observation import _coverage
             return dict(transaction_id=journal["transaction_id"],state=journal["state"],exit_code=0 if journal["state"] in ("applied","rolled_back") else 2,
                         blocked=deepcopy(journal["blocked"]),members=deepcopy(journal["enrollment"]["members"]),
                         activation_status="active" if operation != "rollback" and journal["enrollment"]["members"] and all(m["status"]=="active" for m in journal["enrollment"]["members"]) else "configured",
-                        qualified=operation != "rollback" and bool(journal["enrollment"]["members"]) and all(m["status"]=="active" for m in journal["enrollment"]["members"]) and journal["state"] == "applied")
+                        qualified=operation != "rollback" and bool(journal["enrollment"]["members"]) and all(m["status"]=="active" for m in journal["enrollment"]["members"]) and journal["state"] == "applied"
+                            and all(_coverage(receipt)[1]
+                                for receipt in journal.get('setup_receipts',{}).values()))
     except (StartupError, OSError, ValueError, TypeError, KeyError, sqlite3.Error) as error:
         owned=ownership["journal"]
         reason=str(error) if isinstance(error,StartupError) else "Scoped input or state is unavailable"
@@ -5910,7 +5962,7 @@ def _scoped_qualification(journal, observation, record, *, published=False):
         for row in proof["requirements"]:
             d3._object(row,("id","evidence")); d3._require(row["id"] not in seen and row["id"] in rule["requirements"], "Unknown or duplicate qualification requirement")
             seen.add(row["id"]); d3._require(_evidence(row["evidence"],many=True), "Empty mandatory qualification evidence")
-        if not set(rule["requirements"]) <= seen or not _evidence(proof["general_review"],many=True) or rule["security_required"] and not _evidence(proof["security_review"],many=True):
+        if not _evidence(proof["general_review"],many=True) or rule["security_required"] and not _evidence(proof["security_review"],many=True):
             raise Pending("Mandatory general/security/member qualification is incomplete")
         assessment = next(a for a in journal["plan"]["assessments"]["repositories"] if (a["owner"]["repository_id"],a["owner"]["checkout_id"]) == key[:2])
         d3._require(all(assessment["semantic_assessment"].get(k) for k in ("complete","catalog_complete","conflicts_checked","instructions_checked","source_provenance_checked")), "Complete member semantic adoption assessment is required")
@@ -5919,6 +5971,7 @@ def _scoped_qualification(journal, observation, record, *, published=False):
         facts = deepcopy(proof["scope_observations"])
         d3._object(facts,("authority","observation","client","installed"))
         d3._require(facts["client"] == key[2], "Qualification selected another client")
+        partial = False
         if key[2] == 'codex':
             facts['installed'] = dict(policy_digest=policy_digest(task_state.PACKAGE), runtime_digest=task_state.runtime_fingerprint(),
                 clients=[key[2]] if (task_state.PACKAGE/'clients'/(key[2]+'.md')).is_file() else [], package_root=str(task_state.PACKAGE))
@@ -5927,6 +5980,10 @@ def _scoped_qualification(journal, observation, record, *, published=False):
                 cwd=facts['observation']['root'], pending_journal=journal)
             if facts['observation']['qualification'] is None:
                 raise Pending('Actual retained owner setup qualification is unavailable')
+            capabilities = facts['observation']['qualification'].get('capabilities')
+            partial = capabilities is not None and not capabilities['complete']
+        if not partial and not set(rule['requirements']) <= seen:
+            raise Pending('Mandatory general/security/member qualification is incomplete')
         root = Path(record["project_root"])
         actual = _scoped_target(root,str(PROJECT_FILE))
         if published:
