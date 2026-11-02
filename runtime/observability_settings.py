@@ -1,7 +1,6 @@
 """Checkout-scoped connection consent, separate from task evidence and collection."""
 
 from contextlib import contextmanager
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -41,19 +40,19 @@ def _private(info, *, directory=False):
 
 
 def _authority(scope):
-    # Public startup currently supports legacy Codex checkout scope only.
-    if type(scope) is not startup.ProjectScope:
+    if (type(scope) is not startup.AcceptedScope or scope.client != "codex"
+            or scope.runtime is None or scope.runtime.schema_version != 3):
         raise SettingsError("unsupported_observability_scope")
-    current = startup.resolve_project(SimpleNamespace(client="codex", cwd=scope.repository_root), PACKAGE)
+    current = startup._entry_scope(startup.acquire_project_entry(
+        SimpleNamespace(client="codex", cwd=scope.repository_root), PACKAGE))
     if current != scope:
         raise SettingsError("observability_scope_changed")
     path = state._path(scope)
     state._private(path.parent, True)
     state._private(path)
-    binding = dict(scope_id=state._scope_id(scope), policy_digest=scope.policy_digest,
-        enrollment_digest=hashlib.sha256(json.dumps(startup.read_record(scope.repository_root),
-            sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
-        repository=_identity(scope.repository_root.lstat()), git_common=_identity(scope.git_common_dir.lstat()),
+    # Configuration identity excludes qualification; consent also binds its accepted receipt.
+    binding = dict(scope_id=state._scope_id(scope), accepted_scope_digest=scope.accepted_scope_digest,
+        qualification_digest=startup._canonical_digest(startup._canonical_plain(scope.qualification_provenance)),
         authority_directory=_identity(path.parent.lstat()), authority_database=_identity(path.lstat()))
     with state._database(scope) as database:
         if database is None or state._checkout_row(database, scope) is None:

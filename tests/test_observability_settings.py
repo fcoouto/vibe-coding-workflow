@@ -11,7 +11,6 @@ from unittest.mock import patch
 
 from runtime import startup, state
 from tests import test_runtime
-from tests.test_langfuse import protocol_server
 
 
 PACKAGE = Path(__file__).resolve().parents[1]
@@ -25,8 +24,15 @@ class ObservabilitySettingsTests(unittest.TestCase):
         self.fixture = test_runtime.RuntimeTests(methodName="runTest")
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
-        self.fixture.enroll(runtime=self.fixture.runtime())
-        self.scope = startup.resolve_project(SimpleNamespace(client="codex", cwd=self.fixture.repo), PACKAGE)
+        self.fixture.canonical()
+        self.scope = self.fixture.scope
+        original_acquire = startup.acquire_project_entry
+        observation = json.loads(self.fixture.test_acquisition.read_bytes())['observation']
+        qualifier = lambda record, facts: observation
+        acquisition = patch.object(startup, 'acquire_project_entry', side_effect=lambda *args, **kwargs:
+            original_acquire(*args, **(kwargs | dict(qualifier=qualifier))))
+        acquisition.start()
+        self.addCleanup(acquisition.stop)
         state.start_task(self.scope, dict(client="codex", session_id="session-1", task_id="settings-fixture",
             scope_ref="user:fixture", mode="read-only", decision_ref="user:fixture"))
         self.directory = self.scope.runtime.state_dir / "observability"
@@ -54,8 +60,7 @@ class ObservabilitySettingsTests(unittest.TestCase):
             "langfuse_project_id", "desired_opt_in", "connection_verified_at"})
 
     def test_uninitialized_authority_is_never_bootstrapped(self):
-        uninitialized = replace(self.scope, runtime=startup.RuntimeSettings(2, self.fixture.base / "missing-state"))
-        self.fixture.enroll(runtime=self.fixture.runtime(uninitialized.runtime.state_dir))
+        uninitialized = replace(self.scope, runtime=startup.RuntimeSettings(3, self.fixture.base / "missing-state"))
         for operation, request in ((self.settings.configure, CONFIGURE), (self.settings.status, None)):
             with self.subTest(operation=operation.__name__), self.assertRaises(self.settings.SettingsError):
                 operation(uninitialized, request) if request else operation(uninitialized)
@@ -135,6 +140,21 @@ class ObservabilitySettingsTests(unittest.TestCase):
         (moved / ".vibe-coding-workflow").rename(self.fixture.repo / ".vibe-coding-workflow")
         with self.assertRaises(self.settings.SettingsError):
             self.settings.status(self.scope)
+
+    def test_changed_canonical_authority_during_key_lookup_prevents_account_access(self):
+        self._select_os_store()
+        def load(*args):
+            authority = self.scope.authority_path
+            replacement = authority.with_name('changed-authority.json')
+            replacement.write_bytes(authority.read_bytes())
+            replacement.chmod(authority.stat().st_mode & 0o777)
+            replacement.replace(authority)
+            return ('pk-lf-synthetic', 'sk-lf-synthetic')
+        with patch('runtime.observability_credentials.load', side_effect=load), \
+                patch('runtime.langfuse.verify_project', side_effect=AssertionError('account')):
+            with self.assertRaises(self.settings.SettingsError):
+                self.settings.enable(self.scope, dict(expected_revision=1))
+        self.assertFalse(json.loads(self.path.read_bytes())['desired_opt_in'])
 
     def test_unsafe_config_files_and_private_parent_are_rejected(self):
         self.settings.configure(self.scope, CONFIGURE)
@@ -257,18 +277,20 @@ class ObservabilitySettingsTests(unittest.TestCase):
         self.assertEqual({path.suffix for path in self.directory.iterdir()}, {".json", ".lock"})
 
     def _probe_with_changed_owner(self, change):
-        with protocol_server() as server:
-            self.settings.configure(self.scope, dict(CONFIGURE, destination=server.url))
+        self.settings.configure(self.scope, CONFIGURE)
+        with patch('runtime.langfuse.verify_project', return_value=None):
             self.settings.enable(self.scope, dict(expected_revision=1))
-            changes = []
-            def during_verification():
-                change()
-                changes.append(True)
-            server.on_projects = during_verification
-            with patch("runtime.langfuse.READ_ATTEMPTS", 1), self.assertRaises(self.settings.SettingsError):
-                self.settings.probe(self.scope, dict(expected_revision=2))
-            self.assertEqual(changes, [True])
-            self.assertFalse(any(request["method"] == "POST" for request in server.requests))
+        changes = []
+        def request(method, path, body=None):
+            self.assertEqual((method, path), ('GET', '/api/public/projects'))
+            change()
+            changes.append(True)
+            return dict(data=[dict(id='lf-project')])
+        with patch.dict(os.environ, LANGFUSE_PUBLIC_KEY='pk-lf-synthetic', LANGFUSE_SECRET_KEY='sk-lf-synthetic'), \
+                patch('runtime.langfuse._Connection.request', side_effect=request), \
+                self.assertRaises(self.settings.SettingsError):
+            self.settings.probe(self.scope, dict(expected_revision=2))
+        self.assertEqual(changes, [True])
 
     def test_probe_cannot_post_if_configuration_is_disabled_during_verification(self):
         def disable_configuration():

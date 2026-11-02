@@ -2,7 +2,7 @@
 
 Load only for selected Langfuse setup, connection checks, probes or forwarding questions. Follow the common procedure for authorization, payload scope and evidence; this reference adds provider-specific controls.
 
-Current canonical activation is unavailable. Follow the common procedure's port boundary before configuration, key entry or account access. Provider details below describe the reviewed source contract, not current-main readiness.
+Local connection controls require a current qualified canonical checkout. Follow the common procedure's scope and consent checks before configuration, key entry or account access. Fake local fixtures do not qualify installed clients, native OS stores or accounts.
 
 ## Select a destination
 

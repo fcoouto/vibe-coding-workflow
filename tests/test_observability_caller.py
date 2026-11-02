@@ -24,9 +24,10 @@ class ObservabilityCallerTests(unittest.TestCase):
         self.fixture = test_runtime.RuntimeTests(methodName='runTest')
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
-        self.fixture.enroll(runtime=self.fixture.runtime())
-        self.scope = startup.resolve_project(
-            SimpleNamespace(client='codex', cwd=self.fixture.repo), SCRIPT.parent.parent)
+        self.fixture.canonical()
+        self.scope = self.fixture.scope
+        self.original_acquire = startup.acquire_project_entry
+        self.observation = json.loads(self.fixture.test_acquisition.read_bytes())['observation']
         state.start_task(self.scope, dict(client='codex', session_id='session-1', task_id='caller-task',
             scope_ref='user:fixture', mode='read-only', decision_ref='user:fixture'))
         self.report = state.task_status(self.scope, 'codex', 'session-1')
@@ -39,7 +40,8 @@ class ObservabilityCallerTests(unittest.TestCase):
             args.append('--prepare-observability')
         output = io.StringIO()
         with patch.object(sys, 'path', list(sys.path)), patch.object(sys, 'argv', args), redirect_stdout(output), \
-                patch.object(startup, 'resolve_project', return_value=self.scope), \
+                patch.object(startup, 'acquire_project_entry', side_effect=lambda *args, **kwargs:
+                    self.original_acquire(*args, **(kwargs | dict(qualifier=lambda record, facts: self.observation)))), \
                 patch.object(state, 'task_status', return_value=self.report, side_effect=source_error) as source:
             namespace = runpy.run_path(str(SCRIPT))
             code = namespace['control_main']()

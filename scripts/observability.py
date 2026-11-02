@@ -38,7 +38,7 @@ def main():
         return 1
     from runtime import langfuse, observability_settings as settings
     from runtime.observability_credentials import CredentialError
-    from runtime.startup import StartupError, json_object, resolve_project
+    from runtime.startup import StartupError, json_object, acquire_project_entry, _entry_scope, AcceptedScope
 
     class Parser(argparse.ArgumentParser):
         def error(self, message):
@@ -63,8 +63,9 @@ def main():
             request = json_object(raw or b"{}", limit=settings.MAX_CONFIG)
         if args.action == "status" and request:
             raise StartupError("invalid_observability_status_request")
-        scope = resolve_project(SimpleNamespace(client="codex", cwd=Path(args.cwd)), PACKAGE)
-        if scope is None or scope.runtime is None:
+        scope = _entry_scope(acquire_project_entry(SimpleNamespace(client="codex", cwd=Path(args.cwd)), PACKAGE))
+        if (type(scope) is not AcceptedScope or scope.client != "codex" or scope.runtime is None
+                or scope.runtime.schema_version != 3):
             raise StartupError("existing_enrolled_runtime_required")
         if args.action == "status":
             result = settings.status(scope)

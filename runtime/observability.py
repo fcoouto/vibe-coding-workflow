@@ -2,9 +2,10 @@
 
 import re
 
+from runtime.task_statuses import STATES
+
 
 # Do not import core validators: importing state also loads mutation-capable owners.
-_STATES = {'planned', 'active', 'awaiting_user', 'blocked', 'verifying', 'ready', 'cancelled'}
 _GAPS = ('source_authenticity_unverified', 'source_freshness_unverified',
          'export_eligibility_unverified', 'current_readiness_unverified')
 
@@ -53,7 +54,7 @@ def _task(value, gaps):
         return None
     _object(value, ('client', 'session_id', 'task_id', 'state', 'revision', 'pins'), limit=32)
     client, status = _text(value['client']), _text(value['state'])
-    _require(client in ('codex', 'claude-code') and status in _STATES)
+    _require(client in ('codex', 'claude-code') and status in STATES)
     result = dict(client=client, session_id=_text(value['session_id']), task_id=_text(value['task_id'], 128),
                   state=status, revision=_integer(value['revision'], 1), pins=_pins(value['pins']),
                   accepted_identity=None)

@@ -6,25 +6,16 @@ import json
 from pathlib import Path
 import subprocess
 import sys
-import tempfile
 import unittest
-from unittest.mock import patch
 
-from runtime import changes, state
-from runtime.startup import ProjectScope, RuntimeSettings
-from tests.test_state import canonical_scope
+from runtime import state
+from tests.fixture_canonical_birth import fresh_canonical
 
 
 class ObservabilityTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix='vibe-observability-')
-        self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name).resolve()
-        self.scope = ProjectScope('project', self.root / 'repo', self.root / 'repo/.git', 'policy',
-                                  RuntimeSettings(2, self.root / 'private'))
-        guard = patch.object(changes, 'LOCK_ROOT', self.root / 'guards')
-        guard.start()
-        self.addCleanup(guard.stop)
+        fixture, acquired, observation = fresh_canonical(self)
+        self.root, self.scope = fixture.base, acquired.resolution.scope
 
     def prepare(self, report, **kwargs):
         self.assertIsNotNone(importlib.util.find_spec('runtime.observability'),
@@ -32,12 +23,19 @@ class ObservabilityTests(unittest.TestCase):
         return importlib.import_module('runtime.observability').prepare_task_status(report, **kwargs)
 
     def report(self, *, canonical=True, start=True, client='codex'):
-        if canonical:
-            self.scope = canonical_scope(self.scope, client=client)
         if start:
-            state.start_task(self.scope, dict(client=client, session_id='session', task_id='task',
+            state.start_task(self.scope, dict(client='codex', session_id='session', task_id='task',
                 scope_ref='PRIVATE scope text', mode='read-only', decision_ref='PRIVATE authorization'))
-        return state.task_status(self.scope, client, 'session')
+        report = state.task_status(self.scope, 'codex', 'session')
+        if not canonical and report['task'] is not None:
+            # A supplied retained shape, not current legacy runtime authority.
+            report['task']['pins'] = dict(schema_version=2, policy_digest='policy', runtime_digest='runtime')
+            report['task'].pop('accepted_identity')
+        if client != 'codex' and report['task'] is not None:
+            # Pure supplied data does not establish a qualified Claude client.
+            report['task']['client'] = client
+            report['task']['accepted_identity']['client'] = client
+        return report
 
     def test_disabled_does_not_inspect_report(self):
         class Unreadable:
@@ -55,8 +53,9 @@ class ObservabilityTests(unittest.TestCase):
         self.assertTrue(result['preparation_only'])
         self.assertEqual(result['source'], 'runtime.state.task_status')
         self.assertEqual(result['task'], dict(client='codex', session_id='session', task_id='task',
-            state='planned', revision=1, pins=report['task']['pins'],
-            accepted_identity=dict(project_id='project', repository_id='repository', checkout_id='checkout')))
+            state='TRIAGE', revision=1, pins=report['task']['pins'],
+            accepted_identity={key: report['task']['accepted_identity'][key]
+                               for key in ('project_id', 'repository_id', 'checkout_id')}))
         self.assertEqual(result['generation'], 0)
         self.assertIsNone(result['historical'])
         self.assertEqual(result['gaps'], ['source_authenticity_unverified', 'source_freshness_unverified',
@@ -68,7 +67,7 @@ class ObservabilityTests(unittest.TestCase):
         result['task']['accepted_identity']['project_id'] = 'changed'
         self.assertEqual(report, original)
 
-    def test_real_legacy_status_does_not_invent_canonical_scope(self):
+    def test_supplied_legacy_shape_does_not_invent_canonical_scope(self):
         result = self.prepare(self.report(canonical=False), enabled=True)
         self.assertIsNone(result['task']['accepted_identity'])
         self.assertIn('canonical_identity_unavailable', result['gaps'])
@@ -81,7 +80,7 @@ class ObservabilityTests(unittest.TestCase):
         self.assertEqual(result['generation'], 0)
         self.assertIn('task_unavailable', result['gaps'])
 
-    def test_real_claude_status_is_supported_without_inheriting_codex_qualification(self):
+    def test_supplied_claude_status_does_not_inherit_codex_qualification(self):
         result = self.prepare(self.report(client='claude-code'), enabled=True)
         self.assertEqual(result['task']['client'], 'claude-code')
         self.assertIn('source_authenticity_unverified', result['gaps'])
@@ -111,8 +110,8 @@ class ObservabilityTests(unittest.TestCase):
     def test_historical_status_never_becomes_current_or_merge_authority(self):
         report = self.report()
         # This marker matches _closed_status's shape; it is not a closure qualification.
-        report['task']['state'] = 'cancelled'
-        report['historical'] = dict(historical=True, outcome='cancelled', current=False,
+        report['task']['state'] = 'CANCELLED'
+        report['historical'] = dict(historical=True, outcome='CANCELLED', current=False,
             implementation_verified=False, delivery_complete=False, merge_authority=False,
             status='retained', compact=dict(name='a' * 32 + '.json', digest='b' * 64))
         before = deepcopy(report)
@@ -129,12 +128,12 @@ class ObservabilityTests(unittest.TestCase):
 
     def test_historical_authority_flags_and_compact_references_are_validated(self):
         report = self.report()
-        historical = dict(historical=True, outcome='planned', current=False,
+        historical = dict(historical=True, outcome='TRIAGE', current=False,
             implementation_verified=False, delivery_complete=False, merge_authority=False,
             status='retained', compact=dict(name='a' * 32 + '.json', digest='b' * 64))
         for key, value in (('current', True), ('implementation_verified', True),
                            ('delivery_complete', True), ('merge_authority', True),
-                           ('historical', False), ('outcome', 'ready'), ('status', 'PRIVATE'),
+                           ('historical', False), ('outcome', 'DONE'), ('status', 'PRIVATE'),
                            ('compact', None), ('compact', {'name': '/PRIVATE', 'digest': 'b' * 64})):
             with self.subTest(field=key), self.assertRaises(ValueError):
                 self.prepare(report | {'historical': historical | {key: value}}, enabled=True)
@@ -142,10 +141,10 @@ class ObservabilityTests(unittest.TestCase):
     def test_supplied_ready_state_and_counters_do_not_become_current_readiness(self):
         report = self.report()
         report['generation'] = 5
-        report['task'].update(state='ready', revision=7)
+        report['task'].update(state='DONE', revision=7)
         result = self.prepare(report, enabled=True)
         self.assertEqual(result['generation'], 5)
-        self.assertEqual(result['task']['state'], 'ready')
+        self.assertEqual(result['task']['state'], 'DONE')
         self.assertEqual(result['task']['revision'], 7)
         self.assertIn('current_readiness_unverified', result['gaps'])
         self.assertNotIn('merge_authority', result)
@@ -171,7 +170,7 @@ class ObservabilityTests(unittest.TestCase):
         item['task']['accepted_identity']['client'] = 'claude-code'
         bad.append(item)
         item = deepcopy(valid)
-        item['task']['accepted_identity']['checkout_id'] = 'repository'
+        item['task']['accepted_identity']['checkout_id'] = item['task']['accepted_identity']['repository_id']
         bad.append(item)
         item = deepcopy(valid)
         item['task']['pins']['runtime_digest'] = 'PRIVATE'
@@ -212,7 +211,7 @@ class ObservabilityTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.prepare(report, enabled=True)
         report['task']['accepted_identity']['client'] = 'codex'
-        report['task']['state'] = 'cancelled'
+        report['task']['state'] = 'CANCELLED'
         report['historical'] = dict(historical=True, outcome=Unexpected(), current=False,
             implementation_verified=False, delivery_complete=False, merge_authority=False,
             status='unavailable', compact=None)

@@ -1,6 +1,6 @@
 # Observability integration procedure
 
-Current-main port boundary: connection activation is unavailable. The retained connection owner requires legacy scope that current runtime authority rejects. Before configuration, credential entry, enable or probe, report this limitation and the need for the existing canonical owner interface. Do not acquire keys, contact a provider or bypass authority to make setup succeed. Read the [selective port boundary](../../../docs/d9-observability-preparation.md#selective-port-to-current-main) when implementing or qualifying this port. Historical controls below define the reviewed source behavior, not current activation readiness.
+Current-scope boundary: local controls require the existing public canonical acquisition to return an active, qualified Codex scope with an existing schema-3 authority. Configured-only, pending, stale, unsupported and legacy scope must fail before credential or account access. Reuse the accepted scope digest and qualification receipt; no legacy bootstrap, alternate authority or SDK fallback is allowed. Local fake-fixture proof does not establish installed-client, native, OS-store or account qualification.
 
 Use this for explicitly requested integration preparation, status, enablement, scope changes, disabling or dashboard access. It is independent of project enrollment. Routine coding, general Q&A and ordinary disabled tasks do not load this procedure or a provider reference.
 
@@ -8,11 +8,11 @@ An optional reference at the end of completed onboarding is only a follow-up pro
 
 ## Current capabilities and provider selection
 
-The package contains a selectively ported task-status preparer and connection-control source. Current task-format compatibility and canonical connection authority remain unfinished. The historical controls below specify desired consent, environment or explicit OS credentials, exact-project verification and one authorized fixed synthetic metrics-only span; they do not establish current support. There is no native collector, usage accounting or dashboard provisioning. Installing or invoking this skill activates none of these operations. Do not create an alternative settings file, collector, provider registry or command to fill gaps.
+The package provides optional local task-status preparation and checkout connection controls through the existing canonical owner. Controls store desired consent, select environment or explicit OS credentials, verify an exact Langfuse project and send one fixed synthetic metrics-only span only when authorized. There is no native collector, usage accounting or dashboard provisioning. Installing or invoking this skill activates none of these operations. Do not create alternative settings, a collector, provider registry or authority mechanism to fill gaps.
 
 | Provider | Reference and current support |
 | --- | --- |
-| Langfuse | Read [Langfuse connection controls](langfuse.md) only when selected or its connection/forwarding is specifically discussed. Connection-control source is retained for review; canonical activation, native collection and dashboard qualification are unavailable. |
+| Langfuse | Read [Langfuse connection controls](langfuse.md) only when selected or its connection/forwarding is specifically discussed. Canonical checkout controls require the current qualified owner; native collection and dashboard qualification remain unavailable. |
 
 Do not present other providers as available integrations. A future reviewed provider can add its own reference under this same skill; do not install a provider or change a destination merely because it was mentioned. A generic explanation or local capability-status request needs no provider reference.
 
@@ -33,9 +33,9 @@ For real integration configuration or removal, apply [Tool Integrations](../../.
 
 For unsupported operations, finish with the prepared choices, precise missing capability and next owner/action. Do not retry through a separate SDK, alternate account, arbitrary configuration file or background job. Connection success, desired opt-in, active collection and qualified source coverage are distinct claims; each needs its own actual evidence.
 
-## Historical source control contract
+## Local control contract
 
-Run the installed package's `scripts/observability.py` with Python 3.11+ in an explicitly selected, already enrolled checkout. These controls reuse public legacy Codex scope resolution; canonical umbrella/Project-wide operations and Windows runtime support remain unavailable. Native credential adapters do not qualify a Windows runtime. Do not bootstrap runtime state, adopt another checkout or edit enrollment to make an observability command succeed.
+Run the installed package's `scripts/observability.py` with Python 3.11+ in an explicitly selected, already enrolled checkout. These controls reuse `acquire_project_entry` and `_entry_scope` for a current qualified canonical Codex checkout; Project-wide consent and Windows runtime support remain unavailable. Native credential adapters do not qualify a Windows runtime. Do not bootstrap runtime state, adopt another checkout or edit enrollment to make an observability command succeed.
 
 `python3 -I -B <plugin-root>/scripts/observability.py <action> --cwd <selected-checkout>` accepts one JSON object on stdin, at most 8 KiB. Use actual paths as separate quoted arguments. Do not pass credentials as arguments, input JSON or chat text.
 
@@ -54,7 +54,7 @@ For selected OS storage, apply the provider's [Shared credential impact](langfus
 - `python3 -I -B <plugin-root>/scripts/observability.py store-credentials --cwd <selected-checkout> --expected-revision N` requires a foreground terminal with hidden input. It verifies the entered pair against the configured destination before one native-store write, advances revision and keeps consent off. It sends no span.
 - `python3 -I -B <plugin-root>/scripts/observability.py forget-credentials --cwd <selected-checkout> --expected-revision N` explicitly removes the selected saved connection entry while disabled. It makes no Langfuse call and leaves the selected OS source intact; later lookup fails until keys are saved again.
 
-Revisions in the table illustrate a new environment configuration. Read current status after each credential operation and use its exact revision; do not guess, bypass a conflict or overwrite changed state. A probe does not increment revision or retain a local measurement record. The owner stores only protected operational configuration under the existing private authority's `observability` directory. The existing scope ID and physical/policy binding prevent consent reuse by another checkout; JSON labels cannot create authority. No secrets or probe history are stored there.
+Revisions in the table illustrate a new environment configuration. Read current status after each credential operation and use its exact revision; do not guess, bypass a conflict or overwrite changed state. A probe does not increment revision or retain a local measurement record. The owner stores only protected operational configuration under the existing private authority's `observability` directory. The existing scope ID, accepted-scope digest, qualification receipt and physical authority binding prevent consent reuse by another checkout or changed qualification; JSON labels cannot create authority. No secrets or probe history are stored there.
 
 Handle failures without echoing private input, key values or remote bodies. A native-store or write/fsync failure can leave the requested change applied; local status alone does not inspect the saved keys. Report the uncertainty without automatic retries or speculative rollback of another writer's entry. A failed or delayed remote acknowledgement/readback must not be represented as verified. Use the selected provider reference for result meanings and credential prerequisites.
 
