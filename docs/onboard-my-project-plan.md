@@ -330,7 +330,7 @@ Toolkit remains the authoring authority. This phase packages the existing [nativ
 
 #### Optional Langfuse integration
 
-The [selective current-main port](d9-observability-preparation.md#selective-port-to-current-main) remains an unqualified source candidate: connection controls require canonical-owner integration, and task-format/fixture compatibility is incomplete. Historical implementation records below do not establish current activation.
+The [selective current-main port](d9-observability-preparation.md#selective-port-to-current-main) adapts connection controls, task states and fixtures to current canonical authority. Native collection, installed/live behavior, source attribution and D11 remain unqualified. Historical implementation records below do not establish current activation.
 
 **Planning decision · 28 October 2026.** Langfuse is the main optional observability integration and the direct dashboard interface. Reuse its trace storage, exploration, charts and supported aggregations, together with authoritative provider usage and charges. Remove custom HTML, offline reports and reporting snapshots from D9/D11 scope. Do not build a parallel analytics backend, pricing engine or measurement ledger. This decision updates D9/D11 plans only; it does not install, connect or qualify an integration.
 
