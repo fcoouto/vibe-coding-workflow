@@ -112,6 +112,7 @@ def control_main():
             if name == "status":
                 action.add_argument("--client", required=True, choices=("codex",))
                 action.add_argument("--session", required=True)
+                action.add_argument("--compact", action="store_true")
         workstreams = delegation_actions.add_parser("workstreams", add_help=False)
         workstream_actions = workstreams.add_subparsers(dest="workstream_action", required=True)
         for name in ("enable", "disable", "status", "consume-dispatch", "prepare-continuation",
@@ -220,7 +221,7 @@ def control_main():
                 report = {"status": delegation.guidance_status, "claim": delegation.claim_guidance,
                           "record": delegation.record_guidance}[args.guidance_action](scope, request)
             elif args.delegation_action == "status":
-                report = delegation.delegation_status(scope, client, args.session)
+                report = delegation.delegation_status(scope, client, args.session, compact=args.compact)
             else:
                 if args.delegation_action in {"prepare", "coordinator"} and {"workstream_revision", "workstream_limits"} & request.keys():
                     raise StartupError("Combined Workstreams fields cannot create assignments; use ordinary delegation and continuation_limits for native workers")
@@ -228,7 +229,8 @@ def control_main():
                              "observe": delegation.observe_assignment, "reconcile": delegation.reconcile_assignment,
                              "coordinator": delegation.reserve_coordinator}
                 report = operation[args.delegation_action](scope, request)
-            report = title_report(scope, client, request.get("session_id") if args.delegation_action != "status" else args.session, report)
+            if not (args.delegation_action == "status" and args.compact):
+                report = title_report(scope, client, request.get("session_id") if args.delegation_action != "status" else args.session, report)
             print(json.dumps(report))
             return 0 if report.get("ok", True) else 1
         if args.command == "evidence":
