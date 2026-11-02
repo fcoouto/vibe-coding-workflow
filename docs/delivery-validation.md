@@ -1,6 +1,6 @@
 # Delivery lifecycle implementation evidence
 
-2 November 2026. Review branch: `codex/delivery-lifecycle-foundations`, based on published main `96e182e5dd6f281414b1c82bfa3020de1b5e9254`. Only feature commits were replayed; the original development branch remains intact. The [implementation plan](superpowers/plans/2026-11-02-delivery-lifecycle.md) remains the full target. This source slice is incomplete and must not be presented as qualified end-to-end delivery.
+2 November 2026. Review branch: `codex/delivery-lifecycle-foundations`, based on published main `9c364e5d9bd80ec23aa677b8b237f4bd00a7d718`. Main PR #35's canonical gate envelope support is included unchanged. Only feature commits were replayed; the original development branch remains intact. The [implementation plan](superpowers/plans/2026-11-02-delivery-lifecycle.md) remains the full target. This source slice is incomplete and must not be presented as qualified end-to-end delivery.
 
 ## Implemented source behavior
 
@@ -20,7 +20,7 @@ Guarded transport primitives cover draft discovery/replay, workflow labels, appe
 
 ## Evidence and limits
 
-The combined delivery, compatibility, configuration, ledger, unenrolled-entry, title, hook and repository-gate run passed **181 tests in 308.826 seconds** on published main `96e182e`. Package validation and whitespace checks are separate from behavior and production qualification.
+The final combined delivery, compatibility, configuration, ledger, unenrolled-entry, title, hook and repository-gate run passed **186 tests in 311.097 seconds** on published main `9c364e5`, including PR #35. The preceding run passed 181 tests in 308.826 seconds on `96e182e`. `python3 -B scripts/validate.py` and `git diff --check` pass. Package validation reports client execution `not_checked`; it is separate from behavior and production qualification.
 
 Earlier immutable source snapshots provide scoped evidence, not proof of later edits:
 

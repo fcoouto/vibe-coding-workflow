@@ -10,7 +10,7 @@
 
 **Spec:** [Task delivery and client owned worktrees](../specs/2026-11-02-delivery-lifecycle-design.md).
 
-**Review base:** Published `origin/main` at `96e182e5dd6f281414b1c82bfa3020de1b5e9254`. The feature-only commits were replayed onto this base on `codex/delivery-lifecycle-foundations`; the original `codex/delivery-lifecycle` branch remains intact. Current main's strict runtime/policy pins, configured-only entry handling, shared ledger, explicit evidence cleanup and ordinary title repair remain in place.
+**Review base:** Published `origin/main` at `9c364e5d9bd80ec23aa677b8b237f4bd00a7d718`. The feature-only commits were replayed onto this base on `codex/delivery-lifecycle-foundations`; the original `codex/delivery-lifecycle` branch remains intact. Current main's strict runtime/policy pins, configured-only entry handling, shared ledger, explicit evidence cleanup and ordinary title repair remain in place.
 
 ## Execution checkpoint
 
@@ -203,10 +203,10 @@ Store the managed plan artifact and operation/observation references under the e
 
 ## Source basis and plan review
 
-Current source inspection confirmed the unchanged nine-state vocabulary, the unconditional ordinary/linked `DONE` transitions, existing title repair/manual-edit controls, strict canonical fields, single-delivery linked schema, and the offline D7 boundary. No alternate worktree's unmerged implementation is assumed available.
+Historical inspection at the original planning base `8d21679bdc60f0f8808a156797bcedf086d11480` confirmed the nine-state vocabulary, the then-unconditional ordinary/linked `DONE` transitions, existing title repair/manual-edit controls, strict canonical fields, single-delivery linked schema, and the offline D7 boundary. No alternate worktree's unmerged implementation is assumed available.
 
 [GitHub CLI merge documentation](https://cli.github.com/manual/gh_pr_merge), checked through Context7 and the official page on 2 November 2026, establishes expected-head matching, queue behavior, and that `--delete-branch` affects both local and remote branches. Consequently this plan excludes that flag. [Git push documentation](https://git-scm.com/docs/git-push), checked the same day, specifies explicit expected-ref leases; actual conditional deletion remains a required disposable test, not a conclusion from a read-before-delete check.
 
-Self-review mapping: onboarding/overrides → Task 1; native worktree ownership → Task 2; trusted repository sources → Task 3; draft/checkpoints/READY → Task 4; WAITING/DONE, multiple PRs, parent/child acceptance and retention → Task 5; both merge modes/manual triggers → Task 6; remote-only cleanup → Task 7; selective loading, full verification and client evidence → Task 8. Review Focus inputs are assigned above. The plan changes no runtime code and does not qualify future functionality.
+Self-review mapping: onboarding/overrides → Task 1; native worktree ownership → Task 2; trusted repository sources → Task 3; draft/checkpoints/READY → Task 4; WAITING/DONE, multiple PRs, parent/child acceptance and retention → Task 5; both merge modes/manual triggers → Task 6; remote-only cleanup → Task 7; selective loading, full verification and client evidence → Task 8. Review Focus inputs are assigned above. That planning record did not change runtime code or qualify future functionality; the execution checkpoint above records subsequent implementation.
 
-Planning validation on the recorded base: `python3 -B -m unittest tests.test_task_statuses tests.test_title_sync tests.test_title_sync_integration tests.test_repository_gate -q` passed 71 existing tests. `python3 -B scripts/validate.py` passed; plan/design local link targets and whitespace were checked. The full suite and live provider/native delivery probes were not run for this documentation-only task. New test modules named above are implementation deliverables, not existing passing tests.
+Historical documentation-only planning validation on `8d21679bdc60f0f8808a156797bcedf086d11480`: `python3 -B -m unittest tests.test_task_statuses tests.test_title_sync tests.test_title_sync_integration tests.test_repository_gate -q` passed 71 existing tests. `python3 -B scripts/validate.py` passed; plan/design local link targets and whitespace were checked. The full suite and live provider/native delivery probes were not run for this documentation-only task. At that planning checkpoint, the new test modules named above were future deliverables. Current implementation results and remaining gaps belong to the execution evidence linked above.
