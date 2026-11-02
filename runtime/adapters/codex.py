@@ -12,7 +12,7 @@ from pathlib import Path
 from runtime.adapters import session_start
 from runtime.adapters.session_start import diagnostic, render
 from runtime.engine import HookResult, RuntimeEvent
-from runtime.doctor import NativeProcess, ObservationError, validate_initialize, version
+from runtime.doctor import MAX_OUTPUT, NativeProcess, ObservationError, validate_initialize, version
 from runtime.startup import StartupError, AcceptedScope, json_object
 
 
@@ -129,6 +129,8 @@ def _native_reader(methods, *, on_notification=None):
             if method not in methods:
                 raise ObservationError("unsupported_method")
             sequence += 1
+            if method == "thread/items/read":
+                return process.request(sequence, method, params, response_limit=MAX_OUTPUT)
             return process.request(sequence, method, params)
 
         initialized = request("initialize", {"clientInfo": {"name": "vibe-workflow-native-observer", "version": "1"},
@@ -187,7 +189,7 @@ def _native_chain(scope, binding, attempt_id, prefix, parent_turn_id, spawn_item
         if child == parent or not isinstance(spawn.get("prompt"), str):
             raise ObservationError("child_mismatch")
         from runtime.evidence import _digest
-        envelope = json_object(spawn["prompt"].encode("utf-8"))
+        envelope = json_object(spawn["prompt"].encode("utf-8"), limit=MAX_OUTPUT)
         review = prefix == "review_"
         digest = binding.get("ledger_assignment_digest", binding["assignment_digest"])
         body = envelope.get("ownership" if review else "assignment")

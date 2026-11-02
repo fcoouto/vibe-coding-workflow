@@ -57,7 +57,7 @@ class NativeNotificationTests(NativeProcessFixture, unittest.TestCase):
                              on_notification=observed.append)
         with patch('runtime.doctor.MAX_OUTPUT', 100):
             with self.assertRaisesRegex(ObservationError, '^output_limit$'):
-                child.request(1, 'thread/read', {})
+                child.request(1, 'thread/read', {}, response_limit=100)
         self.assertEqual(observed, [])
 
     def test_invalid_observer_is_rejected_before_starting_native_child(self):

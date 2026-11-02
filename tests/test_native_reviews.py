@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 import subprocess
 import tempfile
+import time
 import types
 import unittest
 from unittest.mock import patch
@@ -80,6 +81,8 @@ for line in sys.stdin:
             result = responses.get("items_second", responses["items"]) if params.get("cursor") else responses["items"]
     else: raise RuntimeError("Unexpected RPC")
     if mode == "oversized": result = {{"data": "x" * (600 * 1024)}}
+    if mode == "oversized-notification" and method == "thread/items/read":
+        print(json.dumps({{"method": "fixture/notification", "params": {{"data": "x" * (128 * 1024)}}}}), flush=True)
     print(json.dumps({{"id": request["id"], "result": result}}), flush=True)
 ''')
         path.chmod(0o700)
@@ -152,6 +155,86 @@ for line in sys.stdin:
         responses["child"]["thread"]["source"]["subAgent"]["thread_spawn"]["agent_path"] = "/actual/native/path"
         self.assertEqual(self.collect(responses, binding=binding)["receipt"]["agent_path"], "/actual/native/path")
         self.assertEqual(self.collect()["receipt"]["mechanism"], "codex-native-agent-path")
+
+    def test_v1_large_prepared_review_uses_bounded_real_subprocess_transport(self):
+        responses, lifecycle_binding = self.v1_fixture(review=True)
+        assignment = "x" * 65536
+        plaintext_digest = hashlib.sha256(assignment.encode()).hexdigest()
+        spawn = responses["spawn"]["data"][0]["item"]
+        envelope = json.loads(spawn["prompt"])
+        envelope["assignment"] = envelope["ownership"]["request"]["assignment"] = assignment
+        ledger_digest = evidence._digest(envelope["ownership"])
+        envelope["ledger_assignment_digest"] = ledger_digest
+        spawn["prompt"] = json.dumps(envelope)
+        report = self.report | dict(assignment_digest=plaintext_digest)
+        text = json.dumps(report)
+        responses["items"]["data"][0]["item"]["text"] = text
+        binding = self.binding | dict(assignment=assignment, assignment_digest=plaintext_digest,
+                                      ledger_assignment_digest=ledger_digest)
+        initialization = dict(codexHome="/private/native", platformFamily="unix", platformOs="macos", userAgent="fixture")
+        results = [initialization, responses["parent"], responses["spawn"], responses["child"],
+                   responses["turns"], responses["items"], responses["turns"]]
+        frames = [json.dumps(dict(id=number, result=result)).encode() + b"\n"
+                  for number, result in enumerate(results, 1)]
+        self.assertGreater(len(spawn["prompt"].encode()), doctor.MAX_INPUT)
+        self.assertGreater(len(frames[2]), doctor.MAX_INPUT)
+        self.assertLess(sum(map(len, frames)), doctor.MAX_OUTPUT)
+        self.assertNotEqual(plaintext_digest, ledger_digest)
+        collected = self.collect(responses, binding=binding)
+        self.assertEqual(collected["report"], report)
+        self.assertEqual(collected["receipt"]["assignment_digest"], plaintext_digest)
+        self.assertEqual(collected["receipt"]["mechanism"], "codex-native-collab-call")
+        self.assertIsNone(collected["receipt"]["agent_path"])
+        lifecycle_binding["assignment_digest"] = ledger_digest
+        observed = self.observe_review_assignment(responses, lifecycle_binding)
+        self.assertEqual(observed["receipt"]["assignment_digest"], ledger_digest)
+        self.assertEqual(observed["result"], text)
+        self.assertFalse(observed["receipt"]["descendants_stopped"])
+
+    def test_native_selected_response_limit_preserves_default_notification_and_total_bounds(self):
+        params = dict(threadId="parent", turnId="parent-turn", itemIds=["spawn"])
+        cases = (("default128", 128 * 1024, None, "normal"),
+                 ("selected-over512", 512 * 1024, doctor.MAX_OUTPUT, "normal"),
+                 ("notification-over128", 1, doctor.MAX_OUTPUT, "oversized-notification"))
+        for label, size, limit, mode in cases:
+            responses = copy.deepcopy(self.responses)
+            responses["spawn"] = dict(data="x" * size)
+            notifications = []
+            process = doctor.NativeProcess([self.executable(responses, mode)], time.monotonic() + 5,
+                                           on_notification=notifications.append)
+            try:
+                kwargs = {} if limit is None else dict(response_limit=limit)
+                with self.subTest(case=label), self.assertRaises(doctor.ObservationError):
+                    process.request(1, "thread/items/read", params, **kwargs)
+                self.assertEqual(notifications, [])
+            finally:
+                process.close()
+        responses = copy.deepcopy(self.responses)
+        responses["spawn"] = dict(data="x" * (270 * 1024))
+        frame = json.dumps(dict(id=1, result=responses["spawn"])).encode() + b"\n"
+        self.assertLess(len(frame), doctor.MAX_OUTPUT)
+        self.assertGreater(2 * len(frame), doctor.MAX_OUTPUT)
+        process = doctor.NativeProcess([self.executable(responses)], time.monotonic() + 5)
+        try:
+            self.assertEqual(process.request(1, "thread/items/read", params, response_limit=doctor.MAX_OUTPUT), responses["spawn"])
+            self.assertGreater(process.bytes_read, doctor.MAX_INPUT)
+            with self.assertRaisesRegex(doctor.ObservationError, "output_limit"):
+                process.request(2, "thread/items/read", params, response_limit=doctor.MAX_OUTPUT)
+            self.assertGreater(process.bytes_read, doctor.MAX_OUTPUT)
+        finally:
+            process.close()
+        process = doctor.NativeProcess([self.executable()], time.monotonic() + 5)
+        try:
+            with self.assertRaises(doctor.ObservationError):
+                process.request(1, "thread/items/read", params, response_limit=doctor.MAX_OUTPUT + 1)
+        finally:
+            process.close()
+        responses = copy.deepcopy(self.responses)
+        responses["parent"]["padding"] = "x" * (128 * 1024)
+        with patch.object(codex.shutil, "which", return_value=self.executable(responses)):
+            with codex._native_reader(codex.REVIEW_METHODS) as (_, request):
+                with self.assertRaises(doctor.ObservationError):
+                    request("thread/read", dict(threadId="parent", includeTurns=False))
 
     def test_v1_collab_call_mismatch_fails_closed(self):
         for review in (False, True):
