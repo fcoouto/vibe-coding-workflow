@@ -22,7 +22,7 @@ An editable task under an adopted delivery policy needs an explicit delivery sco
 
 Only after all independent accepted work passes and every required publication has retained readiness, pending merges set the task to `WAITING` with its specific merge condition. Unpublished or unready work still needs implementation/review. While other work can advance, keep the actual working/review state. Existing Thread Naming renders this state below five cells; no provider call occurs during rendering. An accepted parent scope includes its required companions and integration; children do not assign the parent's state or meter.
 
-Preserve pending delivery and recovery evidence through cancellation and retention. Resolve the specific wait through existing `resolution_ref` handling before another completion verification; unrelated decisions, blockers and explicit pauses remain effective. Existing-PR observation is available through the verified owner below; publication and readiness writers remain unavailable. A merge observation cannot manufacture missing readiness provenance. Do not substitute synthetic proof to clear it.
+Preserve pending delivery and recovery evidence through cancellation and retention. Resolve the specific wait through existing `resolution_ref` handling before another completion verification; unrelated decisions, blockers and explicit pauses remain effective. Existing-PR observation and the private manual controls below retain facts and readiness. Actual qualified host sources remain unavailable; publication still needs its separate execution boundary. A merge observation cannot manufacture missing readiness provenance. Do not substitute synthetic proof to clear it.
 
 ## Inspect pending delivery
 
@@ -44,6 +44,18 @@ This path reads provider facts outside SQLite transactions and rechecks task/pla
 
 Known optional PRs and authorized remote cleanup also retain inventory/evidence until settled, even when not part of own completion. Delivery completion and retention completion are separate. Use existing evidence retirement checks; do not delete records because the thread finished.
 
+## Private manual delivery
+
+Use `owner.run(scope, action, request)` with `ready`, `reopen` or `settle`; requests contain the existing task identity/revision, `publication_id` and stable `operation_id`. No new public CLI or JSON authority exists.
+
+`ready` supports one required PR, manual merge and no required companions in a task already `WORKING` or `REVIEW`. Preserve existing obligations rather than changing another task to fit this scope. The actual qualified Gate must issue a live private `runtime.repository_gate.RepositoryReadiness` through `acquire_readiness(scope, request, publication_binding)`; the owner supplies the operation's `action` to that acquisition. It must bind current D5/D6/D7 inputs and the exact host-selected GitHub adapter. Raw flags, references and callability cannot authorize promotion. The held context spans metadata effect/readback outside SQLite and local readiness publication through `finalize(publish(db))`; the callback performs no network or nested database write.
+
+`reopen` uses that protocol as withdrawal-only, without requesting positive checks or reading the context's positive verification property. Its effect records `local_verification: None`. Acknowledged remote draft/`[BLOCKED]` withdrawal clears retained readiness; failed withdrawal cannot acknowledge permission for further edits. Explicit pauses and blockers remain effective. The operation does not automatically resume a waiting task.
+
+After the user merges, record the actual provider observation through `reconcile`. `settle` then consumes retained readiness and the unchanged accepted scope, resolving only its generated merge wait to `REVIEW`. Explicit pauses, unrelated pending conditions and changed scope/candidate prevent settlement. It performs no provider mutation and never writes `DONE`; run existing completion verification next, then existing title repair. Missing fresh local proof still prevents acceptance after checkout removal.
+
+These are source consumers, not qualified host execution. Actual Gate custody, native lifecycle/currentness and metadata-write authority remain unavailable pending integration and qualification.
+
 ## Unsupported effect orchestration
 
-The GitHub and Git transport adapters are bounded primitives, not delivery authority. Their mutation sources default to unavailable. The callable owner does not yet orchestrate checkpoint/commit/push, READY/reopen, agent merge or remote cleanup. Do not invoke a primitive directly to bypass that boundary or supply handcrafted readiness/cleanup receipts. Existing PR metadata uses workflow labels and append-only operation-marked comments to preserve concurrent human title/description edits. Local worktree and local branch cleanup remain client-owned.
+The GitHub and Git transport adapters are bounded primitives, not delivery authority. Their mutation sources default to unavailable. The callable owner does not orchestrate checkpoint/commit/push, agent merge or remote cleanup. Do not invoke a primitive directly to bypass that boundary or supply handcrafted readiness/cleanup receipts. Existing PR metadata uses workflow labels and append-only operation-marked comments to preserve concurrent human title/description edits. Local worktree and local branch cleanup remain client-owned.

@@ -301,6 +301,8 @@ def operate(scope, action: str, request: dict, *, owner=None) -> dict:
         return _bind_worktree(scope, request, owner)
     if action == 'reconcile':
         return _reconcile(scope, request, owner)
+    if action in {'ready', 'reopen', 'settle'}:
+        return _manual_delivery(scope, action, request, owner)
     _require(action == 'plan', 'Unsupported delivery operation')
     evidence._request(request, ('plan',), ('override', 'previous_plan', 'change_decision_ref', 'milestones'))
     with state._database(scope, write=True) as db:
@@ -346,6 +348,118 @@ def operate(scope, action: str, request: dict, *, owner=None) -> dict:
         task['revision'] += 1
         state._save(db, state._scope_id(scope), task)
         return dict(task=task, plan=plan, **completion_requirements(scope, db, task))
+
+
+def _manual_delivery(scope, action, request, owner):
+    from runtime import evidence, repository_gate
+    from runtime.adapters.github_delivery import GitHubDelivery
+    from scripts.delivery_coordinator import DeliveryOperationOwner
+    evidence._request(request, ('operation_id', 'publication_id'))
+    for key in ('operation_id', 'publication_id'):
+        _ref(request[key])
+    _require(isinstance(owner, DeliveryOperationOwner), 'A verified delivery owner is required')
+    owner.authorize(scope, action, request)
+    digest = evidence._digest(request)
+    with state._database(scope) as db:
+        task = evidence._task(db, scope, request, revision=False)
+        _require('delivery' in task, 'Delivery scope is missing')
+        plan = _read_plan(scope, task, db=db)
+        publication = next((p for p in plan['publications'] if p['id'] == request['publication_id']), None)
+        _require(publication is not None and publication['candidate'] is not None, 'Observed publication is missing')
+        if action != 'settle':
+            for reference in task['delivery']['operations']:
+                previous = evidence._read(scope, reference, db=db)
+                if previous.get('operation_id') == request['operation_id']:
+                    _require(previous.get('action') == action and previous.get('request_digest') == digest,
+                             'Delivery operation identity was reused with changed inputs')
+                    return dict(task=task, plan=plan, replay=True, **completion_requirements(scope, db, task))
+        _require(task['revision'] == request['expected_revision'], 'Task revision conflict')
+        _require(task['state'] not in {'PAUSED', 'BLOCKED', 'CANCELLED'}, 'Explicit task condition prevents delivery')
+        if action != 'reopen':
+            _require(plan['policy']['merge'] == 'manual' and len(plan['publications']) == 1
+                and publication['required'] and not plan['companions'], 'Manual pilot needs its complete bounded scope')
+        if action == 'settle':
+            requirements = completion_requirements(scope, db, task)
+            _require(requirements['delivery_complete'] and not requirements['blockers'], 'Required delivery is unresolved')
+            marker = task['delivery'].get('merge_wait')
+            _require(task['state'] == 'WAITING' and marker is not None
+                and marker['verification'] == task.get('evidence', {}).get('verification'), 'Generated merge wait is unavailable or stale')
+            original = evidence._read(scope, marker['plan'], db=db)
+            def acceptance(value):
+                value = deepcopy(value)
+                for item in value['publications']:
+                    if item['candidate'] is not None:
+                        item['candidate'].pop('observation', None)
+                return evidence._raw(value)
+            _require(acceptance(original) == acceptance(plan), 'Accepted scope changed during merge wait')
+            conditions = [c for c in task['conditions'] if c['id'] == marker['condition_id']]
+            _require(len(conditions) == 1 and conditions[0]['status'] == 'pending'
+                and conditions[0]['kind'] == 'blocker' and conditions[0]['action'] == 'task'
+                and conditions[0]['reference'] == 'delivery:completion'
+                and not any(c['status'] == 'pending' and c['id'] != marker['condition_id'] for c in task['conditions']),
+                'Unrelated or unresolved task conditions prevent settlement')
+            resolution = 'delivery:' + evidence._digest([request['operation_id'], publication['candidate']['observation']])
+        else:
+            _require(action != 'ready' or task['state'] in {'WORKING', 'REVIEW'}, 'Resolve task status before readiness')
+            _require(len(task['delivery']['operations']) < 64, 'Delivery operation history exhausted')
+            previous_plan = deepcopy(task['delivery']['plan'])
+            binding = _publication_binding(publication)
+            marker = evidence._digest([state._canonical_plain(evidence._artifact_owner(scope, task).task), publication['id']])
+    if action == 'settle':
+        state.update_task(scope, {key: request[key] for key in evidence.IDENTITY} | dict(state='REVIEW',
+            reason='Required manual merge observed', reference=resolution, resolution_ref=resolution,
+            resolutions=[dict(id=task['delivery']['merge_wait']['condition_id'], reference=resolution)]))
+        return operate(scope, 'status', dict(client=request['client'], session_id=request['session_id']))
+    source_type = getattr(repository_gate, 'RepositoryReadiness', None)
+    acquire = getattr(owner.gate, 'acquire_readiness', None)
+    _require(isinstance(source_type, type) and callable(acquire), 'Qualified repository readiness source is unavailable')
+    with acquire(scope, request | dict(action=action), binding) as held:
+        _require(isinstance(held, source_type) and isinstance(held.repository, GitHubDelivery)
+            and held.repository is owner.repository, 'A live private repository readiness acquisition is required')
+        held.recheck()
+        if action == 'ready':
+            with state._database(scope) as db:
+                current = evidence._task(db, scope, request, revision=False)
+                _require(current['delivery']['plan'] == previous_plan, 'Delivery scope changed before metadata effect')
+                _ready_verification(scope, db, current, publication, held.local_verification)
+        operation = dict(publication=deepcopy(publication), head=publication['candidate']['head'],
+            repository_id=publication['candidate']['repository_id'], marker=marker,
+            operation_id=evidence._digest([action, request['operation_id']]), title='Task delivery',
+            body='Ready for manual merge' if action == 'ready' else 'Readiness withdrawn for accepted implementation work')
+        facts = held.repository.execute(action, operation)
+        held.recheck()
+        def publish(db):
+            current = evidence._task(db, scope, request, revision=False)
+            _require(current['delivery']['plan'] == previous_plan
+                and current['state'] not in {'PAUSED', 'BLOCKED', 'CANCELLED'}, 'Delivery changed before publication')
+            if action == 'ready':
+                _ready_verification(scope, db, current, publication, held.local_verification)
+            def artifact(value):
+                dependencies = tuple(state._canonical_freeze(edge) for edge in evidence._artifact_dependencies(value))
+                return evidence._artifact(scope, value,
+                    owner=evidence._LinkedOwner(evidence._artifact_owner(scope, current), dependencies), db=db)
+            effect = artifact(dict(version=1, kind='delivery-effect', status='completed', action=action,
+                operation_id=request['operation_id'], request_digest=digest, previous_plan=previous_plan,
+                binding=binding, source=deepcopy(held.reference),
+                local_verification=deepcopy(held.local_verification) if action == 'ready' else None,
+                observation=facts, coordinator_ref=owner._decision['reference']))
+            publication['candidate']['readiness'] = (artifact(dict(version=1, kind='delivery-readiness',
+                binding=binding, local_verification=deepcopy(held.local_verification),
+                source=deepcopy(held.reference), operation=effect)) if action == 'ready' else None)
+            current['delivery']['plan'] = artifact(plan)
+            current['delivery']['operations'].append(effect)
+            current['revision'] += 1
+            state._save(db, state._scope_id(scope), current)
+            return dict(task=current, plan=plan, replay=False, **completion_requirements(scope, db, current))
+        return held.finalize(publish)
+
+
+def _ready_verification(scope, db, task, publication, reference):
+    from runtime import evidence
+    _require(task.get('evidence', {}).get('verification') == reference, 'Current merge verification changed')
+    proof = evidence._read(scope, reference, db=db)
+    _require(proof['purpose'] == 'merge-evidence' and not proof['blockers']
+        and proof['candidate_digest'] == publication['candidate']['snapshot']['digest'], 'Merge verification differs from sealed candidate')
 
 
 def pending(scope, *, cursor: str | None = None, limit: int = 32) -> dict:
