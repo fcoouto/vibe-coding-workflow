@@ -2,9 +2,11 @@
 
 Policy must eventually come from a protected configuration and observations from
 qualified sources. Neither requirement is established by passing Python/JSON data.
-This module intentionally has no publishing or production authorization path.
+Production acquisition remains closed until an independent host source is qualified.
 """
 
+from contextlib import contextmanager
+from copy import deepcopy
 from datetime import datetime, timezone
 from email.parser import BytesParser
 from email.utils import parsedate_to_datetime
@@ -32,6 +34,197 @@ GITHUB_API_VERSION = '2026-03-10'
 
 class GateError(ValueError):
     """Sanitized invalid-envelope error; never includes submitted values."""
+
+
+class _QualifiedReadinessSource:
+    """Host-only source protocol; no constructor or JSON route grants qualification.
+
+    The future host owner supplies repository, expires_at and remote_effects
+    (none/confirmed/uncertain). recheck returns its managed source receipt.
+    writer and finalize use the actual metadata-operation owner; finalize accepts
+    an existing db for the positive held-verifier path. No remote work belongs
+    inside either local writer. cancel is only a known no-effect disposition.
+    """
+
+
+def _acquire_qualified_readiness_source(scope, request, publication_binding):
+    raise GateError('Repository readiness source has not been independently qualified')
+
+
+_READINESS_ISSUER = object()
+
+
+class RepositoryReadiness:
+    """One live source/verification boundary; artifacts alone cannot recreate it."""
+    def __init__(self, issuer, scope, request, binding, source, verification):
+        _require(issuer is _READINESS_ISSUER)
+        self._scope, self._request, self._binding = scope, deepcopy(request), deepcopy(binding)
+        self._source, self._verification = source, verification
+        self._active, self._reference, self._facts, self._source_ref = True, None, None, None
+
+    def _live(self):
+        _require(self._active and type(self._source.expires_at) in (int, float)
+            and time.monotonic() < self._source.expires_at < float('inf'))
+
+    @property
+    def withdrawal_only(self):
+        self._live()
+        return self._request['action'] == 'reopen'
+
+    @property
+    def repository(self):
+        self._live()
+        return self._source.repository
+
+    @property
+    def reference(self):
+        self._live()
+        _require(self._reference is not None)
+        return deepcopy(self._reference)
+
+    @property
+    def local_verification(self):
+        self._live()
+        _require(not self.withdrawal_only)
+        return self._verification.verification_ref
+
+    def recheck(self):
+        from runtime import evidence, state
+        self._live()
+        if not self.withdrawal_only:
+            self._verification.recheck()
+        reference = self._source.recheck(self._scope, deepcopy(self._request), deepcopy(self._binding),
+            withdrawal_only=self.withdrawal_only)
+        state._artifact_reference(reference)
+        facts = evidence._read(self._scope, reference)
+        _fields(facts, ('version', 'kind', 'binding', 'base', 'tree', 'definitions_digest',
+            'source_binding_digest', 'check_run', 'dependencies', 'outcome', 'limitations'))
+        _require(type(facts['version']) is int and facts['version'] == 1 and
+            facts['kind'] == 'repository-readiness-source' and facts['binding'] == self._binding)
+        for key in ('base', 'tree'):
+            _digest(facts[key], commit=True)
+        for key in ('definitions_digest', 'source_binding_digest'):
+            _digest(facts[key])
+        _strings(facts['limitations'])
+        _fields(facts['dependencies'], ('native', 'gate', 'server', 'definitions', 'custody', 'operation'))
+        for dependency in facts['dependencies'].values():
+            state._artifact_reference(dependency)
+            evidence._read(self._scope, dependency)
+        if self.withdrawal_only:
+            _require(facts['outcome'] == 'blocked')
+        else:
+            original = self._verification.original
+            candidate = original['candidate']
+            _require(facts['outcome'] == 'ready' and self._binding['head'] == candidate['head'] and
+                self._binding['snapshot']['digest'] == evidence._digest(candidate) and
+                evidence._read(self._scope, self._binding['snapshot']) == candidate and
+                facts['base'] == candidate['base'] and facts['tree'] ==
+                evidence._git(self._scope.repository_root, 'rev-parse', self._binding['head'] + '^{tree}').decode().strip())
+            check = facts['check_run']
+            _fields(check, ('id', 'repository_id', 'app_id', 'head_sha', 'name', 'external_id', 'status', 'conclusion', 'merge_authority'))
+            for key in ('id', 'repository_id', 'app_id'):
+                _integer(check[key], 1)
+            for key in ('name', 'external_id'):
+                _text(check[key])
+            _require(check['repository_id'] == self._binding['repository_id'] and check['head_sha'] == candidate['head'] and
+                check['status'] == 'completed' and check['conclusion'] == 'success' and check['merge_authority'] is False)
+        self._live()
+        self._facts, self._source_ref = facts, reference
+        return deepcopy(facts)
+
+    def _record(self, db=None):
+        from runtime import evidence, state
+        if db is None:
+            with state._database(self._scope) as reader:
+                task = evidence._task(reader, self._scope, self._request, revision=False)
+        else:
+            task = evidence._task(db, self._scope, self._request, revision=False)
+        body = dict(version=1, kind='repository-merge-readiness', binding=self._binding,
+            accepted_scope_digest=self._scope.accepted_scope_digest,
+            task={key:task[key] for key in evidence.IDENTITY[:4]}, pins=task['pins'],
+            plan=task.get('evidence', {}).get('plan'),
+            local_verification=None if self.withdrawal_only else self.local_verification,
+            reconciliation=None if self.withdrawal_only else self._verification.reconciliation_ref,
+            candidate_digest=self._binding['snapshot']['digest'], source=self._source_ref, **{
+                key:self._facts[key] for key in ('base', 'tree', 'definitions_digest', 'source_binding_digest',
+                    'check_run', 'dependencies', 'outcome', 'limitations')})
+        if self._verification is not None:
+            return self._verification.record(body, db=db)
+        if db is None:
+            with self._source.writer() as writer:
+                return evidence._artifact(self._scope, body, owner=evidence._artifact_owner(self._scope, task), db=writer)
+        return evidence._artifact(self._scope, body, owner=evidence._artifact_owner(self._scope, task), db=db)
+
+    def finalize(self, publish):
+        _require(callable(publish))
+        self.recheck()
+        def local(db):
+            self._reference = self._record(db)
+            return self._source.finalize(publish, db=db)
+        result = (self._source.finalize(lambda db: self._publish_withdrawal(db, publish)) if self.withdrawal_only
+            else self._verification.finalize(local))
+        self._active = False
+        return result
+
+    def _publish_withdrawal(self, db, publish):
+        self._reference = self._record(db)
+        return publish(db)
+
+    def _close(self):
+        from runtime import state
+        if self._active and self._source.remote_effects == 'none':
+            try:
+                self._source.cancel()
+                if self._verification is not None:
+                    self._verification.cancel()
+            except state.StateError:
+                pass  # A changed owner must retain its existing recovery reservation.
+        self._active = False
+
+
+@contextmanager
+def acquire_readiness(scope, request, publication_binding):
+    """Acquire qualified host source plus actual verifier; request JSON is never a source."""
+    from runtime import evidence, state
+    from runtime.adapters.github_delivery import GitHubDelivery
+    _require(isinstance(scope, state.AcceptedScope) and type(request) is dict and
+        request.get('action') in ('ready', 'reopen'))
+    evidence._bounded(request)
+    state._identity(request)
+    state._integer(request.get('expected_revision'), 'readiness task revision', 1)
+    _fields(publication_binding, ('id', 'host', 'repository', 'target', 'branch', 'pull_request',
+        'head', 'snapshot', 'repository_id'))
+    _require(request.get('publication_id') == publication_binding['id'])
+    state._artifact_reference(publication_binding['snapshot'])
+    source = _acquire_qualified_readiness_source(scope, deepcopy(request), deepcopy(publication_binding))
+    _require(isinstance(source, _QualifiedReadinessSource) and isinstance(source.repository, GitHubDelivery) and
+        source.repository.host == publication_binding['host'] and callable(source.repository.mutate) and
+        source.remote_effects in ('none', 'confirmed', 'uncertain'))
+    held = None
+    def context(verification):
+        return RepositoryReadiness(_READINESS_ISSUER, scope, request, publication_binding, source, verification)
+    if request['action'] == 'reopen':
+        held = context(None)
+        try:
+            held.recheck()
+            held._reference = held._record()
+            yield held
+        finally:
+            held._close()
+    else:
+        verification_request = {key:request[key] for key in evidence.IDENTITY} | dict(purpose='merge-evidence')
+        try:
+            with evidence.acquire_merge_verification(scope, verification_request) as verification:
+                held = context(verification)
+                try:
+                    held.recheck()
+                    held._reference = held._record()
+                    yield held
+                finally:
+                    held._close()
+        finally:
+            if held is None and source.remote_effects == 'none':
+                source.cancel()
 
 
 def _require(condition):

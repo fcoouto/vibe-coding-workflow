@@ -6054,7 +6054,134 @@ def verify_completion(scope, request):
     return _verify_member(scope, request)
 
 
-def _verify_member(scope, request, *, linked=False):
+_MERGE_VERIFICATION_ISSUER = object()
+
+
+class _MergeVerification:
+    """Live owner of an existing verifier reservation; never a serialized authority."""
+    def __init__(self, issuer, scope, request, task, plan, candidate, resources, closure,
+                 routing, generation, barrier, verification, reconciliation, reuse, security_impact):
+        _require(issuer is _MERGE_VERIFICATION_ISSUER, 'Held verification requires its actual owner')
+        self._scope = scope
+        self._request = deepcopy(request) | dict(expected_revision=task['revision'])
+        self._task, self._plan, self._candidate = deepcopy((task, plan, candidate))
+        self._resources, self._closure, self._routing = deepcopy((resources, closure, routing))
+        self._generation, self._barrier = generation, deepcopy(barrier)
+        self._verification, self._reconciliation = deepcopy((verification, reconciliation))
+        self._reuse, self._security_impact = deepcopy((reuse, security_impact))
+        self._active, self._publication_db = True, None
+
+    def _live(self):
+        _require(self._active, 'Held verification is closed or already finalized')
+
+    @property
+    def verification_ref(self):
+        self._live()
+        return deepcopy(self._verification)
+
+    @property
+    def reconciliation_ref(self):
+        self._live()
+        return deepcopy(self._reconciliation)
+
+    @property
+    def barrier_id(self):
+        self._live()
+        return self._barrier['id']
+
+    @property
+    def original(self):
+        self._live()
+        return deepcopy(dict(task=self._task, plan=self._plan, candidate=self._candidate,
+            claims=self._closure, generation=self._generation, assignment=self._barrier['data']['assignment']))
+
+    def _current(self, db, *, published=False):
+        from runtime import delegation
+        self._live()
+        task = _task(db, self._scope, self._request, revision=not published)
+        _require((published or task == self._task) and task['pins'] == self._task['pins'] and
+            task['evidence']['plan'] == self._task['evidence']['plan'] and
+            task['evidence']['verification'] == self._verification,
+            'Held verification original task or evidence changed')
+        generation = db.execute('select generation from checkouts where scope_id=?',
+            (state._scope_id(self._scope),)).fetchone()[0]
+        records = delegation._ledger(self._scope, db, task=self._request)
+        actual = next((row for row in records if row['id'] == self._barrier['id']), None)
+        _require(generation == self._generation and actual == self._barrier and
+            delegation._claims(self._resources, maximum=delegation.MAX_VERIFICATION_CLAIMS) == self._closure and
+            delegation._git_routing(self._scope, self._routing['git_directory']) == self._routing['git_routing'],
+            'Held verification reservation, generation or physical routing changed')
+        _require(not _checkout_attempt_blockers(db, self._scope, task, records=records) and
+            not _ledger_blockers(self._scope, db, self._closure, self._barrier['id'], records=records),
+            'Held verification has unresolved participating writers')
+        return task, actual
+
+    def recheck(self):
+        self._live()
+        candidate = capture_candidate(self._scope, self._plan)
+        _require(candidate == self._candidate, 'Held verification candidate changed')
+        blockers = _blockers(self._scope, self._task, self._plan, candidate, 'merge-evidence',
+            self._reuse, self._security_impact, resource_closure=self._closure, barrier_id=self._barrier['id'])
+        _require(not blockers, 'Held merge evidence is missing, stale or blocked')
+        with state._database(self._scope) as db:
+            task, _ = self._current(db)
+        return _verification_response(task, [], candidate, purpose='merge-evidence')
+
+    def record(self, value, *, db=None):
+        self._live()
+        if db is None:
+            from runtime import delegation
+            with delegation._reservation_write(self._scope) as writer:
+                self._current(writer)
+                return _artifact(self._scope, value, owner=_artifact_owner(self._scope, self._task), db=writer)
+        _require(db is self._publication_db and db is not None,
+            'Held publication requires its existing local authority writer')
+        return _artifact(self._scope, value, owner=_artifact_owner(self._scope, self._task), db=db)
+
+    def _settle(self, publish, outcome):
+        from runtime import delegation
+        self._live()
+        with delegation._reservation_write(self._scope) as db:
+            task, active = self._current(db)
+            self._publication_db = db
+            try:
+                result = publish(db) if publish is not None else None
+            finally:
+                self._publication_db = None
+            task, active = self._current(db, published=True)
+            reconciliation = _artifact(self._scope, dict(version=1, kind='synchronous-verification',
+                barrier_id=active['id'], verification=self._verification, revision=task['revision']),
+                owner=_artifact_owner(self._scope, task), db=db)
+            active['data'].update(status='settled', reconciliation=reconciliation, result=dict(outcome=outcome))
+            db.execute('update assignments set data=? where id=?', (_raw(active['data']).decode(), active['id']))
+        self._active = False
+        return result
+
+    def finalize(self, publish):
+        """The owner supplies local publication only; remote effects/readback precede this writer."""
+        _require(callable(publish), 'Held publication requires its local owner callback')
+        self.recheck()
+        return self._settle(publish, 'completed')
+
+    def cancel(self):
+        """Known cancellation before any remote effect; uncertain effects retain ownership."""
+        return self._settle(None, 'cancelled')
+
+
+@contextmanager
+def acquire_merge_verification(scope, request):
+    """Hold the actual D5/D6 verifier through publication, without holding SQLite open."""
+    _require(isinstance(scope, AcceptedScope) and request.get('purpose') == 'merge-evidence',
+        'Held verification requires an accepted merge-evidence scope')
+    grant = _verify_member(scope, request, _held=True)
+    _require(isinstance(grant, _MergeVerification), 'Current merge evidence is blocked')
+    try:
+        yield grant
+    finally:
+        grant._active = False
+
+
+def _verify_member(scope, request, *, linked=False, _held=False):
     from runtime import delivery
     _request(request, ('purpose',), ('reuse', 'security_impact'))
     request = deepcopy(request)
@@ -6137,9 +6264,13 @@ def _verify_member(scope, request, *, linked=False):
         current['revision'] += 1
         reconciliation = _artifact(scope, dict(version=1, kind='synchronous-verification', barrier_id=barrier['id'],
             verification=verification_ref, revision=current['revision']), owner=_artifact_owner(scope, task), db=db)
-        active['data'].update(status='settled', reconciliation=reconciliation, result=dict(outcome='failed' if blockers else 'completed'))
-        db.execute('update assignments set data=? where id=?', (_raw(active['data']).decode(), barrier['id']))
+        if not _held or blockers:
+            active['data'].update(status='settled', reconciliation=reconciliation, result=dict(outcome='failed' if blockers else 'completed'))
+            db.execute('update assignments set data=? where id=?', (_raw(active['data']).decode(), barrier['id']))
         state._save(db, state._scope_id(scope), current)
+    if _held and not blockers:
+        return _MergeVerification(_MERGE_VERIFICATION_ISSUER, scope, request, current, plan, candidate,
+            resources, closure, routing, generation, barrier, verification_ref, reconciliation, reuse, security_impact)
     return _verification_response(current, blockers, candidate, requirements=requirements, purpose=request['purpose'])
 
 
