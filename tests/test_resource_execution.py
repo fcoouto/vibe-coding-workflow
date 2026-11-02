@@ -1,4 +1,5 @@
 """Owned heavy-command integration; fixtures are not native client qualification."""
+from tests.fixture_canonical_birth import test_acquisition
 import importlib
 import sys
 import tempfile
@@ -110,7 +111,7 @@ class ResourceExecutionTests(unittest.TestCase):
         output=io.StringIO()
         with patch('sys.argv',['workflow.py','delegation','workstreams','resource-run','--cwd',str(self.fixture.fixture.repo)]), \
              patch('sys.stdin',SimpleNamespace(buffer=io.BytesIO(json.dumps(self.request).encode()))), \
-             patch('runtime.startup.resolve_project',return_value=self.fixture.scope), \
+             patch('runtime.startup.acquire_project_entry',side_effect=lambda *args,**kwargs:test_acquisition(self.fixture.scope)), \
              patch('runtime.resource_execution.host_directory',return_value=self.directory), redirect_stdout(output):
             code=workflow.control_main()
         self.assertEqual(code,0,output.getvalue())
@@ -229,7 +230,7 @@ class ResourceExecutionTests(unittest.TestCase):
             self.feature('enable')
         request = dict(id='another-checkout', owner=dict(task_id='other'), cpu=1, memory_bytes=1,
             capacity_cpu=2, capacity_memory_bytes=1024*1024, deadline=int(time.time())+60, ready=True)
-        with patch('runtime.startup.resolve_project', return_value=self.fixture.scope):
+        with patch('runtime.startup.acquire_project_entry',side_effect=lambda *args,**kwargs:test_acquisition(self.fixture.scope)):
             result = resource_admission.control(self.directory, 'request', request,
                 eligible=resource_execution._eligible, probe_key='fresh',
                 probe=lambda: dict(sampled_at=int(time.time()), available_memory_bytes=1024*1024, pressure=False))

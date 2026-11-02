@@ -33,7 +33,7 @@ Use the [common envelope](delegation-requests.md#common-envelope) and current re
 revision for mutations. The action references include validator-checked examples;
 implementation reads are for diagnosis, explicit implementation work, or the narrow
 uncovered-schema lookups below. For trusted stop-proof construction, read only
-`_validate_role_proof` in [the validator](../runtime/delegation.py); for cache refresh
+`_validate_operation_proof` in [the validator](../runtime/delegation.py); for cache refresh
 publication, read only `_common`, `_trigger` and `_guidance` there. These lookups
 remain required until complete public references replace those specific schemas;
 do not load the whole implementation for ordinary plan/prepare/observe requests. The runtime

@@ -59,7 +59,7 @@ def workstreams_control(scope, action, request):
 
 
 def control_main():
-    from runtime.startup import MAX_INPUT, StartupError, json_object, resolve_project
+    from runtime.startup import MAX_INPUT, StartupError, json_object, acquire_project_entry, _entry_scope
 
     class Parser(argparse.ArgumentParser):
         def error(self, message):
@@ -159,12 +159,19 @@ def control_main():
                 raise StartupError("Expected a supported native task client")
         else:
             client = args.client
-        scope = resolve_project(SimpleNamespace(client=client, cwd=Path(args.cwd)), PACKAGE)
         if args.command == "doctor":
             from runtime.doctor import inspect_runtime
-            report = inspect_runtime(scope, args.executable)
+            unavailable = False
+            try:
+                acquisition = acquire_project_entry(SimpleNamespace(client=client, cwd=Path(args.cwd)), PACKAGE)
+            except (StartupError, ImportError, ValueError):
+                acquisition = None
+                unavailable = True
+            report = inspect_runtime(None, args.executable, acquisition=acquisition, enrollment_unavailable=unavailable)
             print(json.dumps(report))
             return report["exit_code"]
+        acquisition = acquire_project_entry(SimpleNamespace(client=client, cwd=Path(args.cwd)), PACKAGE)
+        scope = _entry_scope(acquisition)
         if scope is None:
             raise StartupError("The requested checkout is not enrolled for this client")
         if scope.runtime is None:
@@ -242,7 +249,7 @@ def main():
     requested_event = sys.argv[2] if len(sys.argv) == 3 else None
     from runtime.adapters import claude_code, codex, session_start
     from runtime.engine import HookResult
-    from runtime.startup import MAX_INPUT, RuntimeScopeError, StartupError, json_object, orient, resolve_project
+    from runtime.startup import MAX_INPUT, RuntimeScopeError, StartupError, json_object, orient, acquire_project_entry, _entry_scope
     runtime_kind = requested_event if requested_event in codex.RUNTIME_EVENTS else None
 
     def failure(reason):
@@ -265,7 +272,8 @@ def main():
             output = adapter.render(orient(start, PACKAGE))
             if start.client == "codex":
                 try:
-                    scope = resolve_project(start, PACKAGE)
+                    acquisition = acquire_project_entry(start, PACKAGE)
+                    scope = _entry_scope(acquisition)
                     if scope is not None and scope.runtime is not None:
                         from runtime.title_sync import repair
                         presentation = repair(scope, start.client, payload.get("session_id"), force=True)
@@ -277,7 +285,8 @@ def main():
                     pass
         else:
             event = codex.normalize_runtime(payload)
-            scope = resolve_project(event, PACKAGE)
+            acquisition = acquire_project_entry(event, PACKAGE)
+            scope = _entry_scope(acquisition)
             result = HookResult(event.kind)
             if scope is not None and scope.runtime is not None:
                 from runtime.state import process_event

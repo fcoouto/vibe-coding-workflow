@@ -12,7 +12,7 @@ sys.path.insert(0, str(PACKAGE))
 
 def main():
     from runtime import parent_recovery
-    from runtime.startup import MAX_INPUT, StartupError, json_object, resolve_project
+    from runtime.startup import MAX_INPUT, StartupError, json_object, acquire_project_entry, _entry_scope
     parser = argparse.ArgumentParser()
     parser.add_argument('action', choices=('status', 'register', 'withdraw', 'reactivate', 'suspend',
         'schedule', 'record-schedule', 'observe', 'record-send', 'reconcile-feature'))
@@ -25,7 +25,8 @@ def main():
         if args.action in {'register', 'reconcile-feature'}:
             if args.cwd is None:
                 raise ValueError('Recovery activation requires the enrolled checkout')
-            scope = resolve_project(SimpleNamespace(client='codex', cwd=args.cwd), PACKAGE)
+            acquisition = acquire_project_entry(SimpleNamespace(client='codex', cwd=args.cwd), PACKAGE)
+            scope = _entry_scope(acquisition)
             if scope is None or scope.runtime is None:
                 raise ValueError('Recovery activation requires an enrolled workflow task')
             if args.action == 'register':

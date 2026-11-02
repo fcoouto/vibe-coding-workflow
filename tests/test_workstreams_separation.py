@@ -61,10 +61,10 @@ class SeparationTests(unittest.TestCase):
                         workstreams._feature_permission(self.scope, name, choice['revision'])
 
     def test_legacy_disable_is_used_only_for_missing_feature_choice(self):
-        self.protocol.control('disable', 0)
+        self.protocol.control('disable',self.protocol.control('status')['revision'])
         self.assertFalse(self.feature('resource_admission')['enabled'])
         self.assertFalse(self.feature('capacity_recovery')['enabled'])
-        self.feature('capacity_recovery', 'enable', 1)
+        self.feature('capacity_recovery','enable',self.feature('capacity_recovery')['revision'])
         self.assertFalse(self.feature('resource_admission')['enabled'])
         self.assertTrue(self.feature('capacity_recovery')['enabled'])
 

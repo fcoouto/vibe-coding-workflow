@@ -156,7 +156,7 @@ class ValidationReuseTests(unittest.TestCase):
         scope = replace(self.fixture.scope, runtime=replace(self.fixture.scope.runtime,
             state_dir=self.fixture.fixture.root / 'missing-authority'))
         request = self.fixture.fixture.request(attempt_id=self.prepared['attempt_id'])
-        with self.assertRaisesRegex(state.StateError, 'Missing native assignment state'):
+        with self.assertRaisesRegex(state.StateError, 'accepted projection'):
             resource_execution._authority(scope, request)
 
 

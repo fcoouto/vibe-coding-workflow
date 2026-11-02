@@ -1,4 +1,5 @@
 """Isolated CLI integration; native schedules and observations stay synthetic."""
+from tests.fixture_canonical_birth import test_acquisition
 import io
 import json
 import os
@@ -35,7 +36,7 @@ class WorkstreamsCliTests(unittest.TestCase):
             argv.append('reserve')
         argv.extend(['--cwd', str(self.scope.repository_root)])
         with patch('sys.argv', argv), patch('sys.stdin', SimpleNamespace(buffer=io.BytesIO(json.dumps(request).encode()))), \
-             patch('runtime.startup.resolve_project', return_value=self.scope), redirect_stdout(output):
+             patch('runtime.startup.acquire_project_entry',side_effect=lambda *args,**kwargs:test_acquisition(self.scope)), redirect_stdout(output):
             code = workstreams_recovery.main() if recovery else workflow.control_main()
         return code, json.loads(output.getvalue())
 

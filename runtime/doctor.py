@@ -225,7 +225,7 @@ def inspect_hooks(response, scope, definitions):
             "error_count": len(errors), "warning_count": len(warnings), "unexpected_count": unexpected}
 
 
-def inspect_runtime(scope, executable):
+def inspect_runtime(scope, executable, *, acquisition=None, enrollment_unavailable=False):
     """Return JSON-safe independent observations; exit_code is 0, failure 1, incomplete 2."""
     deadline = time.monotonic() + TOTAL_TIMEOUT - 0.25
     report = {
@@ -247,6 +247,21 @@ def inspect_runtime(scope, executable):
                              "version": manifest["version"], "policy_digest": installed_policy}
     except (OSError, ValueError, KeyError, TypeError, RecursionError):
         failed = True
+    state_api = None
+    try:
+        from runtime.state import inspect_state, runtime_fingerprint
+        state_api = inspect_state
+        report["package"]["runtime_digest"] = runtime_fingerprint()
+    except ImportError:
+        report["state"] = {"status": "unavailable"}
+        incomplete = True
+    if enrollment_unavailable:
+        report["enrollment"] = {"status": "unavailable"}
+    if acquisition is not None:
+        resolution = acquisition.resolution
+        scope = resolution.scope if resolution.status == "active" else None
+        if scope is None and resolution.status != "outside":
+            report["enrollment"] = {"status": resolution.status, "reason": resolution.reason}
     if scope is None:
         failed = True
         report["hooks"] = {"status": "requires_enrollment"}
@@ -258,14 +273,13 @@ def inspect_runtime(scope, executable):
             report["enrollment"]["status"] = "policy_mismatch"
             failed = True
         try:
-            from runtime.state import inspect_state, runtime_fingerprint
-            state = inspect_state(scope)
-            runtime_digest = runtime_fingerprint()
-            report["package"]["runtime_digest"] = runtime_digest
-            status = ("not_configured" if not state["configured"] else "missing" if not state["present"]
-                      else "incompatible" if not state["compatible"] else "passed")
+            if state_api is None:
+                raise ImportError
+            state = state_api(scope)
+            status = ("not_configured" if not state["configured"] else "incompatible" if state['schema_version'] != 3
+                      else "missing" if not state["present"] else "incompatible" if not state["compatible"] else "passed")
             report["state"] = {"status": status, **{key: state[key] for key in
-                ("configured", "present", "compatible", "schema_version", "policy_digest", "runtime_digest", "tasks")
+                ("configured", "present", "compatible", "schema_version", "policy_digest", "runtime_digest", "tasks", "error")
                 if key in state}}
             failed |= status != "passed"
         except ImportError:

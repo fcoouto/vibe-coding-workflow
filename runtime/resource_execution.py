@@ -45,9 +45,10 @@ def _authority(scope, request, cleanup=False):
 def _eligible(owner):
     """Suppress known-ineligible waits; unreadable authority retains its queue guard."""
     from types import SimpleNamespace
-    from runtime.startup import resolve_project
+    from runtime.startup import acquire_project_entry, _entry_scope
     try:
-        scope=resolve_project(SimpleNamespace(client=owner['client'],cwd=Path(owner['cwd'])),state.PACKAGE)
+        acquisition=acquire_project_entry(SimpleNamespace(client=owner['client'],cwd=Path(owner['cwd'])),state.PACKAGE)
+        scope=_entry_scope(acquisition)
         if scope is None or scope.runtime is None:
             return True
         setting = workstreams._feature(scope, 'resource_admission')

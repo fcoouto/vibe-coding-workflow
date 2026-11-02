@@ -21,6 +21,14 @@ class ChangesTests(d3_tests.OnboardingTests):
     # Reuse the disposable D3 setup, not its inherited test cases.
     def setUp(self):
         super().setUp()
+        self.home_patch = patch.dict(os.environ, HOME=str(self.base / "isolated-home"))
+        self.home_patch.start()
+        self.addCleanup(self.home_patch.stop)
+        from runtime import review_storage
+        self.machine_config_patch = patch.object(review_storage, "_machine_config_path",
+            return_value=self.base / "machine" / "machine.json")
+        self.machine_config_patch.start()
+        self.addCleanup(self.machine_config_patch.stop)
         from runtime import changes
         self.changes = changes
         self.lock_patch = patch.object(changes, "LOCK_ROOT", self.base / "locks")
@@ -28,7 +36,7 @@ class ChangesTests(d3_tests.OnboardingTests):
         self.addCleanup(self.lock_patch.stop)
         (self.repo / "AGENTS.md").chmod(0o755)
         self.inspect()
-        onboarding.record_plan(self.directory, self.proposal(1))
+        onboarding.record_plan(self.directory, self.proposal(self.plan()["revision"]))
 
     def fingerprint(self, relative):
         path = self.repo / relative
@@ -87,6 +95,7 @@ class ChangesTests(d3_tests.OnboardingTests):
         from runtime import evidence, state
         from runtime.startup import ProjectScope, StartupError
         fixture = EvidenceTests(methodName='runTest')
+        fixture._canonical_peer=True
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
         fixture.plan()
@@ -94,8 +103,7 @@ class ChangesTests(d3_tests.OnboardingTests):
         definition['checks'][0]['resources'] = [dict(kind='service', key='fixture:unrelated', host='local', mode='read')]
         evidence.plan_evidence(fixture.scope, fixture.request(plan=definition, change_decision_ref='user:declared-resource'))
         checked = evidence.run_check(fixture.scope, fixture.request(check_id='unit'))
-        root, _, common = self.changes._checkout(self.repo)
-        target = ProjectScope('target', root, common, policy_digest(onboarding.PACKAGE), fixture.scope.runtime)
+        target = fixture.peer_scope
         self.changes._writers({}, {}, {'task_reconciliation': True}, scope=target)
         with state._database(fixture.scope) as db:
             original = state._task(db, state._scope_id(fixture.scope), 'codex', 'parent')
@@ -121,13 +129,13 @@ class ChangesTests(d3_tests.OnboardingTests):
         from runtime import state
         from runtime.startup import ProjectScope, StartupError
         fixture = Stage4NativeReviewTests(methodName='runTest')
+        fixture._canonical_peer=True
         fixture.setUp(); self.addCleanup(fixture.doCleanups)
         plan = fixture.review_plan()
         plan['jobs'][0]['claims'] = [dict(kind='service', key='fixture:independent-review', host='local', mode='read')]
         fixture.plan(plan)
         prepared = fixture.prepared(assignment='Review only the declared independent service read-only.')
-        root, _, common = self.changes._checkout(self.repo)
-        target = ProjectScope('target', root, common, policy_digest(onboarding.PACKAGE), fixture.scope.runtime)
+        target = fixture.peer_scope
         self.changes._writers({}, {}, {'task_reconciliation': True}, scope=target)
         with state._database(fixture.scope) as db:
             original = state._task(db, state._scope_id(fixture.scope), 'codex', 'parent')
@@ -213,6 +221,26 @@ class ChangesTests(d3_tests.OnboardingTests):
                 if runtime == "legacy" else record["runtime"])
             request = self.bind(request["manifest"])
         return record, original, request
+
+    def historical_runtime(self, record, kind='live'):
+        """Bind portable original-generation data to the exact retained record, without publication."""
+        from tests.test_legacy_currentness import LegacyCurrentnessTests
+        fixture=LegacyCurrentnessTests('runTest')
+        fixture.root,self_scope=self.base,self.changes._record(record,self.plan(),current=False)
+        fixture.repo=self.repo
+        fixture.identity=dict(client='codex',session_id='old-session',task_id='old-task',scope_ref='fixture:original-M')
+        fixture.legacy(kind,scope=self_scope,publish=False)
+        return self_scope
+
+    def retained_inventory(self, directory):
+        return {str(p):(p.read_bytes() if p.is_file() else None,p.stat().st_ino,p.stat().st_mode)
+            for p in directory.rglob('*')}
+
+    def assert_activation_incompatible(self, result):
+        self.assertEqual(result['exit_code'],2,result)
+        self.assertTrue(any('incompatible' in row['reason'].lower() for row in result['blocked']),result)
+        self.assertFalse((self.repo/PROJECT_FILE).exists())
+        self.assertFalse((self.base/'fresh-state').exists())
 
     def legacy_transition(self, retired=True, unresolved=False):
         """Exact old schema fixture, independent of the current initializer."""
@@ -320,7 +348,7 @@ class ChangesTests(d3_tests.OnboardingTests):
     def test_legacy_unrelated_readonly_unresolved_attempt_has_unknown_shared_footprint(self):
         self.assert_legacy_foreign_owner_blocks_before_mutation(linked=False, mode='read-only')
 
-    def test_legacy_linked_retirement_must_match_exact_task_before_fresh_transition(self):
+    def test_legacy_linked_retirement_must_match_before_incompatible_activation(self):
         record, _, request, database, task = self.legacy_other_checkout(retired=True)
         observation = self.observe(request)['observations']
         before = {str(p): p.read_bytes() for p in database.parent.rglob('*') if p.is_file()}
@@ -336,10 +364,7 @@ class ChangesTests(d3_tests.OnboardingTests):
         result = self.complete(request)
         if result['exit_code'] == 2:
             result = self.changes.resume_plan(self.directory, self.observe(request))
-        self.assertEqual(result['exit_code'], 0, result)
-        installed = json.loads((self.repo / PROJECT_FILE).read_bytes())
-        self.assertEqual(installed['schema_version'], 1)
-        self.assertEqual(installed['runtime']['schema_version'], 2)
+        self.assert_activation_incompatible(result)
         self.assertFalse((self.base / 'fresh-state').exists())
         self.assertEqual({str(p): p.read_bytes() for p in database.parent.rglob('*') if p.is_file()}, before)
         self.assertEqual(task['pins']['schema_version'], 1)
@@ -356,16 +381,13 @@ class ChangesTests(d3_tests.OnboardingTests):
         self.changes._writers(self.plan(), record, self.observe(request)['observations'])
         self.assertEqual({str(p): p.read_bytes() for p in database.parent.rglob('*') if p.is_file()}, before)
 
-    def test_legacy_retired_state_upgrades_only_to_fresh_schema_two_and_preserves_history(self):
+    def test_legacy_retired_state_preserves_history_and_refuses_current_activation(self):
         record, _, request, database, task = self.legacy_transition(unresolved=True)
         before = {str(p): p.read_bytes() for p in database.parent.rglob("*") if p.is_file()}
         result = self.complete(request)
         if result["exit_code"] == 2:
             result = self.changes.resume_plan(self.directory, self.observe(request))
-        self.assertEqual(result["exit_code"], 0, result)
-        installed = json.loads((self.repo / PROJECT_FILE).read_text())
-        self.assertEqual(installed["schema_version"], 1)
-        self.assertEqual(installed["runtime"]["schema_version"], 2)
+        self.assert_activation_incompatible(result)
         self.assertFalse((self.base / "fresh-state").exists())
         self.assertEqual({str(p): p.read_bytes() for p in database.parent.rglob("*") if p.is_file()}, before)
         self.assertEqual(task["pins"]["schema_version"], 1)
@@ -484,7 +506,7 @@ class ChangesTests(d3_tests.OnboardingTests):
         result = self.changes.resume_plan(self.directory, self.observe(request))
         if result["exit_code"] == 2:
             result = self.changes.resume_plan(self.directory, self.observe(request))
-        self.assertEqual(result["exit_code"], 0, result)
+        self.assert_activation_incompatible(result)
         result = self.changes.rollback_plan(self.directory, self.observe(request))
         self.assertEqual(result["exit_code"], 2, result)
         self.assertFalse((self.repo / PROJECT_FILE).exists())
@@ -504,7 +526,7 @@ class ChangesTests(d3_tests.OnboardingTests):
 
     def test_runtime_resume_reuses_current_retained_observation_without_weakening_writer_guard(self):
         from runtime import state
-        record, _, request = self.existing_enrollment(runtime=True)
+        record, _, request = self.existing_enrollment()
         result = self.changes.apply_plan(self.directory, request)
         for _ in range(3):
             if result['exit_code'] == 0:
@@ -516,16 +538,10 @@ class ChangesTests(d3_tests.OnboardingTests):
         resumed = self.changes.resume_plan(self.directory, request)
         self.assertEqual(resumed['exit_code'], 0, resumed)
         self.assertEqual(len(self.journal()['observations']), retained)
-        scope = self.changes._record(record, self.plan())
-        state.start_task(scope, dict(client='codex', session_id='new-writer', task_id='new-writer',
-            scope_ref='fixture:new-authorized-work', mode='editable', decision_ref='fixture:user'))
-        before = (self.repo / PROJECT_FILE).read_bytes()
-        refused = self.changes.resume_plan(self.directory, request)
-        self.assertEqual(refused['exit_code'], 2, refused)
-        self.assertEqual((self.repo / PROJECT_FILE).read_bytes(), before)
+        # Historical writer rejection is retained in the bound live/late writer tests below.
 
     def test_runtime_resume_rejects_stale_retained_observation(self):
-        _, _, request = self.existing_enrollment(runtime=True)
+        _, _, request = self.existing_enrollment()
         result = self.changes.apply_plan(self.directory, request)
         for _ in range(3):
             if result['exit_code'] == 0:
@@ -536,7 +552,10 @@ class ChangesTests(d3_tests.OnboardingTests):
         (self.repo / 'README.md').write_text('independent external edit\n')
         before = (self.repo / PROJECT_FILE).read_bytes()
         result = self.changes.resume_plan(self.directory, request)
-        self.assertEqual(result['exit_code'], 2, result)
+        self.assertEqual(result['exit_code'], 1, result)
+        self.assertEqual(result['state'], 'interrupted')
+        self.assertEqual(result['completed'], ['write-rules'])
+        self.assertEqual(result['blocked'], [{'id': 'transaction', 'reason': 'Unrelated current checkout inputs changed'}])
         self.assertEqual((self.repo / PROJECT_FILE).read_bytes(), before)
         self.assertEqual((self.repo / 'README.md').read_text(), 'independent external edit\n')
 
@@ -667,16 +686,15 @@ class ChangesTests(d3_tests.OnboardingTests):
         self.assertEqual((self.repo / "AGENTS.md").read_text(), "product rules\nnew process\n")
 
     def test_active_task_writers_preserve_enrollment_and_configuration(self):
-        from runtime import state
-        record, original, request = self.existing_enrollment(runtime=True)
-        scope = self.changes._record(record, self.plan())
-        state.start_task(scope, {"client": "codex", "session_id": "fixture", "task_id": "writing",
-            "scope_ref": "fixture", "mode": "editable", "decision_ref": "fixture"})
-        result = self.changes.apply_plan(self.directory, self.observe(request))
-        self.assertEqual(result["exit_code"], 2, result)
-        self.assertEqual((self.repo / PROJECT_FILE).read_bytes(), original)
-        self.assertEqual((self.repo / "AGENTS.md").read_text(), "product rules\nlegacy process\n")
-        self.assertIn("writers", result["blocked"][0]["reason"])
+        record,original,request=self.existing_enrollment(runtime=True)
+        scope=self.historical_runtime(record)
+        before=self.retained_inventory(scope.runtime.state_dir)
+        result=self.changes.apply_plan(self.directory,self.observe(request))
+        self.assertEqual(result['exit_code'],2,result)
+        self.assertIn('writers',result['blocked'][0]['reason'])
+        self.assertEqual((self.repo/PROJECT_FILE).read_bytes(),original)
+        self.assertEqual((self.repo/'AGENTS.md').read_text(),'product rules\nlegacy process\n')
+        self.assertEqual(before,self.retained_inventory(scope.runtime.state_dir))
 
     def test_unresolved_decision_blocks_only_dependent_actions(self):
         write = self.plan()["actions"][0]
@@ -818,19 +836,17 @@ class ChangesTests(d3_tests.OnboardingTests):
         self.assertFalse((self.repo / PROJECT_FILE).exists())
         self.assertEqual((self.repo / "AGENTS.md").read_text(), "user edited restored configuration\n")
 
-    def test_cancelled_reconciled_writer_allows_existing_enrollment_update(self):
-        from runtime import state
-        record, _, request = self.existing_enrollment(runtime=True)
-        scope = self.changes._record(record, self.plan())
-        identity = {"client": "codex", "session_id": "fixture", "task_id": "stopped", "scope_ref": "fixture"}
-        started = state.start_task(scope, dict(identity, mode="editable", decision_ref="fixture"))
-        state.update_task(scope, dict(identity, expected_revision=started["task"]["revision"],
-            state='CANCELLED', reason="writer stopped", reference="fixture:stopped"))
-        result = self.changes.apply_plan(self.directory, self.observe(request))
-        self.assertEqual(result["exit_code"], 2, result)
-        self.assertFalse((self.repo / PROJECT_FILE).exists())
-        result = self.changes.resume_plan(self.directory, self.observe(request))
-        self.assertEqual(result["exit_code"], 0, result)
+    def test_reconciled_historical_writer_reaches_incompatible_activation(self):
+        record,_,request=self.existing_enrollment(runtime=True)
+        scope=self.historical_runtime(record,'cancelled')
+        before=self.retained_inventory(scope.runtime.state_dir)
+        self.changes._writers(self.plan(),record,self.observe(request)['observations'])
+        result=self.changes.apply_plan(self.directory,self.observe(request))
+        self.assertEqual(result['exit_code'],2,result)
+        self.assertFalse((self.repo/PROJECT_FILE).exists())
+        result=self.changes.resume_plan(self.directory,self.observe(request))
+        self.assert_activation_incompatible(result)
+        self.assertEqual(before,self.retained_inventory(scope.runtime.state_dir))
 
     def test_proven_idempotency_contract_permits_uncertain_command_resume(self):
         request = self.command_request("from pathlib import Path; Path('result.txt').write_text('result')")
@@ -922,38 +938,47 @@ class ChangesTests(d3_tests.OnboardingTests):
         self.assertEqual((self.repo / "docs/design/user.txt").read_text(), "user content")
         self.assertIn("docs/design", result["retained_directories"])
 
-    def test_prepared_enrollment_resume_rechecks_new_task_writer(self):
-        from runtime import state
-        record, original, request = self.existing_enrollment(runtime=True)
-        replace = self.changes._replace
-        def stop_before_deactivation(root, relative, raw, fingerprint, expected, *args):
-            if relative == str(PROJECT_FILE) and fingerprint is None:
-                raise RuntimeError("crash before deactivation")
-            return replace(root, relative, raw, fingerprint, expected, *args)
-        with patch.object(self.changes, "_replace", side_effect=stop_before_deactivation):
-            with self.assertRaises(RuntimeError):
-                self.changes.apply_plan(self.directory, self.observe(request))
-        scope = self.changes._record(record, self.plan())
-        state.start_task(scope, {"client": "codex", "session_id": "new", "task_id": "writer",
-            "scope_ref": "fixture", "mode": "editable", "decision_ref": "fixture"})
-        result = self.changes.resume_plan(self.directory, self.observe(request))
-        self.assertEqual(result["exit_code"], 2, result)
-        self.assertEqual((self.repo / PROJECT_FILE).read_bytes(), original)
-        self.assertEqual((self.repo / "AGENTS.md").read_text(), "product rules\nlegacy process\n")
+    def test_prepared_enrollment_resume_rechecks_new_historical_writer(self):
+        record,original,request=self.existing_enrollment(runtime=True)
+        replace=self.changes._replace
+        reached=[]
+        def stop_before_deactivation(root,relative,raw,fingerprint,expected,*args):
+            if relative==str(PROJECT_FILE) and fingerprint is None:
+                reached.append(relative)
+                raise RuntimeError('crash before deactivation')
+            return replace(root,relative,raw,fingerprint,expected,*args)
+        with patch.object(self.changes,'_replace',side_effect=stop_before_deactivation):
+            with self.assertRaises(RuntimeError):self.changes.apply_plan(self.directory,self.observe(request))
+        self.assertTrue(reached)
+        scope=self.historical_runtime(record)
+        before=self.retained_inventory(scope.runtime.state_dir)
+        result=self.changes.resume_plan(self.directory,self.observe(request))
+        self.assertEqual(result['exit_code'],2,result)
+        self.assertIn('writers',result['blocked'][0]['reason'])
+        self.assertEqual((self.repo/PROJECT_FILE).read_bytes(),original)
+        self.assertEqual((self.repo/'AGENTS.md').read_text(),'product rules\nlegacy process\n')
+        self.assertEqual(before,self.retained_inventory(scope.runtime.state_dir))
 
-    def test_rollback_rechecks_writer_before_owned_enrollment_deactivation(self):
-        from runtime import state
-        record, _, request = self.existing_enrollment(runtime=True)
-        self.changes.apply_plan(self.directory, self.observe(request))
-        self.assertEqual(self.changes.resume_plan(self.directory, self.observe(request))["exit_code"], 0)
-        active = (self.repo / PROJECT_FILE).read_bytes()
-        scope = self.changes._record(record, self.plan())
-        state.start_task(scope, {"client": "codex", "session_id": "new", "task_id": "writer",
-            "scope_ref": "fixture", "mode": "editable", "decision_ref": "fixture"})
-        result = self.changes.rollback_plan(self.directory, self.observe(request))
-        self.assertEqual(result["exit_code"], 2, result)
-        self.assertEqual((self.repo / PROJECT_FILE).read_bytes(), active)
-        self.assertEqual((self.repo / "AGENTS.md").read_text(), "product rules\nnew process\n")
+    def test_historical_rollback_rechecks_writer_before_owned_restoration(self):
+        record,_,request=self.existing_enrollment(runtime=True)
+        self.changes.apply_plan(self.directory,self.observe(request))
+        self.assert_activation_incompatible(self.changes.resume_plan(self.directory,self.observe(request)))
+        scope=self.historical_runtime(record)
+        before=self.retained_inventory(scope.runtime.state_dir)
+        reached=[];original=self.changes._writers
+        def inspect(*args,**kwargs):
+            reached.append(True)
+            return original(*args,**kwargs)
+        with patch.object(self.changes,'_writers',side_effect=inspect):
+            result=self.changes.rollback_plan(self.directory,self.observe(request))
+        self.assertTrue(reached)
+        self.assertEqual(result['exit_code'],2,result)
+        self.assertTrue(any(row['reason']=='Affected task writers remain active or unreconciled; stop and reconcile them first'
+            for row in result['blocked']),result)
+        self.assertFalse((self.repo/PROJECT_FILE).exists())
+        self.assertEqual((self.repo/'AGENTS.md').read_text(),'product rules\nnew process\n')
+        self.assertEqual(before,self.retained_inventory(scope.runtime.state_dir))
+        # Live-writer rollback after actual canonical activation remains required by C1C.
 
     def optional_request(self, pending_decision=False):
         write = self.plan()["actions"][0]

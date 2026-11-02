@@ -119,9 +119,10 @@ def register(scope, directory, request):
 def _authority(parent, package, *, reauthorize=False):
     from types import SimpleNamespace
     from runtime import workstreams
-    from runtime.startup import resolve_project, StartupError
+    from runtime.startup import acquire_project_entry, _entry_scope, StartupError
     try:
-        scope = resolve_project(SimpleNamespace(client='codex', cwd=Path(parent['cwd'])), package)
+        acquisition = acquire_project_entry(SimpleNamespace(client='codex', cwd=Path(parent['cwd'])), package)
+        scope = _entry_scope(acquisition)
         if scope is not None and scope.runtime is not None:
             with state._database(scope) as db:
                 if db is not None:
