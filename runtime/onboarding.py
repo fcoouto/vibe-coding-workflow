@@ -2036,16 +2036,41 @@ def _record_project_plan(plan, request, path, directory, screening_authenticatio
     _require(type(request["expected_revision"]) is int and request["expected_revision"] == plan["revision"],
              "Onboarding revision conflict; inspect the current plan")
     _object(request["assessments"], ("project", "repositories"))
-    incoming = request["assessments"]
+    incoming = deepcopy(request["assessments"])
     _require(isinstance(incoming["repositories"], list)
              and len(incoming["repositories"]) == len(plan["assessments"]["repositories"])
              and (incoming["project"] is None) == (plan["assessments"]["project"] is None),
              "Every frozen owner assessment must be retained")
     previous = deepcopy(_project_decisions(plan))
+    budget = {"paths": 0, "bytes": 0}
     for old, new in zip(_assessments(plan["assessments"]), _assessments(incoming)):
+        _require(isinstance(new, dict), "Invalid owner assessment")
+        new.setdefault('identity', deepcopy(old['identity']))
         _object(new, ("owner", "identity", "inventory", "decisions", "coverage", "actions", "evidence", "semantic_assessment"))
         _require(new["owner"] == old["owner"] and new["identity"] == old["identity"],
                  "Frozen owner/checkout identity cannot be rebound by a proposal")
+        snapshot = old['identity'].get('snapshot', old['identity'])
+        _require(isinstance(new['actions'], list) and isinstance(new['evidence'], list), 'Invalid proposal rows')
+        for action in new['actions']:
+            _require(isinstance(action, dict), 'Invalid action')
+            action.setdefault('owner', deepcopy(old['owner']))
+            if action.get('kind') in {'write', 'delete'}:
+                _relative(action.get('target'))
+                if 'before' not in action:
+                    observed = _inspection_fingerprint(Path(old['owner']['root']), action['target'], budget)
+                    _require(observed['status'] in {'read', 'absent'}, 'Action preimage is unavailable')
+                    action['before'] = observed.get('sha256', 'absent')
+                if 'after' not in action:
+                    if action['kind'] == 'write':
+                        _text(action.get('text'), empty=True)
+                        action['after'] = hashlib.sha256(action['text'].encode()).hexdigest()
+                    else:
+                        action['after'] = 'absent'
+        for item in new['evidence']:
+            _require(isinstance(item, dict) and isinstance(item.get('inputs'), list), 'Invalid evidence inputs')
+            if 'input_digest' not in item:
+                item['input_digest'] = _evidence_digest(old['owner'], snapshot, plan['package_pins'],
+                    plan['sources']['observed'], item['inputs'])
         _require(isinstance(new["decisions"], list) and all(isinstance(d, dict) and isinstance(d.get("id"), str)
                  for d in new["decisions"]), "Every decision needs a string ID")
         _require({d["id"] for d in old["decisions"]} <= {d["id"] for d in new["decisions"]},

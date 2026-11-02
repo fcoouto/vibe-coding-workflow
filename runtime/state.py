@@ -1311,13 +1311,18 @@ def _scope_version(scope):
 
 def _pins(scope):
     version = _scope_version(scope) if isinstance(scope, AcceptedScope) else SCHEMA_VERSION
-    runtime = runtime_fingerprint()
-    if version == 3 and runtime != scope.runtime_digest:
-        raise StateError("Installed runtime differs from accepted canonical scope")
+    runtime = scope.runtime_digest if version == 3 else runtime_fingerprint()
     pins = dict(schema_version=version, policy_digest=scope.policy_digest, runtime_digest=runtime)
+    if version == 3 and not _installed_compatible(pins):
+        raise StateError("Installed runtime differs from accepted canonical scope")
     if version == 3:
         pins["accepted_scope_digest"] = scope.accepted_scope_digest
     return pins
+
+
+def _installed_compatible(pins):
+    from runtime.startup import _package_compatible, policy_digest
+    return _package_compatible(pins, dict(runtime_digest=runtime_fingerprint(), policy_digest=policy_digest(PACKAGE)))
 
 
 def _scope_id(scope):
@@ -1922,7 +1927,7 @@ def _validate_task(db,scope_id,client,session,task_id,version,task,*,historical=
 def _save(db, scope_id, task):
     if _capture_scalar(db, 'user_version') != CANONICAL_SCHEMA_VERSION:
         raise StateError('Legacy task mutation requires its original pinned package; current authority requires approved D4 birth')
-    if task.get('state') not in STATES or task.get('pins',{}).get('runtime_digest') != runtime_fingerprint():
+    if task.get('state') not in STATES or not _installed_compatible(task.get('pins', {})):
         raise StateError('Historical task mutation requires its original pinned package; current authority requires approved D4 birth')
     previous = db.execute('select data from tasks where scope_id=? and client=? and session_id=? and task_id=?',
         (scope_id,task['client'],task['session_id'],task['task_id'])).fetchone()
@@ -2030,7 +2035,7 @@ def _guard_assignments(db, scope, client, session):
     from runtime.delegation import _ledger
     if any(record['owner']['scope_id'] == _scope_id(scope) and record['owner']['client'] == client and
            record['owner']['session_id'] == session and record['data']['status'] != 'settled'
-           for record in _ledger(scope, db)):
+           for record in _ledger(scope, db, current=True)):
         raise StateError('Unresolved assignments retain historical session ownership; reconcile exact attempts first')
 
 

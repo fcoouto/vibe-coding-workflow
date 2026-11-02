@@ -88,6 +88,13 @@ class TitleIntegrationTests(unittest.TestCase):
         self.call()
         self.assertTrue(self.native.title.endswith(' · REVIEW'))
 
+    def test_unchanged_sync_reads_saved_status_without_revalidating_or_native_transport(self):
+        self.call('configure', topic='Thread naming')
+        with patch.object(title_sync, '_task', return_value=deepcopy(self.task)) as task_read, \
+                patch.object(self.native, 'read', side_effect=AssertionError('Unneeded native read')):
+            self.call()
+        self.assertFalse(task_read.call_args.kwargs['revalidate'])
+
     def test_oversized_member_cannot_create_unreadable_presentation(self):
         before = self.native.title
         with self.assertRaises(ValueError):
@@ -386,7 +393,7 @@ class BoundTaskTitleTests(unittest.TestCase):
 
 
 class CompletedTaskTitleTests(unittest.TestCase):
-    def test_changed_candidate_revalidates_done_before_title_fast_path(self):
+    def test_explicit_refresh_revalidates_done_before_title_fast_path(self):
         from tests import test_evidence
         fixture = test_evidence.EvidenceTests('runTest')
         fixture.setUp()
@@ -405,7 +412,7 @@ class CompletedTaskTitleTests(unittest.TestCase):
             title_sync.operate(fixture.scope, 'configure', request, transport=lambda: native)
         self.assertTrue(native.title.endswith(' · DONE'))
         (fixture.repo / 'app.py').write_text('print("Changed after completion")\n')
-        title_sync.operate(fixture.scope, 'sync', dict(client='codex',session_id='parent'), transport=lambda: native)
+        title_sync.operate(fixture.scope, 'sync', dict(client='codex',session_id='parent'), transport=lambda: native, force=True)
         self.assertTrue(native.title.endswith(' · REVIEW'))
         self.assertFalse(native.title.startswith('▰▰▰▰▰ '))
 

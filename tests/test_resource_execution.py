@@ -9,6 +9,47 @@ from unittest.mock import patch
 from tests import test_workstreams
 
 
+class ResourceDependencyQueueTests(unittest.TestCase):
+    def test_completed_transitive_prerequisites_keep_fifo_and_guard_reopening(self):
+        import time
+        from runtime import resource_admission, resource_execution
+        fixture = test_workstreams.WorkstreamsTests('runTest')
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        children = fixture.settled_worker_chain(3)
+
+        def reopen(child):
+            pending = fixture.api.prepare_continuation(fixture.scope, fixture.continuation(child))
+            fixture.api.consume_continuation(fixture.scope, fixture.fixture.request(
+                attempt_id=child['attempt_id'], workstream_revision=fixture.control('status')['revision'],
+                token=pending['token']))
+
+        reopen(children[-1])
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        directory = Path(temporary.name).resolve() / 'host'
+        revision = fixture.api.control(fixture.scope, 'status',
+            dict(client='codex', feature='resource_admission'))['revision']
+        request = fixture.fixture.request(attempt_id=children[-1]['attempt_id'], resource_revision=revision,
+            phase_id='dependent-phase', cpu=1, memory_bytes=1, capacity_cpu=2,
+            capacity_memory_bytes=1024, argv=[sys.executable, '-c', 'pass'], wait_seconds=0)
+        with patch.object(resource_admission, 'measure', return_value=dict(
+                sampled_at=int(time.time()), available_memory_bytes=0, pressure=True)):
+            older = resource_execution.operate(fixture.scope, directory, 'run', request)
+        self.assertEqual(older['state'], 'waiting')
+        younger = dict(id='younger', owner=dict(task_id='other'), cpu=1, memory_bytes=1,
+            capacity_cpu=2, capacity_memory_bytes=1024, deadline=int(time.time())+60, ready=True)
+        with patch('runtime.startup.acquire_project_entry', return_value=test_acquisition(fixture.scope)):
+            result = resource_admission.control(directory, 'request', younger,
+                eligible=resource_execution._eligible, probe_key='fresh', probe=lambda: dict(
+                    sampled_at=int(time.time()), available_memory_bytes=1024, pressure=False))
+            self.assertEqual(result['reason'], 'older-request')
+            self.assertTrue(resource_admission.control(directory, 'status', {})[
+                'reservations'][older['id']]['request']['ready'])
+            with self.assertRaisesRegex(ValueError, 'admitted dependent'):
+                reopen(children[0])
+
+
 class ResourceExecutionTests(unittest.TestCase):
     def setUp(self):
         self.fixture = test_workstreams.WorkstreamsTests('runTest')
@@ -52,6 +93,55 @@ class ResourceExecutionTests(unittest.TestCase):
         self.feature('disable')
         with self.assertRaises(ValueError): self.call()
         self.assertFalse(self.directory.exists())
+
+    def test_independently_stopped_phase_reuses_capacity_before_assignment_finishes(self):
+        import hashlib
+        import json
+        self.request['capacity_cpu'] = 1
+        self.call()
+        snapshot = self.call('status')['reservations']
+        identity, row = next(iter(snapshot.items()))
+        proof = dict(version=1, kind='resource-phase-reconciliation', reservation_id=identity,
+            owner=row['request']['owner'], phase_id=self.request['phase_id'], stopped=True,
+            descendants_stopped=True, observation_ref='fixture:exact-command-and-descendants-stopped',
+            coordinator_ref='fixture:independent-observation')
+        proof['execution_digest'] = row['execution_digest']
+        path = self.directory.parent / 'phase-stop.json'
+        path.write_text(json.dumps(proof))
+        path.chmod(0o400)
+        reference = dict(path=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+        self.assertEqual(self.call(phase_id='next-phase')['state'], 'waiting')
+        self.assertEqual(self.call('release', host_proof=reference)['state'], 'released')
+        self.assertEqual(self.call(phase_id='next-phase')['returncode'], 0)
+        with self.assertRaises(ValueError):
+            self.call('release', phase_id='next-phase', host_proof=reference)
+
+    def test_phase_release_cannot_race_an_admitted_launcher(self):
+        import hashlib
+        import json
+        from runtime import resource_execution, resource_admission
+        actual = resource_execution._authority
+        intercepted = []
+        def authority(scope, request, cleanup=False):
+            result = actual(scope, request, cleanup=cleanup)
+            rows = resource_admission.control(self.directory, 'status', {})['reservations']
+            if not cleanup and rows and not intercepted:
+                intercepted.append(True)
+                identity, row = next(iter(rows.items()))
+                proof = dict(version=1, kind='resource-phase-reconciliation', reservation_id=identity,
+                    owner=row['request']['owner'], phase_id=self.request['phase_id'], stopped=True,
+                    descendants_stopped=True, observation_ref='fixture:no-process-yet', coordinator_ref='fixture:inspection')
+                path = self.directory.parent / 'early-stop.json'
+                path.write_text(json.dumps(proof))
+                path.chmod(0o400)
+                with self.assertRaisesRegex(ValueError, 'completed execution'):
+                    self.call('release', host_proof=dict(path=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest()))
+            return result
+        with patch.object(resource_execution, '_authority', side_effect=authority):
+            result = self.call()
+        self.assertEqual(intercepted, [True])
+        self.assertEqual(result['returncode'], 0)
+        self.assertEqual(next(iter(self.call('status')['reservations'].values()))['state'], 'active')
 
     def test_timeout_retains_reservation(self):
         result=self.call(argv=[sys.executable,'-c','import time;time.sleep(1)'], timeout_seconds=0.05)

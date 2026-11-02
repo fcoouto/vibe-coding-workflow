@@ -104,6 +104,39 @@ class EvidenceTests(unittest.TestCase):
             result = self.reconcile(result)
         return result
 
+    def test_executor_launch_failure_releases_check_without_handwritten_stop_proof(self):
+        from runtime import delegation
+        self.plan()
+        execute = self.api._execute
+        def fail_launch(scope, check, tool):
+            with patch.object(self.api.subprocess, 'Popen', side_effect=OSError('launch unavailable')):
+                return execute(scope, check, tool)
+        with patch.object(self.api, '_execute', side_effect=fail_launch):
+            result = self.check()
+        self.assertEqual(result['attempt']['status'], 'not-run')
+        self.assertFalse(result['attempt']['process_started'])
+        with state._database(self.scope) as db:
+            record = next(row for row in delegation._ledger(self.scope, db) if row['id'] == result['attempt_id'])
+        self.assertEqual(record['data']['status'], 'settled')
+        self.assertEqual(record['data']['result']['outcome'], 'failed')
+
+    def test_artifact_publication_does_not_scan_unrelated_retention_history(self):
+        self.plan()
+        with patch.object(self.api, '_cleanup_closed_details', side_effect=AssertionError('Unrelated cleanup scan')):
+            reference = fixture_artifact(self.scope, self.identity, dict(observation='bounded fixture'))
+        self.assertEqual(self.api._read(self.scope, reference), dict(observation='bounded fixture'))
+
+    def test_completion_reuses_one_ownership_observation_in_its_transaction(self):
+        from runtime import delegation
+        self.plan()
+        plan = self.api._load_plan(self.scope, self.identity)
+        task = state.task_status(self.scope, 'codex', 'parent')['task']
+        candidate = self.api.capture_candidate(self.scope, plan)
+        with patch.object(delegation, '_ledger', wraps=delegation._ledger) as ledger:
+            blockers = self.api._blockers(self.scope, task, plan, candidate, 'completion', [])
+        self.assertTrue(blockers)
+        self.assertEqual(ledger.call_count, 1)
+
     def native_review_request(self, *, coverage, criteria, assignment):
         from runtime import delegation
         if not hasattr(self, 'native_review_catalog'):

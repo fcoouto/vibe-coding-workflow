@@ -175,7 +175,7 @@ def operate(scope, action, request, transport=None, *, force=False):
         raise ValueError('Unsupported title action')
     if action in {'sync', 'status'} and not path.exists():
         return dict(ok=True, managed=False)
-    task = _task(scope, client, session, revalidate=True)
+    task = _task(scope, client, session, revalidate=force or action != 'sync')
     if task is None:
         raise ValueError("No bound workflow task")
     if action in {'sync', 'status'}:

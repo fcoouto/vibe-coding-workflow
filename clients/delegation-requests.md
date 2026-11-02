@@ -3,8 +3,7 @@
 Read only the section for the current action. The installed validators remain the
 schema authority; these examples execute against them in the documentation tests.
 Implementation loading is unnecessary for the worked plan/prepare requests.
-The explicit stop-proof/cache-publication exceptions below retain their authoritative
-validator lookups. This reference adds
+Stop proofs and cache publication load their complete operation-specific references below. This reference adds
 no permissions, native capability or passing evidence.
 
 ## Common envelope
@@ -223,11 +222,8 @@ completion still requires independent effect/descendant reconciliation.
 ## Reconcile
 
 Action `reconcile` adds `attempt_id`, `host_proof:{path,sha256}` and `assessment`.
-For proof construction only, load `_validate_role_proof` in
-[the authoritative validator](../runtime/delegation.py), including its complete
-version-2 identity, native identity, candidate, plan, claim, observation and result
-bindings. This reference defines the submission envelope, not a replacement proof
-schema. Never replace that lookup with invented fields or weaker flags.
+For proof construction, load the complete role schema in
+[reconciliation proof fields](delegation-proofs.md).
 Proof path is absolute, private and content-hash bound to a trusted independently
 inspected stop result. An assessment has `outcome` (completed, failed or cancelled),
 `changed_paths`, `result_assessment`, `partial_change_assessment`, nonempty
@@ -255,7 +251,6 @@ and surface/applicability rather than the task envelope. Cache status takes
 `profile_ids`. Refresh claims additionally take `trigger:{kind,id}` (routine, manual
 or maintenance), optional `lease_seconds` (1–600); publication takes the actual
 `token`, positive `generation`, `coordinator_ref` and exactly one of `guidance` or
-`failure`. For constructing a publication only, load `_common`, `_trigger` and
-`_guidance` in [the validator](../runtime/delegation.py). Keep that bounded lookup
-until a complete public publication schema replaces it; ordinary cache reuse does
-not require it.
+`failure`. For publication fields and bounds, read
+[guidance publication](guidance-publication.md); ordinary cache reuse does not
+require that reference.

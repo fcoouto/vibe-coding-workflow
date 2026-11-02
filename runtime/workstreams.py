@@ -115,7 +115,7 @@ def _permission(scope, revision):
 
 
 def _report(scope, setting, db):
-    records = d6._ledger(scope, db) if db is not None else []
+    records = d6._ledger(scope, db, current=True) if db is not None else []
     active = [r for r in records if r['owner']['scope_id'] == state._scope_id(scope)
         and 'workstream_revision' in r['body']['request'] and r['data']['status'] != 'settled']
     return dict(ok=True, control_scope='checkout', scope_id=state._scope_id(scope),
@@ -195,7 +195,7 @@ def consume_dispatch(scope, request):
     with d6._reservation_write(scope) as db:
         _permission(scope, request['workstream_revision'])
         d6._require(db is not None, 'Missing native assignment state')
-        records = d6._ledger(scope, db)
+        records = d6._ledger(scope, db, task=request)
         record, task = _owned(scope, db, request, records)
         d6._require(record['body']['request']['workstream_revision'] == request['workstream_revision'] and
             record['data']['status'] == 'prepared' and record['data']['observation'] is None and

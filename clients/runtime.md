@@ -48,7 +48,7 @@ python3 -I -B /path/to/package/scripts/workflow.py delegation coordinator reserv
 python3 -I -B /path/to/package/scripts/workflow.py delegation reconcile --cwd /checkout < reconciliation.json
 ```
 
-Reservation takes the common identity/revision plus stable `dispatch_id`, exact `claims`, `operation:{id,kind:"coordinator-work"}`, `reason`, `ownership_ref` and `stop_conditions`. Use `reserve_coordinator`, `_claims` and `_validate_operation_proof` in [runtime/delegation.py](../runtime/delegation.py) for the bounded schemas. Replay returns the same reservation without another operation or native launch permission. Match an applicable existing D6 coordinator job; otherwise the task's accepted scope/decision and explicit resources suffice. Reservation never grants Git, commit, publishing or settings permission and consumes no native attempt/resource units.
+Reservation takes the common identity/revision plus stable `dispatch_id`, exact `claims`, `operation:{id,kind:"coordinator-work"}`, `reason`, `ownership_ref` and `stop_conditions`. Use [resource claims](resource-claims.md) and [coordinator reconciliation fields](delegation-proofs.md#coordinator-operation) for the bounded schemas. Replay returns the same reservation without another operation or native launch permission. Match an applicable existing D6 coordinator job; otherwise the task's accepted scope/decision and explicit resources suffice. Reservation never grants Git, commit, publishing or settings permission and consumes no native attempt/resource units.
 
 Reconciliation takes identity/revision, `attempt_id`, private `host_proof:{path,sha256}` and an independent `assessment` of outcome, changed paths, result, partial changes and supporting evidence. The version-2 `coordinator-operation-reconciliation` proof binds the exact operation, claims and private operation/resource observations. Verify that the operation and its writable descendants stopped and affected resources are quiescent; these claims do not assert that the live parent coordinator stopped. Retain original D5/D6 plans and candidate bindings only when present at reservation; never invent them for a task-only operation. JSON integrity checks cannot authenticate host evidence. Uncertain operations retain ownership until exact reconciliation.
 
@@ -57,6 +57,16 @@ Reconciliation takes identity/revision, `attempt_id`, private `host_proof:{path,
 The Codex runtime hooks require configured runtime state; absent configuration preserves startup-only behavior. After a valid runtime scope is established, state or pin failure denies guarded `apply_patch`; invalid configuration itself produces a diagnostic and does not establish the runtime guard. Skipped, crashed or timed-out hooks may allow execution. The only write guard is canonical `apply_patch` during a `WORKING` editable task without a pending applicable blocker or decision. Other tools, shell commands and external edits remain outside the guard. Post-tool events conservatively advance checkout generation; generation is invalidation metadata, not a check or review result.
 
 Stop continuation is opt-in through one runnable condition, current correlated turn, budget exactly 1, no unresolved blockers/decisions and eligible `WORKING`/`REVIEW` state. At most one continuation is consumed per task/turn, even across conditions, edits, retries, process restarts and concurrent Stop events; a genuinely new bound turn has its own allowance. Consumption occurs before continuation output, so it cannot be rearmed for that task/turn. A PostToolUse event with a previously unseen turn suppresses old-turn continuation without associating that completion with the task or pausing it. If Post arrives before canonical Pre establishes a turn binding, a later Pre for that same turn cannot adopt it; continuation or correlated pause requires a turn first established by canonical Pre. Missing or uncertain correlation passes without continuation. Interrupt can pause a correlated task; see [native qualification limits](../docs/d2-validation.md). Task state and references do not prove permission or task ownership. Readiness requires current evidence verification; status rechecks `DONE` tasks against actual content. A `DONE` result does not grant merge authority.
+
+## Package version matching
+
+Original fingerprints remain provenance and are never rewritten. The current
+schema-3 reader requires exact executing policy and runtime pins. Automatic
+cross-version compatibility is deferred; older or mixed pairs remain blocked.
+Updates never silently repin existing records. Accepted scope,
+policy, physical authority, writer ownership and candidate checks still apply;
+a changed relevant policy/candidate requires fresh evidence. Legacy readers and
+unsupported vocabularies retain the rules below.
 
 ## Change a pinned runtime
 

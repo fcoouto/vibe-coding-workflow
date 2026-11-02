@@ -70,6 +70,23 @@ The local contract tables also retain their triggers, onboarding decisions, evid
 
 ## User-approved extensions and boundaries
 
+- On 2 November 2026, the user approved the first simplification round. Configured
+  enrollment does not activate runtime guards; managed operations still require
+  qualified authority. Recovery considers changed effects and relevant current or
+  historical writers. The user's pre-merge decision retains strict policy/runtime
+  matching and original pins; automatic cross-version compatibility is deferred.
+- The same approval moves routine execution choice into the policy index and the
+  test-first/self-review procedure into Task Planning. Detailed delegation loads
+  only for its triggers, including failure/escalation. Public reconciliation,
+  guidance and resource schemas replace routine implementation lookups. Required
+  review, security, full setup catalog coverage and repository merge assurance are
+  unchanged. These are routing and bookkeeping changes, not new exemptions.
+- Executor-confirmed nonlaunch needs no independent stop claim. Started processes
+  still need descendant reconciliation. Independent phase stopping can release
+  that phase's capacity without ending its assignment. Retention runs at plan or
+  explicit maintenance boundaries rather than on every artifact publication;
+  existing retention periods, caps and protected evidence remain unchanged.
+
 - Explicit project/client enrollment, silent activation, the three conflict-resolution modes and mandatory policy adoption are plugin decisions. The approved [Project/Repository design](onboard-my-project-plan.md#project-and-repository-model), linked delivery, recovery and retention extend that scope; their concrete owner seams remain future implementation/qualification, without changing current D6 package or live instruction claims.
 - Resource reservations, observed settings and trusted reviewer provenance supplement Toolkit guidance.
 - On 26 October 2026, the user simplified model authorization: native agents/models are automatically approved across all current and future platforms/providers; any non-native model or execution route requires explicit approval. This replaces the earlier subscription-only restriction and the local-only exception. Local models additionally require assessment. Existing account access, task constraints, budgets and supported dispatch still apply; this decision changes neither coordinator settings nor adapter support.

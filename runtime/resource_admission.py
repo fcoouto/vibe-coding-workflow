@@ -40,7 +40,12 @@ def _validate(data):
     state._integer(data['next_order'], 'reservation sequence', 1)
     orders = set()
     for identity, row in data['reservations'].items():
-        state._fields(row, ('request', 'state', 'order', 'proof'), ('last_status',))
+        state._fields(row, ('request', 'state', 'order', 'proof'), ('last_status', 'execution'))
+        if 'execution' in row:
+            state._fields(row['execution'], ('pid', 'returncode'))
+            state._integer(row['execution']['pid'], 'completed process id', 1)
+            _require(type(row['execution']['returncode']) is int and row['state'] in {'active', 'released', 'cancelled'},
+                'Invalid completed execution receipt')
         if row.get('last_status') is not None:
             status = row['last_status']
             state._fields(status, ('reason', 'next_recheck', 'warning'))
@@ -184,10 +189,15 @@ def _operate(data, action, request, now, probe, probe_key=None, eligible=None, d
         if reason is None:
             row['state'] = 'active'
         return _reply(data, row, newly=reason is None, reason=reason, now=now, warning=warning)
-    state._fields(request, ('id', 'owner'), ('stopped_proof',))
+    state._fields(request, ('id', 'owner'), ('execution',) if action == 'complete' else ('stopped_proof',))
     state._text(request['id'], 'host reservation id', 128)
     row = data['reservations'].get(request['id'])
     _require(row is not None and row['request']['owner'] == request['owner'], 'Unknown resource owner')
+    if action == 'complete':
+        _require(row['state'] == 'active' and 'execution' not in row and 'execution' in request,
+            'Execution receipt requires its unreleased active phase')
+        row['execution'] = request['execution']
+        return _reply(data, row, now=now, warning=row.get('last_status', {}).get('warning'))
     if row['state'] in {'released', 'cancelled'}:
         return _reply(data, row, now=now)
     if action == 'release' or row['state'] == 'active':
@@ -219,7 +229,7 @@ def _archive_expired(directory, data, now):
 
 def control(directory, action, request, *, now=None, probe=None, probe_key=None, eligible=None, disk_pressure=False, disk_warning=None):
     """Reserve atomically; stopped-proof meaning and task authority belong to caller."""
-    _require(action in {'status', 'request', 'release', 'cancel'}, 'Unknown resource admission action')
+    _require(action in {'status', 'request', 'release', 'cancel', 'complete'}, 'Unknown resource admission action')
     _require(type(disk_pressure) is bool, 'Invalid disk pressure observation')
     if disk_warning is not None:
         state._text(disk_warning, 'disk telemetry warning', 256)

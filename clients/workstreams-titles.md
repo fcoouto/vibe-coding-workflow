@@ -71,10 +71,11 @@ opportunities. The synchronizer uses the supported Codex App Server protocol,
 without starting a model turn. Interrupt's short deadline leaves repair for the
 next event. Stop does not imply completion.
 
-Completion evidence is revalidated before deciding whether a title is unchanged,
-so changed candidates cannot retain a stale full-meter DONE. Ordinary commands
-skip native calls when revisions are unchanged and no delivery is pending.
-Explicit repair and eligible hooks still check for manual edits.
+Ordinary tool and stop events reuse the saved task status and skip native calls
+when revisions are unchanged and no delivery is pending. Startup/resume and
+explicit repair revalidate completion evidence and check for manual edits.
+Task and evidence controls remain responsible for current completion authority;
+a displayed title is the last delivered status, not fresh evidence.
 A per-thread lock serializes participating writers. Desired titles are persisted
 before writing; readback acknowledges delivery. Lost acknowledgments, changed
 revisions, unavailable clients and timeouts leave repair for the next event.

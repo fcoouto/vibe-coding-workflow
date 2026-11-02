@@ -42,3 +42,14 @@ Load only the guide for the current operation after this common contract.
 ## Completion and limits
 
 For completion, freshness and local merge limits, load [completion evidence](evidence-completion.md). For an authorized runtime transition, load [task retirement](evidence-retirement.md).
+
+## Retention maintenance
+
+Retention runs once when accepting an evidence plan, and on explicit
+`evidence cleanup --cwd /checkout` with the common current task identity/revision.
+Artifact publication does not recursively scan unrelated closed-task history.
+Cleanup returns expired, pending, protected and incomplete-coverage details;
+inspect those results during maintenance. Existing seven-day detail retention,
+four-month compact retention, 100 MiB Project cap, and protected active,
+uncertain and recovery evidence rules remain unchanged. Unsupported cleanup
+coverage remains an explicit limitation, not permission to delete protected data.

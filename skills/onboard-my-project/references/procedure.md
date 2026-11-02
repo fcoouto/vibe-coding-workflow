@@ -68,6 +68,14 @@ Assess every component in the complete pinned catalog and every approved policy.
 
 Apply all three conflict modes in Project Scope. Ask one focused question only when a missing material decision affects scope, behavior, access, cost, architecture, or enforcement. Preserve mode blocks incompatible required adoption; replace mode proposes retiring the approved legacy workflow layer, preserving product rules and exceptions; decide-with-me presents one conflict and recommendation at a time. Never treat silence or recommendation as approval. Continue independent read-only work while decisions are pending.
 
+For schema-2 proposals, keep each assessment's explicit `owner` and semantic
+fields. The helper can derive omitted assessment `identity`, file action `owner`,
+`before`/`after` hashes, and evidence `input_digest` from the frozen inspection,
+actual bounded preimage observation and proposed text. Supplied values still
+undergo the full validators; they are never silently replaced. Review the
+resulting complete proposal before approval. This changes no catalog coverage,
+source requirements, conflict decisions or execution permission.
+
 The proposal must identify ordered actions, dependencies, exact target paths/sections or external resources, before fingerprints/absence, exact proposed text or argv, deterministic after hashes where possible, preservation exceptions, required authorization, verification, and D4 backup/recovery needs. For file writes, preserve unaffected content in the complete postimage; section identifies the authorized area but is not a splice instruction. Include native harness evaluation method and initial smoke cases; optional labs and paid experiments remain separate choices. Do not generate backups or alter the target during D3.
 
 ## Resume, review, and report

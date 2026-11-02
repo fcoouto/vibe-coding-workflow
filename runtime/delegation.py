@@ -1194,7 +1194,17 @@ def _record_data(scope, row, data, *, db=None, context=None, artifact_refs=None)
     return dict(id=identity, owner=owner, data=data, body=body)
 
 
-def _ledger(scope, db, *, context=None, artifact_refs=None):
+def _ledger(scope, db, *, context=None, artifact_refs=None, task=None, current=False, assignment_id=None):
+    where, parameters = '', ()
+    if task is not None or current:
+        where = " where coalesce(json_extract(data,'$.status'),'')!='settled'"
+        if task is not None:
+            where += ' or (scope_id=? and client=? and session_id=? and task_id=?)'
+            scope_id = evidence._task_scope_id(task) if context is not None else state._scope_id(scope)
+            parameters = (scope_id, task['client'], task['session_id'], task['task_id'])
+    if assignment_id is not None:
+        _require(task is None and not current, 'Select one assignment or current ownership')
+        where, parameters = ' where id=?', (assignment_id,)
     capture = state._CAPTURE_SQL_SCOPE.get()
     if capture is not None:
         resources, escrow = capture
@@ -1212,8 +1222,8 @@ def _ledger(scope, db, *, context=None, artifact_refs=None):
                 "coalesce(sum(typeof(id)!='text' or typeof(scope_id)!='text' or typeof(client)!='text' or "
                 "typeof(session_id)!='text' or typeof(task_id)!='text' or typeof(dispatch_id)!='text' or "
                 "typeof(data)!='text'),0) from "
-                '(select id,scope_id,client,session_id,task_id,dispatch_id,data from assignments limit ?)',
-                (MAX_ASSIGNMENTS + 1,)).fetchone()
+                '(select id,scope_id,client,session_id,task_id,dispatch_id,data from assignments' + where + ' limit ?)',
+                (*parameters, MAX_ASSIGNMENTS + 1)).fetchone()
             _require(type(measured) is tuple and len(measured) == 3 and
                 all(type(value) is int and value >= 0 for value in measured) and
                 measured[0] <= MAX_ASSIGNMENTS + 1 and measured[2] == 0,
@@ -1225,8 +1235,8 @@ def _ledger(scope, db, *, context=None, artifact_refs=None):
             acquisition.fail(error)
             raise
     read = partial(_historical_read, scope, context, db, artifact_refs)
-    rows = db.execute('select id,scope_id,client,session_id,task_id,dispatch_id,data from assignments limit ?',
-                      (MAX_ASSIGNMENTS + 1,)).fetchall()
+    rows = db.execute('select id,scope_id,client,session_id,task_id,dispatch_id,data from assignments' + where + ' limit ?',
+                      (*parameters, MAX_ASSIGNMENTS + 1)).fetchall()
     _require(len(rows) <= MAX_ASSIGNMENTS, 'Shared assignment history exceeds its inspection bound')
     records = [_record(scope, row, db=db, context=context, artifact_refs=artifact_refs) for row in rows]
     for record in records:
@@ -1253,7 +1263,8 @@ def _ready_closure(scope, task):
 
 
 def _invalidate_ready(db, scope, task, claims):
-    rows = db.execute('select scope_id,client,session_id,task_id from tasks limit ?', (MAX_ASSIGNMENTS + 1,)).fetchall()
+    rows = db.execute("select scope_id,client,session_id,task_id from tasks where json_extract(data,'$.state')='DONE' "
+        "and json_extract(data,'$.lifecycle.safe_closed_at') is null limit ?", (MAX_ASSIGNMENTS + 1,)).fetchall()
     _require(len(rows) <= MAX_ASSIGNMENTS, 'Shared task history exceeds its inspection bound')
     owner = (state._scope_id(scope), task['client'], task['session_id'], task['task_id'])
     for scope_id, client, session, task_id in rows:
@@ -1276,7 +1287,8 @@ def _insert_assignment(db, scope, task, record):
         raise state.StateError('Retired dispatch cannot create a new assignment; evidence is unavailable or expired')
     if state._retired_assignment(db, record['id']):
         raise state.StateError('Retired native assignment ID cannot be reused')
-    _require(db.execute('select count(*) from assignments').fetchone()[0] < MAX_ASSIGNMENTS,
+    _require(db.execute("select count(*) from (select 1 from assignments where coalesce(json_extract(data,'$.status'),'')!='settled' limit ?)",
+        (MAX_ASSIGNMENTS,)).fetchone()[0] < MAX_ASSIGNMENTS,
              'Shared assignment history exceeds its insertion bound')
     owner, data = record['owner'], record['data']
     _require(data['revision'] == task['revision'] + 1 and owner == dict(scope_id=state._scope_id(scope),
@@ -1525,7 +1537,9 @@ def _resources_available(scope, db, claims, records):
         _require(not _held_conflict(claims, record['data']['claims']),
                  'Canonical resource ownership conflicts with an unresolved assignment')
     # Unlinked D5 attempts retain unknown ownership; exact linked checks use their ledger claims.
-    rows = db.execute('select scope_id,client,session_id,task_id from tasks limit ?', (MAX_ASSIGNMENTS + 1,)).fetchall()
+    rows = db.execute("select scope_id,client,session_id,task_id from tasks where exists "
+        "(select 1 from json_each(tasks.data,'$.evidence.attempts') where json_extract(value,'$.status') "
+        "in ('reserved','running','uncertain')) limit ?", (MAX_ASSIGNMENTS + 1,)).fetchall()
     _require(len(rows) <= MAX_ASSIGNMENTS, 'Shared task history exceeds its inspection bound')
     for scope_id, client, session, task_id in rows:
         record = state._task(db, scope_id, client, session, task_id)
@@ -1630,7 +1644,7 @@ def _reserve_operation(scope, request, *, role, _verification=False):
         _require(db is not None, 'Runtime task state is missing')
         _retired_dispatch(scope, db, request)
         state._assert_open(state._task(db,state._scope_id(scope),request['client'],request['session_id'],request['task_id']))
-        records = _ledger(scope, db)
+        records = _ledger(scope, db, task=request)
         replay = _replay(scope, records, request)
         if replay:
             _require(replay['data']['role'] == role, 'Dispatch identity belongs to another role')
@@ -1654,7 +1668,7 @@ def _reserve_operation(scope, request, *, role, _verification=False):
     with _reservation_write(scope) as db:
         _retired_dispatch(scope, db, request)
         state._assert_open(state._task(db,state._scope_id(scope),request['client'],request['session_id'],request['task_id']))
-        records = _ledger(scope, db)
+        records = _ledger(scope, db, task=request)
         replay = _replay(scope, records, request)
         if replay:
             _require(replay['data']['role'] == role, 'Dispatch identity belongs to another role')
@@ -1793,7 +1807,7 @@ def _prepare_native(scope, request, *, role):
         _require(db is not None, 'Runtime task state is missing')
         _retired_dispatch(scope, db, request)
         state._assert_open(state._task(db,state._scope_id(scope),request['client'],request['session_id'],request['task_id']))
-        records = _ledger(scope, db)
+        records = _ledger(scope, db, task=request)
         replay = _replay(scope, records, request)
         if replay:
             _require(replay['data']['role'] == role, 'Dispatch identity belongs to another role')
@@ -1861,7 +1875,7 @@ def _prepare_native(scope, request, *, role):
     with _reservation_write(scope) as db:
         _retired_dispatch(scope, db, request)
         state._assert_open(state._task(db,state._scope_id(scope),request['client'],request['session_id'],request['task_id']))
-        records = _ledger(scope, db)
+        records = _ledger(scope, db, task=request)
         replay = _replay(scope, records, request)
         if replay:
             _require(replay['data']['role'] == role, 'Dispatch identity belongs to another role')
@@ -1894,7 +1908,7 @@ def _assignment(scope, db, request, *, roles=('worker',), records=None):
     _require(db is not None, 'Missing native assignment state')
     if state._retired_assignment(db, request['attempt_id']):
         raise state.StateError('Retired assignment evidence is unavailable or expired')
-    records = _ledger(scope, db) if records is None else records
+    records = _ledger(scope, db, task=request) if records is None else records
     record = next((r for r in records if r['id'] == request['attempt_id']), None)
     _require(record is not None and record['data']['role'] in roles and
         record['owner'] == dict(scope_id=state._scope_id(scope),
@@ -2298,7 +2312,7 @@ def reconcile_assignment(scope, request):
         task = _assignment_task(scope, db, request)
         generation = db.execute('select generation from checkouts where scope_id=?', (state._scope_id(scope),)).fetchone()[0]
         plan = _assignment_plan(scope, record, task) if record['data']['candidate'] is not None else None
-        reservations = {item['id']: evidence._digest(item['data']) for item in _ledger(scope, db)}
+        reservations = {item['id']: evidence._digest(item['data']) for item in _ledger(scope, db, task=request)}
     assessment = request['assessment']
     state._fields(assessment, ('outcome', 'changed_paths', 'result_assessment', 'partial_change_assessment', 'evidence', 'coordinator_ref'))
     _require(assessment['outcome'] in {'completed', 'failed', 'cancelled'}, 'Unsupported worker outcome')
@@ -2338,7 +2352,7 @@ def reconcile_assignment(scope, request):
     with _reservation_write(scope) as db:
         current = _assignment(scope, db, request, roles=('worker', 'review', 'coordinator'))
         task = _assignment_task(scope, db, request)
-        _require({item['id']: evidence._digest(item['data']) for item in _ledger(scope, db)} == reservations,
+        _require({item['id']: evidence._digest(item['data']) for item in _ledger(scope, db, task=request)} == reservations,
                  'Shared reservation ownership changed during reconciliation; recapture candidate and proof')
         _require(current['data'] == record['data'] and task['pins'] == record['body']['pins'] and
             db.execute('select generation from checkouts where scope_id=?', (state._scope_id(scope),)).fetchone()[0] == generation,
@@ -2375,7 +2389,7 @@ def prepared_native_assignment(scope, attempt_id):
         _require(db is not None, 'Missing native assignment state')
         if state._retired_assignment(db, attempt_id):
             raise state.StateError('Retired native assignment evidence is unavailable or expired')
-        found = next((r for r in _ledger(scope, db) if r['id'] == attempt_id and r['owner']['scope_id'] == state._scope_id(scope)), None)
+        found = next((r for r in _ledger(scope, db, assignment_id=attempt_id) if r['owner']['scope_id'] == state._scope_id(scope)), None)
         _require(found is not None and found['data']['role'] == 'worker', 'Native worker assignment is absent or unqualified')
         return _native_binding(found)
 
@@ -2386,7 +2400,7 @@ def prepared_native_review_assignment(scope, attempt_id):
     with state._database(scope) as db:
         if db is not None and state._retired_assignment(db, attempt_id):
             raise state.StateError('Retired native review evidence is unavailable or expired')
-        record = next((r for r in _ledger(scope, db) if r['id'] == attempt_id and
+        record = next((r for r in _ledger(scope, db, assignment_id=attempt_id) if
             r['owner']['scope_id'] == state._scope_id(scope)), None) if db is not None else None
         _require(record is not None and record['data']['role'] == 'review', 'Exact native review assignment is absent')
         owner = record['owner']
@@ -2407,7 +2421,7 @@ def delegation_status(scope, client, session_id):
             return dict(ok=True, plan=None, assignments=[], conflicts=[], budgets=None, capacity=None, blockers=['Runtime task state is missing'],
                         limitations=list(ADMISSION_LIMITATIONS))
         task = state._task(db, state._scope_id(scope), client, session_id)
-        records = _ledger(scope, db)
+        records = _ledger(scope, db, task=task, current=True)
         selected = [r for r in records if r['owner']['scope_id'] == state._scope_id(scope) and
                     r['owner']['client'] == client and r['owner']['session_id'] == session_id]
         delegation = task.get('delegation') if task else None
@@ -2585,7 +2599,7 @@ def consume_continuation(scope, request):
             from runtime.workstreams import _permission
             _permission(scope, request.get('workstream_revision'))
         _require(db is not None, 'Missing native assignment state')
-        records = _ledger(scope, db)
+        records = _ledger(scope, db, task=request)
         record, task = _continuation_owned(scope, db, request, records, allow_settled=True)
         value = _continuation_intent(scope, record)
         _require(value is not None and value['token'] == request['token'] and value['state'] == 'prepared' and
@@ -2630,7 +2644,7 @@ def prepare_continuation(scope, request):
             from runtime.workstreams import _permission
             _permission(scope, request.get('workstream_revision'))
         _require(db is not None, 'Missing native assignment state')
-        records = _ledger(scope, db)
+        records = _ledger(scope, db, task=request)
         record, task = _continuation_owned(scope, db, request, records, allow_settled=True)
         receipt = _continuation_receipt(scope, record)
         _continuation_recovery(receipt, request['reason'], request['human_continue'])

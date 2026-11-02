@@ -12,6 +12,10 @@ The [adapter](../runtime/adapters/codex.py) validates session identity, absolute
 
 No enrollment produces no output. Each lifecycle event can reload context after resume, fork or compaction; it does not run on every tool call. D1 has no persistent event deduplication because the native event supplies no unique invocation ID.
 
+A valid configured-only canonical checkout permits ordinary editing without
+managed task authority. Explicit task controls still require active qualification.
+Suspended, conflicting or uncertain active authority retains its guard.
+
 ## Startup implementation
 
 Read the [shared startup contract](startup.md) when implementing, diagnosing or preparing enrollment. It defines the record format, runtime limits and package/fixture checks.
