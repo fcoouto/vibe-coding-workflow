@@ -33,6 +33,8 @@ Use the exact pinned Toolkit procedures and approved D3 actions, preserving comp
 
 For file postimages, preserve all unaffected content; an authorized section label does not authorize partial splice semantics. Do not generate a backup before the transaction is approved and started. Safe reruns must not duplicate registrations or erase customizations.
 
+Metadata-only inventory observations describe untouched files; they are never approved preimages, content evidence or recovery material. A newly selected effect still requires the existing bounded exact-content, physical identity and durable-backup checks. Preserve the plan's inventory version during freshness checks and recovery.
+
 ## Enrollment ownership and completion
 
 For schema-1 new enrollment, stage the active project record outside discovery and install it atomically last, only after applicable mandatory policy changes and mechanisms qualify. Gate activation on mandatory requirements and their action/decision dependency closure; independent optional blockers remain reported as partial work without blocking qualified mandatory enrollment. Backup is recovery material, never activation. A valid discovery record activates enrollment; there is no inactive flag.

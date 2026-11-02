@@ -26,7 +26,8 @@ HEX = re.compile(r"[0-9a-f]{64}\Z")
 CHECKOUT_INPUTS = ("repository_root", "git_common_dir", "head", "index_digest", "dirty_inventory", "paths")
 LIMITS = ["Helpers do not authenticate source ownership, trust, catalog semantics, or agent evidence.",
           "Structural checks do not qualify client execution, enrollment, approval, or merge readiness.",
-          "No project commands run; missing baseline and client observations remain agent-recorded gaps."]
+          "No project commands run; missing baseline and client observations remain agent-recorded gaps.",
+          "Metadata-only inventory records do not verify file contents; dependent evidence and edits still require bounded content."]
 
 def _require(condition, message):
     if not condition:
@@ -230,6 +231,7 @@ def _load(path):
              and plan["revision"] >= 1, "Unsupported onboarding plan")
     if "screening" in plan:
         _screening_projection(plan["screening"])
+    _inventory_enabled(plan["identity"])
     return plan
 
 def _save(plan, path, directory, *, budget=None):
@@ -340,6 +342,9 @@ def _sources(record):
             observed[item["path"]] = {"status": "unavailable"}
     return observed
 
+def _secret_file(path):
+    return path.name == ".env" or path.name.startswith(".env.") or path.suffix in {".pem", ".key", ".p12", ".pfx"}
+
 def _fingerprint(root, relative, limit=MAX_FILE, *, resources=None):
     path = root / relative
     held = ExitStack() if resources is not None else None; raw = None
@@ -348,8 +353,7 @@ def _fingerprint(root, relative, limit=MAX_FILE, *, resources=None):
         st = path.lstat()
         if not stat.S_ISREG(st.st_mode):
             return {"status": "special"}
-        if path.name == ".env" or path.name.startswith(".env.") or path.suffix in {
-                ".pem", ".key", ".p12", ".pfx"}:
+        if _secret_file(path):
             return {"status": "excluded", "reason": "potential secret file"}
         if st.st_size > limit:
             return {"status": "oversized"}
@@ -375,11 +379,54 @@ def _file_targets(actions):
             targets.append(_relative(action.get("target")))
     return targets
 
+def _inventory_enabled(snapshot):
+    version = snapshot.get("inventory_version")
+    _require("inventory_version" not in snapshot or type(version) is int and version == 1, "Unsupported file inventory version")
+    for name, value in snapshot["fingerprints"].items():
+        if value["status"] != "metadata":
+            continue
+        _require(version == 1 and not name.startswith("instruction:"), "Metadata cannot replace instruction/content evidence")
+        _object(value, ("status", "reason", "metadata"))
+        _require(value["reason"] in ("oversized", "excluded", "special", "unreadable_or_link"),
+                 "Invalid metadata-only inventory reason")
+        metadata = value["metadata"]
+        _object(metadata, ("device", "inode", "mode", "links", "size", "mtime_ns", "ctime_ns"))
+        _require(all(type(v) is int for v in metadata.values())
+                 and all(metadata[k] >= 0 for k in ("device", "inode", "mode", "links", "size")),
+                 "Invalid file inventory metadata")
+    return version == 1
+
+def _inventory_fingerprint(root, relative, limit):
+    # Observe the leaf without opening it or following links, including secret/special files.
+    path = root / relative
+    try:
+        descriptor = _open_path(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            info = os.stat(path.name, dir_fd=descriptor, follow_symlinks=False)
+        finally:
+            os.close(descriptor)
+        if _secret_file(path):
+            reason = "excluded"
+        elif not stat.S_ISREG(info.st_mode):
+            reason = "unreadable_or_link" if stat.S_ISLNK(info.st_mode) else "special"
+        elif info.st_size > MAX_FILE:
+            reason = "oversized"
+        else:
+            # Shared-budget exhaustion must not change evidence strength between inspect and apply.
+            return _fingerprint(root, relative, limit)
+        return {"status": "metadata", "reason": reason, "metadata": {
+            "device": info.st_dev, "inode": info.st_ino, "mode": info.st_mode, "links": info.st_nlink,
+            "size": info.st_size, "mtime_ns": info.st_mtime_ns, "ctime_ns": info.st_ctime_ns}}
+    except FileNotFoundError:
+        return {"status": "absent"}
+    except (OSError, StartupError):
+        return {"status": "unreadable_or_link"}
+
 def _snapshot_targets(plan):
     names = {name for name in plan["identity"]["fingerprints"] if not name.startswith("instruction:")}
     return sorted(names | set(_file_targets(plan["actions"])))
 
-def _snapshot(root, targets=(), *, budget=None):
+def _snapshot(root, targets=(), *, budget=None, inventory=False):
     def check(*, reading=False):
         if budget is not None:
             _require(type(budget["paths"]) is int and 0 <= budget["paths"] <= MAX_PATHS,
@@ -425,10 +472,11 @@ def _snapshot(root, targets=(), *, budget=None):
     _require(len(observed_names) <= MAX_PATHS, "Checkout path limit exceeded; inventory remains incomplete")
     fingerprints = {}
     total = 0
+    observer = _inventory_fingerprint if inventory else _fingerprint
     for name in observed_names:
         _relative(name)
-        fingerprints[name] = (_inspection_fingerprint(root, name, budget)
-                              if budget is not None else _fingerprint(root, name))
+        fingerprints[name] = (_inspection_fingerprint(root, name, budget, inventory=inventory)
+                              if budget is not None else observer(root, name, MAX_FILE))
         total += fingerprints[name].get("bytes", 0)
         _require(total <= MAX_TOTAL, "Checkout byte limit exceeded; inventory remains incomplete")
     instructions = []
@@ -461,6 +509,8 @@ def _snapshot(root, targets=(), *, budget=None):
             "dirty_inventory": [os.fsdecode(v) for v in status.split(b"\x00") if v],
             "paths": names, "fingerprints": fingerprints, "instructions": instructions}
     check()
+    if inventory:
+        result["inventory_version"] = 1
     return result
 
 def _package_pins():
@@ -498,7 +548,7 @@ def _source_blockers(plan, observed):
 
 def _current(plan):
     root = Path(plan["identity"]["repository_root"])
-    snapshot = _snapshot(root, _snapshot_targets(plan))
+    snapshot = _snapshot(root, _snapshot_targets(plan), inventory=_inventory_enabled(plan["identity"]))
     sources = _sources(plan["sources"]["declared"])
     package = _package_pins()
     changes = []
@@ -607,7 +657,7 @@ def inspect_project(cwd, plan_dir, source_record):
         _source_record(source_record, path)
         plan = _load(path)
         if plan is None:
-            snapshot = _snapshot(root)
+            snapshot = _snapshot(root, inventory=True)
             sources = _sources(source_record)
             plan = {"schema_version": 1, "plan_id": uuid.uuid4().hex, "revision": 1,
                     "created_at": _now(), "identity": snapshot | {"clients": source_record["clients"]},
@@ -630,13 +680,15 @@ def inspect_project(cwd, plan_dir, source_record):
         _save(plan, path, directory)
     return _screen_onboarding_plan(plan_dir, plan["revision"], inspection=plan)
 
-def _inspection_fingerprint(root, relative, budget, *, resources=None):
+def _inspection_fingerprint(root, relative, budget, *, resources=None, inventory=False):
+    _require(not inventory or resources is None, "Capture resource owners require strict content observations")
     _check_observation_deadline(budget)
     _require(budget["paths"] < MAX_PATHS, "Project aggregate path limit exceeded; inventory remains incomplete")
     budget["paths"] += 1
     remaining = MAX_TOTAL - budget["bytes"]
     _require(remaining >= 0, "Project aggregate byte limit exceeded; inventory remains incomplete")
-    result = _fingerprint(root, relative, min(MAX_FILE, remaining), resources=resources)
+    result = (_inventory_fingerprint(root, relative, min(MAX_FILE, remaining)) if inventory else
+              _fingerprint(root, relative, min(MAX_FILE, remaining), resources=resources))
     _require(not (result["status"] == "oversized" and remaining < MAX_FILE),
              "Project aggregate byte limit exceeded; inventory remains incomplete")
     budget["bytes"] += result.get("bytes", 0)
@@ -873,10 +925,12 @@ def _project_observations(scope, sources, assessments=None):
         try:
             assessment = by_root.get(repository["root"], {})
             targets = _observed_targets(assessment)
-            repository["snapshot"] = _snapshot(Path(repository["root"]), targets, budget=budget)
+            prior = assessment.get("identity", {}).get("snapshot")
+            repository["snapshot"] = _snapshot(Path(repository["root"]), targets, budget=budget,
+                inventory=_inventory_enabled(prior) if prior is not None else True)
             if assessment.get("actions") or assessment.get("identity", {}).get("targets"):
                 repository["targets"] = _target_observations(assessment, repository["snapshot"]["fingerprints"], budget=budget)
-            if any(value["status"] not in ("read", "absent") for value in repository["snapshot"]["fingerprints"].values()):
+            if any(value["status"] not in ("read", "absent", "metadata") for value in repository["snapshot"]["fingerprints"].values()):
                 gap(repository["root"], "Repository inventory contains unreadable, excluded or over-limit files")
         except (StartupError, OSError, ValueError, subprocess.SubprocessError) as error:
             gap(repository["root"], "Repository inventory incomplete: " + str(error))
@@ -1071,11 +1125,12 @@ def _project_plan_shape(plan):
         if "reason" in value:
             _text(value["reason"])
 
-    def fingerprints(value):
+    def fingerprints(value, inventory=False):
         _require(isinstance(value, dict) and len(value) <= MAX_PATHS, "Invalid saved file observations")
         for name, item in value.items():
             _text(name)
-            fingerprint(item)
+            if item["status"] != "metadata" or not inventory:
+                fingerprint(item)
 
     _object(plan, ("schema_version", "plan_id", "revision", "created_at", "project_scope", "identity",
         "assessments", "current_observations", "package_pins", "sources", "requirements", "invalidations",
@@ -1253,7 +1308,7 @@ def _project_plan_shape(plan):
                          "Invalid Repository observation binding")
                 if value["snapshot"] is not None:
                     snapshot = value["snapshot"]
-                    _object(snapshot, (*CHECKOUT_INPUTS, "fingerprints", "instructions", "clients"))
+                    _object(snapshot, (*CHECKOUT_INPUTS, "fingerprints", "instructions", "clients"), ("inventory_version",))
                     _require(snapshot["repository_root"] == owner["root"]
                              and snapshot["git_common_dir"] == owner["git_common_dir"]
                              and snapshot["clients"] == declared["clients"], "Invalid selected checkout snapshot")
@@ -1266,7 +1321,7 @@ def _project_plan_shape(plan):
                              and len(snapshot["dirty_inventory"]) <= 2 * MAX_PATHS, "Invalid saved checkout changes")
                     for item in snapshot["dirty_inventory"]:
                         _text(item)
-                    fingerprints(snapshot["fingerprints"])
+                    fingerprints(snapshot["fingerprints"], inventory=_inventory_enabled(snapshot))
                     for instruction in rows(snapshot["instructions"]):
                         _object(instruction, ("path", "scope", "editable"))
                         _require(Path(_text(instruction["path"])).is_absolute()
@@ -1482,7 +1537,12 @@ def _validate_proposal(plan, *, shared=False, references=None):
     inventory = plan["inventory"]
     names = ("product", "critical_flows", "stack", "documents", "quality_commands", "services",
              "client_capabilities", "merge_feasibility", "instructions", "integrations")
-    _object(inventory, () if shared else names, names if shared else ())
+    _object(inventory, () if shared else names, (*names, "uninspected_files") if shared else ("uninspected_files",))
+    uninspected = inventory.get("uninspected_files", {})
+    _require(isinstance(uninspected, dict) and len(uninspected) <= MAX_PATHS, "Invalid uninspected file assessment")
+    for name, reason in uninspected.items():
+        _relative(name)
+        _text(reason)
     documents = inventory.get("documents", {})
     _require(isinstance(documents, dict) and (shared or len(documents) == 9),
              "Map all nine canonical document destinations from the pinned manifest")
@@ -1492,7 +1552,7 @@ def _validate_proposal(plan, *, shared=False, references=None):
         if document["path"] is not None:
             _relative(document["path"])
     fact_records = []
-    for key in inventory.keys() - {"documents"}:
+    for key in inventory.keys() - {"documents", "uninspected_files"}:
         _object(inventory[key], ("facts", "assumptions"))
         _require(isinstance(inventory[key]["facts"], list), "Inventory facts must be a list")
         _strings(inventory[key]["assumptions"])
@@ -1504,6 +1564,8 @@ def _validate_proposal(plan, *, shared=False, references=None):
     evidence_ids = _rows(plan["evidence"], ("id", "kind", "summary", "scope", "inputs", "reference")
                          + (("input_digest",) if references is not None else ()))
     fingerprints = plan["identity"]["fingerprints"]
+    _require(set(uninspected) <= {name for name, value in fingerprints.items() if value["status"] == "metadata"},
+             "Uninspected file assessments must name current metadata-only observations")
     input_keys = set(fingerprints) | (set() if shared else {"checkout:" + key for key in CHECKOUT_INPUTS}) | {"package"} | {
         "source:" + name for name in plan["sources"]["observed"]}
     if references is not None:
@@ -1659,7 +1721,17 @@ def _validate_proposal(plan, *, shared=False, references=None):
         if not native["method"] or not native["smoke_cases"]:
             blockers.append(_block("native_evaluation", "Native harness method/initial smoke cases missing",
                                    "Plan required native evaluation; keep optional paid labs separate"))
+    required = set(_file_targets(plan["actions"]))
+    required.update(name for row in plan["evidence"] for name in row["inputs"])
+    required.update(name for row in plan["decisions"] for name in row["invalidate_on"])
+    required.update(document["path"] for document in documents.values() if document["path"] is not None)
+    inventory_enabled = _inventory_enabled(plan["identity"])
     for key, value in fingerprints.items():
+        if value["status"] == "metadata" and inventory_enabled and key not in required:
+            if key not in uninspected:
+                blockers.append(_block(key, "Uninspected content needs an applicability assessment",
+                    "Record why this untouched file is unnecessary for adoption, or leave dependent coverage pending"))
+            continue
         if value["status"] not in ("read", "absent"):
             blockers.append(_block(key, "File inventory has an explicit assessment gap: " + value["status"],
                                    "Resolve safely or record a scoped independent assessment prerequisite"))
@@ -1727,7 +1799,8 @@ def _record_plan(plan_dir, request, *, screening_check=None):
                 _remember_decision(plan, old)
         # New file destinations add raw fingerprints and instruction scopes even when Git ignores them.
         targets = _file_targets(plan["actions"])
-        expanded = _snapshot(Path(plan["identity"]["repository_root"]), targets)
+        expanded = _snapshot(Path(plan["identity"]["repository_root"]), targets,
+                             inventory=_inventory_enabled(plan["identity"]))
         fingerprints = plan["identity"]["fingerprints"]
         fingerprints.update({key: value for key, value in expanded["fingerprints"].items()
                              if (key.startswith("instruction:") or key in targets) and key not in fingerprints})
@@ -1830,7 +1903,7 @@ def _validate_project_proposal(plan):
             count += len(assessment[key])
         for key, section in assessment["inventory"].items():
             _require(isinstance(section, dict), "Invalid scoped inventory section")
-            if key == "documents":
+            if key in ("documents", "uninspected_files"):
                 count += len(section)
             else:
                 _object(section, ("facts", "assumptions"))
