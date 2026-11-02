@@ -126,20 +126,65 @@ def _read_plan(scope, task, *, db=None, context=None):
 
 def completion_requirements(scope, db, task: dict, *, context=None) -> dict:
     """Local retained facts only; a title or caller's remote claim is never proof."""
+    from runtime import evidence
     adopted = 'delivery_policy' in task.get('accepted_identity', {})
     if 'delivery' not in task:
         required = adopted and task['mode'] == 'editable'
         return dict(delivery_required=required, delivery_complete=not required,
-                    pending=[], blockers=['Delivery scope decision is missing'] if required else [])
+                    pending=[], blockers=['Delivery scope decision is missing'] if required else [], waiting_for_merge=False)
     plan = _read_plan(scope, task, db=db, context=context)
-    return _scope_requirements(plan)
+    return _scope_requirements(plan, read=lambda reference: evidence._read(scope, reference, db=db, context=context))
 
 
-def _scope_requirements(plan):
-    required = [p['id'] for p in plan['publications'] if p['required']]
-    pending = required + ['companion:' + c['task_id'] for c in plan['companions']]
-    return dict(delivery_required=bool(pending), delivery_complete=not pending,
-                pending=pending, blockers=[])
+def _scope_requirements(plan, *, read=None):
+    pending, blockers = [], []
+    required = [p for p in plan['publications'] if p['required']]
+    waiting = bool(required) and not plan['companions']
+    for publication in required:
+        candidate = publication['candidate']
+        observation = candidate.get('observation') if isinstance(candidate, dict) else None
+        if observation is None or read is None:
+            pending.append(publication['id'])
+            waiting = False
+            continue
+        try:
+            record = read(observation)
+            facts = record['observation']
+            _require(type(record['version']) is int and record['version'] == 1 and record['kind'] == 'delivery-observation'
+                and record['binding'] == _publication_binding(publication), 'Delivery observation binding changed')
+            _require(all(facts[k] == record['binding'][k] for k in
+                ('host', 'pull_request', 'target', 'branch', 'head', 'repository_id'))
+                and facts['repository'].casefold() == publication['repository'].casefold(),
+                'Delivered candidate differs from its sealed snapshot')
+            complete = facts['merged'] is True and facts['state'] == 'closed' and bool(facts['merge_commit']) and bool(facts['merged_at'])
+            readiness = candidate.get('readiness')
+            if readiness is None:
+                blockers.append('PR readiness evidence is missing or stale: ' + publication['id'])
+                waiting = False
+            else:
+                ready = read(readiness)
+                _require(type(ready['version']) is int and ready['version'] == 1 and ready['kind'] == 'delivery-readiness'
+                    and ready['binding'] == _publication_binding(publication), 'Readiness binding changed')
+                verification = read(ready['local_verification'])
+                _require(verification['purpose'] == 'merge-evidence' and not verification['blockers']
+                    and verification['candidate_digest'] == candidate['snapshot']['digest'], 'Readiness implementation proof changed')
+            if not complete:
+                pending.append(publication['id'])
+                if facts['state'] == 'closed':
+                    blockers.append('Required PR was closed without merge: ' + publication['id'])
+        except (ValueError, KeyError, TypeError, OSError):
+            pending.append(publication['id'])
+            waiting = False
+            blockers.append('Delivery observation is unavailable or incompatible: ' + publication['id'])
+    pending += ['companion:' + c['task_id'] for c in plan['companions']]
+    return dict(delivery_required=bool(required or plan['companions']), delivery_complete=not pending,
+                pending=pending, blockers=blockers, waiting_for_merge=bool(pending) and waiting and not blockers)
+
+
+def _publication_binding(publication):
+    return {key: publication[key] for key in ('id', 'host', 'repository', 'target', 'branch', 'pull_request')} | dict(
+        head=publication['candidate']['head'], snapshot=publication['candidate']['snapshot'],
+        repository_id=publication['candidate']['repository_id'])
 
 
 def completion_blockers(requirements):
@@ -164,8 +209,12 @@ def implementation_task(task):
 
 def apply_completion(task, requirements, implementation_verified):
     """Called only by the completion writer, after all independent work is verified."""
-    if not implementation_verified or requirements['blockers']:
+    if not implementation_verified:
         if task['state'] == 'DONE':
+            task['state'] = 'REVIEW'
+        return
+    if requirements['blockers'] or not requirements['delivery_complete'] and not requirements['waiting_for_merge']:
+        if task['state'] not in {'WORKING', 'REVIEW'}:
             task['state'] = 'REVIEW'
         return
     if requirements['delivery_complete']:
@@ -203,6 +252,8 @@ def operate(scope, action: str, request: dict, *, owner=None) -> dict:
                         **completion_requirements(scope, db, task))
     if action == 'bind-worktree':
         return _bind_worktree(scope, request, owner)
+    if action == 'reconcile':
+        return _reconcile(scope, request, owner)
     _require(action == 'plan', 'Unsupported delivery operation')
     evidence._request(request, ('plan',), ('override',))
     with state._database(scope, write=True) as db:
@@ -248,7 +299,7 @@ def pending(scope, *, cursor: str | None = None, limit: int = 32) -> dict:
             task = state._task(db, *identity)
             _require(task['accepted_identity']['project_id'] == scope.project_id, 'Foreign task in delivery authority')
             requirements = completion_requirements(None, db, task, context=context)
-            if not requirements['delivery_complete']:
+            if not requirements['delivery_complete'] or requirements['blockers']:
                 records.append(dict(zip(('scope_id', 'client', 'session_id', 'task_id'), identity)) |
                     dict(state=task['state'], plan=task.get('delivery', {}).get('plan'), **requirements))
     next_cursor = None
@@ -317,3 +368,109 @@ def _bind_worktree(scope, request, owner):
         task['revision'] += 1
         state._save(db, state._scope_id(scope), task)
         return dict(task=task, plan=plan, replay=False)
+
+
+def _reconcile(scope, request, owner):
+    from runtime import evidence, startup
+    from runtime.adapters.github_delivery import GitHubDelivery
+    from scripts.delivery_coordinator import DeliveryOperationOwner
+    evidence._request(request, ('operation_id', 'publication_id'), ('original', 'target_revision', 'pull_request'))
+    for key in ('operation_id', 'publication_id'):
+        _ref(request[key])
+    _require(isinstance(owner, DeliveryOperationOwner), 'A verified delivery observation owner is required')
+    owner.authorize(scope, 'reconcile', request)
+    _require(isinstance(owner.repository, GitHubDelivery), 'A bounded provider observation source is required')
+    context = evidence._evidence_context(scope)
+    authority = state._canonical_plain(context.authority_set[0])
+    digest = evidence._digest(request)
+    with state._database(scope) as db:
+        producer = evidence._task(db, scope, request, revision=False)
+        producer_ref = state._canonical_plain(evidence._artifact_owner(scope, producer).task)
+        original_ref = request.get('original', producer_ref)
+        state._task_reference(original_ref)
+        _require(original_ref['authority'] == authority, 'Reconciliation requires the same surviving physical authority')
+        original = state._task(db, original_ref['scope_id'], original_ref['client'],
+                               original_ref['session_id'], original_ref['task_id'])
+        _require(original is not None and original['accepted_identity']['project_id'] == scope.project_id
+            and 'delivery' in original, 'Original delivery task is unavailable')
+        state._assert_open(original)
+        _require(all(original['pins'][key] == producer['pins'][key] for key in
+                     ('schema_version', 'runtime_digest', 'policy_digest')),
+                 'Original delivery needs its retained pinned package')
+        for reference in original['delivery']['operations']:
+            prior = evidence._read(None, reference, db=db, context=context)
+            if prior.get('operation_id') == request['operation_id']:
+                _require(prior.get('action') == 'reconcile' and prior['request_digest'] == digest,
+                         'Delivery operation identity was reused with changed inputs')
+                return dict(task=original, observation=prior['observation'], replay=True,
+                    **completion_requirements(None, db, original, context=context))
+        target_revision = request.get('target_revision', request['expected_revision'])
+        state._integer(target_revision, 'original task revision', 1)
+        _require(('original' in request) == ('target_revision' in request), 'Original task and revision must be supplied together')
+        _require(producer['revision'] == request['expected_revision'] and original['revision'] == target_revision,
+                 'Task revision conflict')
+        _require(len(original['delivery']['operations']) < 64, 'Delivery operation history exhausted')
+        previous_plan = deepcopy(original['delivery']['plan'])
+        plan = _read_plan(None, original, db=db, context=context)
+        publication = next((p for p in plan['publications'] if p['id'] == request['publication_id']), None)
+        _require(publication is not None, 'Unknown publication in original scope')
+        number = request.get('pull_request', publication['pull_request'])
+        _require(type(number) is int and 0 < number <= 2 ** 53
+            and publication['pull_request'] in (None, number), 'Publication PR identity changed')
+        unbound = publication['candidate'] is None
+        if unbound:
+            _require(original_ref == producer_ref and plan['workspace'] is not None and 'evidence' in original,
+                     'Unbound publication needs its original admitted workspace and evidence plan')
+            evidence_plan = evidence._read(scope, original['evidence']['plan'], db=db)
+    observed_publication = publication | dict(pull_request=number)
+    facts = owner.repository.observe(observed_publication)
+    if unbound:
+        observe = getattr(owner.native, 'observe_publication', None)
+        _require(callable(observe), 'Native publication ownership is unresolved')
+        native = observe(scope, deepcopy(observed_publication), number)
+        state._fields(native, ('host', 'repository', 'repository_id', 'pull_request', 'target', 'branch', 'head', 'reference'))
+        _ref(native['reference'])
+        _require(type(native['repository_id']) is int and type(native['pull_request']) is int
+            and all(native[key] == facts[key] for key in native if key != 'reference'),
+                 'Native publication ownership differs from provider identity')
+        evidence._canonical_inputs(scope)
+        code, branch = startup.read_git(scope.repository_root, 'symbolic-ref', '--quiet', '--short', 'HEAD', limit=512)
+        _require(code == 0 and branch.decode('utf-8').strip() == publication['branch'], 'Local publication branch differs')
+        candidate = evidence.capture_candidate(scope, evidence_plan)
+        _require(not any(entry[3:] != str(state.PROJECT_FILE) for entry in candidate['dirty_inventory']),
+                 'Publication candidate contains uncommitted changes')
+        _require(candidate['head'] == facts['head'], 'Provider head differs from the committed local candidate')
+    evidence._canonical_inputs(scope)
+    with state._database(scope, write=True) as db:
+        current_producer = evidence._task(db, scope, request)
+        current = state._task(db, original_ref['scope_id'], original_ref['client'],
+                             original_ref['session_id'], original_ref['task_id'])
+        _require(current is not None and current['revision'] == target_revision
+            and current['delivery']['plan'] == previous_plan, 'Original delivery changed during observation')
+        state._assert_open(current)
+        artifact_owner = evidence._artifact_owner(scope, current_producer)
+        def publish(value):
+            dependencies = evidence._artifact_dependencies(value)
+            if original_ref != producer_ref:
+                dependencies.append(dict(kind='task', reference=original_ref))
+            linked_owner = evidence._LinkedOwner(artifact_owner,
+                tuple(state._canonical_freeze(edge) for edge in dependencies))
+            return evidence._artifact(scope, value, owner=linked_owner, db=db)
+        if unbound:
+            _require(evidence.capture_candidate(scope, evidence_plan) == candidate,
+                     'Local candidate changed during publication observation')
+            publication['pull_request'] = number
+            publication['candidate'] = dict(head=candidate['head'], snapshot=publish(candidate),
+                repository_id=facts['repository_id'], ownership_ref=native['reference'], observation=None, readiness=None)
+        record = dict(version=1, kind='delivery-observation', action='reconcile', operation_id=request['operation_id'],
+            request_digest=digest, previous_plan=previous_plan, original_task=original_ref, producer_task=producer_ref,
+            binding=_publication_binding(publication), observation=facts, observed_at=state._owner_time(),
+            coordinator_ref=owner._decision['reference'])
+        reference = publish(record)
+        publication['candidate']['observation'] = reference
+        current['delivery']['plan'] = publish(plan)
+        current['delivery']['operations'].append(reference)
+        current['revision'] += 1
+        state._save(db, original_ref['scope_id'], current)
+        return dict(task=current, observation=facts, replay=False,
+            **completion_requirements(None, db, current, context=context))

@@ -1546,7 +1546,8 @@ def _closure_facts(context, task_ref, db, recovery, *, recovery_files=None, ordi
     _require(recovery['complete'] is True and not recovery['blockers'] and not recovery['discovered_authorities']
         and sorted(recovery['authorities'],key=_raw)==sorted(expected,key=_raw),'Recovery current source coverage is incomplete or foreign')
     observed=state.inspect_dependencies(db,task_ref);task=observed['task']
-    _require(delivery.completion_requirements(None, db, task, context=context)['delivery_complete'],
+    delivery_requirements = delivery.completion_requirements(None, db, task, context=context)
+    _require(delivery_requirements['delivery_complete'] and not delivery_requirements['blockers'],
         'Pending delivery must retain its original task and recovery evidence')
     assignment_blocker='Assignment body requires original task; exact assignment certificate integration is required'
     _require(not [blocker for blocker in observed['blockers'] if blocker!=assignment_blocker],'; '.join(observed['blockers']))
@@ -6041,6 +6042,7 @@ def _verification_response(task, blockers, candidate=None, *, requirements=None,
     return dict(ok=True, verified=not blockers and not delivery_blockers, task=task,
         implementation_verified=not blockers,
         delivery_complete=requirements['delivery_complete'] if requirements else False,
+        waiting_for_merge=requirements.get('waiting_for_merge', False) if requirements else False,
         blockers=blockers + delivery_blockers,
         candidate_digest=_digest(candidate) if candidate is not None else None, merge_authority=False,
         limitations=['Local point-in-time evidence; no repository merge gate or filesystem security boundary'])
@@ -6472,7 +6474,9 @@ def _linked_lifecycle_outcomes(content,snapshots,*,observed,consumer):
     shared,delivered,sources,deliveries=result;local=[]
     for source in _linked_delivery_sources(content['inputs']):
         plan = _linked_source(source, observed=observed, consumer=consumer, require_admission=True)
-        delivered = delivered and delivery._scope_requirements(plan)['delivery_complete']
+        requirements = delivery._scope_requirements(plan, read=lambda ref: _linked_source(
+            dict(authority=source['authority'], reference=ref), observed=observed, consumer=consumer, require_admission=True))
+        delivered = delivered and requirements['delivery_complete'] and not requirements['blockers']
         sources.append(source)
     delivered = delivered and all(row.get('delivery_requirements', {}).get('delivery_complete', True) for row in snapshots)
     for member in content['members']:
@@ -6554,7 +6558,8 @@ def _linked_terminal_facts(references,selected,acquired,authorities,*,original_a
         all(_linked_projection(s['reference'],s['plan'])==projection for s in snapshots),'Lifecycle scope contracts are incomplete or divergent')
     inputs=_linked_inputs(snapshots);observed={}
     _,delivered,_,deliveries=_linked_outcomes(projection,_digest(inputs),acquired,snapshots,selected,observed=observed,require_shared_support=True,consumer=consumer)
-    delivered = delivered and _linked_delivery_requirements(snapshots)['delivery_complete']
+    requirements = _linked_delivery_requirements(snapshots)
+    delivered = delivered and requirements['delivery_complete'] and not requirements['blockers']
     roots=_linked_source_refs(acquired)+_linked_delivery_sources(inputs)
     for snapshot in snapshots:
         roots.append(dict(authority=snapshot['reference']['authority'],reference=snapshot['plan_ref']))
@@ -7923,7 +7928,9 @@ def _linked_delivery_requirements(snapshots):
     return dict(delivery_required=any(r['delivery_required'] for r in requirements),
                 delivery_complete=all(r['delivery_complete'] for r in requirements),
                 pending=sorted({p for r in requirements for p in r['pending']}),
-                blockers=sorted({b for r in requirements for b in r['blockers']}))
+                blockers=sorted({b for r in requirements for b in r['blockers']}),
+                waiting_for_merge=any(not r['delivery_complete'] for r in requirements)
+                    and all(r['delivery_complete'] or r['waiting_for_merge'] for r in requirements))
 
 
 def _linked_delivery_sources(inputs):

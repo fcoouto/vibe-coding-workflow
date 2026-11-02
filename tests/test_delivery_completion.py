@@ -23,11 +23,25 @@ class MergeWaitBindingTests(unittest.TestCase):
             merge_wait=dict(condition_id=condition['id'], verification=reference('a'), plan=reference('c'))))
         self.assertEqual(delivery.implementation_task(task)['conditions'], [condition])
 
+    def test_generated_wait_preserves_a_resolved_user_condition_with_same_id(self):
+        reference = dict(name='a' * 32 + '.json', digest='a' * 64)
+        user_condition = dict(id='delivery:merge', kind='decision', action='task', status='resolved',
+            reason='User scope', reference='user:scope', resolution_ref='user:chosen')
+        task = dict(state='REVIEW', accepted_identity=dict(delivery_policy=policy()), conditions=[user_condition],
+            evidence=dict(verification=reference), delivery=dict(plan=reference, operations=[]))
+        delivery.apply_completion(task, dict(delivery_complete=False, blockers=[], pending=['pr-0'],
+                                            waiting_for_merge=True), True)
+        self.assertEqual(task['conditions'][0], user_condition)
+        self.assertEqual(task['state'], 'WAITING')
+        self.assertEqual(delivery.implementation_task(task)['conditions'], [user_condition])
+
 
 class CompletionTests(unittest.TestCase):
     def setUp(self):
         self.fixture = test_evidence.EvidenceTests('runTest')
-        self.fixture._delivery_policy = policy(targets=[target()])
+        self.fixture._delivery_policy = policy(targets=[target()], separate_worktrees=getattr(self, 'separate_worktrees', True))
+        self.fixture._canonical_linked = getattr(self, 'linked', False)
+        self.fixture._canonical_peer = getattr(self, 'peer', False)
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
         self.scope = self.fixture.scope
@@ -74,53 +88,38 @@ class CompletionTests(unittest.TestCase):
         self.assertIn('Task conditions remain unresolved', status['evidence']['blockers'])
         self.assertFalse(status['evidence']['implementation_verified'])
 
-    def test_generated_wait_preserves_a_resolved_user_condition_with_same_id(self):
-        self.delivery_plan(1)
-        task = state.update_task(self.scope, self.fixture.request(state='WORKING', reason='Choose scope',
-            reference='user:decision', conditions=[dict(id='delivery:merge', kind='decision', action='task',
-            reason='User scope', reference='user:scope')]))['task']
-        state.update_task(self.scope, self.fixture.request(state='WORKING', reason='Scope chosen',
-            reference='user:chosen', resolutions=[dict(id='delivery:merge', reference='user:chosen')]))
-        result = self.proof()
-        retained = next(c for c in result['task']['conditions'] if c['id'] == 'delivery:merge')
-        self.assertEqual(retained['status'], 'resolved')
-        self.assertEqual(retained['kind'], 'decision')
-        self.assertEqual(result['task']['state'], 'WAITING')
-        self.assertTrue(self.fixture.api.evidence_status(self.scope, 'codex', 'parent')['evidence']['implementation_verified'])
-
     def test_status_requires_a_current_verification_receipt(self):
         self.delivery_plan()
         self.fixture.ready_proof_fixture()
         status = self.fixture.api.evidence_status(self.scope, 'codex', 'parent')
         self.assertFalse(status['evidence']['implementation_verified'])
 
-    def test_multiple_required_publications_wait_without_full_meter(self):
+    def test_unpublished_required_publications_keep_publication_work_open(self):
         self.delivery_plan(2)
         result = self.proof()
         self.assertTrue(result['implementation_verified'])
         self.assertFalse(result['delivery_complete'])
         self.assertFalse(result['verified'])
-        self.assertEqual(result['task']['state'], 'WAITING')
+        self.assertEqual(result['task']['state'], 'REVIEW')
         conditions = result['task']['conditions']
-        self.assertEqual([c['id'] for c in conditions if c['status'] == 'pending'], ['delivery:merge'])
+        self.assertEqual([c['id'] for c in conditions if c['status'] == 'pending'], [])
         title = title_sync.format_title('W1', 'P', 'Feature', result['task']['state'], 4)
-        self.assertTrue(title.endswith('WAITING'))
+        self.assertTrue(title.endswith('REVIEW'))
         self.assertNotIn('▰▰▰▰▰', title)
         status = self.fixture.api.evidence_status(self.scope, 'codex', 'parent')
         self.assertFalse(status['evidence']['delivery_complete'])
-        self.assertEqual(status['task']['state'], 'WAITING')
+        self.assertEqual(status['task']['state'], 'REVIEW')
         with state._database(self.scope) as db:
             proof = self.fixture.api._read(self.scope, result['task']['evidence']['verification'], db=db)
         self.assertEqual(proof['blockers'], [])
-        with self.assertRaisesRegex(ValueError, 'Resolve the task status'):
-            self.fixture.verify()
+        self.assertFalse(result['waiting_for_merge'])
 
     def test_merge_evidence_does_not_require_the_merge_to_have_happened(self):
         self.delivery_plan(1)
-        self.fixture.ready_proof_fixture()
-        # Isolate purpose routing; review qualification has its own native receipt tests.
-        with patch.object(self.fixture.api, '_blockers', return_value=[]):
-            result = self.fixture.api.verify_completion(self.scope, self.fixture.request(purpose='merge-evidence'))
+        self.fixture.plan()
+        self.fixture.checked()
+        self.fixture.review()
+        result = self.fixture.api.verify_completion(self.scope, self.fixture.request(purpose='merge-evidence'))
         self.assertTrue(result['verified'])
         self.assertTrue(result['implementation_verified'])
         self.assertFalse(result['delivery_complete'])
@@ -149,7 +148,7 @@ class LinkedCompletionTests(unittest.TestCase):
         self.assertTrue(result['implementation_verified'], result)
         self.assertFalse(result['verified'], result)
         self.assertFalse(result['delivery_complete'], result)
-        self.assertEqual(result['task']['state'], 'WAITING')
+        self.assertEqual(result['task']['state'], 'REVIEW')
         self.assertNotEqual(linked.task(linked.members[1])['state'], 'DONE')
 
     def test_factual_lifecycle_cannot_release_pending_publication(self):
