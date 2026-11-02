@@ -58,14 +58,20 @@ def _source(value):
     _digest(value['revision'], commit=True)
 
 
-def _pins(value):
-    _fields(value, ('schema_version', 'policy_digest', 'runtime_digest'))
-    _require(type(value['schema_version']) is int and value['schema_version'] == 2)
+def _pins(value, version=1):
+    if version == 1:
+        _fields(value, ('schema_version', 'policy_digest', 'runtime_digest'))
+        _require(type(value['schema_version']) is int and value['schema_version'] == 2)
+    else:
+        _require(version == 2)
+        _fields(value, ('schema_version', 'policy_digest', 'runtime_digest', 'accepted_scope_digest'))
+        _require(type(value['schema_version']) is int and value['schema_version'] == 3)
+        _digest(value['accepted_scope_digest'])
     _digest(value['policy_digest'])
     _digest(value['runtime_digest'])
 
 
-def _binding(value):
+def _binding(value, version=1):
     _fields(value, ('repository', 'target', 'head', 'base', 'candidate_digest', 'queue', 'pins', 'definitions_digest'))
     _text(value['repository'])
     _require(re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', value['repository']) is not None)
@@ -78,7 +84,7 @@ def _binding(value):
         _digest(value[key], commit=True)
     _digest(value['candidate_digest'])
     _digest(value['definitions_digest'])
-    _pins(value['pins'])
+    _pins(value['pins'], version)
     queue = value['queue']
     if queue is not None:
         _fields(queue, ('candidate', 'base', 'members'))
@@ -90,11 +96,11 @@ def _binding(value):
             _digest(member, commit=True)
 
 
-def _policy(value):
+def _policy(value, version=1):
     _fields(value, ('version', 'binding', 'current_runs', 'max_age', 'merge_methods', 'queue_mode',
                     'bypass_actors', 'verifier', 'required_checks', 'required_reviews', 'writer_source', 'revoked_runs'))
-    _require(type(value['version']) is int and value['version'] == 1)
-    _binding(value['binding'])
+    _require(type(value['version']) is int and value['version'] == version)
+    _binding(value['binding'], version)
     _integer(value['max_age'], 1, 86400)
     _require(type(value['current_runs']) is dict and len(value['current_runs']) <= MAX_ITEMS)
     for record_id, run_id in value['current_runs'].items():
@@ -127,18 +133,18 @@ def _policy(value):
     _require('general' in coverage and len(set(coverage)) == len(coverage))
 
 
-def _record(value, extra):
+def _record(value, extra, version=1):
     _fields(value, (*COMMON, *extra))
     for name in ('id', 'run_id'):
         _text(value[name])
     _require(type(value['conclusion']) is str and len(value['conclusion']) <= 512)
     _source(value['source'])
-    _binding(value['binding'])
+    _binding(value['binding'], version)
     _integer(value['observed_at'])
 
 
-def _review(value):
-    _record(value, ('reviewer_id', 'author_id', 'coverage', 'findings', 'dispositions', 'decision_refs', 'rechecked_findings'))
+def _review(value, version=1):
+    _record(value, ('reviewer_id', 'author_id', 'coverage', 'findings', 'dispositions', 'decision_refs', 'rechecked_findings'), version)
     for key in ('reviewer_id', 'author_id'):
         _text(value[key])
     for name in ('coverage', 'decision_refs'):
@@ -170,21 +176,21 @@ def _review(value):
     _require(len(set(rechecks)) == len(rechecks))
 
 
-def _observation(value):
+def _observation(value, version=1):
     _fields(value, ('version', 'binding', 'observed_at', 'verifier', 'merge_method', 'bypass_actors', 'checks', 'reviews', 'writers'))
-    _require(type(value['version']) is int and value['version'] == 1)
-    _binding(value['binding'])
+    _require(type(value['version']) is int and value['version'] == version)
+    _binding(value['binding'], version)
     _integer(value['observed_at'])
     _source(value['verifier'])
     _text(value['merge_method'])
     _strings(value['bypass_actors'])
     for check in _items(value['checks']):
-        _record(check, ('definition_digest',))
+        _record(check, ('definition_digest',), version)
         _digest(check['definition_digest'])
     for review in _items(value['reviews']):
-        _review(review)
+        _review(review, version)
     writers = value['writers']
-    _record(writers, ('unresolved', 'reconciled'))
+    _record(writers, ('unresolved', 'reconciled'), version)
     _strings(writers['unresolved'])
     for writer in _items(writers['reconciled']):
         _fields(writer, ('identity', 'expected_revision', 'expected_pins', 'attempt_id', 'candidate_digest',
@@ -194,7 +200,7 @@ def _observation(value):
             _text(field)
         _require(writer['identity']['client'] == 'codex')
         _integer(writer['expected_revision'], 1)
-        _pins(writer['expected_pins'])
+        _pins(writer['expected_pins'], version)
         _text(writer['attempt_id'])
         _digest(writer['candidate_digest'])
         _digest(writer['plan_digest'])
@@ -202,14 +208,15 @@ def _observation(value):
 
 
 def validate_envelope(value):
-    """Validate the exact v1 fixture schema; this does not authenticate any field."""
+    """Validate the exact fixture schema; this does not authenticate any field."""
     try:
         _fields(value, ('version', 'policy', 'before', 'after', 'now'))
-        _require(type(value['version']) is int and value['version'] == 1)
+        _require(type(value['version']) is int and value['version'] in (1, 2))
+        version = value['version']
         _integer(value['now'])
-        _policy(value['policy'])
-        _observation(value['before'])
-        _observation(value['after'])
+        _policy(value['policy'], version)
+        _observation(value['before'], version)
+        _observation(value['after'], version)
         _require(len(json.dumps(value, allow_nan=False).encode()) <= MAX_INPUT)
     except (ValueError, TypeError, KeyError, RecursionError, OverflowError):
         raise GateError('Invalid repository gate input') from None
@@ -343,7 +350,8 @@ def evaluate(policy, before, after, *, now):
     result = dict(evidence_valid=False, blockers=[], execution_blockers=['unqualified_publisher', 'unqualified_evidence_source'],
                   source_authentication='unverified', merge_authorized=False, published=False)
     try:
-        validate_envelope(dict(version=1, policy=policy, before=before, after=after, now=now))
+        version = policy.get('version') if type(policy) is dict else None
+        validate_envelope(dict(version=version, policy=policy, before=before, after=after, now=now))
     except GateError:
         result['blockers'] = ['invalid_input']
         return result
