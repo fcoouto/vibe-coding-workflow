@@ -13,6 +13,10 @@ saved mode controls, resource admission, recovery and managed titles. New suppor
 Codex runtime scopes start enabled; existing preferences remain. Managed titles
 require explicit adoption. See the [main-runtime boundary](docs/workstreams-main-port.md).
 
+Use the separate [Manage Observability Integration](skills/manage-observability/SKILL.md) skill for optional observability requests. Langfuse is the first provider; exports are metrics-only and collection stays off. Connection controls use the current canonical checkout and private consent; local task preparation uses current task states. Required local evidence stays intact. Native collection and live execution remain separately qualified; see the [port boundary](docs/d9-observability-preparation.md#selective-port-to-current-main).
+
+Observability activation stays outside project onboarding; successful onboarding may propose the separate skill as an optional follow-up.
+
 ## Prepare your Workspace
 
 Open this checkout in a coding agent with terminal access to the destination machine:
