@@ -67,7 +67,7 @@
 
 ### Task 4: Integrate the qualified instruction changes
 
-- [ ] Merge the independently qualified instruction/output candidate under the user's existing authorization. Keep the broader runtime design explicitly undelivered.
+- [x] Merge the independently qualified instruction/output candidate under the user's existing authorization. Keep the broader runtime design explicitly undelivered.
 
 ### Dependent runtime work: unresolved interface
 
@@ -92,3 +92,30 @@
 - Evidence and remaining limits: [qualification record](../../onboarding-authorization-qualification.md).
 
 - Final instruction candidate: 24 focused tests passed in 30.533 seconds; package validation, 100 links/anchors and unchanged six-file review hashes passed. Records-only review found no misleading completion claim.
+
+### Resumed production observation work
+
+- The instruction slice merged as PR #32 at `73fa953`; this checkout now matches that main baseline.
+- Ruling: actual native notifications must reach the trusted qualification owner before a retained reader can exist. Extend the existing transport rather than inventing a receipt issuer or evidence format. `NativeProcess(..., on_notification=None)` and `_native_reader(methods, on_notification=None)` expose parsed stream notifications to an internal owner. Existing callers retain their behavior. The callback validates semantic scope; transport framing alone grants no authority. Observers must obey the existing deadline and retain no unbounded output.
+- Files: `runtime/doctor.py`, `runtime/adapters/codex.py`, `tests/test_native_notifications.py`. No core evidence/state/transaction file edits.
+- [x] Test first: four transport cases; three fail on the absent observer argument, default behavior passes.
+- [x] Implement and verify notification delivery, framing rejection, observer rejection, output limits, invalid observer rejection, adapter forwarding and existing native reader consumers.
+- [ ] Independent review; integrate only a qualified coherent candidate.
+- [ ] Bind actual required hook observations and fresh control facts at the qualification owner, then implement supported durable consumption/history lookup. This is still unresolved; a transport callback cannot establish these facts.
+
+- Qualification: initial four new cases passed with 22 existing doctor checks (26 total, 9.505 seconds). Final seven focused notification/adapter cases passed in 0.118 seconds. The consumer run executed 64 passing native-review/title tests in 110.741 seconds; its exit was nonzero solely because the requested `tests.test_native_workers` module does not exist. Worker cases live in `tests.test_native_reviews`; no nonexistent suite is claimed as passed. No test was rerun merely to erase that selection error.
+- Package validation passed separately; client execution remains `not_checked`.
+- Independent review found no demonstrated transport defect. Hold integration: no production owner consumes these notifications yet. The callback sees only frames encountered while awaiting replies, including initialize; it does not subscribe to another desktop connection, drain after the final reply, establish semantic scope, or authenticate execution claims. It is preparatory code, not delivered activation behavior. The internal observer must honor the shared deadline and protect private payloads.
+- Remaining concrete contract sent to Genesis: identify existing owner-retained observation issuance/lookup and current control/history sources under the four-second read-only budget, or assess the exact existing operation-journal route. No evidence/state/changes source, installed settings, pilot or native campaign was altered. Keep this candidate unmerged until the consuming owner and full path qualify.
+
+### Scoped collector delivery and native qualification
+
+- Genesis approved the first runtime slice: bounded scoped HookStarted/HookCompleted input in the existing native transport, metadata/status only, unchanged discovery default. The user then explicitly authorized native qualification followed by merge.
+- `HookCollector(thread_id, turn_id, source_path)` accepts exact selected bindings, pairs native start/completion metadata, limits 64 runs, rejects malformed/changed/duplicate pairs with an invalid latch, drops payload text, and returns frozen completed-pair snapshots. Hook scope and triggering turn binding are independent fields.
+- Native attempt 1: ephemeral startup/read worked but emitted no hook events; unqualified. Attempt 2: native SessionStart exposed the incorrect scope/turn inference; unqualified. Regression failed before the correction and passed afterward. Ruling: permit one corrective attempt on the changed candidate, retaining the 90-second native execution ceiling; the original two-attempt count was an internal planning limit, not a user limit. No prior pilot campaign allowance was reused.
+- Corrected native attempt: actual Codex CLI 0.165.0 owned app-server connection, genuinely enabled/trusted installed plugin source, disposable ephemeral checkout, one requested Sol High no-tool turn. Collected SessionStart and Stop completed pairs; turn completed in 14.058 seconds. SessionStart carried scope `thread` and a non-null triggering turn ID. No file changes were found in the disposable repository.
+- Final focused proof: 72 tests passed in 24.094 seconds (12 notification/collector, 22 doctor, 38 native review/worker). A SQLite ResourceWarning occurred in the existing fixture suite; no test failed. This change does not touch database code. Package validation remains separate from native qualification.
+- Native proof covers this collector only, using the installed hook definition as an actual event producer. It does not qualify this checkout's hooks as installed, desktop execution, admission, enforcement, retained/current observation lookup, active history or descendant-stop behavior.
+- Source, observations and limits: [collector qualification](../../onboarding-hook-collector-qualification.md). Private sanitized observation/hash records remain with the task; no transcripts, credentials, environment dump or raw hook output were retained.
+
+- Final review supersedes the earlier preparatory hold for this explicitly approved standalone collector slice. Reviewer recomputed the frozen source/test/installed-definition/native-result hashes; all matched. No blocking finding remained. Final package validation passed; its `client_execution: not_checked` field remains a package-validator limitation, with native observations reported separately above. Full-reader integration remains unresolved.

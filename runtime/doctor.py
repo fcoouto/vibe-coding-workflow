@@ -33,12 +33,75 @@ class ObservationError(Exception):
     """Fixed status only; child output and OS exception messages stay private."""
 
 
+class HookCollector:
+    """Scoped native-stream input, never a qualification or currentness certificate."""
+
+    def __init__(self, *, thread_id, turn_id, source_path):
+        values = (thread_id, source_path) + (() if turn_id is None else (turn_id,))
+        if (any(not isinstance(value, str) or not value or len(value) > 4096
+                or not value.isprintable() for value in values)
+                or not Path(source_path).is_absolute()):
+            raise ObservationError("invalid_hook_scope")
+        self.scope = (thread_id, turn_id, source_path)
+        self.runs = {}
+        self.invalid = False
+
+    def __call__(self, notification):
+        if self.invalid:
+            raise ObservationError("invalid_hook_observation")
+        if notification.get("method") not in ("hook/started", "hook/completed"):
+            return
+        try:
+            params = notification["params"]
+            run = params["run"]
+            if (params["threadId"], params.get("turnId"), run["sourcePath"]) != self.scope:
+                return
+            fields = ("id", "eventName", "source", "scope", "executionMode", "handlerType")
+            if any(not isinstance(run[name], str) or not run[name] or len(run[name]) > 4096
+                   or not run[name].isprintable() for name in fields):
+                raise ValueError
+            if (run["source"] != "plugin" or run["handlerType"] != "command"
+                    or run["executionMode"] != "sync"
+                    or run["scope"] not in ("thread", "turn")
+                    or run["eventName"] not in {"sessionStart", "preToolUse", "postToolUse", "stop", "interrupt"}
+                    or type(run["startedAt"]) is not int or run["startedAt"] < 0):
+                raise ValueError
+            row = dict(thread_id=self.scope[0], turn_id=self.scope[1], source_path=self.scope[2],
+                       **{name: run[name] for name in fields}, startedAt=run["startedAt"])
+            prior = self.runs.get(run["id"])
+            if notification["method"] == "hook/started":
+                if prior is not None or len(self.runs) >= 64 or run["status"] != "running":
+                    raise ValueError
+                self.runs[run["id"]] = row
+            else:
+                if (prior != row or run["status"] not in {"completed", "failed", "blocked", "stopped"}
+                        or type(run["completedAt"]) is not int or run["completedAt"] < run["startedAt"]
+                        or type(run["durationMs"]) is not int or run["durationMs"] < 0):
+                    raise ValueError
+                self.runs[run["id"]] = dict(row, status=run["status"], completedAt=run["completedAt"],
+                                            durationMs=run["durationMs"])
+        except (KeyError, TypeError, ValueError):
+            self.invalid = True
+            self.runs.clear()
+            raise ObservationError("invalid_hook_observation") from None
+
+    def snapshot(self):
+        if self.invalid:
+            raise ObservationError("invalid_hook_observation")
+        from runtime.startup import _canonical_freeze
+        return _canonical_freeze([row for row in self.runs.values() if "status" in row])
+
+
 class NativeProcess:
     """Own one child, bounded nonblocking stdout, and no inherited stderr output."""
 
-    def __init__(self, argv, deadline):
+    def __init__(self, argv, deadline, *, on_notification=None):
+        """A trusted synchronous observer must obey the deadline and handle private payloads."""
+        if on_notification is not None and not callable(on_notification):
+            raise ObservationError("invalid_observer")
         if time.monotonic() >= deadline:
             raise ObservationError("timeout")
+        self.on_notification = on_notification
         self.deadline = deadline
         self.buffer = b""
         self.bytes_read = 0
@@ -98,6 +161,9 @@ class NativeProcess:
             if "id" not in response:
                 if not isinstance(response.get("method"), str) or "result" in response or "error" in response:
                     raise ObservationError("malformed_response")
+                if self.on_notification is not None:
+                    # Stream observations are input to the owner, never qualification by themselves.
+                    self.on_notification(response)
                 continue
             if type(response["id"]) is not int or response["id"] != identity:
                 raise ObservationError("mismatched_response")
