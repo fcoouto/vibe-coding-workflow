@@ -294,7 +294,10 @@ def _accepted_identity(value):
     try:
         identity = json_object(json.dumps(_canonical_plain(value), ensure_ascii=True))
         _fields(identity, ("version", "project_id", "repository_id", "checkout_id", "project_root", "project_binding",
-            "primary_root", "repository_root", "git_dir", "git_common_dir", "bindings", "client", "membership", "configuration", "shared_policy"))
+            "primary_root", "repository_root", "git_dir", "git_common_dir", "bindings", "client", "membership", "configuration", "shared_policy"), ("delivery_policy",))
+        if "delivery_policy" in identity:
+            from runtime.delivery import validate_policy
+            validate_policy(identity["delivery_policy"])
         if type(identity["version"]) is not int or identity["version"] != 1:
             raise StateError("Unsupported accepted identity")
         for key in ("project_id", "repository_id", "checkout_id", "client"):
@@ -1859,7 +1862,10 @@ def _task_unaccounted(db, scope_id, client, session, task_id=None, *, historical
 
 def _validate_task(db,scope_id,client,session,task_id,version,task,*,historical=False):
     _fields(task, ("client", "session_id", "task_id", "scope_ref", "mode", "decision_ref", "state", "revision",
-                   "pins", "reason", "reference", "conditions", "turn_id", "turn_uncertain", *(["accepted_identity"] if version == 3 else [])), ("resolution_ref", "evidence", "retirement", "delegation", "milestones", *(["lifecycle","writer_stop"] if version == 3 else [])))
+                   "pins", "reason", "reference", "conditions", "turn_id", "turn_uncertain", *(["accepted_identity"] if version == 3 else [])), ("resolution_ref", "evidence", "retirement", "delegation", "milestones", "delivery", *(["lifecycle","writer_stop"] if version == 3 else [])))
+    if "delivery" in task:
+        from runtime.delivery import validate_record
+        validate_record(task["delivery"])
     stored_claude = (version == 3 and task.get("client") == "claude-code" and
                      isinstance(task.get("accepted_identity"), dict) and
                      task["accepted_identity"].get("client") == "claude-code")

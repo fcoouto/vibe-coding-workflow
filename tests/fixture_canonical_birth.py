@@ -278,7 +278,7 @@ class ScopedBirthFixture(OnboardingFixture):
 
 
 class CanonicalBirthFixture(unittest.TestCase):
-    def prepare(self, *, umbrella=False, history=True, linked=False, peer=False):
+    def prepare(self, *, umbrella=False, history=True, linked=False, peer=False, delivery_policy=None):
         from runtime import review_storage
         f = ScopedBirthFixture(methodName='runTest')
         self.addCleanup(f.doCleanups); f.setUp()
@@ -296,6 +296,9 @@ class CanonicalBirthFixture(unittest.TestCase):
         if linked: f.repo = Path(request["manifest"]["enrollment"]["record"]["repositories"][0]["checkouts"][0]["root"])
         if not history:self.assertTrue(review_storage.prepare_storage(private_root / 'private')['ok'])
         record = request['manifest']['enrollment']['record']
+        if delivery_policy is not None:
+            for repository in record['repositories']:
+                repository['delivery_policy'] = copy.deepcopy(delivery_policy)
         directory = private_root / 'canonical-state'
         for repository in record['repositories']:
             for checkout in repository['checkouts']:
