@@ -2,7 +2,15 @@
 
 Working coordination plan, 2 November 2026. Baseline: main `ed6c45b`.
 
-Goal: qualify and activate the Codex self-host pilot, then complete the approved Python, Next.js and bounded cross-repository rollout. Native operation remains the default. OpenRouter and Langfuse are coordinated here as optional integrations.
+Goal: reach a verified Codex self-host pilot-ready state while coordinating the workstreams in parallel. Actual pilot activation and the approved Python, Next.js and bounded cross-repository rollout follow readiness. Native operation remains the default. OpenRouter and Langfuse are coordinated here as optional integrations.
+
+## Current goal: ready to activate the self-host pilot
+
+Reach a verified pilot-ready state from reviewed main by completing setup observation and retained lookup, applicable native lifecycle and usage qualification, evidence/recovery, local repository enforcement and manual delivery. Coordinate these owners in parallel with OpenRouter and Langfuse, while serializing shared writes. Keep implementations small, preserve the approved observable-configuration promise and native defaults, and merge completed reviewed slices into main.
+
+The goal is complete only when scoped evidence establishes every mandatory self-host prerequisite, installed behavior is observed, recovery and enforcement checks pass, and the exact authorized onboarding/activation steps are prepared. Green source tests, accepted record shapes and merged helpers alone are insufficient. Optional integrations need their own qualification when selected; unrelated expansion does not delay the bounded native pilot. Actual activation and the broader rollout remain explicit milestones.
+
+Parallel assignments use the existing owners: core implements the genuine setup producer/journal/local reader; Native Clients prepares and qualifies applicable behavior and writer reconciliation; Merge Assurance completes the trusted local gate; Evidence Lifecycle checks the bounded pilot's evidence/recovery requirements; delivery connects verified readiness to manual-merge reconciliation. OpenRouter and Langfuse prepare their selected source/connection qualification alongside these dependencies. The pilot owner integrates matching reviewed outputs and reports readiness.
 
 ## Coordination
 
@@ -19,7 +27,7 @@ Use Sol for coupled implementation and review, Luna for suitable small fixtures 
 | Langfuse | Source compatibility completed in PR43; native collection and live connection/source qualification remain separate. | 65 distinct local controls have staged passing evidence, including local HTTPS/fake-keyring CLI/terminal cases. Native-default tasks remain independent; actual usage and D11 remain unqualified. |
 | Evidence | Port reviewed execution-provenance improvements in coherent slices; finish compact retention only with matching producers and consumers. | Current-task/recovery requirements pass. A bounded legacy pilot may proceed only if its applicable limits and retention operations already work; unqualified compact/cap behavior remains explicit. |
 | Merge and manual delivery | Complete the smallest path from verified candidate to PR readiness and observed manual merge, reusing existing delivery/Git primitives. Define and qualify the local trusted verifier/publisher. | Required checks/reviews and writer reconciliation precede readiness. Disposable enforcement passes before an authorized live settings change. Tests remain local. |
-| Pilot | Freeze a reviewed main revision, reuse workspace preparation, update the installed candidate and qualify applicable native behavior and usage. | Observed ordinary activation and one real task cover delegation, checks, review, delivery and recovery. The broader rollout retains the approved D9 behavior/usage/client requirements. |
+| Pilot | Freeze a reviewed main revision, reuse workspace preparation, update the qualification candidate and establish applicable native behavior and usage in the qualification scope. | All mandatory prerequisites have scoped observed evidence, recovery and enforcement checks pass, and exact authorized self-host activation steps are prepared. Actual activation, a pilot task and the broader D9 rollout remain subsequent milestones. |
 
 Run independent source work in parallel. Agree shared interfaces before overlapping changes. Native activation, D6 stop evidence and D7 trust sources are prerequisites where their claims are required; optional integrations do not supply those missing facts.
 
