@@ -4,6 +4,10 @@ For policy authoring, setup, reviewed updates and coverage audits only. Runtime 
 
 Vibe Coding Toolkit remains the workflow authority. The contracts express its applicable requirements in local wording, with the user's extensions identified below. `vibe-setup` is an implementation reference only.
 
+## Codex activation guarantee · 2 November 2026
+
+The user explicitly adopted [setup-time behavioral qualification plus later observable configuration](activation-guarantee-proposal.md). [Project Scope](../policies/01-project-scope.md#authority-and-activation) owns the runtime promise; [Project Onboarding](../policies/10-project-onboarding.md#verify-and-finish), [startup](../clients/startup.md#codex-qualification) and [apply/recovery](../skills/onboard-my-project/references/apply-and-recovery.md#activation-and-reporting) route its use. This replaces the stronger selected-session loaded-control promise that the inspected native interface cannot establish. Invisible session-local disablement, revocation or stale loaded controls are an accepted limitation. It does not waive actual setup observation, mandatory adoption, review, source identity, writer/prior-owner reconciliation, recovery or repository enforcement. Contract adoption is separate from the unfinished native observation producer/retained reader and pilot qualification.
+
 ## Reviewed sources
 
 These contracts were checked against Toolkit revision `790a895304e0c08b70a5b215c9d334f1c86b816c`. This records the reviewed basis, not a claim that it is still the latest revision.
