@@ -1,5 +1,9 @@
 # D7 validation status
 
+2 November 2026. The Gate foundation passed **18 distinct focused software tests across staged runs**: eight Checks transport tests, four held-verifier tests and six typed Gate-context tests. The foundation now retains the actual D5/D6 verification reservation through local publication and provides a live `RepositoryReadiness` context. Tests cover stale/expired/closed grants, uncertain-effect recovery, known no-effect cancellation, withdrawal without positive D5 evidence and ordinary verification's settle-on-return behavior. Native and host-source observations remain explicit fixtures; local reservations use disposable real stores.
+
+The production host-source factory remains closed. These results establish no App credential custody, native client execution, server enforcement or pilot merge readiness. Package validation passed separately; client execution was not checked. The dated observations below remain historical evidence.
+
 26 October 2026. G1's bounded verifier and CLI were independently reviewed after the fix and current nested runtime-pin integration. The independent reviewer ran the focused suite locally: **28 tests passed**. Review findings about unordered evidence comparisons and zero writer revisions were fixed and re-reviewed. This is focused fixture evidence, not repository enforcement.
 
 An earlier **302-test** full-suite result is author-reported historical evidence from before G1's final fixes/integration; it is pre-integration only and was not independently reproduced here. It must not be presented as validation of the current combined package. Package validation and observed client execution are separate claims; neither is established by these focused G1 tests.
