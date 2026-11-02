@@ -4,15 +4,19 @@ Read this contract only when preparing, observing or recovering native delegated
 
 ## Observe the route and select settings
 
-The package provides Codex CLI/Desktop native observation. Qualify the actual surface and required controls before relying on them. Recorded version numbers are provenance, not support gates. Package validation does not establish observed native execution. Approval alone cannot make an unsupported route executable.
+The package provides Codex CLI/Desktop native observation. Qualify the actual surface and required controls under [capability-based compatibility](../policies/11-tool-integrations.md#qualify-the-actual-workflow) before relying on them. Recorded version numbers are provenance, not support gates. Package validation does not establish observed native execution. Approval alone cannot make an unsupported route executable.
 
 Use `discover_native_workers` in the [Codex adapter](../runtime/adapters/codex.py) to inspect current surface, native version and catalog with the coordinator's actual exposed dispatch controls. Select suitable worker settings under policy, retaining the control observation and expected capability digest. Explicit model/effort selection requires supported controls and `fork_turns="none"`; otherwise supply supported inheritance and its evidence only when suitable. Missing controls are limitations, not permission to change coordinator or global settings.
+
+New admission reobserves required controls/catalog and compares capabilities, surface, provider and parent identity. Release metadata differences do not block admission. Record the actual reader version in each new binding while retaining submitted observations and historical receipts unchanged.
 
 Keep requested settings, configured defaults, spawn-observed settings and per-turn execution facts separate. Unknown execution, provider or endpoint facts stay unknown. Historical D5 receipt fields retain their original meanings; see [review evidence](evidence.md#request-fields). Earlier D5 qualification does not qualify this linked schema-2 lifecycle.
 
 ## Use the relevant guidance
 
 Call `guidance_status` with the observed `client_surface`, `applicability` (`client_version`, `capability_fingerprint`) and only relevant `profile_ids`. Retain source URLs/digests, checked time, applicability and immutable snapshot digest. Recommendations do not establish model availability, source verification or route authority; independently verify those facts.
+
+Reuse compares the capability fingerprint on the same surface. Keep the cached client version, checked time and source reference unchanged when reusing guidance after an update. Discovery fingerprints exclude release metadata. Refresh claims still bind the exact requested applicability: an update cannot relabel an outstanding claim or publish an old snapshot as newly verified guidance. Historical control/source keys remain readable without rewriting them. A compatible original snapshot can establish an old failed-refresh key; when legacy applicability cannot be recovered, allow one normal re-evaluation rather than infer unchanged capabilities. Subsequent failure keys suppress version-only retry storms.
 
 When policy's refresh triggers apply, call `claim_guidance` before fetching and `record_guidance` afterward with the live token/generation and verified guidance or failure. The claim serializes publication; an expired or superseded claim cannot publish. Preserve the same trigger identity rather than retrying a failed refresh under invented IDs. Follow policy's compatible stale-cache reuse and dependent-only blocking procedure. No routine upstream fetch is needed merely because time passed.
 

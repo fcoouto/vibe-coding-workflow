@@ -394,6 +394,57 @@ class GuidanceTests(unittest.TestCase):
         self.assertTrue(self.claim(applicability=changed)["claimed"])
 
 
+    def test_new_refresh_cannot_relabel_original_guidance_as_current(self):
+        self.publish()
+        changed = self.request["applicability"] | dict(client_version="future-client")
+        claim = self.claim("maintenance", "upgrade", applicability=changed)
+        with self.assertRaisesRegex(state.StateError, "publication applicability changed"):
+            self.api().record_guidance(self.scope, self.request | dict(applicability=changed,
+                token=claim["token"], generation=claim["generation"],
+                coordinator_ref="coordinator:verified", guidance=self.guidance))
+        updated = self.guidance | dict(applicability=changed)
+        self.assertTrue(self.record(claim, applicability=changed, guidance=updated)["usable"])
+
+
+    def test_legacy_failed_refresh_keeps_stale_guidance_and_trigger_suppression_after_update(self):
+        self.publish()
+        claim = self.claim('maintenance', 'legacy-offline')
+        self.api().record_guidance(self.scope, self.request | dict(token=claim['token'],
+            generation=claim['generation'], coordinator_ref='coordinator:offline', failure='Offline'))
+        path = self.cache_path().with_name('codex-desktop.control.json')
+        control = json.loads(path.read_bytes())
+        control['last_attempt']['key'] = hashlib.sha256(json.dumps(dict(applicability=self.request['applicability'],
+            prior=hashlib.sha256(self.cache_path().read_bytes()).hexdigest(), snapshot_valid=True),
+            sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        path.write_text(json.dumps(control))
+        before = path.read_bytes()
+        changed = self.request['applicability'] | dict(client_version='future-client')
+        self.assertEqual(self.status(applicability=changed)['freshness'], 'stale')
+        self.assertFalse(self.claim('maintenance', 'legacy-offline', applicability=changed)['claimed'])
+        self.assertFalse(self.claim(applicability=changed)['claimed'])
+        self.assertEqual(path.read_bytes(), before)
+
+
+    def test_missing_legacy_snapshot_rechecks_unknown_applicability_once(self):
+        claim = self.claim()
+        self.api().record_guidance(self.scope, self.request | dict(token=claim['token'],
+            generation=claim['generation'], coordinator_ref='coordinator:offline', failure='Offline'))
+        path = self.cache_path().with_name('codex-desktop.control.json')
+        control = json.loads(path.read_bytes())
+        control['last_attempt']['key'] = hashlib.sha256(json.dumps(dict(applicability=self.request['applicability'],
+            prior='missing', snapshot_valid=False), sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        path.write_text(json.dumps(control))
+        changed = self.request['applicability'] | dict(client_version='future-client')
+        replacement = self.claim(applicability=changed)
+        self.assertTrue(replacement['claimed'])
+        self.api().record_guidance(self.scope, self.request | dict(applicability=changed, token=replacement['token'],
+            generation=replacement['generation'], coordinator_ref='coordinator:offline', failure='Offline'))
+        later = changed | dict(client_version='another-future-client')
+        self.assertFalse(self.claim(applicability=later)['claimed'])
+        changed_capability = later | dict(capability_fingerprint='c' * 64)
+        self.assertTrue(self.claim(applicability=changed_capability)['claimed'])
+
+
 class AdmissionTests(unittest.TestCase):
     def setUp(self):
         from tests.test_evidence import EvidenceTests
@@ -475,7 +526,7 @@ class AdmissionTests(unittest.TestCase):
                 self_review='Inspect diff and callers', stop_conditions=['Stop for review after this assignment']),
             selection=dict(model='new-native-model', effort='high', rationale='Capable native model for exact scope',
                 profile_ids=['bounded'], mode='explicit'),
-            control_observation=dict(version=1, client_surface='codex-cli', native_version='0.163.0',
+            control_observation=dict(version=1, client_surface='codex-cli', native_version=self.catalog['native_version'],
                 parent_session_id=self.identity['session_id'], dispatch_controls=deepcopy(self.catalog['dispatch_controls'])),
             discovery_expectation={key: self.catalog[key] for key in
                 ('client_surface', 'native_version', 'capability_digest', 'parent_model_provider')} |
@@ -2039,6 +2090,23 @@ class AdmissionTests(unittest.TestCase):
             bad = dict(observed, receipt=observed['receipt'] | {key: None})
             with self.subTest(key=key), self.assertRaises(state.StateError):
                 self.api._worker_receipt(self.scope, record, request, bad)
+
+
+    def test_admission_accepts_compatible_reader_update_and_records_actual_provenance(self):
+        self.plan()
+        request = self.prepare_request()
+        request['control_observation']['native_version'] = '0.100.0'
+        request['discovery_expectation']['native_version'] = '0.120.0'
+        self.catalog['native_version'] = '9.999.0'
+        prepared = self.api.prepare_assignment(self.scope, request)
+        self.assertTrue(prepared['launch_admitted'])
+        binding = self.api.prepared_native_assignment(self.scope, prepared['attempt_id'])
+        self.assertEqual(binding['native_version'], '9.999.0')
+        data = self.raw_assignment(prepared['attempt_id'])
+        assignment = evidence._read(self.scope, data['assignment'])
+        self.assertEqual(evidence._read(self.scope, assignment['discovery'])['native_version'], '9.999.0')
+        self.assertEqual(assignment['request']['control_observation']['native_version'], '0.100.0')
+        self.assertEqual(assignment['request']['discovery_expectation']['native_version'], '0.120.0')
 
 
 class Stage3ModelFreeTests(unittest.TestCase):

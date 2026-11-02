@@ -47,6 +47,8 @@ File-only configuration and undo use the [transaction contract](../skills/onboar
 
 Establish the native evaluation method and relevant initial smoke cases through [Workflow Maintenance](09-workflow-maintenance.md). Compare a disposable improvement candidate only for an observed failure; optional labs and paid experiments are separate choices.
 
+Apply the [Codex activation guarantee](01-project-scope.md#authority-and-activation): retain observed setup behavior separately from later observable configuration. Opening another session alone does not require repeating setup evaluation. Requalify affected behavior when its applicability changes; unavailable observations remain unknown.
+
 Use [Tests and Builds](05-tests-and-builds.md) for project behavior and [Tool Integrations](11-tool-integrations.md) for real client loading/execution. Check safe reruns for duplicate sections, servers, hooks, skills and scripts while preserving customizations; do not reinstall everything to prove repeatability. A restart, login or trust step remains a precise pending intervention until observed.
 
 Update canonical records through [Context and Handoff](07-context-and-handoff.md), including commands, decisions, coverage, validated versus configured-only capabilities and maintenance/recovery instructions. Apply required [Code Review](06-code-review.md), including post-implementation security coverage. Repository gates follow [Merge Readiness](08-merge-readiness.md) as a selected plugin requirement, not an implied permission to alter live rules or publish.
