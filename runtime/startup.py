@@ -894,7 +894,10 @@ def _compare_canonical_scope(record, *, authority, observation, client, installe
         return result("conflict", "identity_changed")
     selected = next((c for c in repo["checkouts"] if c["root"] == observation["root"]), None)
     if selected is None:
-        if any(c["binding"]["root"] == observation["binding"]["root"] for c in repo["checkouts"]):
+        if any(c["binding"]["root"] == observation["binding"]["root"]
+                or c["git_dir"] == observation["git_dir"]
+                or c["binding"]["git_dir"] == observation["binding"]["git_dir"]
+                for c in repo["checkouts"]):
             return result("conflict", "identity_changed")
         primary = Path(repo["primary_root"])
         project = Path(data["project_root"])
@@ -906,6 +909,8 @@ def _compare_canonical_scope(record, *, authority, observation, client, installe
             return result("outside", "excluded")
         if observation["membership"] == "unknown":
             return result("conflict", "identity_changed")
+        if not membership["future_join"]:
+            return result("outside", "not_enrolled")
         return result("pending", "member_pending")
     bindings = repo["binding"] | selected["binding"]
     if (repo["git_common_dir"] != observation["git_common_dir"] or selected["git_dir"] != observation["git_dir"]
