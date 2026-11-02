@@ -39,6 +39,8 @@ The reviewed six-file SHA-256 manifest was:
 
 ## Unresolved runtime delivery
 
+The Codex consumer now accepts the three current observable fields defined in [startup](../clients/startup.md#codex-qualification), preserving the complete historical binding and other clients' existing checks. Five new Codex cases joined a 29-test focused passing run. A later shared-client scope finding was reproduced, corrected with two client conditions and verified by six affected tests; the original 29-test run was not repeated. These are synthetic software observations, not actual native setup qualification. Package validation and independent source review are recorded with the change.
+
 The user approved [setup behavioral qualification plus current observable configuration](activation-guarantee-proposal.md) on 2 November 2026. This replaces the stronger promise of proving each later selected session's loaded controls; invisible session-local changes may escape detection. The scope/onboarding contracts now express that decision. It does not complete the missing producer/reader, establish behavioral qualification or activate the rolled-back pilot.
 
 `startup.acquire_project_entry` accepts an internal trusted reader; production entry supplies none. `changes._scoped_qualification` validates supplied observations but does not obtain their truth. The native adapter reads thread provenance and review content, while `doctor.discover` reads hook definitions/trust. Neither proves execution in the selected client.
