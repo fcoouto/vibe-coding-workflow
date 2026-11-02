@@ -10,11 +10,11 @@ from tests import test_delegation
 
 class WorkstreamsDefaultTests(unittest.TestCase):
     def setUp(self):
-        self.fixture=test_delegation.AdmissionTests('runTest')
-        self.fixture.setUp()
-        self.addCleanup(self.fixture.doCleanups)
-        self.scope=replace(self.fixture.scope,runtime=RuntimeSettings(2,self.fixture.root/'fresh-default-authority'))
-        self.identity=self.fixture.identity|dict(session_id='default-session',task_id='default-task')
+        from tests.fixture_canonical_birth import fresh_canonical
+        self.fixture, self.acquisition, _ = fresh_canonical(self)
+        self.fixture.root=self.fixture.base
+        self.scope=self.acquisition.resolution.scope
+        self.identity=dict(client='codex',session_id='default-session',task_id='default-task',scope_ref='user:task')
 
     def start(self,**updates):
         return state.start_task(self.scope,self.identity|dict(mode='editable',decision_ref='user:accepted')|updates)
@@ -31,13 +31,15 @@ class WorkstreamsDefaultTests(unittest.TestCase):
         with self.assertRaises(state.StateError):
             workstreams.consume_dispatch(self.scope,self.identity|dict(expected_revision=1,attempt_id='0'*32,workstream_revision=1))
 
-    def test_existing_missing_legacy_preference_stays_off_on_new_task(self):
+    def test_existing_missing_canonical_preference_is_effective_default_without_send_authority(self):
         self.start()
-        # This isolated fixture models old scopes whose disable left no preference.
+        # A missing canonical setting remains preference information, never send authority.
         workstreams._path(self.scope).unlink(missing_ok=True)
         self.start(session_id='later',task_id='later')
-        self.assertFalse(self.status()['enabled'])
+        self.assertTrue(self.status()['enabled'])
         self.assertEqual(self.status()['revision'],0)
+        with self.assertRaises(state.StateError):
+            workstreams.consume_dispatch(self.scope,self.identity|dict(expected_revision=1,attempt_id='0'*32,workstream_revision=0))
 
     def test_explicit_disable_survives_new_tasks_and_idempotent_controls(self):
         self.start()
@@ -57,9 +59,11 @@ class WorkstreamsDefaultTests(unittest.TestCase):
         self.assertEqual(off['revision'],1)
         self.assertTrue(workstreams._path(self.scope).is_file())
 
-    def test_status_without_runtime_is_read_only_and_off(self):
-        self.assertFalse(self.status()['enabled'])
-        self.assertFalse(self.scope.runtime.state_dir.exists())
+    def test_born_scope_status_uses_effective_default_without_writes(self):
+        before={str(p):p.read_bytes() for p in self.scope.runtime.state_dir.rglob('*') if p.is_file()}
+        self.assertTrue(self.status()['enabled'])
+        self.assertEqual(self.status()['revision'],0)
+        self.assertEqual(before,{str(p):p.read_bytes() for p in self.scope.runtime.state_dir.rglob('*') if p.is_file()})
 
     def test_failed_bootstrap_cannot_dispatch(self):
         with patch.object(state,'_save',side_effect=state.StateError('simulated transaction failure')):
@@ -69,11 +73,17 @@ class WorkstreamsDefaultTests(unittest.TestCase):
             workstreams.consume_dispatch(self.scope,self.identity|dict(expected_revision=1,attempt_id='0'*32,workstream_revision=1))
 
     def test_concurrent_first_tasks_share_one_default_revision(self):
-        # Initialize only storage so concurrent callers exercise first checkout registration.
-        with state._database(self.scope,write=True,initialize=True):
-            pass
+        # Actual D4 birth has registered storage; concurrent first tasks materialize one default.
+        def start(n):
+            import time
+            for attempt in range(20):
+                try: return self.start(session_id='parallel-'+str(n),task_id='parallel-'+str(n))
+                except state.StateError as error:
+                    if 'locked or incompatible' not in str(error) or attempt == 19: raise
+                    time.sleep(0.01)
         with ThreadPoolExecutor(max_workers=2) as pool:
-            list(pool.map(lambda n:self.start(session_id='parallel-'+str(n),task_id='parallel-'+str(n)),range(2)))
+            results=list(pool.map(start,range(2)))
+        self.assertEqual({result['task']['task_id'] for result in results},{'parallel-0','parallel-1'})
         self.assertTrue(self.status()['enabled'])
         self.assertEqual(self.status()['revision'],1)
 

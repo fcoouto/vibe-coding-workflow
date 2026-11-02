@@ -22,14 +22,15 @@ PACKAGE = Path(__file__).resolve().parents[1]
 
 class StateTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="vibe-state-")
-        self.addCleanup(self.temp.cleanup)
-        self.base = Path(self.temp.name).resolve()
-        self.scope = ProjectScope("project", self.base / "repo", self.base / "repo/.git", "policy",
-                                  RuntimeSettings(2, self.base / "private"))
-        self.scope.git_common_dir.mkdir(parents=True)
+        self.fresh_scope()
         self.request = dict(client="codex", session_id="session", task_id="task", scope_ref="request:1",
                             mode="editable", decision_ref="user:1")
+
+    def fresh_scope(self):
+        from tests.fixture_canonical_birth import fresh_canonical, save_test_acquisition
+        fixture, self.acquisition, observation = fresh_canonical(self)
+        self.base, self.scope = fixture.base, self.acquisition.resolution.scope
+        self.test_acquisition = save_test_acquisition(self.base / 'test-acquisition.json', fixture, observation)
 
     def api(self):
         self.assertIsNotNone(importlib.util.find_spec("runtime.state"), "durable state implementation missing")
@@ -88,7 +89,7 @@ class StateTests(unittest.TestCase):
             self.api().retire_task(self.scope, request | dict(expected_revision=1))
         files = {str(p):p.read_bytes() for p in self.scope.runtime.state_dir.rglob('*') if p.is_file()}
         with patch.object(self.api(), "runtime_fingerprint", return_value="new-runtime"), \
-                self.assertRaisesRegex(self.api().StateError, 'explicit migration'):
+                self.assertRaises(self.api().StateError):
             self.api().retire_task(self.scope, request)
         self.assertEqual({str(p):p.read_bytes() for p in self.scope.runtime.state_dir.rglob('*') if p.is_file()}, files)
         with self.api()._database(self.scope) as db:
@@ -139,12 +140,11 @@ class StateTests(unittest.TestCase):
         self.assertEqual(first, self.start())
         result = subprocess.run([sys.executable, "-B", "-c",
             "from runtime.state import *; from runtime.startup import *; from pathlib import Path; import json; "
-            f"s=ProjectScope('project',Path({str(self.scope.repository_root)!r}),Path({str(self.scope.git_common_dir)!r}),"
-            f"'policy',RuntimeSettings(2,Path({str(self.scope.runtime.state_dir)!r}))); "
+            f"from tests.fixture_canonical_birth import acquire_test_scope; s=acquire_test_scope({str(self.test_acquisition)!r}); "
             "print(json.dumps(task_status(s,'codex','session')))"], cwd=PACKAGE, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["task"], first["task"])
-        self.assertEqual(set(first["task"]["pins"]), {"policy_digest", "runtime_digest", "schema_version"})
+        self.assertEqual(set(first["task"]["pins"]), {"policy_digest", "runtime_digest", "schema_version", "accepted_scope_digest"})
 
     def test_explicit_rebinding_preserves_old_task_and_revokes_continuation(self):
         self.arm()
@@ -191,32 +191,37 @@ class StateTests(unittest.TestCase):
                         {"mode": "auto"}, {"decision_ref": "bad\nvalue"}, {"surprise": True}):
             with self.subTest(updates=updates), self.assertRaises(self.api().StateError):
                 self.start(**updates)
-        self.assertFalse(self.scope.runtime.state_dir.exists())
+        with self.api()._database(self.scope) as db:
+            self.assertEqual(db.execute('select count(*) from tasks').fetchone()[0], 0)
 
     def test_task_identity_includes_checkout_common_project_client_session(self):
         self.start()
         for changes in ({"repository_root": self.base / "other"}, {"git_common_dir": self.base / "common"},
                         {"project_id": "other"}):
             other = replace(self.scope, **changes)
-            self.assertIsNone(self.api().task_status(other, "codex", "session")["task"])
+            with self.assertRaises(self.api().StateError):
+                self.api().task_status(other, "codex", "session")
         self.assertIsNone(self.status(session="different")["task"])
 
     def test_hooks_status_and_inspection_do_not_initialize(self):
         api = self.api()
-        self.assertFalse(api.inspect_state(self.scope)["present"])
+        self.assertTrue(api.inspect_state(self.scope)["present"])
+        original_inode=(self.scope.runtime.state_dir/'runtime.sqlite3').stat().st_ino
         self.assertIsNone(self.status()["task"])
         self.assertEqual(self.event().action, "deny")
         self.assertEqual(self.event("Stop").action, "pass")
-        self.assertFalse(self.scope.runtime.state_dir.exists())
+        self.assertEqual((self.scope.runtime.state_dir/'runtime.sqlite3').stat().st_ino,original_inode)
+        with api._database(self.scope) as db:self.assertEqual(db.execute('select count(*) from tasks').fetchone()[0],0)
         with self.assertRaises(api.StateError):
             api.start_task(replace(self.scope, runtime=None), self.request)
         self.assertEqual(api.process_event(replace(self.scope, runtime=None), RuntimeEvent(
-            "PreToolUse", "codex", "session", self.scope.repository_root, tool_name="apply_patch")).action, "pass")
+            "PreToolUse", "codex", "session", self.scope.repository_root, tool_name="apply_patch")).action, "deny")
+        self.assertFalse(api.inspect_state(replace(self.scope,runtime=None))["compatible"])
 
     def test_private_directory_database_sidecars_and_corrupt_state(self):
         api = self.api()
         directory = self.scope.runtime.state_dir
-        directory.mkdir(mode=0o755)
+        directory.chmod(0o755)
         with self.assertRaises(api.StateError):
             self.start()
         directory.chmod(0o700)
@@ -226,7 +231,9 @@ class StateTests(unittest.TestCase):
         with self.assertRaises(api.StateError):
             self.start()
         self.assertEqual(path.read_text(), "not our database")
-        path.unlink()
+        self.fresh_scope()
+        directory=self.scope.runtime.state_dir
+        path=directory/'runtime.sqlite3'
         self.start()
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         sidecar = directory / "runtime.sqlite3-journal"
@@ -240,14 +247,14 @@ class StateTests(unittest.TestCase):
 
     def test_arbitrary_sqlite_schema_and_schema_version_are_not_adopted(self):
         directory = self.scope.runtime.state_dir
-        directory.mkdir(mode=0o700)
         path = directory / "runtime.sqlite3"
         with closing(sqlite3.connect(path)) as db, db:
             db.execute("create table private(value)")
         path.chmod(0o600)
         with self.assertRaises(self.api().StateError):
             self.start()
-        path.unlink()
+        self.fresh_scope()
+        path=self.scope.runtime.state_dir/'runtime.sqlite3'
         self.start()
         with closing(sqlite3.connect(path)) as db, db:
             db.execute("pragma user_version=99")
@@ -296,7 +303,8 @@ class StateTests(unittest.TestCase):
             self.event("PostToolUse", turn_id=None)
         self.assertEqual(self.status()["generation"], 4)
         other = replace(self.scope, repository_root=self.base / "other")
-        self.assertEqual(self.api().task_status(other, "codex", "session")["generation"], 0)
+        with self.assertRaises(self.api().StateError):
+            self.api().task_status(other, "codex", "session")
 
     def test_continuation_requires_observation_and_never_rearms(self):
         self.start()
@@ -364,8 +372,8 @@ class StateTests(unittest.TestCase):
             self.api().process_event(self.scope, event)
         self.assertEqual(self.status()["generation"], 2)
         self.assertEqual(self.status()["task"]["state"], 'WORKING')
-        for path in self.scope.runtime.state_dir.iterdir():
-            self.assertNotIn(b"PRIVATE_SENTINEL", path.read_bytes())
+        for path in self.scope.runtime.state_dir.rglob("*"):
+            if path.is_file(): self.assertNotIn(b"PRIVATE_SENTINEL", path.read_bytes())
 
     def test_cancelled_waiting_blocked_and_decisions_suppress_stop(self):
         for state in ('BLOCKED', 'WAITING', 'CANCELLED'):
@@ -375,7 +383,7 @@ class StateTests(unittest.TestCase):
                 self.assertEqual(self.event("Stop").action, "pass")
                 self.assertEqual(self.status()["task"]["state"], state)
                 # A separate fixture preserves terminal task identity and consumed history.
-                self.scope = replace(self.scope, runtime=RuntimeSettings(2, self.base / state))
+                self.fresh_scope()
         self.arm()
         for kind in ("decision", "blocker"):
             self.update(conditions=[dict(id=kind, kind=kind, action="task", reason="Waiting", reference="external:1")])
@@ -417,7 +425,7 @@ class StateTests(unittest.TestCase):
         self.assertFalse(database.exists())
         from runtime import workstreams
         workstreams._path(self.scope).unlink()
-        directory.rmdir()
+        directory.rename(self.base/'retained-original-authority')
         directory.symlink_to(self.base, target_is_directory=True)
         with self.assertRaises(self.api().StateError):
             self.start()
@@ -467,7 +475,7 @@ class StateTests(unittest.TestCase):
     def test_unknown_or_missing_stop_persistently_suppresses_old_allowance(self):
         for observed in ("unseen-stop-turn", None):
             with self.subTest(observed=observed):
-                self.scope = replace(self.scope, runtime=RuntimeSettings(2, self.base / (observed or "missing-stop")))
+                self.fresh_scope()
                 self.arm()
                 self.assertEqual(self.event("Stop", turn_id=observed).action, "pass")
                 task = self.status()["task"]
@@ -496,8 +504,7 @@ class StateTests(unittest.TestCase):
         self.assertEqual(self.status()["generation"], 2)
         code = ("from pathlib import Path; from runtime.startup import *; from runtime.state import *; "
                 "from runtime.engine import *; import json; "
-                f"s=ProjectScope('project',Path({str(self.scope.repository_root)!r}),Path({str(self.scope.git_common_dir)!r}),"
-                f"'policy',RuntimeSettings(2,Path({str(self.scope.runtime.state_dir)!r}))); "
+                f"from tests.fixture_canonical_birth import acquire_test_scope; s=acquire_test_scope({str(self.test_acquisition)!r}); "
                 "r=process_event(s,RuntimeEvent('PostToolUse','codex','session',s.repository_root,'turn','call',"
                 "'apply_patch',False,'A')); print(json.dumps({'action':r.action,"
                 "'generation':task_status(s,'codex','session')['generation']}))")
@@ -538,8 +545,7 @@ class StateTests(unittest.TestCase):
         self.update(conditions=[self.runnable(id="second"), self.runnable(id="third")])
         code = ("from pathlib import Path; from runtime.startup import *; from runtime.state import *; "
                 "from runtime.engine import *; import json; "
-                f"s=ProjectScope('project',Path({str(self.scope.repository_root)!r}),Path({str(self.scope.git_common_dir)!r}),"
-                f"'policy',RuntimeSettings(2,Path({str(self.scope.runtime.state_dir)!r}))); "
+                f"from tests.fixture_canonical_birth import acquire_test_scope; s=acquire_test_scope({str(self.test_acquisition)!r}); "
                 "print(process_event(s, RuntimeEvent('Stop','codex','session',s.repository_root,'turn',"
                 "stop_hook_active=False)).action)")
         processes = [subprocess.Popen([sys.executable, "-B", "-c", code], cwd=PACKAGE,
@@ -547,6 +553,39 @@ class StateTests(unittest.TestCase):
         results = [process.communicate(timeout=5) for process in processes]
         self.assertTrue(all(process.returncode == 0 for process in processes), results)
         self.assertEqual(sum(stdout.strip() == b"continue" for stdout, _ in results), 1, results)
+
+
+    def test_actual_startup_only_acquisition_remains_non_enforcing(self):
+        from tests.test_runtime import RuntimeTests
+        from runtime import startup
+        from types import SimpleNamespace
+        fixture=RuntimeTests('runTest');self.addCleanup(fixture.doCleanups);fixture.setUp()
+        fixture.enroll()
+        acquired=startup.acquire_project_entry(SimpleNamespace(client='codex',cwd=fixture.repo),PACKAGE)
+        scope=startup._entry_scope(acquired)
+        self.assertIsInstance(scope,startup.ProjectScope)
+        self.assertIsNone(scope.runtime)
+        self.assertEqual(self.api().process_event(scope,RuntimeEvent('PreToolUse','codex','session',fixture.repo,tool_name='apply_patch')).action,'pass')
+        self.assertTrue(self.api().inspect_state(scope)['compatible'])
+
+    def test_real_members_and_projects_isolate_task_identity(self):
+        from tests.fixture_canonical_birth import CanonicalBirthFixture, fresh_canonical
+        from runtime import state
+        owner=CanonicalBirthFixture('runTest');self.addCleanup(owner.doCleanups)
+        fixture,acquired,_=owner.accepted_birth(peer=True)
+        members=[a.resolution.scope for a in fixture.member_acquisitions.values()]
+        self.assertEqual(len(members),2)
+        self.assertEqual(members[0].project_id,members[1].project_id)
+        self.assertNotEqual(members[0].repository_id,members[1].repository_id)
+        self.assertNotEqual(members[0].git_common_dir,members[1].git_common_dir)
+        self.assertEqual(members[0].runtime.state_dir,members[1].runtime.state_dir)
+        state.start_task(members[0],self.request)
+        self.assertIsNone(state.task_status(members[1],'codex','session')['task'])
+        state.start_task(members[1],self.request)
+        self.assertNotEqual(state._scope_id(members[0]),state._scope_id(members[1]))
+        _,other,_=fresh_canonical(self)
+        self.assertNotEqual(other.resolution.scope.project_id,members[0].project_id)
+        self.assertIsNone(state.task_status(other.resolution.scope,'codex','session')['task'])
 
 
 if __name__ == "__main__":

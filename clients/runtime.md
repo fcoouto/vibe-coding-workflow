@@ -2,19 +2,19 @@
 
 Read this contract only when a Codex task needs explicit task controls, a `doctor` report, or lifecycle troubleshooting. Startup-only projects do not need it. For native delegated work only, also read [native delegation](delegation.md). For planned checks, review, completion, or local merge evidence, also read [task checks and review evidence](evidence.md). Shared policy remains in the [policy index](../policies/00-index.md); native qualification status and procedures are in [validation guidance](../docs/d2-validation.md).
 
-## Opt in
+## Runtime authority
 
-The existing checkout-root `.vibe-coding-workflow/project.json` may include this optional field:
+For a fresh canonical Project scope, the selected client configuration uses:
 
 ```json
-"runtime": {"schema_version": 2, "state_dir": "/absolute/private/path"}
+"runtime": {"schema_version": 3, "state_dir": "/absolute/private/path"}
 ```
 
-Choose a canonical absolute state directory outside all repositories and plugin caches. The directory and files must be private to the current user. Missing `runtime` keeps startup-only behavior. Invalid configuration produces a diagnostic; startup does not create or repair runtime state. Only `task start` initializes it. State lives in `runtime.sqlite3`, outside repositories. Startup may mention its location in Codex context, but does not expose stored task records there.
+Choose a canonical absolute state directory outside all repositories and plugin caches. The directory and files must be private to the current user. Invalid or conflicting authority produces a diagnostic; startup never creates or repairs state. Owned D4 birth creates canonical `runtime.sqlite3`, its original baseline and receipts; `task start` rejects an absent database. Runtime-enabled legacy enrollment grants no current task, readiness or mutation authority, even with an absent, empty, retired-only or live store. Use its original pinned package. Legacy enrollment without runtime retains startup-only orientation. For historical inspection and updates, load [Change a pinned runtime](#change-a-pinned-runtime). Startup may mention the state path, but does not expose task records in context.
 
 All participating sessions and checkouts with potentially overlapping resources must use one approved shared state authority. Different worktrees or private databases do not establish isolation. If authority or alias coverage is unknown, serialize or block affected work until ownership can be reconciled. Reservations coordinate participating owners; uncontrolled external writers remain a limitation.
 
-This nested runtime schema is version 2; the top-level project enrollment schema remains version 1. For enrollment fields or scope diagnostics, read the [shared startup contract](startup.md).
+Canonical Project authority is schema 2; its runtime configuration and SQLite store are schema 3. Retained formats and operation-proof versions remain distinct. For enrollment fields and diagnostics, read [shared startup](startup.md). Schema validation does not authenticate host intent or establish native execution.
 
 ## Controls
 
@@ -60,12 +60,10 @@ Stop continuation is opt-in through one runnable condition, current correlated t
 
 ## Change a pinned runtime
 
-The uniform task vocabulary is a pinned runtime change. Legacy lowercase records
-remain read-only under the new runtime; old `ready` meant completion and must not
-be reinterpreted as new `READY`. Preserve original records, evidence and pins.
+The uniform task vocabulary is a pinned runtime change. Old M task records and E lowercase schema-3 history keep their original packages, readers, paths, evidence, receipts and pins. E `ready` meant completion; it is not M `READY`. The composed binary is not a universal historical reader. Supported M history may be inspected only through explicit read-only D4 inspection with original proof and shape checks; E lowercase schema-3 history remains with its original E package and reader.
 
 Load this section only for an authorized runtime update or recovery. Follow [application and recovery](../skills/onboard-my-project/references/apply-and-recovery.md) for D4's approved plan and mutation controls. Reconcile affected writers with their supported old pinned runtime before retiring historical tasks. Retirement preserves original pins/history and cannot declare `DONE`; its exact proof requirements remain in [evidence](evidence.md#request-fields).
 
-Activate schema 2 through a fresh approved shared state directory after D4 verifies proposed, actual and backup authority coverage and all affected writers. Preserve schema-1 databases, artifacts and pins unchanged. Do not migrate in place, copy old successful evidence, silently repin tasks or roll back into active schema-1 runtime. A separate state directory does not clear old ownership. Unknown authority, an unsupported old runtime or unverified writer/descendant state blocks the affected transition.
+For a fresh scope, create canonical Project authority and its schema-3 database only through the approved D4 birth operation after it verifies proposed, actual and backup authority coverage and all affected writers. The database is seeded with its original baseline and ownership receipts; task start refuses to create it directly. Preserve existing M schema-2 and E schema-3 authorities, artifacts, packages, paths and pins unchanged. Do not migrate in place, copy old successful evidence, silently repin tasks or roll back into an old active runtime. A separate state directory does not clear old ownership. Unknown authority, an unsupported old runtime or unverified writer/descendant state blocks the affected transition.
 
 D4's shared authority guard protects relevant reservation scans through enrollment changes. A protected long operation keeps a durable owner reference while running; a crash or elapsed time does not clear it. Use supported resume/rollback to reconcile that exact operation and its descendants before continuing. Package checks and successful activation do not establish native client execution.

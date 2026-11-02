@@ -97,8 +97,10 @@ class DelegationScaleTests(unittest.TestCase):
         reviewed=evidence.prepare_review(self.scope,packet)
         observed=review.observed(self.fixture,reviewed)
         with patch('runtime.adapters.codex.observe_native_review_assignment',return_value=observed):
-            delegation.observe_assignment(self.scope,self.fixture.request(attempt_id=reviewed['attempt_id'],parent_turn_id='parent-turn',spawn_item_id='spawn-item'))
-        review.collect(self.fixture,reviewed,review.collection(self.fixture,reviewed,observed))
+            lifecycle=delegation.observe_assignment(self.scope,self.fixture.request(attempt_id=reviewed['attempt_id'],parent_turn_id='parent-turn',spawn_item_id='spawn-item'))
+            self.assertEqual(lifecycle['status'],'observed',lifecycle)
+        collection=review.collect(self.fixture,reviewed,review.collection(self.fixture,reviewed,observed))
+        self.assertEqual(collection['attempt']['status'],'collected')
         evidence.assess_review(self.scope,self.fixture.request(attempt_id=reviewed['attempt_id'],assessment=dict(
             coverage=['general','security'],criteria=['works'],qualification='Independent fixture expertise',
             independence='Separate observed reviewer',semantic_coverage='Read requirements and code',dispositions=[],decision_refs=['user:accepted'])))

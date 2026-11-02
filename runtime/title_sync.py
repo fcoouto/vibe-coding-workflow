@@ -136,7 +136,8 @@ def _path(scope, client, session):
     state._text(session, 'native session', 4096)
     if client != 'codex' or scope is None or scope.runtime is None:
         raise ValueError('Supported enrolled Codex task required')
-    state._path(scope)
+    with state._database(scope) as db:
+        if db is None:raise ValueError('Managed titles require current canonical authority')
     return scope.runtime.state_dir / ('title-' + _digest([state._scope_id(scope), client, session]) + '.json')
 
 

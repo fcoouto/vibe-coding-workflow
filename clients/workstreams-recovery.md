@@ -1,7 +1,8 @@
 # Temporary shared Desktop recovery monitor
 
-This procedure handles provider-capacity failures in parent threads. Local
-CPU/RAM admission is a separate mechanism and adds no recovery schedule.
+This procedure handles provider-capacity failures in eligible parent threads.
+Capacity recovery is independently enabled and adds no resource lease. Local
+CPU/RAM admission remains a separate mechanism.
 
 Read the purpose below and [shared controls](#shared-controls), then the applicable
 section: [register or depart](#register-and-depart),
@@ -10,8 +11,9 @@ section: [register or depart](#register-and-depart),
 reconciliation and the run procedure; registration is unnecessary unless membership
 is being changed.
 
-Load for an activated enabled Workstreams parent, its recovery monitor, human
-continuation, or final departure. This is a cooperative best-effort pilot. It
+Load when activating an eligible workflow parent, operating its recovery monitor,
+handling human continuation, or processing final departure. Check the independent
+`capacity_recovery` preference first. This is a cooperative best-effort pilot. It
 preserves native settings and existing task authority. The user authorized parent
 capacity recovery without waiting for native retries to finish. Retry intent is
 informational; current live activity and the failed capacity turn determine
@@ -23,9 +25,33 @@ routine monitor operation does not require that historical evidence.
 ## Shared controls
 
 Use the installed package's `scripts/workstreams_recovery.py ACTION`, passing one
-JSON object on stdin. The private shared registry is
+JSON object on stdin. New `register` requests supply the current
+`recovery_revision`; human `reactivate` reads and rechecks it internally.
+Historical registrations retain their original
+`workstream_revision` and are read only through their original authority. The
+private shared registry is
 `$CODEX_HOME/workstreams-recovery` (default `~/.codex/workstreams-recovery`). It is
 created only on mutation. Never edit registry or automation files manually.
+
+Changing the `capacity_recovery` preference uses the shared Workstreams feature
+control. That mutation performs recovery preflight before changing the preference,
+then reconciles affected registrations. Its reply preserves the top-level
+preference fields and adds compact `recovery` state: `wanted`, `schedule_id`,
+`pending`, `suspended`, available `historical_registrations` and `next_action`.
+If preflight finds unresolved original-path ownership or delivery, it exits 1,
+returns `ok:false` and `preference_changed:false`, leaves settings untouched, and
+includes the original-path reason with `recovery.ready:false`. A reconciliation
+failure after publication reports the actual `preference_changed` value and
+recovery action without silent rollback. Preference `status` does not inspect
+the registry.
+
+To change the preference, use the shared command from the
+[management procedure](../skills/workstreams/references/procedure.md), selecting
+`capacity_recovery` and its current revision. Do not add schedule observations to
+that request. Complete monitor removal only through this procedure's existing
+`schedule` → actual native observation/operation → `record-schedule` loop. A saved
+schedule ID alone never proves current activity or deletion; pending or uncertain
+outcomes remain pending until acknowledged.
 
 The CLI returns compact operation replies by default. Status lists each parent's
 exact `cwd`, `eligible` and `pending_delivery` flags, plus shared schedule/suspension/lifecycle
@@ -46,12 +72,13 @@ JSON
 
 ## Register and depart
 
-After existing task activation and delegation planning, before managed dispatch,
-call `register --cwd CHECKOUT` with `client`, `session_id`, `task_id`, `scope_ref`,
-`expected_revision` and `workstream_revision`. The session must be the exact native
-parent thread ID. Registration verifies enrolled task authority, current pins,
-saved enablement and original delegation deadline. It does not repin old tasks.
-An unavailable or incompatible task must use its existing pinned recovery path.
+After existing task activation and delegation planning, and only when
+`capacity_recovery` is enabled, call `register --cwd CHECKOUT` with `client`,
+`session_id`, `task_id`, `scope_ref`, `expected_revision` and `recovery_revision`.
+The session must be the exact native parent thread ID. Registration verifies
+enrolled task authority, current pins, recovery preference and original delegation
+deadline. It does not require resource admission or repin old tasks. An unavailable
+or incompatible task must use its existing pinned recovery path.
 
 Mutating controls archive withdrawn records only after their original task deadline
 has expired and no delivery intent remains. Private digest-named `history-*.json`
@@ -64,6 +91,7 @@ unbounded concurrency.
 Registration is idempotent and does not reset a withdrawal, episode, deadline or
 uncertain delivery. Human continuation may call `reactivate` with `thread_id` after
 reconciling mode, current task, native activity, remaining budget and delivery.
+The wrapper reads and rechecks the current recovery revision itself.
 After independently confirming that a manually deleted schedule is absent,
 include `schedule_absent:true` in human reactivation. Unpause an existing schedule
 through its native control before reactivation. Only human reactivation clears
@@ -71,19 +99,23 @@ monitor suspension. A different current task may replace a withdrawn registratio
 delivery is reconciled. The runtime retains the prior registration as audit
 history. Re-registering the same assignment cannot reset its episode. Historical
 owners are not migrated or repinned. Human reactivation rechecks the currently
-bound task and records the current enabled mode revision; intervening toggles
+bound task and records the current recovery revision; intervening toggles
 never silently renew automatic recovery authority.
 
-On completion, cancellation, disable, human-dependent wait or shutdown, call
-`withdraw` with `thread_id`, then perform schedule reconciliation below. Native
-capacity idleness alone is not a departure. If departure cannot execute, the next
-monitor run checks current task authority. Unknown authority retains registration
-and suppresses sends. Shutdown still requires human continuation; this pilot cannot
-independently detect an unreported client crash.
+On completion, cancellation, human-dependent wait or shutdown, call `withdraw`
+with `thread_id`, then perform schedule reconciliation below. Disabling the
+feature withdraws affected registrations as part of the feature mutation; use its
+returned lifecycle snapshot to finish any required native schedule reconciliation.
+Native capacity idleness alone is not a departure. If departure cannot execute,
+the next monitor run checks current task authority. Unknown authority retains
+registration and suppresses sends. Shutdown still requires human continuation;
+this pilot cannot independently detect an unreported client crash.
 
 ## Reconcile the single schedule
 
-Read `status` with `{}`. Inspect only the exact saved `schedule_id` through the App
+Preference status does not read registry or schedule state. For lifecycle
+reconciliation, read `scripts/workstreams_recovery.py status` with `{}`. Inspect
+only the exact saved `schedule_id` through the App
 automation tool or its configuration. Do not infer membership from titles or scan
 unrelated chats. With no saved ID, check for a previously uncertain create before
 creating anything. Call `schedule` with `observed` (`absent`, `active`, `paused`, or
@@ -96,13 +128,15 @@ creating anything. Call `schedule` with `observed` (`absent`, `active`, `paused`
   schedule (`projectId:null`) for host-wide monitoring; registered checkouts supply
   the exact permitted task scopes. Preserve account permissions.
   Record the returned ID with `record-schedule`, `token`, `result:"created"` and
-  `schedule_id`. Activation is protected only after this acknowledgment; defer
-  managed execution while creation or deletion remains unresolved.
+  `schedule_id`. Claim recovery protection only after this acknowledgment.
+  Unresolved creation or deletion does not block ordinary delegation or
+  resource admission.
 - `delete`: delete the exact owned schedule completely with the App tool. Record
   `result:"deleted"` with the token and ID. Check the returned `wanted`: activation
-  during deletion requires creation before that parent's managed execution.
+  during deletion requires creation before claiming that parent's recovery protection.
 - `pending`: another caller owns creation/deletion, or its outcome is uncertain.
-  Reconcile the actual operation before proceeding; time does not release a claim.
+  Reconcile the actual operation before further recovery operations; time does
+  not release a claim. Ordinary delegation and resource admission remain available.
 - `none`: no native mutation. A manual pause/deletion with eligible parents
   suspends recovery. Existing registrations must never recreate it automatically.
 

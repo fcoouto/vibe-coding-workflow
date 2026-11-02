@@ -22,8 +22,44 @@ def title_report(scope, client, session, report):
     return report
 
 
+def workstreams_control(scope, action, request):
+    from runtime import delegation, state, workstreams
+    feature = request.get('feature')
+    state._text(feature, 'Workstreams feature', 64)
+    delegation._require(feature in workstreams.FEATURES, 'Expected an explicit Workstreams feature')
+    if feature != 'capacity_recovery' or action == 'status':
+        return workstreams.control(scope, action, request)
+    from runtime import parent_recovery
+    state._fields(request, ('client', 'feature', 'expected_revision'))
+    directory = parent_recovery.default_directory()
+    preflight = parent_recovery.preflight_feature(scope, directory)
+    if not preflight['ready']:
+        return workstreams.control(scope, 'status', dict(client=request['client'], feature=feature)) | dict(
+            ok=False, preference_changed=False, error=preflight['reason'],
+            recovery=parent_recovery.compact_result(preflight, 'preflight'))
+    previous = workstreams._feature(scope, feature)
+    report = workstreams.control(scope, action, request)
+    try:
+        lifecycle = parent_recovery.reconcile_feature(scope, directory)
+        if lifecycle['pending']:
+            next_action = ('Inspect or perform the original native schedule operation for this token, then use '
+                'scripts/workstreams_recovery.py record-schedule with its observed result. '
+                'Inspect an uncertain operation before retrying it.')
+        elif lifecycle['schedule_id'] is not None or lifecycle['wanted'] == 'present':
+            next_action = ('Observe the owned native schedule, then use scripts/workstreams_recovery.py schedule '
+                'with that observation and record-schedule after any native operation. '
+                'Manual suspension requires explicit human reactivation.')
+        else:
+            next_action = 'No owned recovery schedule is recorded; no native schedule operation is pending.'
+        return report | dict(recovery=parent_recovery.compact_result(lifecycle, 'reconcile-feature') |
+            dict(next_action=next_action))
+    except (ValueError, OSError, KeyError, TypeError) as error:
+        return report | dict(ok=False, preference_changed=any(report[key] != previous[key] for key in ('enabled', 'revision')), error=str(error),
+            recovery=dict(next_action='Reconcile the existing recovery registry and schedule through its original controls.'))
+
+
 def control_main():
-    from runtime.startup import MAX_INPUT, StartupError, json_object, resolve_project
+    from runtime.startup import MAX_INPUT, StartupError, json_object, acquire_project_entry, _entry_scope
 
     class Parser(argparse.ArgumentParser):
         def error(self, message):
@@ -123,12 +159,19 @@ def control_main():
                 raise StartupError("Expected a supported native task client")
         else:
             client = args.client
-        scope = resolve_project(SimpleNamespace(client=client, cwd=Path(args.cwd)), PACKAGE)
         if args.command == "doctor":
             from runtime.doctor import inspect_runtime
-            report = inspect_runtime(scope, args.executable)
+            unavailable = False
+            try:
+                acquisition = acquire_project_entry(SimpleNamespace(client=client, cwd=Path(args.cwd)), PACKAGE)
+            except (StartupError, ImportError, ValueError):
+                acquisition = None
+                unavailable = True
+            report = inspect_runtime(None, args.executable, acquisition=acquisition, enrollment_unavailable=unavailable)
             print(json.dumps(report))
             return report["exit_code"]
+        acquisition = acquire_project_entry(SimpleNamespace(client=client, cwd=Path(args.cwd)), PACKAGE)
+        scope = _entry_scope(acquisition)
         if scope is None:
             raise StartupError("The requested checkout is not enrolled for this client")
         if scope.runtime is None:
@@ -148,12 +191,12 @@ def control_main():
                     report = resource_execution.operate(scope, resource_execution.host_directory(),
                         action.removeprefix("resource-"), request)
                 elif action in {"enable", "disable", "status"}:
-                    report = workstreams.control(scope, action, request)
+                    report = workstreams_control(scope, action, request)
                 else:
                     operation = {"consume-dispatch": workstreams.consume_dispatch,
-                        "prepare-continuation": workstreams.prepare_continuation,
-                        "consume-continuation": workstreams.consume_continuation,
-                        "record-continuation": workstreams.record_continuation}
+                        "prepare-continuation": delegation.prepare_continuation,
+                        "consume-continuation": delegation.consume_continuation,
+                        "record-continuation": delegation.record_continuation}
                     report = operation[action](scope, request)
             elif args.delegation_action == "guidance":
                 report = {"status": delegation.guidance_status, "claim": delegation.claim_guidance,
@@ -161,13 +204,15 @@ def control_main():
             elif args.delegation_action == "status":
                 report = delegation.delegation_status(scope, client, args.session)
             else:
+                if args.delegation_action in {"prepare", "coordinator"} and {"workstream_revision", "workstream_limits"} & request.keys():
+                    raise StartupError("Combined Workstreams fields cannot create assignments; use ordinary delegation and continuation_limits for native workers")
                 operation = {"plan": delegation.plan_delegation, "prepare": delegation.prepare_assignment,
                              "observe": delegation.observe_assignment, "reconcile": delegation.reconcile_assignment,
                              "coordinator": delegation.reserve_coordinator}
                 report = operation[args.delegation_action](scope, request)
             report = title_report(scope, client, request.get("session_id") if args.delegation_action != "status" else args.session, report)
             print(json.dumps(report))
-            return 0
+            return 0 if report.get("ok", True) else 1
         if args.command == "evidence":
             from runtime import evidence
             operations = {"plan": evidence.plan_evidence, "check": evidence.run_check, "reconcile-check": evidence.reconcile_check, "verify": evidence.verify_completion,
@@ -204,7 +249,7 @@ def main():
     requested_event = sys.argv[2] if len(sys.argv) == 3 else None
     from runtime.adapters import claude_code, codex, session_start
     from runtime.engine import HookResult
-    from runtime.startup import MAX_INPUT, RuntimeScopeError, StartupError, json_object, orient, resolve_project
+    from runtime.startup import MAX_INPUT, RuntimeScopeError, StartupError, json_object, orient, acquire_project_entry, _entry_scope
     runtime_kind = requested_event if requested_event in codex.RUNTIME_EVENTS else None
 
     def failure(reason):
@@ -227,7 +272,8 @@ def main():
             output = adapter.render(orient(start, PACKAGE))
             if start.client == "codex":
                 try:
-                    scope = resolve_project(start, PACKAGE)
+                    acquisition = acquire_project_entry(start, PACKAGE)
+                    scope = _entry_scope(acquisition)
                     if scope is not None and scope.runtime is not None:
                         from runtime.title_sync import repair
                         presentation = repair(scope, start.client, payload.get("session_id"), force=True)
@@ -239,7 +285,8 @@ def main():
                     pass
         else:
             event = codex.normalize_runtime(payload)
-            scope = resolve_project(event, PACKAGE)
+            acquisition = acquire_project_entry(event, PACKAGE)
+            scope = _entry_scope(acquisition)
             result = HookResult(event.kind)
             if scope is not None and scope.runtime is not None:
                 from runtime.state import process_event

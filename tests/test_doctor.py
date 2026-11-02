@@ -31,7 +31,7 @@ class DoctorTests(unittest.TestCase):
         self.repo.mkdir()
         self.scope = startup.ProjectScope("fixture", self.repo, self.repo / ".git",
             startup.policy_digest(PACKAGE), startup.RuntimeSettings(2, self.base / "state"))
-        self.state = dict(configured=True, present=True, compatible=True, schema_version=2,
+        self.state = dict(configured=True, present=True, compatible=True, schema_version=3,
                           runtime_digest="a" * 64, policy_digest=self.scope.policy_digest, tasks=[])
         self.hooks = []
         matchers = ("^(startup|resume|clear|compact|fork)$", "^apply_patch$", "*", None, None)
@@ -284,19 +284,20 @@ for line in sys.stdin:
             other.wait(timeout=2)
 
     def test_real_state_pin_inspection_is_read_only_and_detects_mismatch(self):
-        self.scope.git_common_dir.mkdir()
         from runtime import doctor, state
+        from tests.fixture_canonical_birth import fresh_canonical
+        fixture,acquired,_=fresh_canonical(self)
+        self.scope,self.repo=acquired.resolution.scope,fixture.repo
         executable = self.executable()
         report = doctor.inspect_runtime(self.scope, executable)
-        self.assertEqual(report["state"]["status"], "missing")
-        self.assertFalse(self.scope.runtime.state_dir.exists())
+        self.assertEqual(report['state']['status'],'passed')
         state.start_task(self.scope, dict(client="codex", session_id="session", task_id="task",
             scope_ref="request:1", mode="editable", decision_ref="user:1"))
         directory = self.scope.runtime.state_dir
-        before = {path.name: path.read_bytes() for path in directory.iterdir()}
+        before = {str(path): path.read_bytes() for path in directory.rglob("*") if path.is_file()}
         report = doctor.inspect_runtime(self.scope, executable)
         self.assertEqual(report["state"]["status"], "passed")
-        self.assertEqual(before, {path.name: path.read_bytes() for path in directory.iterdir()})
+        self.assertEqual(before, {str(path): path.read_bytes() for path in directory.rglob("*") if path.is_file()})
         database = directory / "runtime.sqlite3"
         with sqlite3.connect(database) as connection:
             task = json.loads(connection.execute("select data from tasks").fetchone()[0])
@@ -305,7 +306,12 @@ for line in sys.stdin:
         before = database.read_bytes()
         report = doctor.inspect_runtime(self.scope, executable)
         self.assertEqual(report["state"]["status"], "incompatible")
-        self.assertFalse(report["state"]["tasks"][0]["compatible"])
+        self.assertFalse(report["state"]["compatible"])
+        self.assertEqual(report["state"]["tasks"], [])
+        self.assertEqual(report["state"]["error"], "Task snapshot, pins and physical checkout differ")
+        self.assertEqual(report["package"]["status"], "passed")
+        self.assertEqual(report["native"]["status"], "passed")
+        self.assertEqual(report["hooks"]["status"], "passed")
         self.assertEqual(report["exit_code"], 1)
         self.assertEqual(before, database.read_bytes())
 
@@ -352,3 +358,13 @@ for line in sys.stdin:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LegacyDoctorReportTests(unittest.TestCase):
+    def test_legacy_report_cannot_be_current_even_when_empty(self):
+        fixture=DoctorTests("runTest");fixture.setUp();self.addCleanup(fixture.doCleanups)
+        self.state=fixture.state
+        self.state['schema_version']=2
+        report=fixture.inspect()
+        self.assertEqual(report['state']['status'],'incompatible')
+        self.assertEqual(report['exit_code'],1)

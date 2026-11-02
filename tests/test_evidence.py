@@ -1,4 +1,5 @@
 """D5 proofs use disposable Git repositories and explicit mocked native observations."""
+from tests.fixture_canonical_birth import fixture_artifact
 from dataclasses import replace
 import hashlib
 import importlib
@@ -13,23 +14,38 @@ import unittest
 from unittest.mock import patch
 
 from runtime import state
+from tests.fixture_canonical_birth import native_receipt_fields
 from runtime.startup import ProjectScope, RuntimeSettings, policy_digest
 
 
 class EvidenceTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix='vibe-evidence-')
-        self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name).resolve()
-        self.repo = self.root / 'repo'
-        self.repo.mkdir()
-        self.git('init', '-q')
+        from tests.fixture_canonical_birth import fresh_canonical, save_test_acquisition
+        self._canonical_common_git = self._testMethodName in {
+            'test_linked_checkout_shared_git_reservation_invalidates_ready_in_same_transaction',
+            'test_candidate_binds_modes_untracked_index_base_environment_and_linked_checkout'}
+        fixture, self.acquisition, observation = fresh_canonical(self)
+        self.root, self.repo, self.scope = fixture.base, fixture.repo, self.acquisition.resolution.scope
+        self.test_acquisition = save_test_acquisition(self.root / 'test-acquisition.json', fixture, observation)
+        if getattr(self,'_canonical_peer',False) or self._canonical_common_git:
+            from types import SimpleNamespace
+            from runtime import startup
+            peer=next(root for root in fixture.test_observations if root != str(self.repo))
+            self.peer_scope=startup._entry_scope(startup.acquire_project_entry(
+                SimpleNamespace(client='codex',cwd=Path(peer)),state.PACKAGE,
+                qualifier=lambda record,facts:fixture.test_observations[peer]))
+
         self.git('config', 'user.email', 'fixture@example.invalid')
         self.git('config', 'user.name', 'Fixture')
         (self.repo / 'app.py').write_text('value = 1\n')
-        self.git('add', '.')
-        self.git('commit', '-qm', 'fixture')
-        self.scope = ProjectScope('fixture', self.repo, self.repo / '.git', policy_digest(state.PACKAGE), RuntimeSettings(2, self.root / 'state'))
+        self.git('add', 'app.py')
+        self.git('commit', '-qm', 'fixture application')
+        if getattr(self,'_canonical_peer',False) or self._canonical_common_git:
+            peer=self.peer_scope.repository_root
+            (peer/'app.py').write_text('value = 1\n')
+            subprocess.run(['git','-c','core.hooksPath='+os.devnull,'-C',str(peer),'add','app.py'],check=True,capture_output=True,timeout=5)
+            subprocess.run(['git','-c','core.hooksPath='+os.devnull,'-C',str(peer),'commit','-qm','fixture peer application'],check=True,capture_output=True,timeout=5)
+
         self.identity = dict(client='codex', session_id='parent', task_id='task', scope_ref='user:task')
         state.start_task(self.scope, self.identity | dict(mode='editable', decision_ref='user:accepted'))
         self.api = importlib.import_module('runtime.evidence')
@@ -169,14 +185,15 @@ class EvidenceTests(unittest.TestCase):
         report = dict(version=1, attempt_id=attempt, assignment_digest=prepared['assignment_digest'],
             candidate_digest=prepared['candidate_digest'], coverage=coverage, findings=findings or [], limitations=[])
         raw = json.dumps(report)
-        actual = dict(version=2, mechanism='codex-native-agent-path', **binding, agent_path='/root/'+binding['task_name'],
+        actual = dict(version=2, mechanism='codex-native-agent-path', **native_receipt_fields(binding), agent_path='/root/'+binding['task_name'],
             originator='codex_exec', parent_model_provider=None, worker_model_provider=None, parent_turn_id='turn', spawn_item_id='spawn',
             worker_id='reviewer', worker_turn_id='child-turn', result_item_id='final', turn_status='completed', checkout=str(self.repo),
             configured_model='fixture-review-model', configured_effort='high', spawn_observed_model='fixture-review-model',
             spawn_observed_effort='high', execution_model=None, execution_effort=None, descendants_stopped=False,
             prompt_delivery='unverified', result_digest=hashlib.sha256(raw.encode()).hexdigest())
         with patch('runtime.adapters.codex.observe_native_review_assignment', return_value=dict(receipt=actual,result=raw)):
-            delegation.observe_assignment(self.scope, self.request(attempt_id=attempt,parent_turn_id='turn',spawn_item_id='spawn'))
+            observed=delegation.observe_assignment(self.scope, self.request(attempt_id=attempt,parent_turn_id='turn',spawn_item_id='spawn'))
+            self.assertEqual(observed['status'],'observed',observed)
         receipt = dict(version=1, mechanism='codex-native-agent-path', native_version='0.163.0', parent_session_id='parent',
             parent_turn_id='turn', spawn_item_id='spawn', reviewer_id='reviewer', review_turn_id='child-turn',
             report_item_id='final', assignment_digest=prepared['assignment_digest'], candidate_digest=prepared['candidate_digest'],
@@ -351,6 +368,26 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(after['state'], 'REVIEW')
         self.assertEqual(after['revision'], ready['revision'] + 1)
 
+    def test_evidence_status_recaptures_file_edit_after_readiness_capture(self):
+        self.ready_proof_fixture()
+        ready = self.verify()['task']
+        verified_digest = self.api._read(self.scope, ready['evidence']['verification'])['candidate_digest']
+        original = self.api._blockers
+        edited = []
+        def blockers(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if not edited:
+                (self.repo / 'app.py').write_text('value = 2\n')
+                edited.append(True)
+            return result
+        with patch.object(self.api, '_blockers', side_effect=blockers):
+            status = self.api.evidence_status(self.scope, 'codex', 'parent')
+        self.assertTrue(edited)
+        self.assertNotEqual(status['evidence']['candidate_digest'], verified_digest)
+        self.assertTrue(status['evidence']['blockers'])
+        current = self.api.capture_candidate(self.scope, self.api._load_plan(self.scope, self.identity))
+        self.assertEqual(status['evidence']['candidate_digest'], self.api._digest(current))
+
     def test_status_uses_newly_accepted_d6_resources_when_candidate_is_unchanged(self):
         from runtime import delegation
         self.ready_proof_fixture()
@@ -435,9 +472,10 @@ class EvidenceTests(unittest.TestCase):
         from runtime import delegation
         self.ready_proof_fixture()
         ready = self.verify()['task']
-        linked = self.root / 'linked'
-        self.git('worktree', 'add', '-q', '--detach', str(linked), 'HEAD')
-        foreign = replace(self.scope, project_id='linked', repository_root=linked)
+        foreign = self.peer_scope
+        self.assertEqual(foreign.git_common_dir,self.scope.git_common_dir)
+        self.assertEqual(foreign.repository_id,self.scope.repository_id)
+        self.assertNotEqual(foreign.checkout_id,self.scope.checkout_id)
         request = self.readiness_owner(scope=foreign, claims=[dict(kind='git', key=str(self.scope.git_common_dir), mode='write')])
         delegation._reserve_operation(foreign, request, role='coordinator')
         with state._database(self.scope) as db:
@@ -490,7 +528,7 @@ class EvidenceTests(unittest.TestCase):
         verification = self.api._read(self.scope, ready['evidence']['verification'])
         verification.pop('resource_closure', None)
         with state._database(self.scope, write=True) as db:
-            ready['evidence']['verification'] = self.api._artifact(self.scope, verification)
+            ready['evidence']['verification'] = fixture_artifact(self.scope,self.identity, verification,db=db)
             state._save(db, state._scope_id(self.scope), ready)
         independent = self.readiness_owner(claims=[dict(kind='service', key='fixture:independent', host='local', mode='read')])
         delegation._reserve_operation(self.scope, independent, role='coordinator')
@@ -692,8 +730,10 @@ class EvidenceTests(unittest.TestCase):
         first = self.api.capture_candidate(self.scope, self.api._load_plan(self.scope, self.identity))
         (self.repo / 'untracked').write_text('two')
         self.assertNotEqual(first, self.api.capture_candidate(self.scope, self.api._load_plan(self.scope, self.identity)))
-        self.git('worktree', 'add', '-q', '--detach', str(self.root / 'linked'))
-        other = replace(self.scope, repository_root=self.root / 'linked')
+        other = self.peer_scope
+        self.assertEqual(other.git_common_dir,self.scope.git_common_dir)
+        self.assertEqual(other.repository_id,self.scope.repository_id)
+        self.assertNotEqual(other.checkout_id,self.scope.checkout_id)
         self.assertNotEqual(candidate['repository_root'], self.api.capture_candidate(other, self.api._load_plan(self.scope, self.identity))['repository_root'])
 
     def test_failed_baseline_does_not_satisfy_criterion_and_effects_cannot_expand(self):

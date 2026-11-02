@@ -113,3 +113,7 @@ def evaluate(event, snapshot):
         task["revision"] += 1
         changes["task"] = task
     return result, changes
+
+
+def guarded_mutation(event):
+    return event.kind == "PreToolUse" and event.client == "codex" and event.tool_name == "apply_patch"

@@ -1,4 +1,5 @@
 """Durable title presentation against a disposable native-client boundary."""
+from tests.fixture_canonical_birth import test_acquisition
 from copy import deepcopy
 from pathlib import Path
 import tempfile
@@ -56,14 +57,14 @@ class NativeTitleTransportTests(unittest.TestCase):
 
 class TitleIntegrationTests(unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        self.home = Path(temporary.name).resolve()
-        private = self.home / 'private'
-        private.mkdir(mode=0o700)
-        self.scope = ProjectScope('p', self.home, self.home / '.git', 'policy', RuntimeSettings(2, private))
-        self.task = dict(client='codex', session_id='session', task_id='task', scope_ref='user:task',
-            state='WORKING', revision=1, pins={'runtime':'fixture'}, milestones=[])
+        from tests.fixture_canonical_birth import fresh_canonical
+        from runtime import state
+        fixture, self.acquisition, _ = fresh_canonical(self)
+        self.home, self.scope = fixture.base, self.acquisition.resolution.scope
+        identity=dict(client='codex',session_id='session',task_id='task',scope_ref='user:task')
+        task=state.start_task(self.scope,identity|dict(mode='editable',decision_ref='user:accepted'))['task']
+        self.task=state.update_task(self.scope,identity|dict(expected_revision=task['revision'],state='WORKING',
+            reason='Title fixture work',reference='user:accepted'))['task']
         authority = patch.object(title_sync, '_task', side_effect=lambda *args, **kwargs: deepcopy(self.task))
         authority.start()
         self.addCleanup(authority.stop)
@@ -83,7 +84,7 @@ class TitleIntegrationTests(unittest.TestCase):
         self.assertEqual(self.native.title, '▱▱▱▱▱ [W1] P · Thread naming · WORKING')
         self.call()
         self.assertEqual(self.native.writes, 1)
-        self.task.update(state='REVIEW', revision=2)
+        self.task.update(state='REVIEW', revision=self.task['revision']+1)
         self.call()
         self.assertTrue(self.native.title.endswith(' · REVIEW'))
 
@@ -151,10 +152,10 @@ class TitleIntegrationTests(unittest.TestCase):
     def test_topic_survives_next_status_update_and_persistence(self):
         self.call('configure', topic='Thread naming')
         self.native.title = self.native.title.replace('Thread naming','Better naming')
-        self.task.update(state='REVIEW', revision=2)
+        self.task.update(state='REVIEW', revision=self.task['revision']+1)
         self.call()
         self.assertIn(' · Better naming · REVIEW', self.native.title)
-        self.task.update(state='WORKING', revision=3)
+        self.task.update(state='WORKING', revision=self.task['revision']+1)
         self.call()
         self.assertIn(' · Better naming · WORKING', self.native.title)
 
@@ -162,9 +163,9 @@ class TitleIntegrationTests(unittest.TestCase):
         self.call('configure', topic='Thread naming')
         manual = self.native.title.replace('WORKING','DONE')
         self.native.title = manual
-        self.task.update(revision=2)
+        self.task.update(revision=self.task['revision']+1)
         self.assertIsNotNone(self.call()['notification'])
-        self.task.update(revision=3)
+        self.task.update(revision=self.task['revision']+1)
         self.assertIsNone(self.call()['notification'])
         self.assertEqual(self.native.title, manual)
         self.assertEqual(self.task['state'], 'WORKING')
@@ -173,7 +174,7 @@ class TitleIntegrationTests(unittest.TestCase):
 
     def test_failed_acknowledgment_repairs_without_duplicate_write(self):
         self.call('configure', topic='Thread naming')
-        self.task.update(state='REVIEW', revision=2)
+        self.task.update(state='REVIEW', revision=self.task['revision']+1)
         self.native.lose_ack = True
         with self.assertRaises(OSError): self.call()
         self.call()
@@ -187,7 +188,7 @@ class TitleIntegrationTests(unittest.TestCase):
 
     def test_done_meter_uses_authoritative_status_only(self):
         self.call('configure', topic='Thread naming')
-        self.task.update(state='DONE', revision=2)
+        self.task.update(state='DONE', revision=self.task['revision']+1)
         self.call()
         self.assertTrue(self.native.title.startswith('▰▰▰▰▰ '))
 
@@ -196,13 +197,13 @@ class TitleIntegrationTests(unittest.TestCase):
         import json
         from types import SimpleNamespace
         from scripts import workflow
-        payload = dict(hook_event_name=kind, session_id='session', cwd=str(self.home),
+        payload = dict(hook_event_name=kind, session_id='session', cwd=str(self.scope.repository_root),
             turn_id='turn', tool_name='exec_command', tool_use_id='call', stop_hook_active=False)
         output = io.StringIO()
         with patch('sys.argv', ['workflow.py', 'codex', kind]), \
              patch('sys.stdin', SimpleNamespace(buffer=io.BytesIO(json.dumps(payload).encode()))), \
              patch('sys.stdout', output), \
-             patch('runtime.startup.resolve_project', return_value=self.scope), \
+             patch('runtime.startup.acquire_project_entry',side_effect=lambda *args,**kwargs:test_acquisition(self.scope)), \
              patch('runtime.state.process_event', return_value=result), \
              patch.object(title_sync, 'NativeTitles', return_value=self.native):
             self.assertEqual(workflow.main(), 0)
@@ -211,7 +212,7 @@ class TitleIntegrationTests(unittest.TestCase):
     def test_post_tool_hook_updates_title_preserving_existing_output(self):
         from runtime.engine import HookResult
         self.call('configure', topic='Thread naming')
-        self.task.update(state='REVIEW', revision=2)
+        self.task.update(state='REVIEW', revision=self.task['revision']+1)
         output = self.hook('PostToolUse', HookResult('PostToolUse', 'context', 'Existing context'))
         self.assertTrue(self.native.title.endswith(' · REVIEW'))
         self.assertEqual(output['hookSpecificOutput']['additionalContext'], 'Existing context')
@@ -220,7 +221,7 @@ class TitleIntegrationTests(unittest.TestCase):
         from runtime.engine import HookResult
         self.call('configure', topic='Thread naming')
         self.native.title = 'My manually chosen title'
-        self.task.update(revision=2)
+        self.task.update(revision=self.task['revision']+1)
         output = self.hook('Stop', HookResult('Stop', 'continue', 'Existing continuation'))
         self.assertEqual(output['decision'], 'block')
         self.assertEqual(output['reason'], 'Existing continuation')
@@ -230,7 +231,7 @@ class TitleIntegrationTests(unittest.TestCase):
     def test_transport_failure_preserves_hook_result(self):
         from runtime.engine import HookResult
         self.call('configure', topic='Thread naming')
-        self.task.update(state='REVIEW', revision=2)
+        self.task.update(state='REVIEW', revision=self.task['revision']+1)
         with patch.object(self.native, 'read', side_effect=OSError('Unavailable')):
             output = self.hook('PostToolUse', HookResult('PostToolUse', 'context', 'Existing context'))
         self.assertEqual(output['hookSpecificOutput']['additionalContext'], 'Existing context')
@@ -243,12 +244,12 @@ class TitleIntegrationTests(unittest.TestCase):
         from scripts import workflow
         self.call('configure', topic='Thread naming')
         self.native.title = 'My title'
-        payload = dict(hook_event_name='SessionStart', source='resume', session_id='session', cwd=str(self.home))
+        payload = dict(hook_event_name='SessionStart', source='resume', session_id='session', cwd=str(self.scope.repository_root))
         output = io.StringIO()
         with patch('sys.argv', ['workflow.py','codex','SessionStart']), \
              patch('sys.stdin', SimpleNamespace(buffer=io.BytesIO(json.dumps(payload).encode()))), \
              patch('sys.stdout', output), \
-             patch('runtime.startup.resolve_project', return_value=self.scope), \
+             patch('runtime.startup.acquire_project_entry',side_effect=lambda *args,**kwargs:test_acquisition(self.scope)), \
              patch('runtime.startup.orient'), \
              patch('runtime.adapters.codex.render', return_value={'systemMessage':'Existing startup'}), \
              patch.object(title_sync, 'NativeTitles', return_value=self.native):
@@ -289,7 +290,7 @@ class BoundTaskTitleTests(unittest.TestCase):
         with patch('sys.argv', ['workflow.py', *arguments, '--cwd', str(self.fixture.scope.repository_root)]), \
              patch('sys.stdin', SimpleNamespace(buffer=io.BytesIO(json.dumps(request).encode()))), \
              patch('sys.stdout', output), \
-             patch('runtime.startup.resolve_project', return_value=self.fixture.scope), \
+             patch('runtime.startup.acquire_project_entry',side_effect=lambda *args,**kwargs:test_acquisition(self.fixture.scope)), \
              patch.object(title_sync, 'NativeTitles', return_value=self.native):
             code = workflow.main()
         result = json.loads(output.getvalue())
@@ -335,7 +336,7 @@ class BoundTaskTitleTests(unittest.TestCase):
             output = io.StringIO()
             with self.subTest(response=response), patch('sys.argv', ['workflow.py', 'task', 'title', 'configure', '--cwd', str(self.fixture.scope.repository_root)]), \
                     patch('sys.stdin', SimpleNamespace(buffer=io.BytesIO(json.dumps(request).encode()))), \
-                    patch('sys.stdout', output), patch('runtime.startup.resolve_project', return_value=self.fixture.scope), \
+                    patch('sys.stdout', output), patch('runtime.startup.acquire_project_entry',side_effect=lambda *args,**kwargs:test_acquisition(self.fixture.scope)), \
                     patch('shutil.which', return_value='/fixture/codex'), patch.object(doctor, 'NativeProcess', side_effect=factory):
                 self.assertEqual(workflow.main(), 1)
                 self.assertFalse(json.loads(output.getvalue())['ok'])

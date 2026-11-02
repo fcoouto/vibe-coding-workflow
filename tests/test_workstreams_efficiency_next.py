@@ -1,6 +1,8 @@
 """Remaining efficiency boundaries over disposable authorities; no native execution."""
 from contextlib import contextmanager
+from pathlib import Path
 import shutil
+import tempfile
 from types import SimpleNamespace
 import time
 import unittest
@@ -37,13 +39,141 @@ class ResourceEfficiencyTests(unittest.TestCase):
             yield clock, measured
 
     def test_immediate_run_fingerprints_once_at_each_fresh_authority_boundary(self):
+        """Three fresh stages each retain one entry and one post-ledger capture."""
+        stages, unassigned = [], []
+        current, phase = [None], [None]
+        actual_authority = resource_execution._authority
+        actual_fingerprint = state.runtime_fingerprint
+
+        def observe_authority(*args, **kwargs):
+            events = []
+            stages.append(events)
+            current[0] = events
+            try:
+                result = actual_authority(*args, **kwargs)
+                events.append('return')
+                return result
+            finally:
+                current[0] = None
+
+        def observe_phase(name, original):
+            def observe(*args, **kwargs):
+                events = current[0] if current[0] is not None else unassigned
+                events.append(name + ':begin')
+                previous, phase[0] = phase[0], name
+                try:
+                    return original(*args, **kwargs)
+                finally:
+                    events.append(name + ':end')
+                    phase[0] = previous
+            return observe
+
+        def observe_fingerprint(*args, **kwargs):
+            result = actual_fingerprint(*args, **kwargs)
+            events = current[0] if current[0] is not None else unassigned
+            events.append('hash:' + str(phase[0]))
+            return result
+
         with self.telemetry(), \
-             patch.object(state, 'runtime_fingerprint', wraps=state.runtime_fingerprint) as fingerprint, \
-             patch.object(resource_execution, '_authority', wraps=resource_execution._authority) as authority:
+             patch.object(state, 'runtime_fingerprint', side_effect=observe_fingerprint) as fingerprint, \
+             patch.object(resource_execution, '_authority', side_effect=observe_authority) as authority, \
+             patch.object(state, '_check_current_authority', side_effect=observe_phase('entry', state._check_current_authority)), \
+             patch.object(resource_execution.d6, '_ledger', side_effect=observe_phase('ledger', resource_execution.d6._ledger)), \
+             patch.object(state, '_compatible', side_effect=observe_phase('compat', state._compatible)):
             result = self.first.call()
         self.assertEqual(result['returncode'], 0)
         self.assertEqual(authority.call_count, 3)
-        self.assertEqual(fingerprint.call_count, 3)
+        self.assertEqual(stages, [['entry:begin', 'hash:entry', 'entry:end', 'ledger:begin', 'ledger:end',
+            'compat:begin', 'hash:compat', 'compat:end', 'return']] * 3)
+        self.assertEqual(unassigned, [])
+        self.assertEqual(fingerprint.call_count, sum(event.startswith('hash:') for stage in stages for event in stage))
+
+    @contextmanager
+    def copied_installed_sources(self):
+        temporary = tempfile.TemporaryDirectory(prefix='vcw-resource-package-')
+        self.addCleanup(temporary.cleanup)
+        package = Path(temporary.name).resolve() / 'package'
+        installed = state.PACKAGE.resolve()
+        original = installed / 'runtime/engine.py'
+        original_bytes = original.read_bytes()
+        self.assertFalse(package.is_relative_to(installed))
+        shutil.copytree(installed, package, ignore=shutil.ignore_patterns('.git', '.superpowers', '__pycache__'))
+        try:
+            with patch.object(state, 'PACKAGE', package):
+                self.assertEqual(state.runtime_fingerprint(), self.first.fixture.scope.runtime_digest)
+                yield package / 'runtime/engine.py'
+        finally:
+            self.assertEqual(original.read_bytes(), original_bytes)
+
+    def authority_snapshot(self):
+        scope = self.first.fixture.scope
+        with state._database(scope) as db:
+            rows = list(db.iterdump())
+            baseline = state._source_baseline(scope, db)
+        files = {}
+        for path in [scope.authority_path, *scope.runtime.state_dir.rglob('*')]:
+            if path.is_file():
+                info = path.stat()
+                files[str(path)] = (path.read_bytes(), info.st_dev, info.st_ino, info.st_mode,
+                                   info.st_mtime_ns, info.st_ctime_ns)
+        return dict(rows=rows, baseline=baseline, files=files)
+
+    def test_changed_installed_sources_reject_before_ledger_admission_and_launch(self):
+        before = self.authority_snapshot()
+        with self.copied_installed_sources() as source:
+            source.write_bytes(source.read_bytes() + b'\n# Disposable early source drift.\n')
+            with self.telemetry(), \
+                    patch.object(resource_execution.d6, '_ledger', wraps=resource_execution.d6._ledger) as ledger, \
+                    patch.object(host, 'control', wraps=host.control) as control, \
+                    patch.object(resource_execution.subprocess, 'Popen', wraps=resource_execution.subprocess.Popen) as launch:
+                with self.assertRaisesRegex(state.StateError, 'Installed runtime differs'):
+                    self.first.call()
+            self.assertEqual(ledger.call_count, 0)
+            self.assertEqual(control.call_count, 0)
+            self.assertEqual(launch.call_count, 0)
+        self.assertFalse(self.first.directory.exists())
+        self.assertEqual(self.authority_snapshot(), before)
+
+    def test_installed_source_drift_after_prelaunch_ledger_retains_active_reservation(self):
+        before = self.authority_snapshot()
+        actual_authority = resource_execution._authority
+        actual_ledger = resource_execution.d6._ledger
+        stages, reads, admitted = [], [], []
+        current = [None]
+        with self.copied_installed_sources() as source:
+            def observe_authority(*args, **kwargs):
+                stages.append(len(stages) + 1)
+                current[0] = stages[-1]
+                try:
+                    return actual_authority(*args, **kwargs)
+                finally:
+                    current[0] = None
+
+            def mutate_after_actual_ledger(*args, **kwargs):
+                records = actual_ledger(*args, **kwargs)
+                reads.append(current[0])
+                if current[0] == 3:
+                    admitted.append(host.control(self.first.directory, 'status', {})['reservations'])
+                    self.assertEqual(len(admitted[0]), 1)
+                    reservation = next(iter(admitted[0].values()))
+                    self.assertEqual(reservation['state'], 'active')
+                    self.assertEqual(reservation['request']['owner']['attempt_id'], self.first.prepared['attempt_id'])
+                    source.write_bytes(source.read_bytes() + b'\n# Disposable post-ledger source drift.\n')
+                return records
+
+            with self.telemetry(), \
+                    patch.object(resource_execution, '_authority', side_effect=observe_authority), \
+                    patch.object(resource_execution.d6, '_ledger', side_effect=mutate_after_actual_ledger), \
+                    patch.object(host, 'control', wraps=host.control) as control, \
+                    patch.object(resource_execution.subprocess, 'Popen', wraps=resource_execution.subprocess.Popen) as launch:
+                with self.assertRaisesRegex(state.StateError, 'Installed runtime differs'):
+                    self.first.call()
+            self.assertEqual(stages, [1, 2, 3])
+            self.assertEqual(reads, [1, 2, 3])
+            self.assertEqual([call.args[1] for call in control.call_args_list], ['request', 'status'])
+            self.assertEqual(launch.call_count, 0)
+        self.assertEqual(host.control(self.first.directory, 'status', {})['reservations'], admitted[0])
+        self.assertEqual(self.authority_snapshot(), before)
 
     def test_run_uses_locked_request_without_an_unused_status_read(self):
         with self.telemetry(), patch.object(host, 'control', wraps=host.control) as control:
