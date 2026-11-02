@@ -745,7 +745,7 @@ def _recovery_files(path, root, journal, cleanup=True):
 def _fresh(plan, journal=None, *, external_owned=()):
     """Normalize only receipt-owned paths; unrelated inputs retain D3 freshness checks."""
     root = Path(plan["identity"]["repository_root"])
-    current = d3._snapshot(root, d3._snapshot_targets(plan))
+    current = d3._snapshot(root, d3._snapshot_targets(plan), inventory=d3._inventory_enabled(plan["identity"]))
     previous = plan["identity"]
     owned = _owned(journal) if journal else {}
     owned.update({key:(None,None) for key in external_owned})
@@ -1060,7 +1060,7 @@ def observation_digest(manifest):
     """Bind coordinator observations to current checkout, effect files and enrollment."""
     root = Path(manifest["checkout"]["repository_root"])
     paths = sorted({str(PROJECT_FILE)} | {e["path"] for a in manifest["actions"] for e in a["effects"]})
-    return d3._digest({"identity": d3._snapshot(root, paths),
+    return d3._digest({"identity": d3._snapshot(root, paths, inventory=True),
         "effects": {name: _fingerprint(root, name) for name in paths},
         "enrollment": _fingerprint(root, str(PROJECT_FILE)), "package_pins": d3._package_pins()})
 
