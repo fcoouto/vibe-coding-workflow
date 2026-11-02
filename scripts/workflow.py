@@ -76,6 +76,7 @@ def control_main():
             if name == "status":
                 action.add_argument("--client", required=True, choices=("codex",))
                 action.add_argument("--session", required=True)
+                action.add_argument("--prepare-observability", action="store_true")
         title = actions.add_parser("title", add_help=False)
         title.add_argument("title_action", choices=("configure", "resume", "status", "sync"))
         title.add_argument("--cwd", required=True)
@@ -242,6 +243,14 @@ def control_main():
         from runtime.state import start_task, update_task, task_status, retire_task
         if args.action == "status":
             report = task_status(scope, client, args.session)
+            if args.prepare_observability:
+                try:
+                    from runtime.observability import prepare_task_status
+                    preparation = {"status": "prepared", "data": prepare_task_status(report, enabled=True)}
+                except Exception:
+                    # Optional preparation must preserve the owner's ordinary status result.
+                    preparation = {"status": "unavailable"}
+                report = dict(report, observability_preparation=preparation)
         else:
             report = {"start": start_task, "update": update_task, "retire": retire_task}[args.action](scope, request)
         report = title_report(scope, client, request.get("session_id") if args.action != "status" else args.session, report)
