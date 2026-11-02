@@ -14,9 +14,9 @@ Use Sol for coupled implementation and review, Luna for suitable small fixtures 
 
 | Slice | Next complete outcome | Exit condition |
 | --- | --- | --- |
-| Activation | Implement the user's approved setup-behavior/current-observable-configuration guarantee through the existing trusted acquisition seam. | Genuine observed qualification, current observable inputs and scoped history support activation. The [approved limitation](activation-guarantee-proposal.md) remains explicit. |
+| Activation | The Codex comparison consumes the approved current fields; next implement the genuine setup observer, existing-journal receipts and file-backed production reader. | Genuine observed qualification, current observable inputs and scoped history support activation. The [approved limitation](activation-guarantee-proposal.md) remains explicit; consumer tests alone do not activate the pilot. |
 | OpenRouter | Source integration completed in PR41; actual optional client/provider qualification remains separate. | All 90 distinct controls have staged passing evidence, plus package/skill validation and independent review. Controls stay opt-in; installed/live execution is not qualified. |
-| Langfuse | Adapt existing connection controls to canonical entry, current statuses and real canonical fixtures. | Focused fake-transport/credential tests pass; native-default tasks remain independent. Live connection and usage-source qualification follow separately. |
+| Langfuse | Source compatibility completed in PR43; native collection and live connection/source qualification remain separate. | 65 distinct local controls have staged passing evidence, including local HTTPS/fake-keyring CLI/terminal cases. Native-default tasks remain independent; actual usage and D11 remain unqualified. |
 | Evidence | Port reviewed execution-provenance improvements in coherent slices; finish compact retention only with matching producers and consumers. | Current-task/recovery requirements pass. A bounded legacy pilot may proceed only if its applicable limits and retention operations already work; unqualified compact/cap behavior remains explicit. |
 | Merge and manual delivery | Complete the smallest path from verified candidate to PR readiness and observed manual merge, reusing existing delivery/Git primitives. Define and qualify the local trusted verifier/publisher. | Required checks/reviews and writer reconciliation precede readiness. Disposable enforcement passes before an authorized live settings change. Tests remain local. |
 | Pilot | Freeze a reviewed main revision, reuse workspace preparation, update the installed candidate and qualify applicable native behavior and usage. | Observed ordinary activation and one real task cover delegation, checks, review, delivery and recovery. The broader rollout retains the approved D9 behavior/usage/client requirements. |
@@ -31,6 +31,6 @@ Retain checks that protect real authority, uncertain writers, duplicate effects,
 
 ## Later work
 
-Agent-initiated merge and remote cleanup remain separate from the manual pilot path. Claude's full lifecycle, wider membership/autojoining, project-review tooling and the final diagnostics report follow their existing plans. The structural large-file scanner change already landed in PR29; do not rebuild it. Plugin upgrades remain a separate maintenance assessment.
+Agent-initiated merge and remote cleanup remain separate from the manual pilot path. Claude's full lifecycle, wider membership/autojoining, project-review tooling and D11's direct Langfuse dashboards follow their existing plans. The structural large-file scanner change already landed in PR29; do not rebuild it. Plugin upgrades remain a separate maintenance assessment.
 
 Recent onboarding PR30–34 and existing source/history remain preserved. This plan creates no live activation, trust grant, credential access, provider call or repository-protection change.

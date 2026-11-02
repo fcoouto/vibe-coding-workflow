@@ -808,9 +808,13 @@ def _compare_canonical_scope(record, *, authority, observation, client, installe
     qualification = observation["qualification"]
     if qualification is not None:
         _canonical_fields(qualification, "current receipt binding provenance")
-        _canonical_fields(qualification["current"], "client surface version configuration_digest hook_owner")
+        current = qualification["current"]
+        _canonical_require(isinstance(current, dict))
+        _canonical_fields(current, "client configuration_digest hook_owner" +
+            (" surface version" if client != "codex" or "surface" in current or "version" in current else ""))
         for key in ("client", "surface", "version"):
-            _canonical_text(qualification["current"][key], 128)
+            if key in current:
+                _canonical_text(current[key], 128)
         _canonical_hash(qualification["current"]["configuration_digest"])
         _canonical_hook(qualification["current"]["hook_owner"])
         _canonical_ref(qualification["receipt"])
@@ -974,7 +978,8 @@ def _compare_canonical_scope(record, *, authority, observation, client, installe
     if qualification is not None and qualification["binding"] is not None:
         binding = qualification["binding"]
         if (binding != activation["qualification_binding"] or qualification["receipt"] != binding["receipt"]
-            or any(qualification["current"][k] != binding[k] for k in qualification["current"] if k != "version")
+            or any(qualification["current"][k] != binding[k] for k in ("client", "configuration_digest", "hook_owner"))
+            or (client != "codex" and qualification["current"]["surface"] != binding["surface"])
             or binding["accepted_scope_digest"] != digest or binding["client"] != client):
             return result("suspended", "qualification_changed")
     if activation["status"] == "suspended":

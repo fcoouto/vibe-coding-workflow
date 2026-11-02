@@ -26,6 +26,8 @@ A copied checkout record, changed policy digest, malformed JSON, link or special
 
 Apply the [scope guarantee](../policies/01-project-scope.md#authority-and-activation). A trusted owner supplies actual setup behavioral evidence and current observable configuration through the existing acquisition seam. Keep the historical qualification binding/provenance separate from current registration, trust and configuration observations. Reuse compatible client capabilities without rewriting their original version provenance; strict policy/runtime source identity remains required. Copied labels or receipts without genuine owner observation cannot activate a scope. The current implementation and qualification boundary is recorded in [onboarding qualification](../docs/onboarding-authorization-qualification.md).
 
+Codex `qualification.current` contains `client`, `configuration_digest` and `hook_owner`. Historical surface/version stay in `qualification.binding`; they are not assertions about the current session. Legacy five-field current inputs remain readable without rewriting stored facts. Other clients retain their existing current-surface checks. Startup eligibility never qualifies an unobserved surface-specific operation.
+
 ## Runtime limits
 
 Require Git and Python 3.11+ on the hook PATH. Current file operations require POSIX; Windows and non-Git projects remain unqualified. Input is limited to 128 KiB, Git lookup to two seconds and each hook to five seconds. Startup performs no writes, network requests or model calls. Interpreter isolation prevents project Python files or environment imports from replacing runtime modules.
