@@ -242,9 +242,20 @@ do not complete dependencies; uncertainty never clears merely with time.
 ## Status
 
 `delegation status --cwd CHECKOUT --client codex --session SESSION` takes no stdin.
-It reports plan, assignments, conflicts, budgets, capacity and blockers. Request it
-when those details are needed; preserve the latest mutation revision instead of
-polling or repeatedly copying full historical assignment state into the chat.
+Append `--compact` for recorded progress. It returns at most 20 assignments,
+unsettled first, with task/attempt identity, recorded state and existing observation
+and reconciliation references. Missing references remain null. Counts and blockers
+cover all assignments; `assignment_count` and `details_required` disclose omitted
+rows or conflict detail. Omit the flag when acceptance, reconciliation or diagnosis
+needs the full assignments, conflicts, budgets or capacity.
+
+Compact status performs existing bounded ledger validation, without native
+observation, completion revalidation or title synchronization. It establishes no
+current readiness, permission, liveness or stopped ownership. Follow policy 03's
+[progress retrieval rules](../policies/03-agent-delegation.md#progress-and-result-retrieval).
+Ordinary task/evidence status retains authoritative revalidation; preserve the
+latest mutation revision instead of using those commands as progress heartbeats.
+
 Guidance cache controls use their [existing cache procedure](delegation.md#use-the-relevant-guidance)
 and surface/applicability rather than the task envelope. Cache status takes
 `client_surface`, `applicability:{client_version,capability_fingerprint}` and optional
