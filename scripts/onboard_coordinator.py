@@ -11,7 +11,7 @@ from runtime import changes, onboarding, startup
 
 
 class CoordinatorOperationOwner:
-    def __init__(self, verified_decision):
+    def __init__(self, verified_decision, *, setup_observations=()):
         decision = deepcopy(startup._canonical_plain(verified_decision))
         onboarding._bounded(decision)
         onboarding._object(decision, ('decision_reference', 'operation', 'plan_directory',
@@ -30,6 +30,10 @@ class CoordinatorOperationOwner:
         self._entered = False
         self._projections = None
         self._records = None
+        from runtime.setup_observation import _issued
+        self._setup_observations = tuple(setup_observations)
+        for observation in self._setup_observations:
+            _issued(observation)
 
     def _require(self, condition):
         if not condition:
@@ -72,6 +76,13 @@ class CoordinatorOperationOwner:
     def _projection(self, identity):
         subject = {key: identity[key] for key in ('project_id', 'repository_id', 'checkout_id', 'client')}
         self._require(onboarding._digest(identity) in self._projections.get(onboarding._digest(subject), set()))
+
+    def record_setup(self, directory, journal):
+        from runtime.setup_observation import persist_setup
+        self._require(self._entered and str(directory) == self._decision['plan_directory']['path']
+            and self._decision['operation'] in ('apply', 'resume'))
+        self._core(journal['plan'], {key: journal[key] for key in ('manifest', 'approval')})
+        persist_setup(directory, journal, self._setup_observations)
 
     def _birth_authority(self, authority):
         if self._creation is None:
@@ -172,9 +183,9 @@ class CoordinatorOperationOwner:
         return issue(frozen_facts)
 
 
-def run_verified_operation(verified_decision, plan_dir, proposal):
+def run_verified_operation(verified_decision, plan_dir, proposal, *, setup_observations=()):
     """Called only after the coordinator's independent semantic verification."""
-    owner = CoordinatorOperationOwner(verified_decision)
+    owner = CoordinatorOperationOwner(verified_decision, setup_observations=setup_observations)
     operation = startup._canonical_plain(owner._decision)['operation']
     function = {'apply': changes.apply_plan, 'resume': changes.resume_plan, 'rollback': changes.rollback_plan}[operation]
     with changes._bootstrap_d4_host(owner, issuer=changes._D4_HOST_BOOTSTRAP_ISSUER) as host:

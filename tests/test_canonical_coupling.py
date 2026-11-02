@@ -91,7 +91,10 @@ class CanonicalCouplingTests(unittest.TestCase):
 
     def operation(self, birth, fixture, request, contexts, operation):
         decision = birth.decision(fixture, request, operation, contexts)
-        return onboard_coordinator.run_verified_operation(decision, fixture.directory, copy.deepcopy(request))
+        # Keep fixture-only qualification outside the real retained-source reader.
+        with patch('runtime.setup_observation.read_qualification',
+                side_effect=lambda record, facts, **kwargs: facts['observation']['qualification']):
+            return onboard_coordinator.run_verified_operation(decision, fixture.directory, copy.deepcopy(request))
 
     def observation(self, request, *, command=None, prior=False):
         manifest = request['manifest']
