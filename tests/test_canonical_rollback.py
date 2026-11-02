@@ -60,7 +60,10 @@ class CanonicalOwnedRollbackTests(unittest.TestCase):
     def invoke(self, operation, request=None):
         request = self.request if request is None else request
         decision = self.birth.decision(self.fixture, request, operation, self.contexts)
-        return onboard_coordinator.run_verified_operation(decision, self.fixture.directory, copy.deepcopy(request))
+        # These lifecycle fixtures deliberately inject synthetic owner observations.
+        with patch('runtime.setup_observation.read_qualification',
+                side_effect=lambda record, facts, **kwargs: facts['observation']['qualification']):
+            return onboard_coordinator.run_verified_operation(decision, self.fixture.directory, copy.deepcopy(request))
 
     def acquire(self, root, qualifier):
         acquisition = startup.acquire_project_entry(SimpleNamespace(client='codex', cwd=Path(root)), state.PACKAGE,

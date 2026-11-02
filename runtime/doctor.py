@@ -1,6 +1,7 @@
 """Read-only package/state checks and bounded native hook discovery, never execution."""
 
 import hashlib
+from contextvars import ContextVar
 import json
 import os
 from pathlib import Path
@@ -27,6 +28,7 @@ KNOWN_VERSIONS = {pair[0] for pair in NATIVE_COMPATIBILITY}
 HASH = re.compile(r"sha256:[0-9a-f]{64}(?:/sha256:[0-9a-f]{64})?\Z")
 SOURCES = {"system", "user", "project", "mdm", "sessionFlags", "plugin", "cloudRequirements",
            "cloudManagedConfig", "legacyManagedConfigFile", "legacyManagedConfigMdm", "unknown"}
+_HOOK_STREAM = ContextVar('hook_stream', default=None)
 
 
 class ObservationError(Exception):
@@ -45,6 +47,8 @@ class HookCollector:
         self.scope = (thread_id, turn_id, source_path)
         self.runs = {}
         self.invalid = False
+        self.native_process = None
+        self.native_only = True
 
     def __call__(self, notification):
         if self.invalid:
@@ -56,6 +60,12 @@ class HookCollector:
             run = params["run"]
             if (params["threadId"], params.get("turnId"), run["sourcePath"]) != self.scope:
                 return
+            origin = _HOOK_STREAM.get()
+            self.native_only &= origin is not None
+            if self.native_process is not None and origin is not self.native_process:
+                self.native_only = False
+            if origin is not None:
+                self.native_process = origin
             fields = ("id", "eventName", "source", "scope", "executionMode", "handlerType")
             if any(not isinstance(run[name], str) or not run[name] or len(run[name]) > 4096
                    or not run[name].isprintable() for name in fields):
@@ -102,6 +112,8 @@ class NativeProcess:
         if time.monotonic() >= deadline:
             raise ObservationError("timeout")
         self.on_notification = on_notification
+        self.argv = tuple(argv)
+        self.identity = None
         self.deadline = deadline
         self.buffer = b""
         self.bytes_read = 0
@@ -135,11 +147,18 @@ class NativeProcess:
         return chunk
 
     def send(self, message):
-        # Requests are small fixed diagnostics; no configuration, authorization or turn RPCs.
+        # Read RPCs only; native hook enumeration may initialize its own trust baselines.
         if self.process.stdin is None:
             raise ObservationError("stdin_unavailable")
         self.process.stdin.write(json.dumps(message).encode() + b"\n")
         self.process.stdin.flush()
+
+    def _deliver_notification(self, response):
+        token = _HOOK_STREAM.set(self)
+        try:
+            self.on_notification(response)
+        finally:
+            _HOOK_STREAM.reset(token)
 
     def request(self, identity, method, params):
         self.send({"id": identity, "method": method, "params": params})
@@ -166,7 +185,7 @@ class NativeProcess:
                     raise ObservationError("malformed_response")
                 if self.on_notification is not None:
                     # Stream observations are input to the owner, never qualification by themselves.
-                    self.on_notification(response)
+                    self._deliver_notification(response)
                 continue
             if type(response["id"]) is not int or response["id"] != identity:
                 raise ObservationError("mismatched_response")
@@ -176,6 +195,10 @@ class NativeProcess:
                 raise ObservationError("rpc_error")
             if not isinstance(response["result"], dict):
                 raise ObservationError("malformed_response")
+            if method == 'initialize':
+                validate_initialize(response['result'])
+                self.identity = {key: response['result'][key] for key in
+                    ('codexHome', 'platformFamily', 'platformOs', 'userAgent')}
             return response["result"]
 
 
@@ -213,6 +236,7 @@ def validate_initialize(response):
 
 
 def discover(executable, cwd, deadline):
+    """Native enumeration can initialize Codex-owned .hook-trust baselines."""
     child = NativeProcess([str(executable), "app-server", "--listen", "stdio://"], deadline)
     try:
         initialized = child.request(1, "initialize", {
@@ -225,7 +249,7 @@ def discover(executable, cwd, deadline):
         child.close()
 
 
-def inspect_hooks(response, scope, definitions):
+def inspect_hooks(response, scope, definitions, *, package=PACKAGE):
     data = response.get("data")
     if (not isinstance(data, list) or len(data) != 1 or not isinstance(data[0], dict)
             or data[0].get("cwd") != str(scope.repository_root)):
@@ -237,7 +261,7 @@ def inspect_hooks(response, scope, definitions):
             or any(not isinstance(item, dict) or not isinstance(item.get("message"), str)
                    or not isinstance(item.get("path"), str) for item in errors)):
         raise ObservationError("malformed_response")
-    source = str(PACKAGE / "hooks/codex.json")
+    source = str(package / "hooks/codex.json")
     for hook in hooks:
         if (not isinstance(hook, dict) or not isinstance(hook.get("eventName"), str)
                 or not isinstance(hook.get("sourcePath"), str)):
@@ -275,7 +299,7 @@ def inspect_hooks(response, scope, definitions):
         group = groups[0]
         handler = group["hooks"][0]
         matched = (hook["source"] == "plugin" and hook["handlerType"] == "command"
-            and hook.get("command") == handler["command"].replace("${PLUGIN_ROOT}", str(PACKAGE))
+            and hook.get("command") == handler["command"].replace("${PLUGIN_ROOT}", str(package))
             and hook.get("matcher") == group.get("matcher") and hook["timeoutSec"] == handler["timeout"]
             and not hook.get("async", False) and hook.get("additionalContextLimit") is None)
         item.update(definition="matched" if matched else "modified", current_hash=hook["currentHash"],
@@ -290,7 +314,7 @@ def inspect_hooks(response, scope, definitions):
             item["status"] = "passed"
         failed |= item["status"] != "passed"
     return {"status": "failed" if failed else "incomplete" if incomplete else "passed", "events": events,
-            "source": source, "source_digest": hashlib.sha256((PACKAGE / "hooks/codex.json").read_bytes()).hexdigest(),
+            "source": source, "source_digest": hashlib.sha256((package / "hooks/codex.json").read_bytes()).hexdigest(),
             "error_count": len(errors), "warning_count": len(warnings), "unexpected_count": unexpected}
 
 
