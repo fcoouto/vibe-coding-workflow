@@ -42,7 +42,7 @@
 - [x] Baseline characterized: initial full baseline interrupted; focused failing regressions established before changes.
 - [x] Task 1: scope and presentation.
 - [x] Task 2: recovery.
-- [x] Task 3: compatibility.
+- [x] Task 3: retain strict matching; automatic upgrade compatibility deferred by the user's pre-merge decision.
 - [x] Task 4: checks and evidence.
 - [x] Task 5: current ownership and capacity.
 - [x] Task 6: onboarding and loading.
@@ -60,7 +60,7 @@ The user approved implementation directly from the audit; no repeated design or 
 - Independent Astra/high review found three actionable defects: previously qualified configured records could bypass hooks; phase release could race a pending launch; native lookup/task startup still scanned unrelated settled history. Each was reproduced before its fix. Nine scope/phase regressions and two lifecycle/ledger regressions then passed.
 - Ruling: arbitrary subprocesses still require independent descendant reconciliation. Only executor-confirmed nonlaunch settles automatically; a declaration of read-only intent is not containment.
 - Ruling: phase release now needs a durable completed execution receipt plus independent descendant proof. Old reservations without that receipt retain whole-owner reconciliation. Pending launch cannot supply a completed receipt.
-- Ruling: compatibility supports exact current pins and the explicitly reviewed merged PR30 source pair, without rewriting history. Unknown/mixed pins and unsupported records still fail; schema equality alone is insufficient.
+- Initial compatibility ruling was superseded before merge: the accepted-only PR30 exception did not bind the installed target. The user chose strict matching, so the exception was removed without repinning records or introducing another approval mechanism.
 - Ruling: retain historical closure genealogy and protected-store discovery. Remove retention scans from each publication and share one validated ownership observation across completion checks in the same database transaction. A focused regression reduced repeated ledger reads from three to one. Broader provenance-graph redesign remains a future round; no historical fact is rewritten.
 - Ruling: schema-2 onboarding derives repeated identities, file hashes and evidence digests. Semantic scope, complete catalog coverage and exact D4 authorization remain explicit.
 - Package validation passed; installed/native execution remains untested. The complete suite is rerun after review fixes before final delivery.
@@ -111,10 +111,32 @@ ledger reuse. No Genesis test allowance is spent by this chat.
 Composition must retain Genesis's execution publication frame through result
 attachment, authenticated execution readers, private provenance and retained
 source rules. Started or uncertain subprocesses retain independent stopped-child
-reconciliation. Package compatibility is a separate integration slice: no Genesis
-or composed source generation is added to the PR30 compatibility approval.
+reconciliation. Package compatibility remains strict: no PR30, Genesis or composed
+source generation receives an automatic cross-version exception.
 
 The full source candidate remains the tested unit. Proposed logical slices are
 not yet independently verified commits. Integration order remains a shared
 decision after qualification; no merge, installation or live activation occurs
 in this implementation round.
+
+### Pre-merge corrective review
+
+After the user authorized merging, Genesis supplied an independent final review
+of immutable `b3d83b6`. It found two blockers: the PR30 exception accepted unknown
+installed targets, and resource-queue eligibility omitted settled prerequisite
+assignments. Both were reproduced by focused failing tests.
+
+The user explicitly chose strict version matching. Automatic cross-version
+compatibility is deferred. Queue eligibility now uses the existing task-scoped
+ledger: current owners plus that task's settled history. A genuine three-job chain
+checks that completed transitive prerequisites preserve FIFO and that an active
+dependent still blocks prerequisite reopening. No Genesis source, fingerprint
+approval or execution allowance is changed by these corrections.
+
+Focused corrective verification passed six tests: strict package equality and
+unchanged persisted provenance, real transitive FIFO/reopening protection,
+current-plus-own-history selection, and direct/transitive stale prerequisite
+checks. Package validation and diff checks also passed. Earlier unaffected
+evidence remains reusable because these corrections only remove the upgrade
+exception and restore the existing task-scoped selection at queue eligibility;
+they do not alter evidence publication, file recovery, onboarding or title behavior.

@@ -22,8 +22,8 @@ Setup still assesses the full pinned Toolkit catalog and every contract.
 
 ## Supported boundaries
 
-- Compatibility explicitly supports the merged PR30 source pair and exact current
-  packages. Unknown pairs still require review; original records are never repinned.
+- Package compatibility requires exact current policy/runtime pins. The user
+  deferred automatic cross-version support before merge; records are never repinned.
 - Arbitrary subprocesses can detach writers. Successful exit does not release
   ownership or capacity automatically. Independent phase proof is supported only after the helper durably records execution completion. The receipt does not establish stopped descendants.
 - File recovery still discovers retained stores to protect historical dependencies.
@@ -62,6 +62,6 @@ bounded retention path fits its budget.
 
 Logical integration slices are hook/title and policy routing; recovery and D3
 derivation; current/exact ledger reads; checks and cleanup scheduling; phase
-receipts; and package compatibility. These are not independently tested commits.
-The complete frozen candidate is the tested unit. Compatibility approval for PR30
-does not approve a Genesis or composed generation, which needs separate review.
+receipts. These are not independently tested commits. The complete frozen candidate
+is the tested unit. Automatic package compatibility was deferred by the user;
+neither PR30 nor Genesis receives a cross-version exception.

@@ -60,7 +60,7 @@ def _eligible(owner):
                 return False
             if task['pins']!=owner['pins']:
                 return True
-            rows=d6._ledger(scope,db,assignment_id=owner['attempt_id'])
+            rows=d6._ledger(scope,db,task=task)
             record=next((r for r in rows if r['id']==owner['attempt_id']),None)
             if record is None or record['data']['status']=='settled':
                 return False

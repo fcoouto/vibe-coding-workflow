@@ -295,17 +295,9 @@ def read_record(root, *, budget=None, allow_machine_only=False):
     return _read_record_snapshot(root, budget=budget, allow_machine_only=allow_machine_only)[0]
 
 
-# Reviewed schema-3 reader compatibility with the merged PR30 source package.
-# Keep original source pins; adding a pair requires behavior and migration review.
-COMPATIBLE_PACKAGE_PINS = frozenset({(
-    'bb131d4f891b5e51d0e7803f0b39263b09ae5a7a99d96fd89444fa0871809c1b',
-    '9782f25e8c8fde75191a0f80b8cd325a667ac1619b7b7c5f1c053e1004da137a',
-)})
-
-
 def _package_compatible(accepted, installed):
     pair = tuple(accepted.get(key) for key in ('policy_digest', 'runtime_digest'))
-    return pair == tuple(installed.get(key) for key in ('policy_digest', 'runtime_digest')) or pair in COMPATIBLE_PACKAGE_PINS
+    return pair == tuple(installed.get(key) for key in ('policy_digest', 'runtime_digest'))
 
 
 def policy_digest(package, *, budget=None):

@@ -58,12 +58,12 @@ The Codex runtime hooks require configured runtime state; absent configuration p
 
 Stop continuation is opt-in through one runnable condition, current correlated turn, budget exactly 1, no unresolved blockers/decisions and eligible `WORKING`/`REVIEW` state. At most one continuation is consumed per task/turn, even across conditions, edits, retries, process restarts and concurrent Stop events; a genuinely new bound turn has its own allowance. Consumption occurs before continuation output, so it cannot be rearmed for that task/turn. A PostToolUse event with a previously unseen turn suppresses old-turn continuation without associating that completion with the task or pausing it. If Post arrives before canonical Pre establishes a turn binding, a later Pre for that same turn cannot adopt it; continuation or correlated pause requires a turn first established by canonical Pre. Missing or uncertain correlation passes without continuation. Interrupt can pause a correlated task; see [native qualification limits](../docs/d2-validation.md). Task state and references do not prove permission or task ownership. Readiness requires current evidence verification; status rechecks `DONE` tasks against actual content. A `DONE` result does not grant merge authority.
 
-## Compatible package updates
+## Package version matching
 
 Original fingerprints remain provenance and are never rewritten. The current
-schema-3 reader accepts exact executing pins and explicitly reviewed compatible
-source pairs, starting with merged PR30. Matching schema numbers alone never
-establish compatibility. Unknown or mixed pairs remain blocked. Accepted scope,
+schema-3 reader requires exact executing policy and runtime pins. Automatic
+cross-version compatibility is deferred; older or mixed pairs remain blocked.
+Updates never silently repin existing records. Accepted scope,
 policy, physical authority, writer ownership and candidate checks still apply;
 a changed relevant policy/candidate requires fresh evidence. Legacy readers and
 unsupported vocabularies retain the rules below.

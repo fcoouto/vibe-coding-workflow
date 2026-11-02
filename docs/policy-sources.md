@@ -73,8 +73,8 @@ The local contract tables also retain their triggers, onboarding decisions, evid
 - On 2 November 2026, the user approved the first simplification round. Configured
   enrollment does not activate runtime guards; managed operations still require
   qualified authority. Recovery considers changed effects and relevant current or
-  historical writers. Explicit reviewed source-pair compatibility retains original
-  pins; it does not authorize schema-only compatibility or silent policy changes.
+  historical writers. The user's pre-merge decision retains strict policy/runtime
+  matching and original pins; automatic cross-version compatibility is deferred.
 - The same approval moves routine execution choice into the policy index and the
   test-first/self-review procedure into Task Planning. Detailed delegation loads
   only for its triggers, including failure/escalation. Public reconciliation,

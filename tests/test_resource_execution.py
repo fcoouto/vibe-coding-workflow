@@ -9,6 +9,47 @@ from unittest.mock import patch
 from tests import test_workstreams
 
 
+class ResourceDependencyQueueTests(unittest.TestCase):
+    def test_completed_transitive_prerequisites_keep_fifo_and_guard_reopening(self):
+        import time
+        from runtime import resource_admission, resource_execution
+        fixture = test_workstreams.WorkstreamsTests('runTest')
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        children = fixture.settled_worker_chain(3)
+
+        def reopen(child):
+            pending = fixture.api.prepare_continuation(fixture.scope, fixture.continuation(child))
+            fixture.api.consume_continuation(fixture.scope, fixture.fixture.request(
+                attempt_id=child['attempt_id'], workstream_revision=fixture.control('status')['revision'],
+                token=pending['token']))
+
+        reopen(children[-1])
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        directory = Path(temporary.name).resolve() / 'host'
+        revision = fixture.api.control(fixture.scope, 'status',
+            dict(client='codex', feature='resource_admission'))['revision']
+        request = fixture.fixture.request(attempt_id=children[-1]['attempt_id'], resource_revision=revision,
+            phase_id='dependent-phase', cpu=1, memory_bytes=1, capacity_cpu=2,
+            capacity_memory_bytes=1024, argv=[sys.executable, '-c', 'pass'], wait_seconds=0)
+        with patch.object(resource_admission, 'measure', return_value=dict(
+                sampled_at=int(time.time()), available_memory_bytes=0, pressure=True)):
+            older = resource_execution.operate(fixture.scope, directory, 'run', request)
+        self.assertEqual(older['state'], 'waiting')
+        younger = dict(id='younger', owner=dict(task_id='other'), cpu=1, memory_bytes=1,
+            capacity_cpu=2, capacity_memory_bytes=1024, deadline=int(time.time())+60, ready=True)
+        with patch('runtime.startup.acquire_project_entry', return_value=test_acquisition(fixture.scope)):
+            result = resource_admission.control(directory, 'request', younger,
+                eligible=resource_execution._eligible, probe_key='fresh', probe=lambda: dict(
+                    sampled_at=int(time.time()), available_memory_bytes=1024, pressure=False))
+            self.assertEqual(result['reason'], 'older-request')
+            self.assertTrue(resource_admission.control(directory, 'status', {})[
+                'reservations'][older['id']]['request']['ready'])
+            with self.assertRaisesRegex(ValueError, 'admitted dependent'):
+                reopen(children[0])
+
+
 class ResourceExecutionTests(unittest.TestCase):
     def setUp(self):
         self.fixture = test_workstreams.WorkstreamsTests('runTest')
