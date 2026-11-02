@@ -22,6 +22,10 @@ These fields describe only the legacy checkout-root record. The current client m
 
 A copied checkout record, changed policy digest, malformed JSON, link or special-file record produces a diagnostic. Reconcile accepted scope/version through onboarding; never silently rewrite it during startup. For the legacy record, omitting `runtime` preserves startup-only behavior. A stored qualification flag is not a native observation, and startup never qualifies a host surface. The runtime field alone does not enable Claude lifecycle controls.
 
+## Codex qualification
+
+Apply the [scope guarantee](../policies/01-project-scope.md#authority-and-activation). A trusted owner supplies actual setup behavioral evidence and current observable configuration through the existing acquisition seam. Keep the historical qualification binding/provenance separate from current registration, trust and configuration observations. Reuse compatible client capabilities without rewriting their original version provenance; strict policy/runtime source identity remains required. Copied labels or receipts without genuine owner observation cannot activate a scope. The current implementation and qualification boundary is recorded in [onboarding qualification](../docs/onboarding-authorization-qualification.md).
+
 ## Runtime limits
 
 Require Git and Python 3.11+ on the hook PATH. Current file operations require POSIX; Windows and non-Git projects remain unqualified. Input is limited to 128 KiB, Git lookup to two seconds and each hook to five seconds. Startup performs no writes, network requests or model calls. Interpreter isolation prevents project Python files or environment imports from replacing runtime modules.
