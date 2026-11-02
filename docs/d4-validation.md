@@ -1,5 +1,18 @@
 # D4 onboarding validation
 
+## File configuration and recovery — 2 November 2026
+
+The simplified canonical file path separates configuration, activation and undo. It reuses the existing transaction primitives and retains explicit runtime creation, active/shared-state transitions and command controls on their applicable paths. Original package/source pins remain provenance; file undo can use a newer supported reader.
+
+Validation covered configuration without runtime birth, unrelated input and review-history growth, older recorded pins, edited/replaced outputs, corrupt backups, substituted parents, overlapping operations, live writers, missing allocated runtime, and interrupted replacement/deletion. Fourteen file-transaction tests passed. Existing-store admission and recovery checks passed after replacing the obsolete expectation that configured-only completion must return pending. Broader composition, active rollback, birth lifetime, onboarding inventory and legacy transaction checks passed. Package validation, skill validation and whitespace checks passed; the onboarding entry is 148 words.
+
+Independent general/security review found a runtime-identity check before lock acquisition and stale activation guidance. A regression reproduced the lock gap; the fix verifies and retains exact authority under the held guard. Review accepted both fixes. Representative instruction paths distinguish file undo, configuration completion and activation with missing native proof.
+
+The actual self-host pilot then used the verified coordinator entry and its existing rollback authorization. Transaction `self-host-20261102-configured-1` reached `rolled_back`, exit 0. Both transaction-created files (`docs/setup.md` and `.vibe-coding-workflow/project.json`) returned to absence. All 357 retained files matched their pre-operation bytes/modes; the original runtime baseline, birth certificate, approved manifest and frozen plan remained unchanged. The installed entry resolver reports both the primary and linked development checkouts as `outside / not_enrolled`.
+
+These results prove file recovery and entry resolution. They do not establish managed activation, native client qualification or repository enforcement. Historical observations below retain their original scope.
+
+
 26 October 2026. Transaction implementation, independent review and bounded disposable adoption checks are complete. **Successful full project enrollment remains unqualified:** the disposable project has no qualified repository gate or complete client-operation evidence. Native operation remains the default.
 
 ## Implementation and review

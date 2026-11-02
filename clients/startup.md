@@ -6,7 +6,7 @@ The shared runtime resolves the nearest Git checkout and common Git directory. L
 
 ## Enrollment input
 
-Canonical Project authority is created through approved D4 onboarding/birth. Its selected client must explicitly cover the current checkout. A runtime-enabled legacy schema-1 record does not establish current task authority in the composed package; retain and use its original pinned package. A legacy record without runtime remains startup-only and supplies no task authority. Supported M history may be inspected through the explicit read-only D4 path; E lowercase schema-3 history remains with its original E package and reader. Disposable fixtures exercise software behavior; they do not establish completed onboarding or qualified enforcement. Record shape, digests and stored qualification labels do not authenticate host intent or establish native client execution.
+Canonical Project configuration is created through approved D4 file configuration. Runtime birth is a separate managed-operation effect. Its selected client must explicitly cover the current checkout. A runtime-enabled legacy schema-1 record does not establish current task authority in the composed package; retain and use its original pinned package. A legacy record without runtime remains startup-only and supplies no task authority. Supported M history may be inspected through the explicit read-only D4 path; E lowercase schema-3 history remains with its original E package and reader. Disposable fixtures exercise software behavior; they do not establish completed onboarding or qualified enforcement. Record shape, digests and stored qualification labels do not authenticate host intent or establish native client execution.
 
 | Legacy schema-1 field | Meaning |
 | --- | --- |

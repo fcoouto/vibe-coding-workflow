@@ -31,6 +31,8 @@ For each new setup/update, resolve the current Toolkit revision once and use cat
 - Before altering meaningful configuration, retain a recoverable private backup and record original location/content identity. Bind the change plan to the target and current content; journal applied operations. Replace only authorized sections in mixed files and retire obsolete registrations as well as their files. Keep backups outside source control and instruction discovery paths.
 - Resume from verified actual state. Restore only content still matching this operation's output; subsequent user edits require reconciliation. Do not overwrite them during rollback. Preserve recovery records even when some setup components remain blocked.
 
+File-only configuration and undo use the [transaction contract](../skills/onboard-my-project/references/apply-and-recovery.md#file-configuration-and-undo). Configuration completion is distinct from managed activation. Defer runtime creation until an explicitly scoped managed operation needs it. Recovery preserves retained history and does not repeat onboarding assessment or native qualification.
+
 ## Verify and finish
 
 Establish the native evaluation method and relevant initial smoke cases through [Workflow Maintenance](09-workflow-maintenance.md). Compare a disposable improvement candidate only for an observed failure; optional labs and paid experiments are separate choices.

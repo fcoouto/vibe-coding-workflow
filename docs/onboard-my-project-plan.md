@@ -2,7 +2,7 @@
 
 Design and implementation plan · 26 October 2026 · **Stages, feature baseline, activation behavior, client scope and all eleven policy contracts approved; D1–D5 implemented; qualification remains scope-specific**
 
-Outcome: enroll a project once, then activate its agreed workflow during ordinary coding requests. Qualify each client's actual behavior. Codex startup, opt-in D2 task controls, D3 private inspect/plan, D4 approved apply/resume/rollback and D5 task evidence verification exist. D3 does not modify projects; D4 keeps enrollment pending until mandatory adoption qualifies. Dispatch and repository merge enforcement remain D6–D7 work.
+Outcome: enroll a project once, then activate its agreed workflow during ordinary coding requests. Qualify each client's actual behavior. Codex startup, opt-in D2 task controls, D3 private inspect/plan, D4 approved apply/resume/rollback and D5 task evidence verification exist. D3 does not modify projects; D4 completes file configuration independently; managed activation waits for mandatory adoption qualification. Dispatch and repository merge enforcement remain D6–D7 work.
 
 Contract loading: [policy index](../policies/00-index.md). The user approved all eleven contracts on 25 October 2026.
 
@@ -227,7 +227,7 @@ Initially each worker has one identified Repository/worktree as its editable sof
 
 ### Membership updates and recovery
 
-D4 reuses owned baselines, journals and recovery checks. Separate shared-policy updates from member runtime/script/settings updates, preserving active pins until compatible update/reconciliation. Recover affected members independently while honoring shared dependencies. Removing membership stops future activation but retains needed proof and active/uncertain ownership. Before shared-policy rollback, reconcile all dependent members/tasks, later joins and user edits; no blanket restore or silent rebind is permitted. Existing D4 stopped-writer and postimage checks still apply to affected mutation.
+D4 file-only configuration and undo use the [file transaction contract](../skills/onboard-my-project/references/apply-and-recovery.md#file-configuration-and-undo). Active/runtime/shared operations reuse owned baselines and their scoped recovery checks. Separate shared-policy updates from member runtime/script/settings updates, preserving active pins until compatible update/reconciliation. Recover affected members independently while honoring shared dependencies. Removing membership stops future activation but retains needed proof and active/uncertain ownership. Before shared-policy rollback, reconcile all dependent members/tasks, later joins and user edits; no blanket restore or silent rebind is permitted. Existing D4 stopped-writer and postimage checks still apply to affected mutation.
 
 ### Evidence retention
 
