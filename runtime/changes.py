@@ -504,7 +504,7 @@ def _journal(path, *, file_only=False):
     except FileNotFoundError:
         return None
     result = d3.read_request(raw, limit=MAX_JOURNAL)
-    d3._object(result, ("schema_version", "transaction_id", "manifest_digest", "manifest", "approval", "plan", "state", "receipts", "enrollment", "blocked", "directories", "observations"), ("birth",) if result.get("schema_version") == 2 else ())
+    d3._object(result, ("schema_version", "transaction_id", "manifest_digest", "manifest", "approval", "plan", "state", "receipts", "enrollment", "blocked", "directories", "observations"), ("birth", "setup_receipts") if result.get("schema_version") == 2 else ())
     if result.get("schema_version") == 2:
         return _scoped_journal_shape(result, file_only=file_only)
     d3._require(result["schema_version"] == 1 and result["state"] in
@@ -5200,10 +5200,16 @@ def inspect_lifecycle_recovery(authorities,task_refs):
 
 
 def _scoped_journal_shape(journal, *, file_only=False):
-    d3._object(journal, ("schema_version", "transaction_id", "manifest_digest", "manifest", "approval", "plan", "state", "receipts", "enrollment", "blocked", "directories", "observations"), ("birth",))
+    d3._object(journal, ("schema_version", "transaction_id", "manifest_digest", "manifest", "approval", "plan", "state", "receipts", "enrollment", "blocked", "directories", "observations"), ("birth", "setup_receipts"))
     d3._require(type(journal["schema_version"]) is int and journal["schema_version"] == 2 and journal["manifest_digest"] == d3._digest(journal["manifest"])
                 and journal["state"] in ("prepared", "applying", "interrupted", "applied", "blocked", "rollback_partial", "rolled_back"), "Invalid scoped journal")
     d3._require(isinstance(journal["receipts"], dict) and isinstance(journal["directories"], dict) and isinstance(journal["observations"], list), "Invalid scoped recovery containers")
+    if 'setup_receipts' in journal:
+        from runtime.setup_observation import receipt_shape
+        d3._require(isinstance(journal['setup_receipts'], dict) and len(journal['setup_receipts']) <= 64, 'Invalid owner setup receipt collection')
+        for identity, receipt in journal['setup_receipts'].items():
+            receipt_shape(receipt)
+            d3._require(identity == d3._digest(receipt['identity']) and receipt['transaction_id'] == journal['transaction_id'], 'Original setup receipt transaction changed')
     if 'birth' in journal and not file_only:
         birth = journal['birth']
         d3._object(birth, ('version','intent','intent_digest','phase','directories','allocation','committed','certificate'))
@@ -5783,6 +5789,10 @@ def _run_scoped(plan_dir, request, operation, *, host=None, entry_authorizer=Non
                         state="prepared", receipts={}, enrollment=None, blocked=[], directories={}, observations=[])
                     _save(path, journal)
                     ownership["journal"]=journal
+                if operation != 'rollback' and entry_authorizer is not None:
+                    _public_host(host)
+                    if callable(getattr(host.owner, 'record_setup', None)):
+                        host.owner.record_setup(path, journal)
                 with _d4_publication_batch(path,journal,source_contexts,request,host,owner,[canonical_location,*authority_locations]):
                     _scoped_register_sources(path,journal,source_contexts)
                 if not file_only and journal.get('birth'):
@@ -5909,6 +5919,14 @@ def _scoped_qualification(journal, observation, record, *, published=False):
         facts = deepcopy(proof["scope_observations"])
         d3._object(facts,("authority","observation","client","installed"))
         d3._require(facts["client"] == key[2], "Qualification selected another client")
+        if key[2] == 'codex':
+            facts['installed'] = dict(policy_digest=policy_digest(task_state.PACKAGE), runtime_digest=task_state.runtime_fingerprint(),
+                clients=[key[2]] if (task_state.PACKAGE/'clients'/(key[2]+'.md')).is_file() else [], package_root=str(task_state.PACKAGE))
+            from runtime.setup_observation import read_qualification
+            facts['observation']['qualification'] = read_qualification(record, facts,
+                cwd=facts['observation']['root'], pending_journal=journal)
+            if facts['observation']['qualification'] is None:
+                raise Pending('Actual retained owner setup qualification is unavailable')
         root = Path(record["project_root"])
         actual = _scoped_target(root,str(PROJECT_FILE))
         if published:

@@ -1,6 +1,6 @@
 # Onboarding authorization and output qualification
 
-2 November 2026. Scope: six instruction/coverage files on main baseline `a0f1767e36d3433df5b24154eaa34bf3dd8c398f`. No production runtime changes, installation or pilot activation.
+Instruction/output slice, 2 November 2026. Scope: six instruction/coverage files on main baseline `a0f1767e36d3433df5b24154eaa34bf3dd8c398f`. That slice made no production runtime changes, installation or pilot activation.
 
 ## Implemented behavior
 
@@ -37,7 +37,9 @@ The reviewed six-file SHA-256 manifest was:
 | `skills/onboard-my-project/references/reviewed-configuration.md` | `e4845abd1f403d5005e36334ff0072ba4bc0d0bb3550186de6203a14cbc9ea27` |
 | `docs/policy-sources.md` | `2b6a73733776712d169334fa15f659aa92d80ebbdd312dd8f588182078ecfe7c` |
 
-## Unresolved runtime delivery
+## Runtime boundary after the consumer slice
+
+The following records the boundary on 2 November 2026 before the setup-source candidate below.
 
 The Codex consumer now accepts the three current observable fields defined in [startup](../clients/startup.md#codex-qualification), preserving the complete historical binding and other clients' existing checks. Five new Codex cases joined a 29-test focused passing run. A later shared-client scope finding was reproduced, corrected with two client conditions and verified by six affected tests; the original 29-test run was not repeated. These are synthetic software observations, not actual native setup qualification. Package validation and independent source review are recorded with the change.
 
@@ -50,3 +52,15 @@ Read-only schema generation from the installed Codex CLI exposes `HookStartedNot
 The remaining implementation needs actual owner-observed required setup behavior, exact project/checkout/client/candidate binding, bounded durable lookup, current observable-configuration invalidation, and reliable prior-active history. It no longer needs proof of another selected session's effective loaded controls. An editable configured flag cannot establish history. Existing transaction records prove their own operation, not completeness of all prior activation history. Do not manufacture a receipt, create a signer/registry, widen a native campaign, or claim that the contract update resolves these source gaps.
 
 Genesis owns core evidence/state/retention and coordinates the separate pilot. No overlapping runtime module was edited. The reverted pilot and its retained recovery history remain unchanged. The existing two-case/180-second native campaign was not run or reused as authorization for a different lifecycle campaign.
+
+## Setup-source candidate, 2 November 2026
+
+The staged source on baseline `a551a8bd1a1db79d805e49b795322be97479c664` implements the producer, existing private D4 journal receipts and production local-file reader. [Setup collection](../runtime/setup_observation.py) combines an owned native stream with separately verified complete semantic, adoption and review evidence. The coordinator receives that source separately from proposal JSON; copied labels and partial matrices cannot mint receipts. Existing D4 ownership, recovery and original scope/source/transaction bindings remain required. Journal origin is a cooperative code-path contract, not protection against deliberate same-user filesystem forgery.
+
+Initial support covers personal Codex CLI/local-plugin setup with modern content approval and file-backed relevant configuration origins. Routine qualification reads relevant local hook/plugin/trust inputs and native bundle contents; model/account preferences are excluded. Historical surface/version remain intact. The [approved observable-configuration promise](activation-guarantee-proposal.md) is unchanged: startup does not certify a later session's UI, loaded controls or dependent delegation behavior. Required unmapped sources remain unqualified; unknown prior history stays unknown.
+
+The native bundle scan has its own 8 MiB cap alongside the unchanged canonical 8 MiB observation cap, for at most 16 MiB combined. Both share the existing four-second deadline and 4096-path limit. No routine hook starts a native process, network request or model call.
+
+Setup-only `hooks/list` may initialize the base User-config directory's `.hook-trust/` baselines, including unrelated enumerated plugins. Native filenames derive from the length-prefixed User config path and plugin ID; native enumeration can create the directory, temporary files and hash-named baseline files. Account for these possible writes in the authorized native campaign scope before invocation. This implementation performs no trust migration itself. The pinned [Codex 0.165 trust implementation](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/hooks/src/engine/plugin_trust.rs), [user hook-state rules](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/hooks/src/config_rules.rs) and [bundle fingerprint](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/hooks/src/engine/plugin_fingerprint.rs) are authoring sources, not routine fetch dependencies.
+
+Staged software proof passed 27 focused cases: seven new producer/configuration/journal cases in 7.087 seconds and 20 existing consumer/transport/rollback cases in 42.410 seconds. These use disposable files and fake native transport. One initial fixture-scope error was preserved and corrected to qualify only the affected linked checkout; the retained primary stayed configured and unchanged. Package validation is a separate check. Actual native setup behavior and self-host pilot activation remain unqualified; this source slice performed no real client execution, installation or trust-setting changes.

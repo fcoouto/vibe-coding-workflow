@@ -1213,6 +1213,9 @@ def acquire_canonical_project(event, package, *, authority_path=None, qualifier=
         _entry_budget_check(budget)
         if qualifier is not None and not callable(qualifier):
             raise StartupError("Invalid internal qualification owner")
+        if qualifier is None and event.client == 'codex':
+            from runtime.setup_observation import read_qualification
+            qualifier = lambda record, facts: read_qualification(record, facts, cwd=event.cwd, budget=budget)
         if not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", event.client):
             raise StartupError("Invalid client identity")
         acquired = _acquire_canonical_membership(event.cwd, authority_path=authority_path, budget=budget)
