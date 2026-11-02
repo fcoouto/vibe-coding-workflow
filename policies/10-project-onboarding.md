@@ -16,6 +16,14 @@ For each new setup/update, resolve the current Toolkit revision once and use cat
 | Evidence | Record target/source revision, decisions, complete coverage matrix, before/after checks, configuration and execution observations, backups, pending interventions and rerun results. |
 | Blocking condition | A mandatory requirement lacks adoption or qualified operation, a material decision is unresolved, or a required prerequisite/source is unavailable. Keep enrollment incomplete for that scope; continue independent authorized setup work. |
 
+## Onboarding authority
+
+An explicit request for full onboarding authorizes routine configuration, required checks and activation after those checks pass, within the selected project, clients, permissions and agreed effects. Verify that existing authority covers each concrete operation; an internal stage or separate activation transaction does not itself require another conversational approval. Preserve inspect-only, plan-only and configuration-only limits. A reviewed plan or configuration document never supplies consent by itself.
+
+Ask only for an unresolved material exception: an effect outside the established scope, new permissions or costs, external data sharing, a provider/model change, destructive action, migration, workflow replacement, additional enforcement, or recovery that would discard later edits. Reuse decisions already made; continue independent authorized work while the exception remains pending. Missing qualification is a check or prerequisite to resolve, not a reason to ask the user to approve missing evidence.
+
+Present the concrete [Reviewed Configuration](../skills/onboard-my-project/references/reviewed-configuration.md) in plain language. It explains the work and its status without adding an approval gate. Keep internal stages, digests and receipt mechanics in linked technical records.
+
 ## Inspect and plan
 
 1. Apply [Project Scope](01-project-scope.md). Keep machine preparation, new-project creation and existing-project enrollment distinct. Do not configure this plugin's own repository as an application merely because the agent is working here; confirm the actual destination.
