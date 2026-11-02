@@ -14,7 +14,7 @@
 
 ## Execution checkpoint
 
-Implementation started from fetched main `44de11fa14bb2dddef02a3fbabb521d9bc10ecc4` on `codex/delivery-lifecycle`. The policy-adoption candidate is implemented and independently reviewed; 11 focused tests pass. Its prescribed broader check has the same 4 failures/22 errors as unchanged main onboarding tests, so Task 1 is not marked fully verified. Task 2 additionally requires a production native admission source absent from current main; the user has been asked whether to wait for Native Clients or include that prerequisite here. See [execution evidence](../../delivery-validation.md). Remaining tasks have not started.
+Implementation started from fetched main `44de11fa14bb2dddef02a3fbabb521d9bc10ecc4` on `codex/delivery-lifecycle`. The policy-adoption candidate is implemented and independently reviewed; 11 focused tests pass. Its prescribed broader check has the same 4 failures/22 errors as unchanged main onboarding tests, so Task 1 is not marked fully verified. On 2 November 2026, the user chose to wait for the existing Native Clients work and keep this branch focused. Task 2 is waiting for its production native admission source; this branch will not implement that prerequisite. Resume by inspecting the Native Clients integration on current main, verifying the required source and destination-admission interfaces, and reconciling this branch before continuing. See [execution evidence](../../delivery-validation.md). Remaining tasks have not started; no background watcher or automatic resumption is configured.
 
 ## Global Constraints
 
