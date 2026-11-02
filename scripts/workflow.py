@@ -63,6 +63,7 @@ def control_main():
             if name == "status":
                 action.add_argument("--client", required=True, choices=("codex",))
                 action.add_argument("--session", required=True)
+                action.add_argument("--compact", action="store_true")
         guidance = delegation_actions.add_parser("guidance", add_help=False)
         guidance_actions = guidance.add_subparsers(dest="guidance_action", required=True)
         for name in ("status", "claim", "record"):
@@ -163,7 +164,7 @@ def control_main():
                 report = {"status": delegation.guidance_status, "claim": delegation.claim_guidance,
                           "record": delegation.record_guidance}[args.guidance_action](scope, request)
             elif args.delegation_action == "status":
-                report = delegation.delegation_status(scope, client, args.session)
+                report = delegation.delegation_status(scope, client, args.session, compact=args.compact)
             else:
                 operation = {"plan": delegation.plan_delegation, "prepare": delegation.prepare_assignment,
                              "observe": delegation.observe_assignment, "reconcile": delegation.reconcile_assignment,

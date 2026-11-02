@@ -140,8 +140,9 @@ This pilot was developed against Local Model Delegation 0.3.16; it imports its
 `Client` and event formatter. Requalify this private interface after plugin upgrades.
 Do not mutate that plugin's job database or fabricate Codex transcripts.
 
-Read `progress.jsonl` for sanitized observed events, `result.json` for the private
-response/accounting, and `visibility.json` for delivery receipts. The current CLI
+Use completion events or bounded process waits, then `scripts/openrouter_workers.py status --root <saved-worker-root> --compact` with `{"task_id":"<run-id>"}` on stdin for compact recorded progress. Omit `--compact` to retrieve the response/accounting when verification or diagnostics need it. Compact status includes sanitized failure facts, nullable stop observations and a path/SHA-256 reference to the bytes read; it never rewrites `result.json`. A response being available does not prove a complete or accepted report, current liveness or stopped ownership. If the saved result changes before verification, inspect the current result and use its actual binding.
+
+Read `progress.jsonl` for a specific observed-event diagnostic and `visibility.json` for delivery receipts. The current CLI
 emits tool events at completion/error; while a tool is running, report only that
 the worker is active. A heartbeat is presence, not evidence of progress. Forward
 events through native supervisor commentary. Do not imply exact native-card parity.

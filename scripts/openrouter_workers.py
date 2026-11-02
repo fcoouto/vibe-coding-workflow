@@ -820,6 +820,34 @@ def verify(run, disposition, checks, *, failure=None):
         return result
 
 
+def status(run: Path, *, compact=False) -> dict:
+    """Read retained results without launching, publishing, or accepting evidence."""
+    path = run / 'result.json'
+    raw = path.read_bytes()
+    result = json.loads(raw)
+    if not compact:
+        return result
+    states = {'prepared', 'running', 'awaiting_verification', 'accepted', 'rejected',
+              'failed', 'unresolved', 'not_launched'}
+    if (not isinstance(result, dict) or not isinstance(result.get('task_id'), str)
+            or re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,63}', result['task_id']) is None
+            or not isinstance(result.get('state'), str) or result['state'] not in states
+            or result['task_id'] != run.name):
+        raise ValueError('invalid_retained_status')
+    for key in ('local_execution_stopped', 'native_fallback_ready'):
+        if result.get(key) is not None and type(result[key]) is not bool:
+            raise ValueError('invalid_retained_status')
+    if 'response' in result and not isinstance(result['response'], str):
+        raise ValueError('invalid_retained_status')
+    if result.get('failure') is not None and not isinstance(result['failure'], dict):
+        raise ValueError('invalid_retained_status')
+    return dict(view='compact', observation_only=True, task_id=result['task_id'], state=result['state'],
+        response_available=bool(result.get('response')), failure=safe_failure(result.get('failure')),
+        local_execution_stopped=result.get('local_execution_stopped'),
+        native_fallback_ready=result.get('native_fallback_ready'),
+        result_ref=dict(path=str(path.resolve()), sha256=hashlib.sha256(raw).hexdigest()))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('action', choices=['run', 'status', 'verify'])
@@ -829,7 +857,10 @@ def main():
     parser.add_argument('--visibility-plugin', type=Path)
     parser.add_argument('--habblaud-endpoint')
     parser.add_argument('--habblaud-account')
+    parser.add_argument('--compact', action='store_true')
     args = parser.parse_args()
+    if args.compact and args.action != 'status':
+        raise ValueError('compact_requires_status')
     request = json.load(sys.stdin)
     publisher = None
     if args.action == 'run':
@@ -847,7 +878,7 @@ def main():
     elif args.action == 'verify':
         result = verify(run, request['disposition'], request['checks'], failure=request.get('failure'))
         if publisher: publisher(result['state'])
-    else: result = json.loads((run / 'result.json').read_text())
+    else: result = status(run, compact=args.compact)
     print(json.dumps(result, allow_nan=False))
 
 

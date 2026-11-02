@@ -336,3 +336,9 @@ Before delivery, compare requirement coverage and run representative instruction
 [evaluation]: https://github.com/soumatheusgomes/vibe-coding-toolkit/blob/790a895304e0c08b70a5b215c9d334f1c86b816c/docs/prompts/14-harness-evaluation.md
 [improvement]: https://github.com/soumatheusgomes/vibe-coding-toolkit/blob/790a895304e0c08b70a5b215c9d334f1c86b816c/docs/prompts/15-harness-improvement.md
 [harness-method]: https://github.com/soumatheusgomes/vibe-coding-toolkit/blob/790a895304e0c08b70a5b215c9d334f1c86b816c/docs/tools/23-harness2.md
+
+## Workflow efficiency — 2 November 2026
+
+The user-approved [efficiency design](superpowers/specs/2026-11-01-workflow-efficiency-design.md) and its impact-scan refinements extend existing mechanisms. Policy 03 owns event/bounded waiting and compact-before-detail retrieval; policy 07 owns durable invocation repair in its responsible record. Existing policies 05, 09 and 11 retain evidence freshness, maintenance and capability qualification. Native delegation and external-worker procedures own exact `--compact` commands. No new Toolkit requirement, external execution route, startup probe or general fact/failure cache is introduced.
+
+`tests/test_compact_status.py` covers compact privacy, omitted uncertainty/conflicts, retained ownership, malformed state, CLI routing and immutable result bytes. Existing guidance, worker, Council, evidence, observability and startup tests cover affected boundaries. Representative instruction paths are checked against the approved plan; package/synthetic proof is separate from native execution and measured savings. Updates to pinned content use existing authorized update/recovery, without silent active-task repinning.

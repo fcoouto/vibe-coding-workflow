@@ -34,6 +34,10 @@ Apply with the [shared contract rules](00-index.md).
 3. Cap concurrency by actual authorized slots, host resources and the task budget. For waves, retain each task's brief, start eligible workers together, wait for their results before integration, and let the coordinator record one progress entry per wave.
 4. The coordinator owns lockfiles, shared configuration, tracking records and Git operations. Serialize authorized commits in task order, recording current HEAD immediately before each. If commits are not authorized, review recorded working-tree snapshots instead; workers must not commit or publish implicitly.
 
+## Progress and result retrieval
+
+Use host completion/attention events or bounded waits. For managed progress, prefer the existing compact status view; expand the exact assignment/result only when acceptance, reconciliation, a changed observation or a specific diagnostic need requires it. Unchanged status does not justify rereading reports or whole logs. Required user updates may truthfully report waiting without another diagnostic read. Use logs when needed to investigate a failure or stall. Compact recorded progress cannot establish current readiness, permissions, liveness or stopped ownership; retain the existing authoritative checks at their decision points. Ordinary task/evidence status may revalidate readiness and is not a progress heartbeat.
+
 ## Review, integration and recovery
 
 - Before review, fix the target base/candidate or working-tree snapshot, including staged, unstaged and relevant untracked changes. Reviewers inspect the diff and relevant callers, contracts and tests. They remain read-only; checks with shared mutable resources must be isolated or serialized. Review does not authorize fixes, commits or publishing.

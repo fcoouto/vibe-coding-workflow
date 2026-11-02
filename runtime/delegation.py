@@ -2004,15 +2004,31 @@ def prepared_native_review_assignment(scope, attempt_id):
         return _native_binding(record)
 
 
-def delegation_status(scope, client, session_id):
+def _compact_delegation_status(report: dict) -> dict:
+    """Project recorded ownership only; never refresh native or completion evidence."""
+    assignments = report['assignments']
+    rows = sorted(assignments, key=lambda row: (row['status'] == 'settled', row['attempt_id']))
+    result = dict(ok=report['ok'], view='compact', observation_only=True,
+        assignment_count=len(rows), unsettled_count=sum(row['status'] != 'settled' for row in rows),
+        conflict_count=len(report['conflicts']), blockers=list(dict.fromkeys(report['blockers'])),
+        limitations=list(report['limitations']), details_required=len(rows) > 20 or bool(report['conflicts']),
+        assignments=[dict(attempt_id=row['attempt_id'], task_id=row['owner']['task_id'], role=row['role'],
+            status=row['status'], outcome=(row.get('result') or {}).get('outcome'),
+            observation=row.get('observation'), reconciliation=row.get('reconciliation')) for row in rows[:20]])
+    result.update({key: report[key] for key in ('revision', 'pins') if key in report})
+    return result
+
+
+def delegation_status(scope, client, session_id, *, compact=False):
     """Inspect current and retained historical admissions, never initializing or launching."""
     state._text(client, 'delegation client')
     state._text(session_id, 'delegation session')
     _require(client == 'codex', 'Unsupported delegation client')
     with state._database(scope) as db:
         if db is None:
-            return dict(ok=True, plan=None, assignments=[], conflicts=[], budgets=None, capacity=None, blockers=['Runtime task state is missing'],
+            report = dict(ok=True, plan=None, assignments=[], conflicts=[], budgets=None, capacity=None, blockers=['Runtime task state is missing'],
                         limitations=list(ADMISSION_LIMITATIONS))
+            return _compact_delegation_status(report) if compact else report
         task = state._task(db, state._scope_id(scope), client, session_id)
         records = _ledger(scope, db)
         selected = [r for r in records if r['owner']['scope_id'] == state._scope_id(scope) and
@@ -2029,7 +2045,7 @@ def delegation_status(scope, client, session_id):
             for record in unresolved:
                 if _held_conflict(claims, record['data']['claims']):
                     conflicts.append(dict(job_id=job['id'], attempt_id=record['id'], owner=record['owner'], claims=record['data']['claims']))
-        return dict(ok=True, revision=task['revision'] if task else None, pins=task['pins'] if task else None,
+        report = dict(ok=True, revision=task['revision'] if task else None, pins=task['pins'] if task else None,
             plan=delegation['plan'] if delegation else None, budgets=budgets,
             assignments=[dict(attempt_id=r['id'], owner=r['owner'], **r['data']) for r in selected], conflicts=conflicts,
             capacity=dict(unresolved_managed_workers=sum(r['data']['role'] in {'worker', 'review'} for r in unresolved),
@@ -2037,3 +2053,5 @@ def delegation_status(scope, client, session_id):
                 observed_host_capacity=plan['limits']['host_capacity'] if plan else None),
             blockers=['Unreconciled assignment retains resource claims' for r in selected if r['data']['status'] != 'settled'],
             limitations=list(ADMISSION_LIMITATIONS))
+
+        return _compact_delegation_status(report) if compact else report
