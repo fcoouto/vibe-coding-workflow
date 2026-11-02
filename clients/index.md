@@ -2,6 +2,8 @@
 
 Read only the client instructions for the current task. Shared workflow requirements live in the [policy index](../policies/00-index.md).
 
+For delivery workspace preparation and task-owned publication evidence, load [delivery](delivery.md) only when that operation applies. Its current callable workspace binding does not activate a client or qualify publication/merge execution.
+
 | Client | Load when |
 | --- | --- |
 | [Codex](codex.md) | Codex startup activates the workflow, or you implement, validate or diagnose its adapter. |

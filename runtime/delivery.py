@@ -141,6 +141,8 @@ def operate(scope, action: str, request: dict, *, owner=None) -> dict:
             state._compatible(scope, task)
             return dict(task=task, plan=_read_plan(scope, task, db=db) if 'delivery' in task else None,
                         **completion_requirements(scope, db, task))
+    if action == 'bind-worktree':
+        return _bind_worktree(scope, request, owner)
     _require(action == 'plan', 'Unsupported delivery operation')
     evidence._request(request, ('plan',), ('override',))
     with state._database(scope, write=True) as db:
@@ -154,3 +156,63 @@ def operate(scope, action: str, request: dict, *, owner=None) -> dict:
         task['revision'] += 1
         state._save(db, state._scope_id(scope), task)
         return dict(task=task, plan=plan, **completion_requirements(scope, db, task))
+
+
+def _bind_worktree(scope, request, owner):
+    from runtime import changes, evidence, startup
+    from scripts.delivery_coordinator import DeliveryOperationOwner
+    evidence._request(request, ('operation_id',))
+    _ref(request['operation_id'])
+    _require(isinstance(owner, DeliveryOperationOwner), 'A verified native owner is required')
+    owner.authorize(scope, 'bind-worktree', request)
+    digest = evidence._digest(request)
+    with state._database(scope) as db:
+        task = evidence._task(db, scope, request, revision=False)
+        _require('delivery' in task and task['mode'] == 'editable', 'Editable delivery plan is missing')
+        for reference in task['delivery']['operations']:
+            previous = evidence._read(scope, reference, db=db)
+            if previous.get('operation_id') == request['operation_id']:
+                _require(previous['action'] == 'bind-worktree' and previous['request_digest'] == digest,
+                         'Delivery operation identity was reused with changed inputs')
+                return dict(task=task, plan=_read_plan(scope, task, db=db), replay=True)
+        _require(task['revision'] == request['expected_revision'], 'Task revision conflict')
+        plan = _read_plan(scope, task, db=db)
+        _require(plan['workspace'] is None and len(task['delivery']['operations']) < 64,
+                 'Workspace already bound or delivery history exhausted')
+        original = deepcopy(task['delivery']['plan'])
+    # Native ownership and physical Git identity are distinct observations. Neither
+    # can be taken from a caller-supplied path or substituted for D4 admission.
+    observation = owner.native.observe_worktree(scope.repository_root)
+    state._fields(observation, ('root', 'owner', 'attachment', 'reference'))
+    for key in ('attachment', 'reference'):
+        _ref(observation[key])
+    _require(observation['owner'] == scope.client
+             and observation['root'] == str(scope.repository_root), 'Native worktree ownership is unresolved')
+    evidence._canonical_inputs(scope)
+    root, git_dir, common = changes._checkout(scope.repository_root)
+    _require((root, git_dir, common) == (scope.repository_root, scope.git_dir, scope.git_common_dir),
+             'Observed workspace differs from accepted checkout')
+    _require(not plan['policy']['separate_worktrees'] or git_dir != common,
+             'Native isolated workspace is required before implementation')
+    code, head = startup.read_git(root, 'rev-parse', '--verify', 'HEAD', limit=256)
+    _require(code == 0, 'Workspace base could not be observed')
+    base = head.decode('ascii').strip()
+    _require(re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', base), 'Workspace base is invalid')
+    workspace = dict(root=str(root), git_dir=str(git_dir), git_common_dir=str(common), base=base,
+                     owner=observation['owner'], attachment=observation['attachment'],
+                     reference=observation['reference'], cleanup_owner='client')
+    with state._database(scope, write=True) as db:
+        task = evidence._task(db, scope, request)
+        _require(task['delivery']['plan'] == original, 'Delivery plan changed during native observation')
+        evidence._canonical_inputs(scope)
+        plan['workspace'] = workspace
+        artifact_owner = evidence._artifact_owner(scope, task)
+        record = dict(version=1, kind='delivery-workspace-binding', action='bind-worktree',
+                      operation_id=request['operation_id'], request_digest=digest,
+                      previous_plan=original, workspace=workspace)
+        reference = evidence._artifact(scope, record, owner=artifact_owner, db=db)
+        task['delivery']['plan'] = evidence._artifact(scope, plan, owner=artifact_owner, db=db)
+        task['delivery']['operations'].append(reference)
+        task['revision'] += 1
+        state._save(db, state._scope_id(scope), task)
+        return dict(task=task, plan=plan, replay=False)

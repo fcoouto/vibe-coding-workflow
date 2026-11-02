@@ -1,6 +1,7 @@
 """Delivery adoption is explicit, bounded, and preserves historical decisions."""
 from copy import deepcopy
 import unittest
+from pathlib import Path
 
 
 def policy(**updates):
@@ -87,11 +88,11 @@ class DeliveryPlanTests(unittest.TestCase):
         from runtime import state
         self.fixture = CanonicalBirthFixture('runTest')
         self.addCleanup(self.fixture.doCleanups)
-        prepared = self.fixture.prepare(delivery_policy=policy())
+        prepared = self.fixture.prepare(delivery_policy=policy(), linked=getattr(self, 'linked', False))
         self.fixture.assert_applied_configured(prepared, self.fixture.invoke(prepared))
         f = prepared[0]
         from runtime import startup
-        _, acquisition, _ = self.fixture.qualify_members(f, f.repo / startup.PROJECT_FILE)
+        _, acquisition, _ = self.fixture.qualify_members(f, Path(prepared[1]['manifest']['enrollment']['record']['project_root']) / startup.PROJECT_FILE)
         self.scope = acquisition.resolution.scope
         self.identity = dict(client='codex', session_id='delivery', task_id='task', scope_ref='user:feature')
         state.start_task(self.scope, self.identity | dict(mode='editable', decision_ref='user:scope'))
