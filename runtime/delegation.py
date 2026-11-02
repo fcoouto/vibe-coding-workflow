@@ -1372,14 +1372,16 @@ def _discovery(scope, plan, request):
     from runtime.adapters.codex import discover_native_workers
     controls = request['control_observation']
     state._fields(controls, ('version', 'client_surface', 'native_version', 'parent_session_id', 'dispatch_controls'))
+    state._text(controls['native_version'], 'control observation native version', 256)
     route = plan['route']
     _require(all(controls[key] == route[key] for key in ('client_surface', 'parent_session_id')),
              'Native controls do not match the prepared route')
     observed = discover_native_workers(scope, controls)
     expected = request['discovery_expectation']
     state._fields(expected, ('capability_digest', 'client_surface', 'native_version', 'parent_session_id', 'parent_model_provider'))
-    _require(all(observed.get(key) == value for key, value in expected.items()) and
-             all(observed.get(key) == controls[key] for key in ('client_surface', 'native_version', 'parent_session_id')) and
+    state._text(expected['native_version'], 'discovery expectation native version', 256)
+    _require(all(observed.get(key) == value for key, value in expected.items() if key != 'native_version') and
+             all(observed.get(key) == controls[key] for key in ('client_surface', 'parent_session_id')) and
              observed['dispatch_controls'] == controls['dispatch_controls'], 'Actual native capabilities changed from the prepared expectation')
     dispatch = observed['dispatch_controls']
     _require(dispatch['spawn'] is True and all(dispatch.get(key) is True for key in

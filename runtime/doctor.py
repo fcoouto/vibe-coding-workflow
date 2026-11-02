@@ -95,7 +95,7 @@ class HookCollector:
 class NativeProcess:
     """Own one child, bounded nonblocking stdout, and no inherited stderr output."""
 
-    def __init__(self, argv, deadline, *, on_notification=None):
+    def __init__(self, argv, deadline, *, on_notification=None, stdin=subprocess.PIPE):
         """A trusted synchronous observer must obey the deadline and handle private payloads."""
         if on_notification is not None and not callable(on_notification):
             raise ObservationError("invalid_observer")
@@ -105,7 +105,7 @@ class NativeProcess:
         self.deadline = deadline
         self.buffer = b""
         self.bytes_read = 0
-        self.process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        self.process = subprocess.Popen(argv, stdin=stdin, stdout=subprocess.PIPE,
                                         stderr=subprocess.DEVNULL, bufsize=0)
         self.selector = selectors.DefaultSelector()
         os.set_blocking(self.process.stdout.fileno(), False)
@@ -120,7 +120,8 @@ class NativeProcess:
             except subprocess.TimeoutExpired:
                 self.process.kill()
         self.process.wait(timeout=0.1)
-        self.process.stdin.close()
+        if self.process.stdin is not None:
+            self.process.stdin.close()
         self.process.stdout.close()
 
     def read(self, deadline):
@@ -135,6 +136,8 @@ class NativeProcess:
 
     def send(self, message):
         # Requests are small fixed diagnostics; no configuration, authorization or turn RPCs.
+        if self.process.stdin is None:
+            raise ObservationError("stdin_unavailable")
         self.process.stdin.write(json.dumps(message).encode() + b"\n")
         self.process.stdin.flush()
 
