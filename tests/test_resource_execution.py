@@ -53,6 +53,55 @@ class ResourceExecutionTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.call()
         self.assertFalse(self.directory.exists())
 
+    def test_independently_stopped_phase_reuses_capacity_before_assignment_finishes(self):
+        import hashlib
+        import json
+        self.request['capacity_cpu'] = 1
+        self.call()
+        snapshot = self.call('status')['reservations']
+        identity, row = next(iter(snapshot.items()))
+        proof = dict(version=1, kind='resource-phase-reconciliation', reservation_id=identity,
+            owner=row['request']['owner'], phase_id=self.request['phase_id'], stopped=True,
+            descendants_stopped=True, observation_ref='fixture:exact-command-and-descendants-stopped',
+            coordinator_ref='fixture:independent-observation')
+        proof['execution_digest'] = row['execution_digest']
+        path = self.directory.parent / 'phase-stop.json'
+        path.write_text(json.dumps(proof))
+        path.chmod(0o400)
+        reference = dict(path=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+        self.assertEqual(self.call(phase_id='next-phase')['state'], 'waiting')
+        self.assertEqual(self.call('release', host_proof=reference)['state'], 'released')
+        self.assertEqual(self.call(phase_id='next-phase')['returncode'], 0)
+        with self.assertRaises(ValueError):
+            self.call('release', phase_id='next-phase', host_proof=reference)
+
+    def test_phase_release_cannot_race_an_admitted_launcher(self):
+        import hashlib
+        import json
+        from runtime import resource_execution, resource_admission
+        actual = resource_execution._authority
+        intercepted = []
+        def authority(scope, request, cleanup=False):
+            result = actual(scope, request, cleanup=cleanup)
+            rows = resource_admission.control(self.directory, 'status', {})['reservations']
+            if not cleanup and rows and not intercepted:
+                intercepted.append(True)
+                identity, row = next(iter(rows.items()))
+                proof = dict(version=1, kind='resource-phase-reconciliation', reservation_id=identity,
+                    owner=row['request']['owner'], phase_id=self.request['phase_id'], stopped=True,
+                    descendants_stopped=True, observation_ref='fixture:no-process-yet', coordinator_ref='fixture:inspection')
+                path = self.directory.parent / 'early-stop.json'
+                path.write_text(json.dumps(proof))
+                path.chmod(0o400)
+                with self.assertRaisesRegex(ValueError, 'completed execution'):
+                    self.call('release', host_proof=dict(path=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest()))
+            return result
+        with patch.object(resource_execution, '_authority', side_effect=authority):
+            result = self.call()
+        self.assertEqual(intercepted, [True])
+        self.assertEqual(result['returncode'], 0)
+        self.assertEqual(next(iter(self.call('status')['reservations'].values()))['state'], 'active')
+
     def test_timeout_retains_reservation(self):
         result=self.call(argv=[sys.executable,'-c','import time;time.sleep(1)'], timeout_seconds=0.05)
         self.assertTrue(result['uncertain'])

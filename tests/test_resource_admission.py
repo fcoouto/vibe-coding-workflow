@@ -112,6 +112,18 @@ class ResourceAdmissionTests(unittest.TestCase):
         self.call('request', request)
         self.assertEqual(self.call('cancel', dict(id='one', owner=request['owner']))['state'], 'cancelled')
 
+    def test_completed_phase_cancel_retains_receipt_and_requires_stopped_proof(self):
+        request = self.request()
+        self.call('request', request)
+        owner = dict(id=request['id'], owner=request['owner'])
+        execution = dict(pid=123, returncode=0)
+        self.call('complete', owner | dict(execution=execution))
+        with self.assertRaises(state.StateError):
+            self.call('cancel', owner)
+        self.assertEqual(self.call('cancel', owner | dict(stopped_proof=
+            dict(path='/trusted/proof', sha256='a' * 64)))['state'], 'cancelled')
+        self.assertEqual(self.call('status', {})['reservations']['one']['execution'], execution)
+
     def test_corruption_and_symlink_are_not_telemetry_failures(self):
         self.call('request', self.request())
         path = self.directory/'admission.json'

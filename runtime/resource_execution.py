@@ -14,7 +14,7 @@ from runtime import delegation as d6, evidence, state, workstreams
 def _authority(scope, request, cleanup=False):
     with state._database(scope) as db:
         d6._require(db is not None, 'Missing native assignment state')
-        records = d6._ledger(scope, db)
+        records = d6._ledger(scope, db, task=request)
         record = d6._assignment(scope, db, request, roles=('worker', 'review', 'coordinator'), records=records)
         task = (state._task(db, state._scope_id(scope), request['client'], request['session_id'], request['task_id'])
             if cleanup else d6._assignment_task(scope, db, request, revision=False))
@@ -60,7 +60,7 @@ def _eligible(owner):
                 return False
             if task['pins']!=owner['pins']:
                 return True
-            rows=d6._ledger(scope,db)
+            rows=d6._ledger(scope,db,assignment_id=owner['attempt_id'])
             record=next((r for r in rows if r['id']==owner['attempt_id']),None)
             if record is None or record['data']['status']=='settled':
                 return False
@@ -86,9 +86,10 @@ def operate(scope, directory, action, request):
     """Run only once per phase; uncertain execution retains capacity for reconciliation."""
     from runtime import resource_admission as host
     evidence._request(request, ('attempt_id','phase_id'),
-        ('resource_revision','workstream_revision','cpu','memory_bytes','capacity_cpu','capacity_memory_bytes','argv','wait_seconds','timeout_seconds','disk_bytes'))
+        ('resource_revision','workstream_revision','cpu','memory_bytes','capacity_cpu','capacity_memory_bytes','argv','wait_seconds','timeout_seconds','disk_bytes','host_proof'))
     state._text(request['phase_id'], 'resource phase', 128)
     d6._require(action in {'run','status','release','cancel'}, 'Unknown resource action')
+    d6._require('host_proof' not in request or action == 'release', 'Phase proof belongs only to release')
     revisions = {'resource_revision', 'workstream_revision'} & request.keys()
     d6._require(len(revisions) == 1 if action == 'run' else len(revisions) <= 1,
         'Use one resource revision or the original legacy Workstreams revision')
@@ -98,7 +99,8 @@ def operate(scope, directory, action, request):
     if action in {'status','release','cancel'}:
         snapshot = host.control(directory, 'status', {})
     if action == 'status':
-        return dict(ok=True, reservations={key:value for key,value in snapshot['reservations'].items()
+        return dict(ok=True, reservations={key:value | (dict(execution_digest=evidence._digest(value['execution']))
+            if 'execution' in value else {}) for key,value in snapshot['reservations'].items()
             if all(value['request']['owner'].get(k)==v for k,v in owner.items())},
             next_action='Inspect original execution and independently reconcile stopped owners before releasing active reservations')
     if action in {'release','cancel'}:
@@ -106,9 +108,24 @@ def operate(scope, directory, action, request):
         d6._require(row is not None and all(row['request']['owner'].get(k)==v for k,v in owner.items()), 'Resource owner changed')
         owner=row['request']['owner']
         if action=='release':
-            d6._require(record['data']['status']=='settled' and record['data']['reconciliation'] is not None,
-                'Release requires independently reconciled stopped owner')
-            proof=dict(path=str(state._path(scope)),sha256=record['data']['reconciliation']['digest'])
+            if 'host_proof' in request:
+                d6._require('execution' in row, 'Phase release requires its completed execution receipt')
+                observed = evidence._read_host_proof(scope, request['host_proof'])
+                state._fields(observed, ('version','kind','reservation_id','owner','phase_id','stopped',
+                    'descendants_stopped','observation_ref','coordinator_ref','execution_digest'))
+                d6._require(type(observed['version']) is int and observed['version'] == 1
+                    and observed['kind'] == 'resource-phase-reconciliation' and observed['reservation_id'] == identity
+                    and observed['owner'] == owner and observed['phase_id'] == request['phase_id']
+                    and observed['execution_digest'] == evidence._digest(row['execution'])
+                    and observed['stopped'] is True and observed['descendants_stopped'] is True,
+                    'Release requires independently observed exact phase and stopped descendants')
+                for field in ('observation_ref', 'coordinator_ref'):
+                    state._text(observed[field], 'phase ' + field)
+                proof = request['host_proof']
+            else:
+                d6._require(record['data']['status']=='settled' and record['data']['reconciliation'] is not None,
+                    'Release requires independently reconciled stopped owner')
+                proof=dict(path=str(state._path(scope)),sha256=record['data']['reconciliation']['digest'])
         else:
             row=snapshot['reservations'].get(identity)
             d6._require(row is not None and row['state']=='waiting', 'Only an unlaunched wait can be cancelled')
@@ -157,8 +174,10 @@ def operate(scope, directory, action, request):
             return result | dict(uncertain=True,released=False,pid=child.pid,reason='command still running; reconcile original owner')
         def tail(stream):
             size=stream.tell();stream.seek(max(0,size-16384));return stream.read().decode('utf-8',errors='replace')
+        execution = dict(pid=child.pid, returncode=code)
+        host.control(directory, 'complete', dict(id=identity, owner=owner, execution=execution))
         # Arbitrary commands can detach descendants; native stop reconciliation owns release.
-        return result | dict(returncode=code,stdout=tail(stdout),stderr=tail(stderr),pid=child.pid,
+        return result | dict(returncode=code,stdout=tail(stdout),stderr=tail(stderr),pid=child.pid,execution_digest=evidence._digest(execution),
             released=False,uncertain=True,reason='command exited; independently reconcile descendants before release')
 
 

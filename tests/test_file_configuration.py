@@ -43,6 +43,35 @@ class FileConfigurationTests(CanonicalBirthFixture):
         self.assertFalse(result['qualified'])
         self.assertNotIn('birth', changes._load_journal(fixture.directory))
 
+    def test_file_eligibility_ignores_unchanged_other_members_and_shared_policy(self):
+        fixture, request = self.configuration()
+        manifest = request['manifest']
+        record = manifest['enrollment']['record']
+        record.update(kind='umbrella', project_root=str(fixture.base))
+        other = copy.deepcopy(record['repositories'][0])
+        other.update(repository_id='other', primary_root=str(fixture.base / 'other'),
+            git_common_dir=str(fixture.base / 'other/.git'))
+        other['checkouts'][0].update(checkout_id='other-checkout', root=other['primary_root'], git_dir=other['git_common_dir'])
+        other['checkouts'][0]['clients'][0]['activation']['status'] = 'suspended'
+        record['repositories'].append(other)
+        record['shared_policy'] = [dict(path=str(fixture.base / 'shared.md'), sha256='a' * 64)]
+        prior = copy.deepcopy(record)
+        with patch.object(changes, '_scoped_prior', return_value=(None, prior)):
+            self.assertTrue(changes._file_configuration(manifest, onboarding._load(fixture.directory)))
+            record['repositories'][0]['checkouts'][0]['clients'][0]['activation']['status'] = 'suspended'
+            self.assertFalse(changes._file_configuration(manifest, onboarding._load(fixture.directory)))
+
+    def test_writer_roots_exclude_inspected_owners_without_changes(self):
+        fixture, request = self.configuration()
+        manifest = request['manifest']
+        extra = copy.deepcopy(manifest['owners'][0])
+        extra['owner'].update(root=str(fixture.base / 'unrelated'), git_common_dir=str(fixture.base / 'unrelated/.git'),
+            repository_id='unrelated', checkout_id='unrelated-checkout')
+        manifest['owners'].append(extra)
+        roots, git_roots = changes._scoped_writer_roots(manifest)
+        self.assertNotIn(fixture.base / 'unrelated', roots)
+        self.assertNotIn(fixture.base / 'unrelated/.git', git_roots)
+
     def test_configuration_checks_effects_without_revalidating_unrelated_inputs(self):
         fixture, request = self.configuration()
         fixture.source.unlink()

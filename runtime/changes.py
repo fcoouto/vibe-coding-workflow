@@ -1986,10 +1986,32 @@ def _file_configuration(manifest, plan):
     """File-only configured records do not create or operate a managed runtime."""
     _, prior = _scoped_prior(plan)
     records = [record for record in (prior, manifest['enrollment']['record']) if record]
-    if any(record.get('schema_version') != 2 or record['shared_policy'] or
-           any(entry['activation']['status'] != 'configured' for _, _, entry in _scoped_entries(record).values())
-           for record in records):
+    if any(record.get('schema_version') != 2 for record in records):
         return False
+    current = manifest['enrollment']['record']
+    old, new = _scoped_entries(prior), _scoped_entries(current)
+    if prior and prior['shared_policy'] != current['shared_policy']:
+        return False
+    changed = _scoped_changed_paths(manifest) - {Path(current['project_root']) / PROJECT_FILE}
+    if any(Path(item['path']) in changed for record in records for item in record['shared_policy']):
+        return False
+    affected = set(old) ^ set(new)
+    affected.update(key for key in old.keys() & new.keys()
+        if _scoped_projection(prior, key) != _scoped_projection(current, key)
+        or old[key][2]['activation'] != new[key][2]['activation'])
+    # Runtime-bearing membership changes retain existing-store admission.
+    runtime_members_changed = any(entry['configuration'] and entry['configuration']['runtime']
+        for entries in (old, new) for key, (_, _, entry) in entries.items() if key in affected)
+    shared_roots = [Path(action['owner']['root']) for action in manifest['actions']
+        if action['owner']['kind'] == 'project' and any(effect['before'] != effect['after'] for effect in action['effects'])]
+    for entries in (old, new):
+        for key, (_, checkout, entry) in entries.items():
+            if key in affected and entry['configuration'] and entry['configuration']['shared_dependencies']:
+                return False
+            if (key in affected or runtime_members_changed or any(path.is_relative_to(Path(checkout['root'])) for path in changed)
+                    or any(Path(checkout['root']).is_relative_to(root) for root in shared_roots)) \
+                    and entry['activation']['status'] != 'configured':
+                return False
     originals, _, _ = _scoped_originals(plan)
     return all(originals[action['id']]['kind'] in ('write', 'delete')
                and action['recovery'] == 'file-preimages' and action['execution'] is None
@@ -2152,8 +2174,13 @@ def _scoped_runtime_locations(records, affected=None):
 
 
 def _scoped_writer_roots(manifest):
-    git_roots={Path(a['owner']['git_common_dir']) for a in manifest['owners'] if a['owner']['kind']=='repository'}
-    return {Path(a['owner']['root']) for a in manifest['owners']} | git_roots,git_roots
+    owners = [action['owner'] for action in manifest['actions']
+        if any(effect['before'] != effect['after'] for effect in action['effects'])]
+    affected = {(member['repository_id'], member['checkout_id']) for member in manifest['enrollment']['affected']}
+    owners.extend(item['owner'] for item in manifest['owners'] if item['owner']['kind'] == 'repository'
+        and (item['owner']['repository_id'], item['owner']['checkout_id']) in affected)
+    git_roots = {Path(owner['git_common_dir']) for owner in owners if owner['kind'] == 'repository'}
+    return {Path(owner['root']) for owner in owners} | git_roots, git_roots
 
 
 def _scoped_changed_paths(manifest):
@@ -5673,7 +5700,7 @@ def _run_scoped(plan_dir, request, operation, *, host=None, entry_authorizer=Non
         originals, dependencies, affected, suspend = _validate_scoped(request, plan,
             operation=operation if file_only else None)
         authority, prior = _scoped_prior(plan)
-        locations = _scoped_runtime_locations([prior, m["enrollment"]["record"]], affected)
+        locations = _scoped_runtime_locations([prior, m["enrollment"]["record"]], None if file_only else affected)
         affected_roots,affected_git=_scoped_writer_roots(m)
         changed_paths=_scoped_changed_paths(m)
         lock_root = d3._plan_path(LOCK_ROOT)
@@ -5692,9 +5719,10 @@ def _run_scoped(plan_dir, request, operation, *, host=None, entry_authorizer=Non
             held = _authority_owner(canonical_location)
             if held is not None and held != operation_owner:
                 raise Pending("Canonical authority has an interrupted or uncertain operation; resume its exact journal")
-            git_dirs = {a["owner"]["git_dir"] for a in m["owners"] if a["owner"]["kind"] == "repository"}
+            git_dirs = {a["owner"]["git_dir"] for a in m["owners"] if a["owner"]["kind"] == "repository"
+                and (Path(a['owner']['root']) in affected_roots or Path(a['owner']['git_common_dir']) in affected_git)}
             if plan["identity"]["kind"] == "standalone":
-                git_dirs.update(a["owner"]["git_common_dir"] for a in m["owners"] if a["owner"]["kind"] == "repository")
+                git_dirs.update(str(common) for common in affected_git)
             descriptors = {git_dir: locks.enter_context(_worktree_lock(git_dir)) for git_dir in sorted(git_dirs)}
             owner = dict(schema_version=1, plan_dir=str(path), transaction_id=m["transaction_id"], manifest_digest=d3._digest(m))
             if entry_authorizer is None:

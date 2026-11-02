@@ -72,12 +72,39 @@ class UnenrolledCheckoutTests(unittest.TestCase):
         self.assertEqual(self.authority.read_bytes(), before)
         self.assertFalse((self.base / "state").exists())
 
-    def test_configured_primary_keeps_qualification_guard(self):
+    def test_configured_primary_allows_ordinary_work_without_task_authority(self):
         result = self.acquire(self.repo)
-        self.assertEqual(result.resolution.reason, "qualification_unobserved")
+        self.assertEqual(result.resolution.reason, "activation_configured")
         with self.assertRaises(startup.RuntimeScopeError):
             startup._entry_scope(result)
+        self.assertIsNone(self.hook(self.repo))
+        self.assertFalse((self.base / "state").exists())
+
+    def test_configured_only_work_does_not_require_current_package_pins(self):
+        self.record['repositories'][0]['checkouts'][0]['clients'][0]['configuration']['runtime_digest'] = 'f' * 64
+        self.authority.write_text(json.dumps(self.record))
+        self.assertIsNone(self.hook(self.repo))
+
+    def test_suspended_member_keeps_its_guard(self):
+        self.record['repositories'][0]['checkouts'][0]['clients'][0]['activation']['status'] = 'suspended'
+        self.authority.write_text(json.dumps(self.record))
         self.assertEqual(self.hook(self.repo)["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_configured_records_with_retained_active_signals_keep_the_guard(self):
+        activation = self.record['repositories'][0]['checkouts'][0]['clients'][0]['activation']
+        binding = dict(client='codex', surface='codex-cli', version='fixture', configuration_digest='a' * 64,
+            accepted_scope_digest='b' * 64, receipt=dict(reference='fixture:old-qualification', sha256='c' * 64),
+            hook_owner=dict(root=str(PACKAGE), source=str(PACKAGE / 'scripts/workflow.py'),
+                binding=self.record['project_binding'], sha256='d' * 64))
+        for retained in (dict(qualification='qualified'), dict(accepted_scope_digest='b' * 64),
+                         dict(qualification_binding=binding)):
+            with self.subTest(retained=next(iter(retained))):
+                original = copy.deepcopy(activation)
+                activation.update(retained)
+                self.authority.write_text(json.dumps(self.record))
+                self.assertEqual(self.hook(self.repo)['hookSpecificOutput']['permissionDecision'], 'deny')
+                activation.clear()
+                activation.update(original)
 
     def test_future_join_remains_pending(self):
         self.record["membership"]["future_join"] = True

@@ -56,9 +56,17 @@ not permission to stop unrelated processes.
 
 Command exit alone does not release capacity: an arbitrary command can detach a
 service into another process group. Reservations remain active until
-`resource-release` verifies existing independent D6 reconciliation that the entire
-original owner stopped. This conservative v1 rule can hold capacity until a worker
-turn is reconciled; it does not guarantee prompt release after each shell command.
+`resource-release` verifies independent reconciliation of the owner or the exact
+phase. For a completed phase while its assignment continues, supply
+`host_proof:{path,sha256}` referring to private independently observed JSON with
+exactly `version:1`, `kind:"resource-phase-reconciliation"`, `reservation_id`,
+`owner` copied from resource status, original `phase_id`, `execution_digest` from the returned completed execution receipt, `stopped:true`,
+`descendants_stopped:true`, `observation_ref` and `coordinator_ref`. The observation
+must establish that this phase and all its descendants stopped; flags alone are
+not evidence. A proof for another phase, execution or owner rejects. An admitted phase without a durable completed execution receipt cannot use phase-only release, so a pending launcher cannot run after its capacity was freed. After release, a new
+phase can use the freed capacity; simultaneous or uncertain phases retain their
+separate occupancy. Without a phase proof, the original whole-owner D6
+reconciliation remains supported.
 `resource-cancel` cancels only an unlaunched wait atomically. Cleanup remains
 available after disable/cancellation. Time expiry alone never frees an active
 reservation. Known disabled or closed older waiters stop blocking the queue;

@@ -295,6 +295,19 @@ def read_record(root, *, budget=None, allow_machine_only=False):
     return _read_record_snapshot(root, budget=budget, allow_machine_only=allow_machine_only)[0]
 
 
+# Reviewed schema-3 reader compatibility with the merged PR30 source package.
+# Keep original source pins; adding a pair requires behavior and migration review.
+COMPATIBLE_PACKAGE_PINS = frozenset({(
+    'bb131d4f891b5e51d0e7803f0b39263b09ae5a7a99d96fd89444fa0871809c1b',
+    '9782f25e8c8fde75191a0f80b8cd325a667ac1619b7b7c5f1c053e1004da137a',
+)})
+
+
+def _package_compatible(accepted, installed):
+    pair = tuple(accepted.get(key) for key in ('policy_digest', 'runtime_digest'))
+    return pair == tuple(installed.get(key) for key in ('policy_digest', 'runtime_digest')) or pair in COMPATIBLE_PACKAGE_PINS
+
+
 def policy_digest(package, *, budget=None):
     """Bind enrollment to the installed policy filenames and exact contents."""
     paths = sorted((package / "policies").glob("*.md"))
@@ -396,9 +409,9 @@ def resolve_project(event, package, *, budget=None) -> ProjectScope | None:
                         runtime)
 
 
-def orient(event, package):
-    acquisition = acquire_project_entry(event, package)
-    scope = _entry_scope(acquisition)
+def orient(event, package, *, acquisition=None):
+    acquisition = acquisition or acquire_project_entry(event, package)
+    scope = _entry_scope(acquisition, managed=False)
     if scope is None:
         return None
     client_file = package / "clients" / f"{event.client}.md"
@@ -937,7 +950,11 @@ def _compare_canonical_scope(record, *, authority, observation, client, installe
     config, activation = config_entry["configuration"], config_entry["activation"]
     if config is None:
         return result("pending", "activation_pending")
-    if (client not in installed["clients"] or any(config[k] != installed[k] for k in ("policy_digest", "runtime_digest"))):
+    if (not preview and activation["status"] == "configured" and qualification is None
+            and activation['qualification'] == 'pending' and activation['qualification_binding'] is None
+            and activation['accepted_scope_digest'] is None):
+        return result("configured", "activation_configured")
+    if client not in installed["clients"] or not _package_compatible(config, installed):
         return result("suspended", "configuration_changed")
     shared = sorted((s for s in data["shared_policy"] if s["path"] in config["shared_dependencies"]), key=lambda s: s["path"])
     if (len(dependencies) != len(shared) or [d["path"] for d in dependencies] != [s["path"] for s in shared]
@@ -972,7 +989,7 @@ def _compare_canonical_scope(record, *, authority, observation, client, installe
     if location["path"] != config["runtime"]["state_dir"]:
         return result("conflict", "runtime_location_unsafe")
     if activation["status"] == "configured":
-        return result("configured", "activation_configured")
+        return result("configured", "activation_qualified_inactive")
     if activation["status"] == "pending":
         return result("pending", "activation_pending")
     if preview:
@@ -1230,7 +1247,7 @@ def acquire_canonical_project(event, package, *, authority_path=None, qualifier=
                      client=event.client, installed=installed)
         _check_observation_deadline(budget)
         resolution = resolve_canonical_scope(record, **facts)
-        if qualifier is not None and resolution.status == "configured" and resolution.reason == "qualification_unobserved":
+        if qualifier is not None and resolution.status == "configured" and resolution.reason in {"qualification_unobserved", "activation_configured"}:
             observation["qualification"] = qualifier(record, _canonical_freeze(facts | {"deadline": budget["deadline"]}))
             _check_observation_deadline(budget)
             # The trusted callback may inspect facts, but it cannot normalize changed authority bytes.
@@ -1395,11 +1412,13 @@ def acquire_project_entry(event, package, *, qualifier=None, deadline=None, budg
         return CanonicalAcquisition(ScopeResolution("conflict", None, "observation_unavailable"), pointer)
 
 
-def _entry_scope(acquisition):
+def _entry_scope(acquisition, *, managed=True):
     """Unwrap one actual entry decision; unavailable current authority fails closed."""
     if not isinstance(acquisition, CanonicalAcquisition):
         raise RuntimeScopeError('Project authority acquisition is unavailable')
     resolution = acquisition.resolution
+    if not managed and resolution.status == 'configured' and resolution.reason == 'activation_configured':
+        return None
     if resolution.status not in {'active', 'outside'}:
         raise RuntimeScopeError('Project authority is unavailable or requires qualification: ' + resolution.reason)
     return resolution.scope

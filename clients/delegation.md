@@ -30,13 +30,10 @@ Run the installed package's `scripts/workflow.py` with the enrolled checkout as 
 | `delegation status --cwd /checkout --client codex --session SESSION` | [Status](delegation-requests.md#status); no stdin |
 
 Use the [common envelope](delegation-requests.md#common-envelope) and current response
-revision for mutations. The action references include validator-checked examples;
-implementation reads are for diagnosis, explicit implementation work, or the narrow
-uncovered-schema lookups below. For trusted stop-proof construction, read only
-`_validate_operation_proof` in [the validator](../runtime/delegation.py); for cache refresh
-publication, read only `_common`, `_trigger` and `_guidance` there. These lookups
-remain required until complete public references replace those specific schemas;
-do not load the whole implementation for ordinary plan/prepare/observe requests. The runtime
+revision for mutations. The action references include validator-checked examples.
+For stop-proof construction, read [reconciliation fields](delegation-proofs.md).
+For cache refresh publication, read [guidance publication](guidance-publication.md).
+Implementation reads are needed only for diagnosis or implementation work. The runtime
 does not choose jobs, budgets, settings or authorization.
 
 Accept the D5 evidence plan, then an immutable D6 plan with exact jobs, claims, dependencies, finite admission limits and verified capacity. Apply policy's isolation and ownership rules under the [shared authority](runtime.md#opt-in). Claims include relevant path aliases, Git and mutable resources; directory claims conservatively serialize path ownership. Admission requires completed, reconciled dependencies and available capacity/budget, including unresolved retained assignments.

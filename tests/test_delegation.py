@@ -524,6 +524,23 @@ class AdmissionTests(unittest.TestCase):
         finally:
             self.identity, self.scope = prior, prior_scope
 
+    def test_native_lifecycle_and_new_task_ignore_unrelated_settled_history(self):
+        self.plan()
+        previous = self.prepare()
+        self.settle_fixture(previous['attempt_id'])
+        request = self.second_owner(2)
+        self.identity = {key: request[key] for key in evidence.IDENTITY[:4]}
+        with patch.object(self.api, 'MAX_ASSIGNMENTS', 1):
+            prepared = self.api.prepare_assignment(self.scope, request)
+            self.assertTrue(prepared['launch_admitted'])
+            binding = self.api.prepared_native_assignment(self.scope, prepared['attempt_id'])
+            self.assertEqual(binding['parent_session_id'], self.identity['session_id'])
+            observed = self.observe_worker(prepared)
+            self.assertEqual(observed['attempt_id'], prepared['attempt_id'])
+            fresh = state.start_task(self.scope, self.identity | dict(session_id='fresh', task_id='fresh',
+                mode='editable', decision_ref='user:accepted'))
+            self.assertEqual(fresh['task']['task_id'], 'fresh')
+
     def test_plan_is_immutable_and_replay_returns_once_only_admission(self):
         self.plan()
         request = self.prepare_request()

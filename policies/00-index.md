@@ -10,11 +10,16 @@ During Runtime, read this index, every contract whose trigger applies, and appli
 
 Keep policy adoption, action applicability and action satisfaction distinct. Missing capabilities or unknown applicability cannot count as inapplicable or satisfied. Block only dependent work; never silently skip a mandatory requirement.
 
+Use deterministic tooling or direct execution when sufficient. Consider delegation
+for useful context isolation, specialization, required independence or independent
+parallel work; only then load the dispatch contract. Direct work still follows
+planning, verification and applicable review requirements.
+
 | Contract | Load when |
 | --- | --- |
 | [Project Scope](01-project-scope.md) | During onboarding or updates; at task startup or resume; after changes to repository/client scope, instructions, permissions or accepted policy. |
 | [Task Planning](02-task-planning.md) | Before implementation; when resuming work; after material changes to the goal, scope, constraints, risk or acceptance criteria. |
-| [Agent Delegation](03-agent-delegation.md) | Before starting a task or dispatching a worker; after material scope changes, failed attempts, stalled repair/validation progress or capacity changes. |
+| [Agent Delegation](03-agent-delegation.md) | When considering or dispatching a worker; after failed attempts, stalled repair/validation progress, or scope/capacity changes affecting delegated work. |
 | [Security Review](04-security-review.md) | After implementing a deliverable, before completion or merge; after changes affecting review coverage or evidence. |
 | [Tests and Builds](05-tests-and-builds.md) | When selecting checks; before accepting completion or merge; after changes affecting evidence. |
 | [Code Review](06-code-review.md) | Before every merge; before completing nontrivial or review-required work; when requested; after changes affecting review evidence. |

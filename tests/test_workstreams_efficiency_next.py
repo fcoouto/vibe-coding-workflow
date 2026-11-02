@@ -179,7 +179,7 @@ class ResourceEfficiencyTests(unittest.TestCase):
         with self.telemetry(), patch.object(host, 'control', wraps=host.control) as control:
             result = self.first.call()
         self.assertEqual(result['returncode'], 0)
-        self.assertEqual([call.args[1] for call in control.call_args_list], ['request'])
+        self.assertEqual([call.args[1] for call in control.call_args_list], ['request', 'complete'])
 
     def test_run_still_rejects_corrupt_registry_before_launch(self):
         self.first.directory.mkdir(mode=0o700)

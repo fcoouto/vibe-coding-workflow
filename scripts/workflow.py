@@ -81,7 +81,7 @@ def control_main():
         title.add_argument("--cwd", required=True)
         evidence = commands.add_parser("evidence", add_help=False)
         evidence_actions = evidence.add_subparsers(dest="action", required=True)
-        for name in ("plan", "status", "check", "reconcile-check", "verify"):
+        for name in ("plan", "status", "check", "reconcile-check", "verify", "cleanup"):
             action = evidence_actions.add_parser(name, add_help=False)
             action.add_argument("--cwd", required=True)
             if name == "status":
@@ -215,7 +215,7 @@ def control_main():
             return 0 if report.get("ok", True) else 1
         if args.command == "evidence":
             from runtime import evidence
-            operations = {"plan": evidence.plan_evidence, "check": evidence.run_check, "reconcile-check": evidence.reconcile_check, "verify": evidence.verify_completion,
+            operations = {"plan": evidence.plan_evidence, "check": evidence.run_check, "reconcile-check": evidence.reconcile_check, "verify": evidence.verify_completion, "cleanup": evidence.cleanup_evidence,
                           "prepare": evidence.prepare_review, "collect": evidence.collect_review, "assess": evidence.assess_review}
             report = (evidence.evidence_status(scope, client, args.session) if args.action == "status" else
                       operations[args.review_action if args.action == "review" else args.action](scope, request))
@@ -269,11 +269,11 @@ def main():
             raise StartupError("CLI event does not match the payload event")
         if requested_event == "SessionStart":
             start = adapter.normalize(payload)
-            output = adapter.render(orient(start, PACKAGE))
+            acquisition = acquire_project_entry(start, PACKAGE)
+            output = adapter.render(orient(start, PACKAGE, acquisition=acquisition))
             if start.client == "codex":
                 try:
-                    acquisition = acquire_project_entry(start, PACKAGE)
-                    scope = _entry_scope(acquisition)
+                    scope = _entry_scope(acquisition, managed=False)
                     if scope is not None and scope.runtime is not None:
                         from runtime.title_sync import repair
                         presentation = repair(scope, start.client, payload.get("session_id"), force=True)
@@ -286,7 +286,7 @@ def main():
         else:
             event = codex.normalize_runtime(payload)
             acquisition = acquire_project_entry(event, PACKAGE)
-            scope = _entry_scope(acquisition)
+            scope = _entry_scope(acquisition, managed=False)
             result = HookResult(event.kind)
             if scope is not None and scope.runtime is not None:
                 from runtime.state import process_event
@@ -294,7 +294,7 @@ def main():
             output = codex.render_runtime(result)
             if scope is not None and scope.runtime is not None and event.kind in {"PostToolUse", "Stop"}:
                 from runtime.title_sync import repair
-                presentation = repair(scope, event.client, event.session_id, force=True)
+                presentation = repair(scope, event.client, event.session_id)
                 if presentation.get("notification"):
                     output = dict(output or {})
                     output["systemMessage"] = (output.get("systemMessage", "") + " " + presentation["notification"]).strip()
