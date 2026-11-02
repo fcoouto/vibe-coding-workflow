@@ -1549,6 +1549,8 @@ def _closure_facts(context, task_ref, db, recovery, *, recovery_files=None, ordi
     delivery_requirements = delivery.completion_requirements(None, db, task, context=context)
     _require(delivery_requirements['delivery_complete'] and not delivery_requirements['blockers'],
         'Pending delivery must retain its original task and recovery evidence')
+    _require(delivery.retention_requirements(None, db, task, context=context)['retention_complete'],
+        'Known publication or cleanup obligations must retain their original task')
     assignment_blocker='Assignment body requires original task; exact assignment certificate integration is required'
     _require(not [blocker for blocker in observed['blockers'] if blocker!=assignment_blocker],'; '.join(observed['blockers']))
     ready=task['state']=='DONE'
@@ -7440,7 +7442,7 @@ def _observe_linked_preparation_member(context,ref,task,basis,certificate,*,read
 
 def _linked_preparation_steps(pointer,authorities,*,writer=None,read_context=None,read_roster=None,serial_members=False):
     """Complete semantic/source facts; recovery interpretation belongs to the outer acquisition."""
-    from runtime import changes,delegation
+    from runtime import changes,delegation,delivery
     content=_linked_contract(pointer)
     selected=content['selected'];context=_reference_context(selected['authority'])
     with _preparation_database(context,writer) as db:
@@ -7460,6 +7462,8 @@ def _linked_preparation_steps(pointer,authorities,*,writer=None,read_context=Non
         with _preparation_database(context,writer) as db:
             task=state._task(db,ref['scope_id'],ref['client'],ref['session_id'],ref['task_id'])
             _require(task is not None and task.get('writer_stop',{}).get('linked'),'Linked preparation needs every independent stop')
+            _require(delivery.retention_requirements(None, db, task, context=context)['retention_complete'],
+                'Known publication or cleanup obligations must retain their original linked task')
             own_basis=_read(None,task['writer_stop']['linked'],context=context,db=db)
             _require(own_basis==basis,'Linked independent member bases differ')
         job=dict(kind='member-certificate',item=dict(reference=ref,pins=task['pins']),basis=basis)

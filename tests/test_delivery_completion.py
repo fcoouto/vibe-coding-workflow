@@ -46,10 +46,10 @@ class CompletionTests(unittest.TestCase):
         self.addCleanup(self.fixture.doCleanups)
         self.scope = self.fixture.scope
 
-    def delivery_plan(self, count=0):
+    def delivery_plan(self, count=0, *, required=True):
         publications = [dict(id='pr-' + str(n), **{k: target()[k] for k in
             ('provider', 'host', 'repository', 'target')}, branch='feature-' + str(n),
-            candidate=None, pull_request=None, dependencies=[], required=True) for n in range(count)]
+            candidate=None, pull_request=None, dependencies=[], required=required) for n in range(count)]
         return delivery.operate(self.scope, 'plan', self.fixture.request(plan=dict(version=1,
             decision_ref='user:scope', policy=self.fixture._delivery_policy, workspace=None,
             publications=publications, companions=[])))
@@ -93,6 +93,37 @@ class CompletionTests(unittest.TestCase):
         self.fixture.ready_proof_fixture()
         status = self.fixture.api.evidence_status(self.scope, 'codex', 'parent')
         self.assertFalse(status['evidence']['implementation_verified'])
+
+    def test_accepted_scope_extension_reopens_done_before_recomputing_progress(self):
+        initial = self.delivery_plan()
+        old_milestone = dict(id='old-scope', weight=1, accepted=True, reference='user:accepted')
+        state.update_task(self.scope, self.fixture.request(state='WORKING', reason='Accepted scope',
+            reference='user:accepted', milestones=[old_milestone]))
+        completed = self.proof()['task']
+        plan = initial['plan'] | dict(decision_ref='user:expanded', publications=[dict(id='new-pr',
+            **{k: target()[k] for k in ('provider', 'host', 'repository', 'target')}, branch='new-feature',
+            candidate=None, pull_request=None, dependencies=[], required=True)])
+        result = delivery.operate(self.scope, 'plan', self.fixture.request(plan=plan,
+            previous_plan=completed['delivery']['plan'], change_decision_ref='user:expanded',
+            milestones=[old_milestone, dict(id='new-scope', weight=1, accepted=False, reference='user:expanded')]))
+        self.assertEqual(result['task']['state'], 'REVIEW')
+        self.assertFalse(result['delivery_complete'])
+        self.assertIn('new-pr', result['pending'])
+        self.assertEqual(title_sync.progress_cells(result['task']), 2)
+        self.assertEqual(self.fixture.api._read(self.scope, initial['task']['delivery']['plan']), initial['plan'])
+        title = title_sync.format_title('W1', 'P', 'Feature', result['task']['state'], 5)
+        self.assertNotIn('▰▰▰▰▰', title)
+
+    def test_scope_revision_preserves_explicit_pause_and_required_deliveries(self):
+        initial = self.delivery_plan(1)
+        state.update_task(self.scope, self.fixture.request(state='PAUSED', reason='User pause', reference='user:pause'))
+        revised = initial['plan'] | dict(decision_ref='user:expanded')
+        result = delivery.operate(self.scope, 'plan', self.fixture.request(plan=revised,
+            previous_plan=initial['task']['delivery']['plan'], change_decision_ref='user:expanded'))
+        self.assertEqual(result['task']['state'], 'PAUSED')
+        with self.assertRaises(ValueError):
+            delivery.operate(self.scope, 'plan', self.fixture.request(plan=revised | dict(publications=[]),
+                previous_plan=result['task']['delivery']['plan'], change_decision_ref='user:expanded'))
 
     def test_unpublished_required_publications_keep_publication_work_open(self):
         self.delivery_plan(2)

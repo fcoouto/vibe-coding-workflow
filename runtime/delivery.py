@@ -78,7 +78,7 @@ def validate_record(value):
         state._artifact_reference(marker['plan'])
 
 
-def _plan(value, saved, override=None):
+def _plan(value, saved, override=None, *, previous=None):
     from runtime import evidence
     evidence._bounded(value)
     state._fields(value, ('version', 'decision_ref', 'policy', 'workspace', 'publications', 'companions'))
@@ -86,11 +86,14 @@ def _plan(value, saved, override=None):
     _ref(value['decision_ref'])
     _require(validate_policy(value['policy']) == effective_policy(saved, override),
              'Plan differs from adopted delivery policy')
-    _require(value['workspace'] is None, 'Workspace binding needs independently observed native ownership')
+    _require(value['workspace'] is None if previous is None else
+             evidence._raw(value['workspace']) == evidence._raw(previous['workspace']),
+             'Workspace binding needs independently observed native ownership')
     publications, companions = value['publications'], value['companions']
     _require(isinstance(publications, list) and len(publications) <= 64
              and isinstance(companions, list) and len(companions) <= 64, 'Invalid delivery scope')
     ids = set()
+    old_publications = {p['id']: p for p in previous['publications']} if previous else {}
     for publication in publications:
         state._fields(publication, ('id', 'provider', 'host', 'repository', 'target', 'branch',
                                    'candidate', 'pull_request', 'dependencies', 'required'))
@@ -99,8 +102,14 @@ def _plan(value, saved, override=None):
         ids.add(publication['id'])
         _branch(publication['branch'])
         _require(type(publication['required']) is bool, 'Invalid delivery requirement')
-        _require(publication['pull_request'] is None and publication['candidate'] is None,
-                 'Publication binding requires observed candidate and PR ownership')
+        old = old_publications.get(publication['id'])
+        if old is None:
+            _require(publication['pull_request'] is None and publication['candidate'] is None,
+                     'Publication binding requires observed candidate and PR ownership')
+        else:
+            protected = ('id', 'provider', 'host', 'repository', 'target', 'branch', 'candidate', 'pull_request')
+            _require(evidence._raw({k: publication[k] for k in protected}) == evidence._raw({k: old[k] for k in protected})
+                and (not old['required'] or publication['required']), 'Scope revision cannot replace or discard an existing delivery')
         _require(any(all(publication[k] == t[k] for k in ('provider', 'host', 'repository', 'target'))
                      for t in value['policy']['targets']), 'Unadopted publication target')
         _require(isinstance(publication['dependencies'], list) and len(publication['dependencies']) <= 64
@@ -116,6 +125,9 @@ def _plan(value, saved, override=None):
     for companion in companions:
         state._task_reference(companion)
     _require(len({evidence._raw(c) for c in companions}) == len(companions), 'Duplicate delivery companion')
+    if previous:
+        _require(old_publications.keys() <= ids and {evidence._raw(c) for c in previous['companions']}
+            <= {evidence._raw(c) for c in companions}, 'Scope revision cannot discard existing delivery obligations')
     return deepcopy(value)
 
 
@@ -136,7 +148,7 @@ def completion_requirements(scope, db, task: dict, *, context=None) -> dict:
     return _scope_requirements(plan, read=lambda reference: evidence._read(scope, reference, db=db, context=context))
 
 
-def _scope_requirements(plan, *, read=None):
+def _scope_requirements(plan, *, read=None, readiness_required=True):
     pending, blockers = [], []
     required = [p for p in plan['publications'] if p['required']]
     waiting = bool(required) and not plan['companions']
@@ -158,10 +170,10 @@ def _scope_requirements(plan, *, read=None):
                 'Delivered candidate differs from its sealed snapshot')
             complete = facts['merged'] is True and facts['state'] == 'closed' and bool(facts['merge_commit']) and bool(facts['merged_at'])
             readiness = candidate.get('readiness')
-            if readiness is None:
+            if readiness_required and readiness is None:
                 blockers.append('PR readiness evidence is missing or stale: ' + publication['id'])
                 waiting = False
-            else:
+            elif readiness_required:
                 ready = read(readiness)
                 _require(type(ready['version']) is int and ready['version'] == 1 and ready['kind'] == 'delivery-readiness'
                     and ready['binding'] == _publication_binding(publication), 'Readiness binding changed')
@@ -185,6 +197,41 @@ def _publication_binding(publication):
     return {key: publication[key] for key in ('id', 'host', 'repository', 'target', 'branch', 'pull_request')} | dict(
         head=publication['candidate']['head'], snapshot=publication['candidate']['snapshot'],
         repository_id=publication['candidate']['repository_id'])
+
+
+def retention_requirements(scope, db, task, *, context=None):
+    """Known external obligations survive an optional publication or own completion."""
+    from runtime import evidence
+    if 'delivery' not in task:
+        return dict(retention_complete=True, retention_pending=[], retention_blockers=[])
+    read = lambda reference: evidence._read(scope, reference, db=db, context=context)
+    plan = deepcopy(_read_plan(scope, task, db=db, context=context))
+    plan['companions'] = []  # Shared acceptance remains the linked completion owner's responsibility.
+    for publication in plan['publications']:
+        publication['required'] = publication['required'] or publication['pull_request'] is not None
+    requirements = _scope_requirements(plan, read=read, readiness_required=False)
+    pending, blockers = requirements['pending'], requirements['blockers']
+    for publication in plan['publications']:
+        if not publication['required'] or publication['id'] in pending:
+            continue
+        target = next(t for t in plan['policy']['targets'] if all(t[k] == publication[k]
+            for k in ('provider', 'host', 'repository', 'target')))
+        if target['remote_cleanup_ref'] is None:
+            continue
+        try:
+            cleanup = read(publication['candidate']['cleanup'])
+            _require(type(cleanup['version']) is int and cleanup['version'] == 1 and cleanup['kind'] == 'delivery-cleanup'
+                and cleanup['binding'] == _publication_binding(publication) and cleanup['status'] in {'absent', 'deleted', 'disabled'},
+                'Remote cleanup is not settled')
+            if cleanup['status'] == 'disabled':
+                _ref(cleanup['decision_ref'])
+        except (ValueError, KeyError, TypeError, OSError):
+            pending.append('cleanup:' + publication['id'])
+    for reference in task['delivery']['operations']:
+        record = read(reference)
+        if record.get('kind') == 'delivery-effect' and record.get('status') != 'completed':
+            pending.append('operation:' + record['operation_id'])
+    return dict(retention_complete=not pending and not blockers, retention_pending=pending, retention_blockers=blockers)
 
 
 def completion_blockers(requirements):
@@ -255,15 +302,47 @@ def operate(scope, action: str, request: dict, *, owner=None) -> dict:
     if action == 'reconcile':
         return _reconcile(scope, request, owner)
     _require(action == 'plan', 'Unsupported delivery operation')
-    evidence._request(request, ('plan',), ('override',))
+    evidence._request(request, ('plan',), ('override', 'previous_plan', 'change_decision_ref', 'milestones'))
     with state._database(scope, write=True) as db:
         task = evidence._task(db, scope, request)
         saved = task.get('accepted_identity', {}).get('delivery_policy')
         _require(saved is not None, 'Delivery policy has not been adopted')
-        _require('delivery' not in task, 'Delivery plan already exists; reconcile the existing scope')
-        plan = _plan(request['plan'], saved, request.get('override'))
+        previous = None
+        if 'delivery' in task:
+            _require('previous_plan' in request and 'change_decision_ref' in request,
+                     'Delivery plan already exists; scope revision needs its previous plan and accepted decision')
+            state._artifact_reference(request['previous_plan'])
+            _ref(request['change_decision_ref'])
+            _require(request['previous_plan'] == task['delivery']['plan'], 'Scope revision plan changed')
+            _require(len(task['delivery']['operations']) < 64, 'Delivery operation history exhausted')
+            previous = _read_plan(scope, task, db=db)
+            saved = previous['policy']
+        else:
+            _require('previous_plan' not in request and 'change_decision_ref' not in request,
+                     'Initial delivery scope cannot revise an absent plan')
+        plan = _plan(request['plan'], saved, request.get('override'), previous=previous)
+        if previous:
+            _require(plan['decision_ref'] == request['change_decision_ref'], 'Scope revision decision changed')
+            old_publications = {p['id']: p for p in previous['publications']}
+            expanded = (len(plan['publications']) > len(previous['publications'])
+                or len(plan['companions']) > len(previous['companions'])
+                or any(p['required'] and not old_publications[p['id']]['required']
+                       for p in plan['publications'] if p['id'] in old_publications))
+            _require(not expanded or not task.get('milestones') or 'milestones' in request,
+                     'Expanded scope needs revised accepted milestones before progress is computed')
+        if 'milestones' in request:
+            task['milestones'] = state._milestones(request['milestones'])
         reference = evidence._artifact(scope, plan, owner=evidence._artifact_owner(scope, task), db=db)
-        task['delivery'] = dict(plan=reference, operations=[])
+        if previous:
+            change = dict(version=1, kind='delivery-plan-change', previous_plan=task['delivery']['plan'],
+                          plan=reference, decision_ref=request['change_decision_ref'])
+            task['delivery']['operations'].append(evidence._artifact(scope, change,
+                owner=evidence._artifact_owner(scope, task), db=db))
+            task['delivery']['plan'] = reference
+            if task['state'] == 'DONE':
+                task['state'] = 'REVIEW'
+        else:
+            task['delivery'] = dict(plan=reference, operations=[])
         task['revision'] += 1
         state._save(db, state._scope_id(scope), task)
         return dict(task=task, plan=plan, **completion_requirements(scope, db, task))
@@ -299,9 +378,10 @@ def pending(scope, *, cursor: str | None = None, limit: int = 32) -> dict:
             task = state._task(db, *identity)
             _require(task['accepted_identity']['project_id'] == scope.project_id, 'Foreign task in delivery authority')
             requirements = completion_requirements(None, db, task, context=context)
-            if not requirements['delivery_complete'] or requirements['blockers']:
+            retention = retention_requirements(None, db, task, context=context)
+            if not requirements['delivery_complete'] or requirements['blockers'] or not retention['retention_complete']:
                 records.append(dict(zip(('scope_id', 'client', 'session_id', 'task_id'), identity)) |
-                    dict(state=task['state'], plan=task.get('delivery', {}).get('plan'), **requirements))
+                    dict(state=task['state'], plan=task.get('delivery', {}).get('plan'), **requirements, **retention))
     next_cursor = None
     if len(rows) > limit:
         next_cursor = base64.urlsafe_b64encode(evidence._raw(dict(version=1, authority=authority,

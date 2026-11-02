@@ -15,7 +15,7 @@ class ReconcileTests(unittest.TestCase):
         self.case.setUp()
         self.addCleanup(self.case.doCleanups)
         self.fixture, self.scope = self.case.fixture, self.case.scope
-        self.case.delivery_plan(1)
+        self.case.delivery_plan(1, required=getattr(self, 'required', True))
         self.provider = test_github_delivery.GitHubDeliveryTests('runTest')
         self.provider.setUp()
         self.provider.pr['head']['ref'] = 'feature-0'
@@ -119,6 +119,20 @@ class ReconcileTests(unittest.TestCase):
 
 
 class SurvivingAuthorityTests(unittest.TestCase):
+    def test_optional_open_pr_stays_visible_and_protected_after_own_completion(self):
+        fixture = ReconcileTests('runTest')
+        fixture.required = False
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.reconcile()
+        completed = fixture.fixture.verify()['task']
+        self.assertEqual(completed['state'], 'DONE')
+        inventory = delivery.pending(fixture.scope)
+        self.assertEqual(len(inventory['records']), 1)
+        self.assertFalse(inventory['records'][0]['retention_complete'])
+        self.assertFalse(inventory['records'][0]['delivery_required'])
+        self.assertIn('pr-0', inventory['records'][0]['retention_pending'])
+
     def test_removed_original_checkout_keeps_factual_observation_and_sealed_proof(self):
         import shutil
         fixture = ReconcileTests('runTest')
