@@ -764,13 +764,12 @@ def _capture_birth_history(record):
             _require(_path(_machine_config_path()) == path); _check_parents(parents)
         snapshot = _configuration_snapshot(path, descriptor); config = snapshot[0]
         _require(config is not None, 'Canonical birth needs ready machine-private history')
-        context = _ready_context(config, parents, deadline=budget['deadline'])
-        _storage_outside(context, path, targets)
         machine = _MACHINE_ACQUISITION.get()
         def observe():
             _require(active and machine.get('active') is True and _MACHINE_ACQUISITION.get() is machine
                 and _configuration_snapshot(path, descriptor) == snapshot)
-            _ready_context(config, parents, deadline=budget['deadline'])
+            context = _ready_context(config, parents, deadline=budget['deadline'])
+            _storage_outside(context, path, targets)
             _require(evidence._binding(Path(record['project_root'])) == record['project_binding'])
             for repository in record['repositories']:
                 for selected in repository['checkouts']:
