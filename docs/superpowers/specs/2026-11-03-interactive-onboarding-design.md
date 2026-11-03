@@ -10,8 +10,7 @@ This design changes no runtime behavior or existing settings.
 
 Help users understand and choose how agents will work in their project. Each
 question explains the benefit, the effect of each choice and where to learn more.
-Use the client's native question UI, with an equivalent conversational fallback.
-Ask one question at a time and preserve answered choices across interruptions.
+Follow the [native single-select procedure](../../../skills/onboard-my-project/references/procedure.md#basic-onboarding). Preserve submitted choices across interruptions.
 
 Considered approaches:
 
@@ -186,8 +185,8 @@ refresh and live client qualification remain separate from source implementation
   reported accurately.
 - Missing future application tools do not become onboarding blockers; baseline
   discovery, catalog coverage and Context7 checks still occur when applicable.
-- Native question UI and conversational fallback preserve the same options,
-  defaults, scope and help. No answer, interruption and noninteractive execution
-  preserve pending choices without repeating completed work.
+- Native single-select boxes preserve the options, labels, scope and help. An
+  unavailable box, unanswered question or interruption leaves the choice pending
+  without repeating completed work.
 - Run package validation, relevant preference-preservation checks and representative
   instruction-path evaluations. Report live client observation separately.
