@@ -38,6 +38,125 @@ class PreparedInstructionsTests(unittest.TestCase):
         manifest = self.reader.build_manifest(self.root)
         (self.root / "clients/instruction-map.json").write_text(json.dumps(manifest))
 
+    def external_file(self, text, name="Ü skill.md"):
+        directory = tempfile.TemporaryDirectory(prefix="external instructions ")
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name).resolve() / name
+        path.write_bytes(text.encode("utf-8"))
+        return path
+
+    def test_external_cli_delivers_selected_source_without_preparation_or_source_changes(self):
+        path = self.external_file("# External skill\r\nPreserve Straße and 漢字.\r\n")
+        original = path.read_bytes()
+        manifest = (PACKAGE / "clients/instruction-map.json").read_bytes()
+        result = subprocess.run([sys.executable, "-I", "-B", str(SCRIPT), "--batch", "--external", str(path)],
+                                capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(original, result.stdout)
+        self.assertTrue(result.stdout.startswith(b"External instructions: pages 1-1/1;"))
+        self.assertTrue(result.stdout.endswith(b"Selection complete.\n"))
+        self.assertLessEqual(len(result.stdout), 24000)
+        self.assertEqual(path.read_bytes(), original)
+        invalid = subprocess.run([sys.executable, "-I", "-B", str(SCRIPT), "--prepare", "--external"],
+                                 capture_output=True, timeout=5)
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertEqual(invalid.stdout, b"")
+        self.assertEqual((PACKAGE / "clients/instruction-map.json").read_bytes(), manifest)
+
+    def test_external_batches_reconstruct_exact_sources_and_single_page_fallback(self):
+        content = "# Skill\r\n" + "Preserve Straße, 漢字 and every rule.\r\n" * 1400
+        path = self.external_file(content)
+        other = self.external_file("# Reference\nDo not omit this last rule.\n")
+        paths = [str(path), str(path), str(other)]
+        first = self.reader.load_batch(self.root, paths, external=True)
+        recovered = {str(path): "", str(other): ""}
+        batch, count = first, 0
+        while True:
+            rendered = self.reader.render_page(batch)
+            self.assertLessEqual(len(rendered.encode()), 24000)
+            for section in batch["sections"]:
+                recovered[section["path"]] += section["text"]
+            count += 1
+            page = batch["last_page"] + 1
+            if page > batch["pages"]:
+                break
+            self.assertIn(f"--external --batch --page {page} --revision {first['revision']}", rendered)
+            batch = self.reader.load_batch(self.root, paths, page, first["revision"], external=True)
+        self.assertGreater(count, 1)
+        self.assertLess(count, first["pages"])
+        self.assertEqual(recovered, {str(path): content, str(other): other.read_text()})
+        fallback = self.reader.load_page(self.root, paths, first["last_page"] + 1, first["revision"], external=True)
+        self.assertLessEqual(len(self.reader.render_page(fallback).encode()), 9500)
+        part = fallback["sections"][0]
+        self.assertEqual(part["path"], str(path))
+        self.assertEqual(part["start_line"], first["sections"][-1]["end_line"] + 1)
+        self.assertEqual(part["text"], "".join(content.splitlines(keepends=True)[part["start_line"] - 1:part["end_line"]]))
+
+    def test_external_read_observes_only_selected_source_once_without_a_manifest(self):
+        path = self.external_file("# Small skill\nRead this complete requirement.\n")
+        (self.root / "clients/instruction-map.json").unlink()
+        reads = Counter()
+        original_read = Path.read_bytes
+
+        def observe(source):
+            reads[source] += 1
+            return original_read(source)
+
+        with patch.object(Path, "read_bytes", observe):
+            result = self.reader.load_batch(self.root, [str(path), str(path)], external=True)
+        self.assertEqual((result["page"], result["last_page"], result["pages"]), (1, 1, 1))
+        self.assertEqual(reads, Counter({path: 1}))
+        self.assertEqual(result["sections"][0]["text"], "# Small skill\nRead this complete requirement.\n")
+
+    def test_external_continuation_rejects_source_selection_and_resolved_target_changes(self):
+        path = self.external_file(self.source)
+        other = self.external_file(self.source)
+        alias = path.parent / "alias.md"
+        alias.symlink_to(path)
+        paths = [str(alias)]
+        first = self.reader.load_batch(self.root, paths, external=True)
+        page = first["last_page"] + 1
+        self.assertLessEqual(page, first["pages"])
+        with self.assertRaises(ValueError):
+            self.reader.load_batch(self.root, paths, page, external=True)
+        with self.assertRaises(ValueError):
+            self.reader.load_batch(self.root, paths + [str(other)], page, first["revision"], external=True)
+        path.write_text(self.source + "Changed required text.\n")
+        with self.assertRaises(ValueError):
+            self.reader.load_batch(self.root, paths, page, first["revision"], external=True)
+        path.write_text(self.source)
+        alias.unlink()
+        alias.symlink_to(other)
+        with self.assertRaises(ValueError):
+            self.reader.load_batch(self.root, paths, page, first["revision"], external=True)
+
+    def test_external_mode_cannot_bypass_package_or_markdown_path_boundaries(self):
+        private = self.external_file("Private non-instruction data", name="private.txt")
+        alias = private.parent / "alias.md"
+        alias.symlink_to(private)
+        package_alias = private.parent / "package.md"
+        package_alias.symlink_to(self.root / "clients/codex.md")
+        for path in ("relative.md", "https://example.test/skill.md", str(private), str(alias), str(package_alias),
+                     str(self.root / "clients/codex.md"), str(private.parent), str(private.parent / "bad\nname.md")):
+            with self.subTest(path=path), self.assertRaises((ValueError, OSError)):
+                self.reader.load_batch(self.root, [path], external=True)
+        external = self.external_file("# Skill\n")
+        with self.assertRaises(ValueError):
+            self.reader.load_batch(self.root, [str(external)])
+
+    def test_external_cli_fails_without_partial_output_for_invalid_later_source(self):
+        first = self.external_file("# Valid first source\n")
+        invalid = self.external_file("漢" * 8000)
+        for last in (invalid, invalid.parent / "missing.md"):
+            stdout, stderr = StringIO(), StringIO()
+            with patch.object(self.reader, "ROOT", self.root), \
+                    patch.object(sys, "argv", [str(SCRIPT), "--external", "--batch", str(first), str(last)]), \
+                    redirect_stdout(stdout), redirect_stderr(stderr):
+                result = self.reader.main()
+            self.assertEqual(result, 1)
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertIn("unavailable", stderr.getvalue())
+
     def test_pages_reconstruct_sources_once_with_complete_utf8_and_bounded_output(self):
         paths = ["clients/codex.md", "policies/rules.md", "policies/rules.md"]
         first = self.reader.load_page(self.root, paths)

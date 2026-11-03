@@ -32,6 +32,22 @@ def source_path(root, name):
     return path
 
 
+def source_entry(raw, name):
+    lines = raw.decode("utf-8").splitlines(keepends=True)
+    ranges, start, size = [], 1, 0
+    for number, line in enumerate(lines, 1):
+        length = len(line.encode("utf-8"))
+        if length > SOURCE_BYTES:
+            raise ValueError(f"Instruction line exceeds the section budget in {name}; use bounded native reads")
+        if size + length > SOURCE_BYTES:
+            ranges.append([start, number - 1])
+            start, size = number, 0
+        size += length
+    if lines:
+        ranges.append([start, len(lines)])
+    return {"sha256": hashlib.sha256(raw).hexdigest(), "ranges": ranges}
+
+
 def build_manifest(root):
     files = {}
     paths = sorted([*(root / "clients").glob("*.md"), *(root / "policies").glob("*.md"),
@@ -39,37 +55,36 @@ def build_manifest(root):
     for path in paths:
         name = path.relative_to(root).as_posix()
         raw = source_path(root, name).read_bytes()
-        lines = raw.decode("utf-8").splitlines(keepends=True)
-        ranges, start, size = [], 1, 0
-        for number, line in enumerate(lines, 1):
-            length = len(line.encode("utf-8"))
-            if length > SOURCE_BYTES:
-                raise ValueError(f"Split the oversized instruction line in {name}")
-            if size + length > SOURCE_BYTES:
-                ranges.append([start, number - 1])
-                start, size = number, 0
-            size += length
-        if lines:
-            ranges.append([start, len(lines)])
-        files[name] = {"sha256": hashlib.sha256(raw).hexdigest(), "ranges": ranges}
+        files[name] = source_entry(raw, name)
     return {"version": 1, "files": files}
 
 
-def _load_pages(root, paths, page, revision):
-    manifest = json.loads(source_path(root, str(MAP)).read_bytes())
-    if not isinstance(manifest, dict) or manifest.get("version") != 1 or not isinstance(manifest.get("files"), dict):
-        raise ValueError("Invalid prepared instruction map")
+def _load_pages(root, paths, page, revision, external=False):
+    if not external:
+        manifest = json.loads(source_path(root, str(MAP)).read_bytes())
+        if not isinstance(manifest, dict) or manifest.get("version") != 1 or not isinstance(manifest.get("files"), dict):
+            raise ValueError("Invalid prepared instruction map")
     if not paths or type(page) is not int or page < 1 or (page > 1 and not revision):
         raise ValueError("Select sources and bind continuation pages to their revision")
     selected = list(dict.fromkeys(paths))
     identity, sections = [], []
     for name in selected:
-        if name not in manifest["files"] or not instruction_name(name):
-            raise ValueError("Select a packaged instruction path from the policy/client references")
-        entry = manifest["files"][name]
-        raw = source_path(root, name).read_bytes()
-        if not isinstance(entry, dict) or hashlib.sha256(raw).hexdigest() != entry.get("sha256"):
-            raise ValueError(f"Prepared source changed: {name}; use bounded native reads or update the package")
+        if external:
+            path = Path(name)
+            if not path.is_absolute() or path.suffix.lower() != ".md" or not name.isprintable():
+                raise ValueError("Select explicit absolute local Markdown instruction files")
+            path = path.resolve(strict=True)
+            if not path.is_file() or path.suffix.lower() != ".md" or path.is_relative_to(root.resolve()):
+                raise ValueError("External instructions must be regular Markdown files outside the package")
+            raw = path.read_bytes()
+            entry = dict(source_entry(raw, name), resolved=str(path))
+        else:
+            if name not in manifest["files"] or not instruction_name(name):
+                raise ValueError("Select a packaged instruction path from the policy/client references")
+            entry = manifest["files"][name]
+            raw = source_path(root, name).read_bytes()
+            if not isinstance(entry, dict) or hashlib.sha256(raw).hexdigest() != entry.get("sha256"):
+                raise ValueError(f"Prepared source changed: {name}; use bounded native reads or update the package")
         lines = raw.decode("utf-8").splitlines(keepends=True)
         ranges = entry.get("ranges")
         if not isinstance(ranges, list):
@@ -107,19 +122,26 @@ def _load_pages(root, paths, page, revision):
     return current, pages
 
 
-def load_page(root, paths, page=1, revision=None):
-    current, pages = _load_pages(root, paths, page, revision)
-    return dict(revision=current, page=page, pages=len(pages), sections=pages[page - 1])
+def load_page(root, paths, page=1, revision=None, *, external=False):
+    current, pages = _load_pages(root, paths, page, revision, external)
+    result = dict(revision=current, page=page, pages=len(pages), sections=pages[page - 1])
+    if external:
+        result["external"] = True
+    return result
 
 
-def load_batch(root, paths, page=1, revision=None):
-    current, pages = _load_pages(root, paths, page, revision)
+def load_batch(root, paths, page=1, revision=None, *, external=False):
+    current, pages = _load_pages(root, paths, page, revision, external)
     result, sections = None, []
     for number in range(page, len(pages) + 1):
         single = dict(revision=current, page=number, pages=len(pages), sections=pages[number - 1])
+        if external:
+            single["external"] = True
         render_page(single)  # Every included page must remain usable by the small-page fallback.
         candidate = dict(revision=current, page=page, last_page=number, pages=len(pages),
                          sections=sections + single["sections"])
+        if external:
+            candidate["external"] = True
         try:
             render_page(candidate)
         except ValueError:
@@ -134,13 +156,14 @@ def render_page(result):
     last = result.get("last_page", result["page"])
     batch = "last_page" in result
     label = f"pages {result['page']}-{last}" if batch else f"page {result['page']}"
-    output = [f"Vibe instructions: {label}/{result['pages']}; revision {result['revision']}\n"]
+    source = "External" if result.get("external") else "Vibe"
+    output = [f"{source} instructions: {label}/{result['pages']}; revision {result['revision']}\n"]
     for section in result["sections"]:
         output.append(f"\n--- {section['path']} lines {section['start_line']}-{section['end_line']} ---\n")
         output.append(section["text"])
         output.append("\n--- source complete ---\n" if section["complete"] else "\n--- source continues ---\n")
     if last < result["pages"]:
-        mode = "--batch " if batch else ""
+        mode = ("--external " if result.get("external") else "") + ("--batch " if batch else "")
         output.append(f"\nContinue the same selection with {mode}--page {last + 1} --revision {result['revision']}.\n")
     else:
         output.append("\nSelection complete.\n")
@@ -156,17 +179,18 @@ def main():
     parser.add_argument("--page", type=int, default=1)
     parser.add_argument("--revision")
     parser.add_argument("--batch", action="store_true", help="combine consecutive pages within one bounded response")
+    parser.add_argument("--external", action="store_true", help="read explicitly selected absolute local Markdown paths outside the package")
     parser.add_argument("--prepare", action="store_true", help="authoring only: rebuild the package map")
     args = parser.parse_args()
     try:
         if args.prepare:
-            if args.paths or args.page != 1 or args.revision or args.batch:
+            if args.paths or args.page != 1 or args.revision or args.batch or args.external:
                 raise ValueError("Preparation cannot be combined with a read")
             (ROOT / MAP).write_text(json.dumps(build_manifest(ROOT), indent=2) + "\n", encoding="utf-8")
             return 0
-        paths = BOOTSTRAP if args.paths == ["bootstrap"] else args.paths
+        paths = BOOTSTRAP if args.paths == ["bootstrap"] and not args.external else args.paths
         read = load_batch if args.batch else load_page
-        print(render_page(read(ROOT, paths, args.page, args.revision)), end="")
+        print(render_page(read(ROOT, paths, args.page, args.revision, external=args.external)), end="")
         return 0
     except (ValueError, OSError, KeyError, TypeError) as error:
         print(f"Prepared instruction read unavailable: {error}", file=sys.stderr)
