@@ -15,6 +15,8 @@ When using packaged file tools for standalone basic setup, select `project_scope
 
 Use [Verify and finish](../../../policies/10-project-onboarding.md#verify-and-finish) to assess completion, including startup integration and the local procedures reached through generated project guidance. This does not establish AcceptedScope, task readiness, managed runtime activation, qualification, merge readiness or external authority.
 
+Present onboarding preference choices one at a time in the client’s native single-select question box. Preserve default and recommendation labels even when the client orders the recommendation first. Record only submitted answers. If the box is unavailable or unanswered, leave the choice pending and continue independent authorized setup.
+
 ## Selected managed planning
 
 Read [managed-plan](managed-plan.md) only when the selected operation uses the canonical managed dispatcher. It defines its pinned source bundle, bounded plan/inventory schemas, review and recovery bindings. Do not use its task-state or qualification prerequisites to block ordinary development. “Managed planning” refers to that dispatcher; standalone file-only authoring may still use packaged file tools without managed runtime, task state or managed authority.
