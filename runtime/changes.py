@@ -5787,7 +5787,7 @@ def _run_scoped(plan_dir, request, operation, *, host=None, entry_authorizer=Non
             journal = _load_journal(path, file_only=file_only)
             if journal is not None:
                 d3._require(all(row['stopped'] for row in journal.get('native_observations',{}).values()),
-                    'Original external native descendants remain uncertain; reconcile their exact source claims before project effects')
+                    'Original external native source claims remain uncertain; reconcile their exact source claims before project effects')
                 d3._require(journal["schema_version"] == 2 and journal["manifest"] == m and journal["approval"] == request["approval"] and journal["plan"] == plan, "Scoped journal binding changed")
                 if entry_authorizer is None:
                     ownership["journal"]=journal

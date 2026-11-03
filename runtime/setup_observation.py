@@ -344,12 +344,13 @@ def _collect_content(observed, accepted_identity, transaction_id, verified_asses
         'Genuine frontend bootstrap observations are missing')
     d3._require(set(observed['observations']) <= set(BEHAVIOR_CASES), 'Unknown frontend behavior claim')
     observations = dict(observed['observations'])
-    inherited_safety=None
+    inherited_safety=None;inherited_contract=None
     if predecessor is not None:
         previous, _ = _retained_reference(predecessor,budget)
         d3._require(previous['identity'] == identity, 'Successor frontend observation changed original accepted scope')
         _monotonic_coverage(previous,dict(version=2,assessment=assessment))
         inherited_safety=previous.get('source',{}).get('native_safety')
+        inherited_contract=previous.get('source',{}).get('native_source_contract')
         for row in previous.get('assessment',{}).get('cases',[]):
             if row.get('status','verified') == 'verified':
                 observations.setdefault(row['id'],previous.get('source',{}).get('observations',{}).get(row['id'],row['evidence']))
@@ -422,6 +423,7 @@ def _collect_content(observed, accepted_identity, transaction_id, verified_asses
         native=native, configuration=config, runs=[], assessment=assessment, predecessor=predecessor,
         source=dict(binding=binding,bootstrap=observed['bootstrap'],observations=observations,
             pending_reason=observed['pending_reason']))
+    if inherited_contract is not None:content['source']['native_source_contract']=startup._canonical_copy(inherited_contract)
     if observed.get('native_safety') is not None:
         content['source']['native_safety']=_native_safety(observed['native_safety'])
     elif inherited_safety is not None:
@@ -466,7 +468,10 @@ def receipt_shape(content):
             startup._canonical_ref(content['predecessor'])
             d3._require('#setup:' in content['predecessor']['reference'],'Setup predecessor must name a full retained setup receipt')
         source = content['source']
-        d3._object(source, ('binding','observations','bootstrap','pending_reason'), ('capture_reference','command_origins','command_origin','source_capture','native_safety','native_origin','native_capture','managed'))
+        d3._object(source, ('binding','observations','bootstrap','pending_reason'), ('capture_reference','command_origins','command_origin','source_capture','native_safety','native_origin','native_capture','managed','native_source_contract'))
+        if 'native_source_contract' in source:
+            d3._require(source.get('native_origin') is not None or source.get('native_capture') is not None or content['predecessor'] is not None,
+                'Limited native source lost its original lifecycle provenance')
         if 'native_safety' in source:_native_safety(source['native_safety'])
         if content['assessment'].get('bootstrap',{}).get('status')=='verified':
             d3._require(_bootstrap_verified(content),'Original native bootstrap lost its actual safety evidence')
@@ -660,7 +665,7 @@ def collect_retained_setup(reference, identity, new_transaction, assessment, *, 
     if native_origin:
         row,journal,part=_read_native_reference(reference,budget)
         d3._require(part is None and row['result']['kind']=='setup','A filtered native setup source is required')
-        original=row['result']['content']
+        original=row['result']['content'];native_contract=row.get('source_contract')
     else:original,journal=_retained_reference(reference,budget)
     d3._require(original['identity']==startup._canonical_plain(identity) and 'assessment' in original
         and original['transaction_id']!=new_transaction,'Retained setup needs a complete filtered source and a new exact transaction')
@@ -680,6 +685,7 @@ def collect_retained_setup(reference, identity, new_transaction, assessment, *, 
         'Original observable setup configuration changed')
     content.update(version=2,transaction_id=new_transaction,assessment=assessment,predecessor=original.get('predecessor') if native_origin else reference)
     content['source']['native_origin' if native_origin else 'capture_reference']=reference
+    if native_origin and native_contract is not None:content['source']['native_source_contract']=startup._canonical_copy(native_contract)
     return _SetupObservation(startup._canonical_freeze(content),_ISSUER)
 
 
@@ -841,7 +847,9 @@ def _authorization_shape(value):
 
 
 def _native_execution(value):
-    d3._object(value,('argv','cwd','timeout_seconds','external_effects','serialization_reference'))
+    d3._object(value,('argv','cwd','timeout_seconds','external_effects','serialization_reference'),('source_contract',))
+    if 'source_contract' in value:
+        d3._require(value['source_contract']=='bounded-native-source-v1','Unknown native source lifecycle contract')
     d3._strings(value['argv'],empty=False);startup._canonical_path(value['cwd'])
     d3._require(type(value['timeout_seconds']) is int and 1<=value['timeout_seconds']<=300,
         'Native observation needs its original bounded duration')
@@ -860,12 +868,46 @@ def _native_allocation(journal,row):
     return allocation
 
 
+def _native_source_contract(allocation):
+    if allocation['native_execution'].get('source_contract') is None:return None
+    return dict(version=1,kind='bounded-native-source-v1',client_startup_descendants='unknown',
+        limitation='Client-managed startup descendants may remain unobserved and cause late effects; this closes only the exact source process claim.')
+
+
+def _native_reconciliation(row,proof):
+    from runtime.changes import _evidence
+    common=('claim_id','pid','returncode','stopped')
+    limited='source_contract' in row
+    fields=('reaped','process_evidence','writer_assessment_evidence','identified_writers_reconciled',
+        'pending_workflow_hooks','unexpected_tool_or_spawn','unexplained_project_effects','ownership_conflicts') if limited else ('descendants_stopped','evidence')
+    d3._object(proof,common+fields)
+    d3._require(all(proof[key]==row[key] for key in ('claim_id','pid','returncode')) and proof['stopped'] is True,
+        'Native reconciliation selected another original process')
+    if limited:
+        d3._require(type(row['pid']) is int and row['pid']>0 and type(row['returncode']) is int
+            and type(proof['pid']) is int and type(proof['returncode']) is int and proof['reaped'] is True
+            and proof['identified_writers_reconciled'] is True
+            and all(proof[key] is False for key in ('pending_workflow_hooks','unexpected_tool_or_spawn','unexplained_project_effects','ownership_conflicts')),
+            'Native source has an unresolved process, identified writer, hook or effect')
+        refs=[proof['process_evidence'],proof['writer_assessment_evidence']]
+        d3._require(all(_evidence(ref) for ref in refs) and refs[0]!=refs[1],
+            'Native source needs independent process and writer/effect assessment references')
+    else:
+        d3._require(proof['descendants_stopped'] is True and _evidence(proof['evidence'],many=True)
+            and len({d3._digest(ref) for ref in proof['evidence']})>=2,'Native source descendants lack original full-stop proof')
+
+
 def _native_rows_shape(journal):
     rows=journal['native_observations']
     d3._require(isinstance(rows,dict) and len(rows)<=64,'Native source claim bound exceeded')
     for key,row in rows.items():
-        d3._object(row,('claim_id','attempt_ref','identity','allocation_digest','status','returncode','pid','stopped','result','before','after','context','reconciliation'))
+        d3._object(row,('claim_id','attempt_ref','identity','allocation_digest','status','returncode','pid','stopped','result','before','after','context','reconciliation'),('source_contract',))
         allocation=_native_allocation(journal,row)
+        contract=_native_source_contract(allocation)
+        d3._require(row.get('source_contract')==contract and ('source_contract' in row)==(contract is not None),
+            'Native source changed its original lifecycle contract')
+        if row['reconciliation'] is not None:_native_reconciliation(row,row['reconciliation'])
+        d3._require(row['stopped']==(row['reconciliation'] is not None),'Native source stopped state lacks exact reconciliation')
         d3._require(key==d3._digest(row['attempt_ref']) and 'native_execution' in allocation,
             'Native source lost its original allocation')
         d3._require(d3._digest(row['identity'])==journal['qualification_scope']['target']['accepted_scope_digest'],
@@ -875,7 +917,7 @@ def _native_rows_shape(journal):
             and (row['returncode'] is None or type(row['returncode']) is int)
             and (row['pid'] is None or type(row['pid']) is int and row['pid']>0),'Unknown native observation outcome')
         d3._require(row['status']!='reconciled' or row['stopped'] and row['reconciliation'] is not None,
-            'Native source lacks original descendant reconciliation')
+            'Native source lacks its original lifecycle reconciliation')
         if row['result'] is not None:
             d3._object(row['result'],('kind','content'))
             if row['result']['kind']=='setup':receipt_shape(row['result']['content'])
@@ -902,6 +944,7 @@ def _native_result(context,result):
                 and content['configuration']['package_root']==payload['package_root']
                 and content['native']['executable']==payload['native']['executable'],'Native metadata changed original frontend inputs')
             content['source']['native_capture']=capture
+            if 'source_contract' in original:content['source']['native_source_contract']=startup._canonical_copy(original['source_contract'])
         return dict(kind='setup',content=content)
     try:payload=doctor._native_witness_content(result)
     except doctor.ObservationError:raise startup.StartupError('Actual issued native source is required') from None
@@ -918,6 +961,7 @@ def _native_reference(directory,row,part=None):
     else:
         d3._require(part in ('before','after','context'),'Unknown native source fact');route+=':'+part;body=row[part]
     d3._require(body is not None,'Native source fact is unavailable')
+    if 'source_contract' in row:body=dict(source_contract=row['source_contract'],fact=body)
     return dict(reference=route,sha256=d3._digest(body))
 
 
@@ -935,16 +979,17 @@ def _read_native_reference(reference,budget):
     row=journal.get('native_observations',{}).get(parts[0])
     d3._require(row is not None and row['claim_id']==parts[1] and row['status']=='reconciled' and row['stopped']
         and row['reconciliation'] is not None and row['result'] is not None,
-        'Original native observation and writable descendants are not reconciled')
+        'Original native source claim is not reconciled')
     part=parts[2] if len(parts)==3 else None
     d3._require(reference==_native_reference(pointer.parent,row,part),'Original native observation changed')
     return dict(row,allocation=_native_allocation(journal,row)),journal,part
 
 
 def _native_provenance(content,budget):
-    source=content.get('source',{})
+    source=content.get('source',{});originals={}
     if 'native_origin' in source:
         row,_,part=_read_native_reference(source['native_origin'],budget)
+        originals[d3._digest(source['native_origin'])]=row
         d3._require(part is None and row['result']['kind']=='setup','Original filtered native source is unavailable')
         original=row['result']['content']
         d3._require(all(original[key]==content[key] for key in ('identity','native','configuration'))
@@ -952,14 +997,21 @@ def _native_provenance(content,budget):
             and all(all(proof in source['observations'].get(case,[]) for proof in proofs)
                 for case,proofs in original['source']['observations'].items()),
             'Native setup source was replayed or changed')
+        d3._require(source.get('native_source_contract')==(row.get('source_contract') or original['source'].get('native_source_contract')),
+            'Retained native source lost its limited lifecycle scope and late-effect risk')
     if 'native_capture' in source:
         row,_,part=_read_native_reference(source['native_capture'],budget)
+        originals[d3._digest(source['native_capture'])]=row
         d3._require(part is None and row['result']['kind']=='native-fragment' and row['identity']==content['identity'],
             'Original native frontend capture changed')
+        if 'source_contract' in row:
+            d3._require(source.get('native_source_contract')==row['source_contract'],
+                'Native frontend capture lost its limited lifecycle scope and late-effect risk')
     if source.get('native_safety') is not None:
         safety=_native_safety(source['native_safety']);before_ref,after_ref=safety['evidence'][-2:]
         before,_,before_part=_read_native_reference(before_ref,budget)
         after,_,after_part=_read_native_reference(after_ref,budget)
+        originals[d3._digest(before_ref)]=before;originals[d3._digest(after_ref)]=after
         probe=before['allocation'].get('probe')
         original_route=before_ref['reference'].rsplit(':',1)[0]
         after_source=after['allocation'].get('source_capture')
@@ -969,6 +1021,20 @@ def _native_provenance(content,budget):
             and before['before']['target']['fingerprint']['mode'] & 0o222 and after['after']==before['before']
             and (after['claim_id']==before['claim_id'] or after_source is not None and after_source['reference']==original_route),
             'Native policy probe lost its independent original before/after facts')
+        for row in (before,after):
+            if 'source_contract' in row:
+                d3._require(source.get('native_source_contract')==row['source_contract'],
+                    'Native safety evidence lost its limited lifecycle scope and late-effect risk')
+    for proofs in source.get('observations',{}).values():
+        for reference in proofs:
+            if '#native-observation:' not in reference['reference']:continue
+            token=d3._digest(reference)
+            if token not in originals:originals[token]=_read_native_reference(reference,budget)[0]
+            row=originals[token]
+            d3._require(row['identity']==content['identity'],'Retained native behavior evidence changed original scope')
+            if 'source_contract' in row:
+                d3._require(source.get('native_source_contract')==row['source_contract'],
+                    'Retained native behavior evidence lost its limited lifecycle scope and late-effect risk')
 
 
 def _live_native_context(decision,process):
