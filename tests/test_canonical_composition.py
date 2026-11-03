@@ -530,7 +530,7 @@ class CanonicalFixtureFoundationTests(CanonicalBirthFixture):
             context=startup.orient(event,state.PACKAGE)
         self.assertEqual(snapshot(),before)
         self.assertFalse(member_path.exists() or member_path.is_symlink())
-        self.assertIn(f"accepted project configuration at {json.dumps(str(scope.authority_path))}.",context)
+        self.assertIn(f"accepted project configuration at {json.dumps(str(scope.authority_path))}",context)
         self.assertNotIn(json.dumps(str(member_path)),context)
 
     def test_umbrella_orientation_uses_project_authority(self):

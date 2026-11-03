@@ -47,6 +47,12 @@ passed after the shared startup mock was corrected to forward `managed` without
 weakening its assertions. The mock change received independent follow-up review.
 Package validation passed. See [the validation record](../../d4-validation.md).
 
+Before integration, merge newer main `c010e7f`, regenerate the single stale runtime
+instruction-map entry and preserve newer startup behavior. Expanded integration
+coverage is cumulative 207/207: 205 passing cases plus the two corrected
+authority-path assertions on a focused rerun. Independent review covers these
+small adaptations; no production behavior was changed after that expanded run.
+
 ## Review focus
 
 Absence is not stopped-writer proof. Broken links and malformed/interrupted

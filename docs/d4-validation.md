@@ -34,6 +34,17 @@ blocking issue in that mock change. Package validation and `git diff --check`
 passed. This establishes the selected source/fixture behavior, not a complete
 repository-wide suite or native-client qualification.
 
+Integration with main `c010e7f` also covers prepared instruction loading and the
+updated startup/runtime paths. Regenerating the prepared map changes only the
+`clients/runtime.md` entry; its two bounded pages reconstruct all 96 lines exactly.
+The expanded run passed 205 of 207 cases in 537.097 seconds. Two orientation
+assertions expected a period after the quoted authority path, while newer main
+continues that sentence. Removing only that punctuation expectation preserves
+the exact path, state/inode/mode/mtime and member-authority checks. Both affected
+cases then passed in 9.211 seconds. Independent integration review confirmed that
+production code and the map were unchanged, so the other 205 results remain
+applicable: cumulative coverage is 207/207, not a second full-suite run.
+
 Manual/static instruction checks cover ordinary native editing, explicit birth,
 known-owner conflicts and file-only undo. Required local procedures remain
 reachable without Toolkit retrieval; ordinary work gains no runtime prerequisite.

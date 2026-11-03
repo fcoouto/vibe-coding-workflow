@@ -91,6 +91,25 @@ def render_runtime(result: HookResult) -> dict | None:
     return {"hookSpecificOutput": {"hookEventName": kind, "additionalContext": reason}}
 
 
+def with_output_notice(payload, output):
+    """Surface the observed child marker; later outer clipping is not visible here."""
+    if (not isinstance(payload, dict) or payload.get("hook_event_name") != "PostToolUse"
+            or payload.get("tool_name") != "Bash"):
+        return output
+    response = payload.get("tool_response")
+    if not isinstance(response, str) or not response.startswith("Warning: truncated output (original token count:"):
+        return output
+    # Stdout can imitate this prefix; emit only constant advisory text.
+    notice = ("The tool response contains a truncation marker. Recover any missing instructions or evidence "
+              "required for this task before relying on it; retain complete material already received.")
+    result = dict(output or {})
+    specific = dict(result.get("hookSpecificOutput", {}))
+    previous = specific.get("additionalContext", "")
+    specific.update(hookEventName="PostToolUse", additionalContext=(previous + "\n" if previous else "") + notice)
+    result["hookSpecificOutput"] = specific
+    return result
+
+
 def runtime_diagnostic(kind, reason):
     """Errors never block an unvalidated scope or replace a completed tool result."""
     return {"systemMessage": f"Vibe Coding Workflow {kind} runtime unavailable: {reason}. "

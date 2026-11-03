@@ -136,6 +136,22 @@ class StartupTests(unittest.TestCase):
         self.assertNotIn("https://", context)
         self.assertEqual(record.read_bytes(), before)
 
+    def test_prepared_bootstrap_command_delivers_current_sources_without_runtime(self):
+        self.enroll()
+        context = self.invoke()["hookSpecificOutput"]["additionalContext"]
+        if self.client != "codex":
+            self.assertNotIn("read_instructions.py", context)
+            return
+        self.assertIn("read_instructions.py", context)
+        command = shlex.split(context.split("`")[1])
+        self.assertEqual(command[0:3], ["python3", "-I", "-B"])
+        result = subprocess.run(command, cwd=self.repo, capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertLessEqual(len(result.stdout), 9500)
+        for path in ("clients/codex.md", "policies/00-index.md"):
+            self.assertIn((PACKAGE / path).read_bytes(), result.stdout)
+        self.assertFalse(any(self.base.rglob("runtime.sqlite3")))
+
     def test_nested_directory_and_symlink_resolve_same_checkout(self):
         self.enroll()
         nested = self.repo / "src/deep"
