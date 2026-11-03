@@ -417,6 +417,25 @@ class MachineFamilyDiscoveryTests(unittest.TestCase):
         home.start();self.addCleanup(home.stop)
         self.family=self.fixture.base/'.vibe-coding-workflow/workstreams-families.sqlite3'
 
+    def test_session_start_keeps_ordinary_guidance_for_active_runtime(self):
+        from runtime import startup
+
+        acquisition = self.acquire(managed=None)
+        self.assertEqual(acquisition, self.acquire(managed=False))
+        self.assertIsNone(startup._entry_scope(acquisition, managed=False).runtime)
+
+        digest = self.scope.runtime_digest
+        for failures in ([OSError], [digest, OSError], [digest, 'f' * 64]):
+            with self.subTest(fingerprint=failures), patch('runtime.state.runtime_fingerprint', side_effect=failures):
+                self.assertEqual(self.acquire(managed=None), acquisition)
+
+        directory = self.scope.runtime.state_dir
+        retained = self.fixture.base / 'retained-runtime'
+        directory.rename(retained)
+        directory.symlink_to(retained, target_is_directory=True)
+        self.assertEqual(self.acquire(managed=None), acquisition)
+        self.assertEqual(self.acquire().resolution.reason, 'runtime_location_unsafe')
+
     def reserve(self,home=None):
         from scripts.workstreams_family import reserve
         path=(home or Path.home())/'.vibe-coding-workflow/workstreams-families.sqlite3'

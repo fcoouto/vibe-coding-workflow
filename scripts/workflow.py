@@ -299,7 +299,8 @@ def main():
             raise StartupError("CLI event does not match the payload event")
         if requested_event == "SessionStart":
             start = adapter.normalize(payload)
-            acquisition = acquire_project_entry(start, PACKAGE, managed=False, deadline=deadline)
+            # SessionStart uses managed scope only for restricted qualification context.
+            acquisition = acquire_project_entry(start, PACKAGE, managed=None, deadline=deadline)
             output = adapter.render(orient(start, PACKAGE, acquisition=acquisition))
             if start.client == "codex":
                 try:
