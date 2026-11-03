@@ -98,3 +98,19 @@ An offline replay with the same observed child and an isolated context copy
 produced `Canary scout · 東京 · gpt-6.1-sol`. This checks correlation after
 metadata is available. It leaves the live first badge gate open. A Desktop
 chat that loads the changed hook is needed for the next bounded attempt.
+
+## Fresh Desktop receiver qualification
+
+A fresh Desktop chat on the PR worktree ran one read-only native child with
+inherited settings. The staged start hook bound the declared context to the
+observed child. The first Habblaud 1.0.3 snapshot after dispatch, revision 12773,
+showed `Canary scout · 東京 · gpt-6.1-sol` under the actual parent. An independent
+read confirmed the same child, parent, checkout, creation marker and configured
+model through the bundled Codex 0.166.0-alpha.5.1 observer. This qualifies the
+receiver badge for that label. Visual rendering remains unobserved.
+
+The user approved OpenRouter worker consent version 2 on the primary checkout
+and one read-only run with the two inspected fixtures, four steps and 120 seconds.
+The primary checkout reports configured enrollment without accepted managed
+authority or a schema-3 runtime. The supported OpenRouter configuration path
+requires both. Consent remains unsaved and the canary allocation remains unused.
