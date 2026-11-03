@@ -7,13 +7,46 @@ Use for an explicitly selected existing project, authorized update, repair or re
 Read the [policy index](../../../policies/00-index.md), [Project Scope](../../../policies/01-project-scope.md), [Project Onboarding](../../../policies/10-project-onboarding.md), applicable local instructions and linked policies. For setup authoring, resolve the canonical [Vibe Coding Toolkit](https://github.com/soumatheusgomes/vibe-coding-toolkit) revision once. Assess every component in its complete catalog for relevance, current adoption or an equivalent, and any useful action. Read the component guidance and linked sources needed for the selected work; keep provenance in authoring records, not routine task loading.
 
 1. Confirm the selected checkout and applicable instructions. Follow [client startup integration](../../../policies/10-project-onboarding.md#client-startup-integration) for each selected client. Keep workspace preparation and new-project creation separate; do not enroll the toolkit checkout just because it is the current working directory.
-2. Inspect relevant project configuration, commands and paths. Separate observed facts from assumptions, and preserve user changes, data, permissions, model/provider choices and existing protections.
+2. Inspect relevant project configuration, commands and paths. Separate observed facts from assumptions, and preserve user changes, data, permissions, model/provider choices and existing protections. Resolve missing [project preferences](#project-preference-questions) before preparing changes.
 3. Make only authorized, useful changes. Retain a recoverable private backup before meaningful configuration changes; use the [configuration and undo contract](apply-and-recovery.md#file-configuration-and-undo) for managed file operations. Load detailed procedures only for a selected capability.
 4. Run useful project commands and relevant local/client checks. Report what they establish and what remains unknown. Leave the user useful guidance, working commands, limitations and an undo location.
 
 When using packaged file tools for standalone basic setup, select `project_scope.inspection_scope: "relevant"`. This inspects only the project inputs needed for the requested edits: applicable ancestor/directory instructions, selected inputs and targets, their preimages, and the physical target scope. The tools capture planned write/delete/evidence paths; unrelated checkout state and a full file census are outside this partial snapshot. It grants no command execution inside the file transaction, runtime activation or managed authority. Run ordinary project checks natively under existing permission. Keep the Toolkit component-catalog assessment complete even when only selected files are inspected. Explain this as “inspect relevant project files”; do not ask users to select an internal JSON mode.
 
 Use [Verify and finish](../../../policies/10-project-onboarding.md#verify-and-finish) to assess completion, including startup integration and the local procedures reached through generated project guidance. This does not establish AcceptedScope, task readiness, managed runtime activation, qualification, merge readiness or external authority.
+
+Present onboarding preference choices one at a time in the client’s native single-select question box. Preserve default and recommendation labels even when the client orders the recommendation first. Record only submitted answers. If the box is unavailable or unanswered, leave the choice pending and continue independent authorized setup.
+
+## Project preference questions
+
+After identifying the repository, remote and primary branch, and before preparing
+changes, resolve missing preferences in the order below. Use the native
+single-select rule above for each question. Reuse existing decisions and keep
+answers bound to the selected repository and target. Explain the effect before
+asking. If the remote does not support PRs or the target is unknown, report the
+affected choice as inapplicable or pending, respectively.
+
+1. **How should agents publish completed task changes in `<repository_name>`?**
+   State the remote and explain that draft PRs make changes and checks available
+   for review.
+   - Keep changes local. Ask me before committing or publishing. (default)
+   - Commit the task changes, push a task branch, and open a draft PR. (recommended)
+2. **May agents merge pull requests into `<project_name>`’s primary branch, `<primary_branch_name>`?**
+   Explain that permission is scoped to the named target and still depends on
+   [merge readiness](../../../policies/08-merge-readiness.md).
+   - No. I will review and merge them myself. (default)
+   - Yes. Merge independently reviewed PRs marked `[READY]` when all required checks pass.
+3. **Enable Workstreams for `<project_name>`?**
+   Explain that this records a preference while separate activation remains
+   deferred. Link to [Workstreams](../../workstreams/SKILL.md) for details.
+   - Keep it off for now. (default)
+   - Yes. Enable Workstreams for this project. (recommended)
+
+Retain submitted choices in the setup record with their scope and provenance.
+Publication and merge choices are separate. The `[READY]` marker summarizes
+verified readiness and grants no authority. Workstreams answers leave resource
+admission and capacity recovery settings intact. Report saved choices and
+pending effects separately.
 
 ## Selected managed planning
 
