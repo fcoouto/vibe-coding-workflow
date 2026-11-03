@@ -524,8 +524,8 @@ class CanonicalFixtureFoundationTests(CanonicalBirthFixture):
         self.assertFalse(member_path.exists() or member_path.is_symlink())
         event=startup.StartupEvent('codex','canonical-session',fixture.repo,'startup')
         actual_acquire=startup.acquire_project_entry
-        def qualified_entry(event,package):
-            return actual_acquire(event,package,qualifier=lambda record,facts:observation)
+        def qualified_entry(event,package,*,managed=True):
+            return actual_acquire(event,package,qualifier=lambda record,facts:observation,managed=managed)
         with patch.object(startup,'acquire_project_entry',side_effect=qualified_entry):
             context=startup.orient(event,state.PACKAGE)
         self.assertEqual(snapshot(),before)

@@ -82,4 +82,15 @@ Load this section only for an authorized runtime update or recovery. Follow [app
 
 For managed runtime preparation, create the schema-3 database only through the explicitly approved D4 birth operation after it verifies proposed, actual and backup authority coverage and all affected writers. File-only configuration and undo do not require a database. The managed database is seeded with its original baseline and ownership receipts; task start refuses to create it directly. Preserve existing M schema-2 and E schema-3 authorities, artifacts, packages, paths and pins unchanged. Do not migrate in place, copy old successful evidence, silently repin tasks or roll back into an old active runtime. A separate state directory does not clear old ownership. Unknown authority, an unsupported old runtime or unverified writer/descendant state blocks the affected transition.
 
+Fresh D4 birth does not create unrelated temporary-review storage. Existing
+machine history retains its original ready provenance; a genuinely absent machine
+configuration uses a bounded absence witness instead. Unsafe or interrupted
+configuration and missing known stores remain protected. A changed witness blocks
+an in-progress birth. For completed births, later unrelated machine storage does
+not replace the original certificate; related owners still require reconciliation.
+Absence never proves that an old writer or descendant stopped.
+Choose a separate state directory if creating it would also create a missing
+machine-configuration parent; D4 refuses that overlap before writing anything.
+An already-existing private machine parent remains supported.
+
 D4's shared authority guard protects relevant reservation scans through enrollment changes. A protected long operation keeps a durable owner reference while running; a crash or elapsed time does not clear it. Use supported resume/rollback to reconcile that exact operation and its descendants before continuing. Package checks and successful activation do not establish native client execution.

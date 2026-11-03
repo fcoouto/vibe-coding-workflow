@@ -1593,6 +1593,9 @@ def _birth_intent(plan, manifest, history, *, plan_dir):
         d3._require(next(directory.iterdir(), None) is None, 'Unknown existing birth directory content')
     missing = []; parent = directory
     while not parent.exists(): missing.append(str(parent)); parent = parent.parent
+    d3._require(history['version'] != 2 or not any(
+        Path(history['machine']['path']).is_relative_to(Path(name)) for name in missing),
+        'Birth storage would create missing machine-history parents; choose a separate state directory')
     destination = dict(directory=str(directory), database=str(directory / 'runtime.sqlite3'),
         parents=review_storage._parents(directory, existing=True), missing_directories=list(reversed(missing)),
         directory_preimage=dict(status='private-empty' if directory.exists() else 'absent',
