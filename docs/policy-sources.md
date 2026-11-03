@@ -1,5 +1,17 @@
 # Policy source map
 
+## Shared worker roles — 3 November 2026
+
+The user approved explicit role and custom-name visibility for native and
+OpenRouter workers. The [shared visibility contract](../clients/worker-visibility.md)
+extends the existing optional OpenRouter/local-delegation display transport.
+It preserves Toolkit delegation, specialist responsibility, ownership and
+independent verification requirements. Native and external identities remain
+distinct; immutable markers, original pins and authority roles are unchanged.
+The extension grants no new execution route or installation authority. Source
+fixtures verify label delivery behavior; actual client rendering and first-binding
+compatibility remain unqualified.
+
 ## Managed-runtime birth without unrelated history — 3 November 2026
 
 The user's selected D4 slice removes temporary-review storage as a prerequisite

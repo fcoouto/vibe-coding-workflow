@@ -206,6 +206,15 @@
         ]
       ]
     },
+    "clients/worker-visibility.md": {
+      "sha256": "8948995236fcb7dfe99c4695ba77bac9d6519684bf92327a55d6f5e13be8171b",
+      "ranges": [
+        [
+          1,
+          97
+        ]
+      ]
+    },
     "clients/workstreams-naming.md": {
       "sha256": "5e3214d64c62669e31e484fca8fca6f1a4775395c3284bcf76c77492eacc1846",
       "ranges": [
@@ -300,7 +309,7 @@
       ]
     },
     "policies/03-agent-delegation.md": {
-      "sha256": "369ce393a9de036e1001f292a87ac6eb32d51dc8bdfbc774869ba15e5a2d4af0",
+      "sha256": "d61073d192a2f86dbca6e970d1dd1c4f11ac4cf6de7e51cb89797847bde2e67a",
       "ranges": [
         [
           1,
@@ -308,7 +317,7 @@
         ],
         [
           42,
-          58
+          60
         ]
       ]
     },
@@ -547,15 +556,15 @@
       ]
     },
     "skills/openrouter-workers/references/procedure.md": {
-      "sha256": "86aaa1036b9b0ad3ab1f42b14e300f2035e76c9b186a12ce178995b29824bb5b",
+      "sha256": "be7fe34779601c5c2c9a69fa083543f04be0154f7aceafca7d7a86dbb46fb55b",
       "ranges": [
         [
           1,
-          125
+          122
         ],
         [
-          126,
-          170
+          123,
+          179
         ]
       ]
     },
