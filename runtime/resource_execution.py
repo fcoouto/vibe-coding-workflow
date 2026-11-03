@@ -83,11 +83,13 @@ def _eligible(owner):
 
 
 def operate(scope, directory, action, request):
-    """Run only once per phase; uncertain execution retains capacity for reconciliation."""
+    """Release finite foreground capacity; assignment and writer ownership stay separate."""
     from runtime import resource_admission as host
     evidence._request(request, ('attempt_id','phase_id'),
-        ('resource_revision','workstream_revision','cpu','memory_bytes','capacity_cpu','capacity_memory_bytes','argv','wait_seconds','timeout_seconds','disk_bytes','host_proof'))
+        ('resource_revision','workstream_revision','cpu','memory_bytes','capacity_cpu','capacity_memory_bytes','argv','wait_seconds','timeout_seconds','disk_bytes','host_proof','background'))
     state._text(request['phase_id'], 'resource phase', 128)
+    background = request.get('background', False)
+    d6._require(type(background) is bool, 'Invalid background declaration')
     d6._require(action in {'run','status','release','cancel'}, 'Unknown resource action')
     d6._require('host_proof' not in request or action == 'release', 'Phase proof belongs only to release')
     revisions = {'resource_revision', 'workstream_revision'} & request.keys()
@@ -102,7 +104,7 @@ def operate(scope, directory, action, request):
         return dict(ok=True, reservations={key:value | (dict(execution_digest=evidence._digest(value['execution']))
             if 'execution' in value else {}) for key,value in snapshot['reservations'].items()
             if all(value['request']['owner'].get(k)==v for k,v in owner.items())},
-            next_action='Inspect original execution and independently reconcile stopped owners before releasing active reservations')
+            next_action='Inspect active reservations and reconcile known services or uncertain execution; released capacity does not settle assignment writers')
     if action in {'release','cancel'}:
         row=snapshot['reservations'].get(identity)
         d6._require(row is not None and all(row['request']['owner'].get(k)==v for k,v in owner.items()), 'Resource owner changed')
@@ -143,7 +145,10 @@ def operate(scope, directory, action, request):
     disk=request.get('disk_bytes',0)
     state._integer(disk,'disk demand')
     # Bind the phase to its command without allowing changed retries to launch again.
-    owner=owner | dict(command_digest=evidence._digest(dict(argv=argv,disk_bytes=disk)))
+    command = dict(argv=argv, disk_bytes=disk)
+    if background:
+        command['background'] = True
+    owner=owner | dict(command_digest=evidence._digest(command))
     deadline=plan['limits']['deadline'];end=min(time.monotonic()+wait,time.monotonic()+max(0,deadline-time.time()))
     while True:
         _authority(scope,request)
@@ -175,10 +180,13 @@ def operate(scope, directory, action, request):
         def tail(stream):
             size=stream.tell();stream.seek(max(0,size-16384));return stream.read().decode('utf-8',errors='replace')
         execution = dict(pid=child.pid, returncode=code)
-        host.control(directory, 'complete', dict(id=identity, owner=owner, execution=execution))
-        # Arbitrary commands can detach descendants; native stop reconciliation owns release.
-        return result | dict(returncode=code,stdout=tail(stdout),stderr=tail(stderr),pid=child.pid,execution_digest=evidence._digest(execution),
-            released=False,uncertain=True,reason='command exited; independently reconcile descendants before release')
+        retained = background or any(claim['kind'] in {'service', 'port'} and claim['mode'] == 'write'
+            for claim in record['data']['claims'])
+        completed = host.control(directory, 'complete', dict(id=identity, owner=owner, execution=execution, release=not retained))
+        # Capacity completion never reconciles assignment writers or proves descendants stopped.
+        return result | completed | dict(returncode=code,stdout=tail(stdout),stderr=tail(stderr),pid=child.pid,execution_digest=evidence._digest(execution),
+            released=not retained,uncertain=retained,reason='known background service; reconcile before releasing capacity' if retained else
+            'foreground command exited; cooperative capacity released, assignment ownership unchanged')
 
 
 def host_directory():

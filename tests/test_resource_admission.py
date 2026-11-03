@@ -124,6 +124,36 @@ class ResourceAdmissionTests(unittest.TestCase):
             dict(path='/trusted/proof', sha256='a' * 64)))['state'], 'cancelled')
         self.assertEqual(self.call('status', {})['reservations']['one']['execution'], execution)
 
+    def test_finite_completion_reuses_capacity_without_stopped_proof_or_replay(self):
+        for code in (0, 7, -15):
+            with self.subTest(returncode=code):
+                request = self.request(str(code), cpu=2)
+                self.call('request', request)
+                owner = dict(id=request['id'], owner=request['owner'])
+                execution = dict(pid=123, returncode=code)
+                result = self.call('complete', owner | dict(execution=execution, release=True))
+                self.assertEqual(result['state'], 'released')
+                self.assertFalse(result['admitted'])
+                saved = self.call('status', {})['reservations'][request['id']]
+                self.assertEqual(saved['execution'], execution)
+                self.assertIsNone(saved['proof'])
+                self.assertFalse(self.call('request', request)['admitted'])
+                with self.assertRaises(state.StateError):
+                    self.call('complete', owner | dict(execution=execution, release=True))
+
+    def test_capacity_completion_rejects_invalid_receipts_and_release_flags(self):
+        request = self.request()
+        self.call('request', request)
+        owner = dict(id=request['id'], owner=request['owner'])
+        for execution, release in [(dict(pid=0, returncode=0), True),
+                (dict(pid=123, returncode=True), True), (dict(pid=123), True),
+                (dict(pid=123, returncode=0), 'yes')]:
+            with self.subTest(execution=execution, release=release), self.assertRaises(state.StateError):
+                self.call('complete', owner | dict(execution=execution, release=release))
+        saved = self.call('status', {})['reservations'][request['id']]
+        self.assertEqual(saved['state'], 'active')
+        self.assertNotIn('execution', saved)
+
     def test_corruption_and_symlink_are_not_telemetry_failures(self):
         self.call('request', self.request())
         path = self.directory/'admission.json'

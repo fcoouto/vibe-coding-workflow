@@ -1,6 +1,8 @@
 """Ordinary edits need guidance, not optional managed task authority."""
+import hashlib
 import json
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -16,6 +18,13 @@ class MinimalDefaultTests(unittest.TestCase):
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
         return fixture
+
+    def configured_fixture(self):
+        owner = file_fixtures.FileConfigurationTests('runTest')
+        self.addCleanup(owner.doCleanups)
+        fixture, request = owner.configuration()
+        self.assertEqual(owner.operate(fixture, request, 'apply')['exit_code'], 0)
+        return fixture, SimpleNamespace(client='codex', cwd=fixture.repo, session_id='ordinary')
 
     def test_ordinary_patch_has_no_task_prerequisite(self):
         fixture = self.runtime_fixture()
@@ -56,6 +65,64 @@ class MinimalDefaultTests(unittest.TestCase):
         with self.assertRaises(startup.RuntimeScopeError):
             startup._entry_scope(acquired)
         self.assertFalse(any(fixture.base.rglob('runtime.sqlite3')))
+
+    def test_basic_guidance_ignores_package_updates_without_rewriting_provenance(self):
+        fixture, event = self.configured_fixture()
+        authority = fixture.repo / startup.PROJECT_FILE
+        original = authority.read_bytes()
+        with patch.object(startup, 'policy_digest', return_value='e' * 64) as policy, \
+                patch.object(state, 'runtime_fingerprint', return_value='f' * 64) as runtime:
+            acquired = startup.acquire_project_entry(event, state.PACKAGE, managed=False)
+            self.assertEqual(acquired.resolution.reason, 'basic_guidance')
+            scope = startup._entry_scope(acquired, managed=False)
+            self.assertIsInstance(scope, startup.ProjectScope)
+            self.assertNotIsInstance(scope, startup.AcceptedScope)
+            self.assertIsNone(scope.runtime)
+            policy.assert_not_called()
+            runtime.assert_not_called()
+            with self.assertRaises(startup.RuntimeScopeError):
+                startup._entry_scope(acquired)
+            managed = startup.acquire_project_entry(event, state.PACKAGE)
+            with self.assertRaises(startup.RuntimeScopeError):
+                startup._entry_scope(managed)
+        self.assertEqual(authority.read_bytes(), original)
+        self.assertFalse(any(fixture.base.rglob('runtime.sqlite3')))
+
+    def test_basic_guidance_requires_current_client_and_policy_index(self):
+        fixture, event = self.configured_fixture()
+        original = Path.is_file
+        for missing in ('clients/codex.md', 'policies/00-index.md'):
+            with self.subTest(missing=missing), patch.object(Path, 'is_file',
+                    lambda path: False if path == state.PACKAGE / missing else original(path)):
+                acquired = startup.acquire_project_entry(event, state.PACKAGE, managed=False)
+                self.assertIsNone(acquired.resolution.scope)
+                with self.assertRaises(startup.RuntimeScopeError):
+                    startup._entry_scope(acquired, managed=False)
+
+    def test_basic_guidance_preserves_shared_dependency_and_physical_membership_checks(self):
+        fixture, event = self.configured_fixture()
+        shared = fixture.base / 'shared.md'
+        shared.write_text('Accepted instructions\n')
+        authority = fixture.repo / startup.PROJECT_FILE
+        record = json.loads(authority.read_bytes())
+        record['shared_policy'] = [dict(path=str(shared), sha256=hashlib.sha256(shared.read_bytes()).hexdigest())]
+        record['repositories'][0]['checkouts'][0]['clients'][0]['configuration']['shared_dependencies'] = [str(shared)]
+        authority.write_text(json.dumps(record))
+        accepted = shared.read_bytes()
+        self.assertEqual(startup.acquire_project_entry(event, state.PACKAGE, managed=False).resolution.reason,
+                         'basic_guidance')
+        shared.write_text('Changed instructions\n')
+        acquired = startup.acquire_project_entry(event, state.PACKAGE, managed=False)
+        self.assertEqual(acquired.resolution.reason, 'dependency_changed')
+        with self.assertRaises(startup.RuntimeScopeError):
+            startup._entry_scope(acquired, managed=False)
+        shared.write_bytes(accepted)
+        record['project_binding']['inode'] += 1
+        authority.write_text(json.dumps(record))
+        acquired = startup.acquire_project_entry(event, state.PACKAGE, managed=False)
+        self.assertIsNone(acquired.resolution.scope)
+        with self.assertRaises(startup.RuntimeScopeError):
+            startup._entry_scope(acquired, managed=False)
 
     def test_unbound_runtime_patch_passes_but_selected_managed_task_still_guards(self):
         fixture = self.runtime_fixture()

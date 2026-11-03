@@ -799,9 +799,10 @@ def _compare_canonical_scope(record, *, authority, observation, client, installe
     _canonical_text(client, 128)
     _canonical_fields(authority, "path target")
     _canonical_path(authority["path"]); _canonical_target(authority["target"])
-    _canonical_fields(installed, "policy_digest runtime_digest clients package_root")
-    for field in ("policy_digest", "runtime_digest"):
-        _canonical_hash(installed[field])
+    _canonical_fields(installed, "policy_digest runtime_digest clients package_root" if managed else "clients package_root")
+    if managed:
+        for field in ("policy_digest", "runtime_digest"):
+            _canonical_hash(installed[field])
     _canonical_path(installed["package_root"])
     for name in _canonical_rows(installed["clients"]):
         _canonical_text(name, 128)
@@ -980,8 +981,7 @@ def _compare_canonical_scope(record, *, authority, observation, client, installe
             and activation['qualification'] == 'pending' and activation['qualification_binding'] is None
             and activation['accepted_scope_digest'] is None):
         return result("configured", "activation_configured")
-    if client not in installed["clients"] or (not _package_compatible(config, installed) if managed else
-            config["policy_digest"] != installed["policy_digest"]):
+    if client not in installed["clients"] or managed and not _package_compatible(config, installed):
         return result("suspended", "configuration_changed")
     shared = sorted((s for s in data["shared_policy"] if s["path"] in config["shared_dependencies"]), key=lambda s: s["path"])
     if (len(dependencies) != len(shared) or [d["path"] for d in dependencies] != [s["path"] for s in shared]
@@ -1282,8 +1282,10 @@ def acquire_canonical_project(event, package, *, authority_path=None, qualifier=
         if package != Path(__file__).resolve().parents[1]:
             return result("conflict", "installed_unavailable")
         _check_observation_deadline(budget)
-        installed = dict(policy_digest=policy_digest(package, budget=budget), runtime_digest=runtime_fingerprint(budget=budget) if managed else "0" * 64,
-            clients=[event.client] if (package / "clients" / (event.client + ".md")).is_file() else [], package_root=str(package))
+        installed = dict(clients=[event.client] if (package / "clients" / (event.client + ".md")).is_file()
+            and (package / "policies/00-index.md").is_file() else [], package_root=str(package))
+        if managed:
+            installed.update(policy_digest=policy_digest(package, budget=budget), runtime_digest=runtime_fingerprint(budget=budget))
         facts = dict(authority=dict(path=str(pointer), target=_canonical_plain(acquired.authority_target)), observation=observation,
                      client=event.client, installed=installed)
         _check_observation_deadline(budget)
