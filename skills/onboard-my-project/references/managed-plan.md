@@ -2,6 +2,8 @@
 
 Load only when the user-selected onboarding operation uses the canonical managed dispatcher. Basic onboarding follows [the ordinary procedure](procedure.md) and does not require this plan, runtime database or task-state machinery.
 
+The optional `project_scope.inspection_scope: "relevant"` is for standalone basic file-only authoring, not a reduced managed plan. It selects relevant instruction/configuration inputs and targets; exact proposed write, delete and evidence paths are captured automatically. The snapshot retains physical scope, applicable ancestor/directory instructions, selected-input and target preimages, and explicitly omits unrelated HEAD/index/dirty state and a full census. Treat it as partial. It grants no command execution, runtime activation or managed authority. Ordinary project checks run natively under existing permission. Regardless of selected files, assess the complete Toolkit component catalog. When explaining the choice to a user, say “inspect relevant project files,” not the internal JSON field/value.
+
 ## Toolkit sources and private plan
 
 For a new managed run, resolve the canonical [Vibe Coding Toolkit](https://github.com/soumatheusgomes/vibe-coding-toolkit) revision once. Retrieve its current existing-project guidance and complete, dynamically discovered component catalog, including required linked sources. Read relevant guides before judging applicability; do not copy prompts into this package. A trusted versioned copy can support offline work with freshness explicitly unverified. Missing sources block only dependent work. Resume at the recorded revision; a requested refresh starts a new plan.

@@ -426,7 +426,7 @@ def _snapshot_targets(plan):
     names = {name for name in plan["identity"]["fingerprints"] if not name.startswith("instruction:")}
     return sorted(names | set(_file_targets(plan["actions"])))
 
-def _snapshot(root, targets=(), *, budget=None, inventory=False):
+def _snapshot(root, targets=(), *, budget=None, inventory=False, relevant=False):
     def check(*, reading=False):
         if budget is not None:
             _require(type(budget["paths"]) is int and 0 <= budget["paths"] <= MAX_PATHS,
@@ -465,9 +465,12 @@ def _snapshot(root, targets=(), *, budget=None, inventory=False):
             raise
         check()
     _require(identity is not None and identity[0] == root, "Selected checkout identity changed")
-    code, raw = git("ls-files", "--cached", "--others", "--exclude-standard", "-z")
-    _require(code == 0, "Cannot enumerate checkout files")
-    names = sorted(set(os.fsdecode(name) for name in raw.split(b"\x00") if name))
+    if relevant:
+        names = sorted({_relative(name) for name in targets})
+    else:
+        code, raw = git("ls-files", "--cached", "--others", "--exclude-standard", "-z")
+        _require(code == 0, "Cannot enumerate checkout files")
+        names = sorted(set(os.fsdecode(name) for name in raw.split(b"\x00") if name))
     observed_names = sorted(set(names) | {_relative(name) for name in targets})
     _require(len(observed_names) <= MAX_PATHS, "Checkout path limit exceeded; inventory remains incomplete")
     fingerprints = {}
@@ -498,6 +501,10 @@ def _snapshot(root, targets=(), *, budget=None, inventory=False):
             if fingerprints[key]["status"] != "absent":
                 instructions.append({"path": str(location), "scope": str(directory),
                                      "editable": location.is_relative_to(root)})
+    if relevant:
+        check()
+        return {"repository_root": str(root), "git_common_dir": str(identity[1]),
+                "paths": names, "fingerprints": fingerprints, "instructions": instructions}
     code, index = git("ls-files", "--stage", "-z")
     _require(code == 0, "Cannot read staged checkout identity")
     code, status = git("status", "--porcelain=v1", "-z", "--untracked-files=all")
@@ -701,8 +708,14 @@ def _filesystem_binding(path):
     _require(stat.S_ISDIR(info.st_mode), "Project identity needs an existing directory")
     return {"device": info.st_dev, "inode": info.st_ino}
 
+def _relevant_inspection(scope):
+    _require("inspection_scope" not in scope or scope["inspection_scope"] == "relevant"
+             and scope["kind"] == "standalone", "Relevant inspection requires a standalone Project")
+    return "inspection_scope" in scope
+
+
 def _project_scope(value):
-    _object(value, ("kind", "project_root", "member_checkouts", "membership", "authority", "project_files"))
+    _object(value, ("kind", "project_root", "member_checkouts", "membership", "authority", "project_files"), ("inspection_scope",))
     _require(value["kind"] in ("standalone", "umbrella"), "Invalid Project kind")
     root = Path(_text(value["project_root"]))
     _require(root.is_absolute(), "Select an absolute Project root")
@@ -728,8 +741,9 @@ def _project_scope(value):
     _text(authority["reference"])
     for name in _strings(value["project_files"]):
         _relative(name)
-    _require(value["kind"] != "standalone" or not value["project_files"],
+    _require(value["kind"] != "standalone" or _relevant_inspection(value) or not value["project_files"],
              "Standalone named files belong to its selected Repository assessment")
+    _relevant_inspection(value)
     _require(len(members) + len(value["project_files"]) + len(membership["include"])
              + len(membership["exclude"]) <= MAX_PATHS, "Project scope aggregate path limit exceeded")
     return deepcopy(value)
@@ -924,10 +938,12 @@ def _project_observations(scope, sources, assessments=None):
             continue
         try:
             assessment = by_root.get(repository["root"], {})
-            targets = _observed_targets(assessment)
+            relevant = _relevant_inspection(scope)
+            targets = _relevant_inputs(scope, assessment) if relevant else _observed_targets(assessment)
             prior = assessment.get("identity", {}).get("snapshot")
             repository["snapshot"] = _snapshot(Path(repository["root"]), targets, budget=budget,
-                inventory=_inventory_enabled(prior) if prior is not None else True)
+                inventory=False if relevant else _inventory_enabled(prior) if prior is not None else True,
+                relevant=relevant)
             if assessment.get("actions") or assessment.get("identity", {}).get("targets"):
                 repository["targets"] = _target_observations(assessment, repository["snapshot"]["fingerprints"], budget=budget)
             if any(value["status"] not in ("read", "absent", "metadata") for value in repository["snapshot"]["fingerprints"].values()):
@@ -974,6 +990,24 @@ def _observed_targets(assessment):
     prior = assessment.get("identity", {}).get("targets", {})
     return list(dict.fromkeys([*(name for name in prior if not name.startswith("cwd:/")),
                               *_file_targets(assessment.get("actions", []))]))
+
+
+def _relevant_inputs(scope, assessment):
+    snapshot = assessment.get("identity", {}).get("snapshot") or {}
+    names = [*scope["project_files"], *_observed_targets(assessment),
+             *(name for name in snapshot.get("fingerprints", {}) if not name.startswith("instruction:"))]
+    inventory = assessment.get("inventory", {})
+    _require(isinstance(inventory, dict), "Invalid scoped inventory")
+    documents = inventory.get("documents", {})
+    _require(isinstance(documents, dict) and all(isinstance(document, dict) for document in documents.values()),
+             "Invalid scoped documents")
+    names.extend(document["path"] for document in documents.values() if document.get("path") is not None)
+    for rows, field in ((assessment.get("evidence", []), "inputs"),
+                        (assessment.get("decisions", []), "invalidate_on")):
+        _require(isinstance(rows, list) and all(isinstance(row, dict) for row in rows), "Invalid scoped input references")
+        names.extend(name for row in rows for name in _strings(row.get(field, []))
+                     if not name.startswith(("instruction:", "checkout:", "source:")) and name != "package")
+    return sorted({_relative(name) for name in names})
 
 def _project_file_boundary(root, name, repositories, *, budget=None):
     def check():
@@ -1202,7 +1236,8 @@ def _project_plan_shape(plan):
              "Saved requirements must retain the complete pinned catalog metadata")
     _object(plan["identity"], ("project_id", "project_root", "kind", "binding", "authority", "id_origin"))
     scope = plan["project_scope"]
-    _object(scope, ("kind", "project_root", "member_checkouts", "membership", "authority", "project_files"))
+    _object(scope, ("kind", "project_root", "member_checkouts", "membership", "authority", "project_files"), ("inspection_scope",))
+    relevant = _relevant_inspection(scope)
     _object(scope["membership"], ("include", "exclude", "future_join", "authorization"))
     _object(scope["authority"], ("path", "sha256", "reference"))
     _strings(scope["member_checkouts"], empty=False)
@@ -1308,19 +1343,23 @@ def _project_plan_shape(plan):
                          "Invalid Repository observation binding")
                 if value["snapshot"] is not None:
                     snapshot = value["snapshot"]
-                    _object(snapshot, (*CHECKOUT_INPUTS, "fingerprints", "instructions", "clients"), ("inventory_version",))
+                    checkout_fields = ("repository_root", "git_common_dir", "paths") if relevant else CHECKOUT_INPUTS
+                    _object(snapshot, (*checkout_fields, "fingerprints", "instructions", "clients"),
+                            () if relevant else ("inventory_version",))
                     _require(snapshot["repository_root"] == owner["root"]
                              and snapshot["git_common_dir"] == owner["git_common_dir"]
                              and snapshot["clients"] == declared["clients"], "Invalid selected checkout snapshot")
-                    if snapshot["head"] is not None:
-                        _text(snapshot["head"])
-                    _hash(snapshot["index_digest"])
+                    if not relevant:
+                        if snapshot["head"] is not None:
+                            _text(snapshot["head"])
+                        _hash(snapshot["index_digest"])
                     for name in _strings(snapshot["paths"]):
                         _relative(name)
-                    _require(isinstance(snapshot["dirty_inventory"], list)
-                             and len(snapshot["dirty_inventory"]) <= 2 * MAX_PATHS, "Invalid saved checkout changes")
-                    for item in snapshot["dirty_inventory"]:
-                        _text(item)
+                    if not relevant:
+                        _require(isinstance(snapshot["dirty_inventory"], list)
+                                 and len(snapshot["dirty_inventory"]) <= 2 * MAX_PATHS, "Invalid saved checkout changes")
+                        for item in snapshot["dirty_inventory"]:
+                            _text(item)
                     fingerprints(snapshot["fingerprints"], inventory=_inventory_enabled(snapshot))
                     for instruction in rows(snapshot["instructions"]):
                         _object(instruction, ("path", "scope", "editable"))
@@ -1566,7 +1605,7 @@ def _validate_proposal(plan, *, shared=False, references=None):
     fingerprints = plan["identity"]["fingerprints"]
     _require(set(uninspected) <= {name for name, value in fingerprints.items() if value["status"] == "metadata"},
              "Uninspected file assessments must name current metadata-only observations")
-    input_keys = set(fingerprints) | (set() if shared else {"checkout:" + key for key in CHECKOUT_INPUTS}) | {"package"} | {
+    input_keys = set(fingerprints) | (set() if shared else {"checkout:" + key for key in CHECKOUT_INPUTS if key in plan["identity"]}) | {"package"} | {
         "source:" + name for name in plan["sources"]["observed"]}
     if references is not None:
         input_keys.update(_file_targets(plan["actions"]))
@@ -1823,6 +1862,8 @@ def _evidence_digest(owner, identity, package, sources, inputs, context=None):
     values.update({"checkout:" + key: identity[key] for key in CHECKOUT_INPUTS if key in identity})
     values.update({"source:" + key: value for key, value in sources.items()})
     values["package"] = package
+    if "repository_root" in identity and "head" not in identity:
+        _require(set(inputs) <= values.keys(), "Unknown evidence input fingerprint")
     value = {"owner": owner, "inputs": {name: values.get(name) for name in inputs}}
     if context is not None:
         value["context"] = context
@@ -2012,6 +2053,8 @@ def _expand_project_inputs(plan, current):
                 continue
             known = {row["path"] for row in old["instructions"]}
             old["instructions"].extend(row for row in new["instructions"] if row["path"] not in known)
+            if _relevant_inspection(plan["project_scope"]):
+                old["paths"] = sorted(set(old["paths"]) | set(new["paths"]))
         else:
             old["paths"] = list(dict.fromkeys([*old["paths"], *new["paths"]]))
         old["fingerprints"].update({key: value for key, value in new["fingerprints"].items()
@@ -2066,6 +2109,15 @@ def _record_project_plan(plan, request, path, directory, screening_authenticatio
                         action['after'] = hashlib.sha256(action['text'].encode()).hexdigest()
                     else:
                         action['after'] = 'absent'
+        if _relevant_inspection(plan["project_scope"]):
+            expanded = _snapshot(Path(old['owner']['root']), _relevant_inputs(plan['project_scope'], new),
+                                 budget=budget, relevant=True)
+            snapshot['paths'] = sorted(set(snapshot['paths']) | set(expanded['paths']))
+            snapshot['fingerprints'].update({name: value for name, value in expanded['fingerprints'].items()
+                                            if name not in snapshot['fingerprints']})
+            known = {row['path'] for row in snapshot['instructions']}
+            snapshot['instructions'].extend(row for row in expanded['instructions'] if row['path'] not in known)
+            new['identity'] = deepcopy(old['identity'])
         for item in new['evidence']:
             _require(isinstance(item, dict) and isinstance(item.get('inputs'), list), 'Invalid evidence inputs')
             if 'input_digest' not in item:
@@ -2289,6 +2341,8 @@ def _collect_onboarding_screening(run):
     import time
     execution = screening._execution(run)
     _require('produced' not in execution and 'ticket' in execution, 'Screening collector is one-shot')
+    _require(not _relevant_inspection(execution['last_plan'].get('project_scope', {})),
+             'Repository screening requires a full inspection')
     repositories = sorted((target for target in _canonical_plain(execution['targets']) if target['git'] is not None),
                           key=lambda item: item['path'])
     budget = dict(execution['observation_budget'], deadline=run.deadline_monotonic - 0.5)
