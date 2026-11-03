@@ -70,3 +70,17 @@ Independent review found and closed defects in native spawn correlation, full
 label bounds, optional delivery isolation, private path checks, receiver reset
 and receipt preservation. Source validation is complete. Existing WIP and
 installed packages were preserved. No installation or live qualification ran.
+
+## Live qualification against main f16e0cf
+
+One read-only Desktop worker ran with inherited settings. The observer verified
+its actual parent, child, checkout and creation marker using Codex CLI 0.165.0.
+Habblaud 1.0.3 had already registered the child as `Default`. Publication of the
+declared Unicode label returned `habblaud_binding_mismatch` and left that binding
+intact. This qualifies native identity correlation and conflict handling. Exact
+custom label rendering on the active receiver remains a merge gate.
+
+The primary checkout reported OpenRouter unconfigured and disabled. The feature
+checkout had no eligible saved scope. OpenCode 1.19.5 was present. Live external
+qualification requires an eligible checkout with explicit current worker consent
+and a separately bounded canary. The retained prior canary approval is spent.
