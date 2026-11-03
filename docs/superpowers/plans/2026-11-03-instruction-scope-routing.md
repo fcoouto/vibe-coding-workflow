@@ -83,3 +83,13 @@ Source scope differed: candidate implementation selected Graphify while omitting
 Budget adoption outside the runner remains cooperative. Candidate review used 10,000-token children with 12,000-token outer headroom. Its initial native RTK/AGENTS reads used 10,000/default 10,000, although actual output was complete. Those reads were not recovery after reader failure. The automatic mixed-source and bounded clipping paths passed; the independent audit found no new router/drainer defect requiring another repair cycle.
 
 The slice remains unmerged and is not installed live. A complete paired benchmark remains outstanding after model capacity returns. No full-runtime-suite repair was attempted; the previously recorded unrelated `tests.test_state.StateTests.test_symlink_paths_missing_database_and_read_only_status_are_safe` failure remains outside this slice.
+
+## Authorized complete rerun: external changes interrupted comparison
+
+The user requested another complete implementation/review/resume pair on 3 November. `/tmp/vibe-scope-rerun-20261103` preserved the same two product commits, task, prompts, native model and settings. Initial controls exactly matched the preceding attempt; both arms passed preflight with Vibe enabled. Baseline completed all three phases and the eight acceptance cases. Its independent delivery audit reproduced the mixed-scope rejection and verified complete recovery with adequate budgets.
+
+Candidate implementation completed successfully, but its post-phase guard detected 42 added files: six under the installed `backtest-expert` skill and 36 under installed `vibe-setup`. No configuration settings or private Vibe package files changed. These additions include skill entry points and runtime sources, not logs. Candidate review and resume did not start. This attempt is invalid for controlled before/after comparison; no performance delta is claimed.
+
+Astra investigated the repeated validation interruption. The new skills were absent from the candidate implementation's startup catalog and were not directly read, but subsequent review/resume would have a changed available-skill environment. The decision is to preserve this attempt, retain the strict guard and run both arms afresh after confirmation that external updates have finished. Do not roll back the additions, exclude them from the guard or continue only the candidate arm.
+
+Evidence and spent usage are retained in `/tmp/vibe-scope-rerun-20261103/analysis/external-drift-stop.json`, the external-diff receipt and the independent delivery audit. Replacement scripts are prepared under `/tmp/vibe-scope-rerun2-20261103`; they have not been initialized or run. Confirmation that external updates have finished remains pending.
