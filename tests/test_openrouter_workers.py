@@ -49,8 +49,10 @@ class WorkerTests(unittest.TestCase):
         settings.disable(self.source, {'expected_revision': self.settings['revision']})
         with self.assertRaisesRegex(settings.SettingsError, 'openrouter_disabled'):
             self.api.prepare(self.runs, dict(self.brief, task_id='blocked'))
-        result = self.api.execute(run, self.root / 'worker', self.root / 'auth')
+        phases = []
+        result = self.api.execute(run, self.root / 'worker', self.root / 'auth', phases.append)
         self.assertEqual(result['failure'], {'category': 'integration', 'reason': 'openrouter_disabled'})
+        self.assertEqual(phases, [], 'Refused launch must not publish a worker character')
         self.assertIs(result['native_fallback_ready'], True)
         self.assertIs(result['local_execution_stopped'], True)
         with self.assertRaisesRegex(ValueError, 'already_started'):
@@ -139,6 +141,135 @@ print(json.dumps({{'type':'step_finish','part':{{'reason':'stop','cost':0,'token
         with self.assertRaises(FileExistsError):
             self.api.prepare(self.runs, self.brief)
 
+    def test_custom_role_survives_preparation_without_changing_execution(self):
+        try:
+            run = self.api.prepare(self.runs, dict(self.brief,
+                custom_role_name='Security investigator · 東京'))
+        except ValueError as error:
+            self.fail(f'Explicit custom role name must be supported: {error}')
+        saved = json.loads((run / 'brief.json').read_text())
+        self.assertEqual(saved['role'], 'Scout')
+        self.assertEqual(saved['specialty'], 'File analysis')
+        self.assertEqual(saved['custom_role_name'], 'Security investigator · 東京')
+        self.assertEqual(saved['model'], 'vendor/model')
+        self.assertEqual(saved['provider'], 'provider')
+        self.assertEqual(self.api.configuration(saved), self.api.configuration(self.brief))
+
+    def test_openrouter_reuses_external_display_identity_through_verification(self):
+        from runtime import worker_visibility
+        from tests.test_worker_visibility import fixture_transport
+        client, transport = fixture_transport()
+        run = self.api.prepare(self.runs, dict(self.brief, custom_role_name='Evidence scout'))
+        exe = self.fixture("sys.stdin.read()\n"
+                           "print(json.dumps({'type':'text','part':{'text':'Fixture answer'}}))\n"
+                           "print(json.dumps({'type':'step_finish','part':{'reason':'stop','cost':0,'tokens':{}}}))\n")
+        with patch.object(worker_visibility, 'transport', return_value=transport):
+            args = (self.root, run, 'http://127.0.0.1:1', 'account')
+            publisher = self.api.habblaud_publisher(*args)
+            self.assertEqual(client.events, [])
+            result = self.api.execute(run, exe, self.root / 'auth', publisher)
+            self.assertEqual(result['state'], 'awaiting_verification')
+            result = self.api.verify(run, 'accepted', ['Native fixture verification'])
+            self.api.habblaud_publisher(*args)(result['state'])
+        external = str(uuid.uuid5(uuid.NAMESPACE_URL, str(run)))
+        self.assertNotEqual(external, self.brief['coordinator_chat_id'])
+        self.assertEqual({event['agent_id'] for event in client.events}, {external})
+        self.assertEqual({event['session_id'] for event in client.events}, {self.brief['coordinator_chat_id']})
+        self.assertEqual({event['agent_type'] for event in client.events}, {'Scout · Model'})
+        self.assertEqual([event['hook_event_name'] for event in client.events].count('SubagentStart'), 1)
+        self.assertEqual([event['hook_event_name'] for event in client.events].count('SubagentStop'), 1)
+
+    def test_existing_openrouter_receipt_keeps_its_original_badge(self):
+        from runtime import worker_visibility
+        from tests.test_worker_visibility import fixture_transport
+        client, transport = fixture_transport()
+        run = self.api.prepare(self.runs, dict(self.brief, custom_role_name='Evidence scout'))
+        endpoint, account = 'http://127.0.0.1:1', 'account'
+        metadata = self.api.visibility_declaration(dict(self.brief, custom_role_name='Evidence scout'))
+        external = str(uuid.uuid5(uuid.NAMESPACE_URL, str(run)))
+        binding = dict(parent=self.brief['coordinator_chat_id'], agent_id=external,
+            label='Evidence scout · Model', cwd=self.brief['source_root'])
+        legacy = worker_visibility.publisher(transport, endpoint, account, binding, metadata, run / 'visibility.json')
+        self.assertTrue(legacy('Working')['delivered'])
+        with patch.object(worker_visibility, 'transport', return_value=transport):
+            publish = self.api.habblaud_publisher(self.root, run, endpoint, account)
+            self.assertTrue(publish('accepted')['delivered'])
+        self.assertEqual({event['agent_type'] for event in client.events}, {'Evidence scout · Model'})
+
+    def test_approved_native_fallback_preserves_frozen_name_with_a_real_child_id(self):
+        from runtime import worker_visibility
+        from runtime.adapters import codex
+        from scripts import worker_visibility as native_helper
+        from tests.test_worker_visibility import fixture_transport
+
+        client, transport = fixture_transport()
+        run = self.api.prepare(self.runs, dict(self.brief, custom_role_name='Evidence scout'))
+        exe = self.fixture("sys.stdin.read()\nprint(json.dumps({'type':'error','error':{}}))\n")
+        endpoint, account = 'http://127.0.0.1:1', 'account'
+        plugin = self.root / 'transport'
+        plugin.mkdir(mode=0o700)
+        with patch.object(worker_visibility, 'transport', return_value=transport):
+            result = self.api.execute(run, exe, self.root / 'auth',
+                self.api.habblaud_publisher(plugin, run, endpoint, account))
+            self.assertTrue(result['native_fallback_ready'])
+            self.assertTrue(result['local_execution_stopped'])
+            frozen = self.api.visibility_declaration(json.loads((run / 'brief.json').read_text()))
+            child = str(uuid.uuid4())
+            parent, task_name = self.brief['coordinator_chat_id'], 'scout_fallback'
+            context = self.root / 'native-fallback.json'
+            native_helper.prepare_native(context, dict(parent_session_id=parent, checkout=str(self.source),
+                task_name=task_name, visibility=frozen))
+            observed = dict(version=1, parent_session_id=parent, worker_id=child, checkout=str(self.source),
+                client_surface='codex-cli', native_version='0.163.0', agent_path='/root/' + task_name,
+                task_name=task_name, configured_model='Native model', configured_provider='native-account',
+                execution_model=None, execution_effort=None)
+            with patch.object(codex, 'observe_worker_visibility', return_value=observed):
+                native = native_helper.publish_native(context, child, 'Working', plugin, endpoint, account)
+        self.assertTrue(native['delivered'])
+        self.assertEqual(native['visibility'], dict(version=1, role='Scout', specialty='File analysis',
+                                                   custom_role_name='Evidence scout'))
+        external = str(uuid.uuid5(uuid.NAMESPACE_URL, str(run)))
+        self.assertNotEqual(child, external)
+        starts = {event['agent_id']: event['agent_type'] for event in client.events if event['hook_event_name'] == 'SubagentStart'}
+        self.assertEqual(starts, {external: 'Scout · Model', child: 'Evidence scout · Native model'})
+
+    def test_slow_visibility_does_not_consume_worker_deadline(self):
+        run = self.api.prepare(self.runs, dict(self.brief, timeout_seconds=1))
+        exe = self.fixture("sys.stdin.read()\n"
+                           "print(json.dumps({'type':'text','part':{'text':'Fixture answer'}}))\n"
+                           "print(json.dumps({'type':'step_finish','part':{'reason':'stop','cost':0,'tokens':{}}}))\n")
+        result = self.api.execute(run, exe, self.root / 'auth', lambda phase: time.sleep(1.2))
+        self.assertEqual(result['state'], 'awaiting_verification')
+        self.assertTrue(result['local_execution_stopped'])
+
+    def test_verify_returns_saved_acceptance_even_if_visibility_decoder_fails(self):
+        from contextlib import redirect_stdout
+        import io
+        from types import SimpleNamespace
+
+        run = self.api.prepare(self.runs, self.brief)
+        exe = self.fixture("sys.stdin.read()\n"
+                           "print(json.dumps({'type':'text','part':{'text':'Fixture answer'}}))\n"
+                           "print(json.dumps({'type':'step_finish','part':{'reason':'stop','cost':0,'tokens':{}}}))\n")
+        self.assertEqual(self.api.execute(run, exe, self.root / 'auth')['state'], 'awaiting_verification')
+        stdin = SimpleNamespace(buffer=io.BytesIO(json.dumps(dict(task_id='pilot-1',
+            disposition='accepted', checks=['Native fixture verification'])).encode()))
+        output = io.StringIO()
+        args = [str(SCRIPT), 'verify', '--root', str(self.runs), '--visibility-plugin', str(self.root)]
+
+        def broken(phase):
+            raise RecursionError('Malformed snapshot')
+
+        with patch.object(self.api, 'habblaud_publisher', return_value=broken), patch.object(sys, 'stdin', stdin), \
+                patch.object(sys, 'argv', args), redirect_stdout(output):
+            try:
+                self.api.main()
+            except RecursionError:
+                self.fail('Optional visibility must not break the verification response')
+        returned = json.loads(output.getvalue().splitlines()[-1])
+        self.assertEqual(returned['state'], 'accepted')
+        self.assertEqual(returned, json.loads((run / 'result.json').read_text()))
+
     def test_legacy_credit_is_ignored_and_not_saved(self):
         try:
             run = self.api.prepare(self.runs, dict(self.brief, credit={'remaining': 0}), now=999)
@@ -164,7 +295,7 @@ print(json.dumps({{'type':'step_finish','part':{{'reason':'stop','cost':0,'token
         self.assertFalse(config['provider']['openrouter']['models']['vendor/model']['options']['provider']['allow_fallbacks'])
 
     def test_worker_reuses_qualified_catalog_without_a_background_refresh(self):
-        exe = self.fixture("import os\nassert os.environ.get('OPENCODE_DISABLE_MODELS_FETCH') == 'true'\n"
+        exe = self.fixture("sys.stdin.read()\nimport os\nassert os.environ.get('OPENCODE_DISABLE_MODELS_FETCH') == 'true'\n"
                            "print(json.dumps({'type':'text','part':{'text':'Fixture answer'}}))\n"
                            "print(json.dumps({'type':'step_finish','part':{'reason':'stop','cost':0,'tokens':{}}}))\n")
         run = self.api.prepare(self.runs, self.brief)
@@ -173,7 +304,8 @@ print(json.dumps({{'type':'step_finish','part':{{'reason':'stop','cost':0,'token
     def test_missing_visibility_adapter_does_not_prevent_worker_execution(self):
         import subprocess
         brief = dict(self.brief)
-        exe = self.fixture("print(json.dumps({'type':'error','error':{'message':'provider unavailable'}}))\n")
+        exe = self.fixture("sys.stdin.read()\n"
+                           "print(json.dumps({'type':'error','error':{'message':'provider unavailable'}}))\n")
         result = subprocess.run(fixture_command(self, SCRIPT, 'run', '--root', self.runs,
                                  '--opencode', exe, '--auth-data', self.root/'auth',
                                  '--visibility-plugin', self.root/'missing'), input=json.dumps(brief),
@@ -208,7 +340,7 @@ print(json.dumps({{'type':'step_finish','part':{{'reason':'stop','cost':0,'token
 
     def test_sized_preparation_and_child_receive_larger_finite_budget(self):
         brief, _, _ = self.sized_brief()
-        exe = self.fixture("import os\nconfig=json.loads(os.environ['OPENCODE_CONFIG_CONTENT'])\n"
+        exe = self.fixture("sys.stdin.read()\nimport os\nconfig=json.loads(os.environ['OPENCODE_CONFIG_CONTENT'])\n"
             "assert config['provider']['openrouter']['models']['vendor/model']['options']['maxOutputTokens']==8192\n"
             "assert config['permission']['*']=='deny'\n"
             "print(json.dumps({'type':'text','part':{'text':'sized'}}))\n"
@@ -327,7 +459,7 @@ for event in [
         self.assertEqual(self.api.verify(run, 'accepted', ['Native line count: 3; matches response'])['state'], 'accepted')
 
     def test_error_even_with_zero_exit_never_becomes_success(self):
-        exe = self.fixture("print(json.dumps({'type':'error','error':{'message':'SECRET'}}))\n")
+        exe = self.fixture("sys.stdin.read()\nprint(json.dumps({'type':'error','error':{'message':'SECRET'}}))\n")
         run = self.api.prepare(self.runs, self.brief, now=100)
         result = self.api.execute(run, exe, self.root / 'auth')
         self.assertEqual(result['state'], 'failed')
@@ -589,7 +721,7 @@ for event in [
             if process.poll() is None: process.kill(); process.wait()
 
     def test_native_rejection_allows_takeover_without_an_external_replay(self):
-        exe = self.fixture("print(json.dumps({'type':'text','part':{'text':'Wrong answer'}}))\n"
+        exe = self.fixture("sys.stdin.read()\nprint(json.dumps({'type':'text','part':{'text':'Wrong answer'}}))\n"
                            "print(json.dumps({'type':'step_finish','part':{'reason':'stop','cost':0,'tokens':{}}}))\n")
         run = self.api.prepare(self.runs, self.brief)
         result = self.api.execute(run, exe, self.root / 'auth')

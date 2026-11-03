@@ -191,6 +191,45 @@ class SettingsTests(unittest.TestCase):
                 self.settings.configure(self.repo, dict(self.request, expected_revision=3))
         self.assertEqual(database.read_bytes(), before)
 
+    def test_basic_checkout_worker_consent_without_runtime(self):
+        authority = self.repo / startup.PROJECT_FILE
+        project = json.loads(authority.read_bytes())
+        entry = project['repositories'][0]['checkouts'][0]['clients'][0]
+        entry['configuration']['runtime'] = None
+        entry['activation'].update(status='configured', qualification='pending',
+            accepted_scope_digest=None, transaction_id=None, evidence=[], qualification_binding=None)
+        authority.write_text(json.dumps(project))
+        original = authority.read_bytes()
+        storage = self.root / 'basic-openrouter'
+        with patch.object(self.settings, 'BASIC_STORAGE', storage, create=True):
+            self.assertFalse(self.settings.status(self.repo)['configured'])
+            self.assertFalse(storage.exists())
+            with self.assertRaises(self.settings.SettingsError):
+                self.settings.configure(self.repo, self.request)
+            configured = self.settings.configure(self.repo, dict(self.request, routes=['workers']))
+            self.assertFalse(configured['enabled'])
+            with self.assertRaises(self.settings.SettingsError):
+                self.settings.enable(self.repo, dict(expected_revision=1))
+            self.settings.enable(self.repo, dict(expected_revision=1, consent_version=2))
+            with self.settings.admission(self.repo, 'workers', revision=2) as report:
+                self.assertEqual(report['worker_capability'], 'read_only')
+            with self.assertRaises(self.settings.SettingsError):
+                with self.settings.admission(self.repo, 'proposals'):
+                    pass
+            self.assertEqual(authority.read_bytes(), original)
+            replacement = authority.with_name('replacement.json')
+            replacement.write_bytes(original)
+            replacement.replace(authority)
+            with self.assertRaises(self.settings.SettingsError):
+                with self.settings.admission(self.repo, 'workers', revision=2):
+                    pass
+            self.assertTrue(self.settings.status(self.repo)['enabled'])
+            self.assertFalse(self.settings.disable(self.repo, dict(expected_revision=2))['enabled'])
+            renewed = self.settings.configure(self.repo, dict(self.request, routes=['workers'], expected_revision=3))
+            self.assertFalse(renewed['enabled'])
+            self.assertTrue(self.settings.enable(self.repo, dict(expected_revision=4, consent_version=2))['enabled'])
+            self.assertFalse(any(storage.rglob('runtime.sqlite3')))
+
     def test_file_only_status_and_disable_require_no_runtime(self):
         authority = self.repo / startup.PROJECT_FILE
         project = json.loads(authority.read_bytes())

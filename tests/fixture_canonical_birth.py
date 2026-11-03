@@ -294,7 +294,6 @@ class CanonicalBirthFixture(unittest.TestCase):
         self.assertFalse(peer and linked,'Shared distinct-Repository birth and selected linked birth are separate topologies')
         request = f.scoped_request(umbrella=umbrella or peer, linked=linked)
         if linked: f.repo = Path(request["manifest"]["enrollment"]["record"]["repositories"][0]["checkouts"][0]["root"])
-        if not history:self.assertTrue(review_storage.prepare_storage(private_root / 'private')['ok'])
         record = request['manifest']['enrollment']['record']
         if delivery_policy is not None:
             for repository in record['repositories']:

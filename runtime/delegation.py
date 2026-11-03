@@ -1117,6 +1117,7 @@ def _record_data(scope, row, data, *, db=None, context=None, artifact_refs=None)
         body['candidate'] == data['candidate'] and evidence._digest(body['request']) == data['request_digest'],
         'Assignment immutable binding differs from its ledger record')
     state._identity(body['request'])
+    _visibility(body['request'])
     pin_version = state._validate_pins(body['pins'])
     canonical_fields = ('accepted_identity',) if pin_version == 3 else ()
     _require(('lifecycle' in body) == ('lifecycle' in data), 'Assignment lifetime metadata differs from immutable body')
@@ -1346,6 +1347,16 @@ def _semantic(request):
     return {key: value for key, value in request.items() if key != 'expected_revision'}
 
 
+def _visibility(request):
+    if 'visibility' not in request:
+        return {}
+    from runtime import worker_visibility
+    try:
+        return dict(visibility=worker_visibility.declaration(request['visibility']))
+    except ValueError:
+        raise state.StateError('Invalid worker visibility declaration') from None
+
+
 def _reply(record, admitted=False):
     data, body = record['data'], record['body']
     workstream = 'workstream_revision' in body['request']
@@ -1356,6 +1367,7 @@ def _reply(record, admitted=False):
         requested_model=data['binding']['requested_model'], requested_effort=data['binding']['requested_effort'],
         revision=data['revision'], status=data['status'], launch_admitted=admitted and not workstream, replayed=not admitted,
         **(dict(dispatch_prepared=True) if workstream else {}),
+        **_visibility(body['request']),
         limitations=list(ADMISSION_LIMITATIONS))
 
 
@@ -1869,8 +1881,9 @@ def _prepare_native(scope, request, *, role):
     """Reserve before native spawn, returning launch admission only on a new committed row."""
     evidence._request(request, ('dispatch_id', 'job_id', 'selection', 'control_observation',
         'discovery_expectation', 'guidance', 'resource_units', *(('brief',) if role == 'worker' else
-        ('coverage', 'criteria', 'assignment'))), ('retry_of', 'diagnostic', 'workstream_revision', 'workstream_limits', 'workstream_context_id', 'continuation_limits'))
+        ('coverage', 'criteria', 'assignment'))), ('retry_of', 'diagnostic', 'workstream_revision', 'workstream_limits', 'workstream_context_id', 'continuation_limits', 'visibility'))
     request = json_object(evidence._raw(request))
+    _visibility(request)
     if 'continuation_limits' in request:
         _continuation_limits(request)
     if 'workstream_context_id' in request:
@@ -2476,7 +2489,8 @@ def reconcile_assignment(scope, request):
 
 
 def _native_binding(record):
-    binding = dict(record['data']['binding'], assignment_digest=record['data']['assignment']['digest'])
+    binding = dict(record['data']['binding'], assignment_digest=record['data']['assignment']['digest'],
+        **_visibility(record['body']['request']))
     context_id = _assignment_context(record['body']['request'], record['data']['role'])
     if context_id is not None:
         binding['workstream_context_id'] = context_id
@@ -2683,7 +2697,8 @@ def _continuation_reply(record, task, value, admitted=False):
         worker_id=value['native_identity']['worker_id'], task_name=record['data']['binding']['task_name'],
         state=value['state'], send_admitted=admitted, native_delivery='unobserved',
         remaining_continuations=value['remaining_continuations'], retry_at=value['retry_at'],
-        delivery=value['delivery'], limitations=list(CONTINUATION_LIMITATIONS))
+        delivery=value['delivery'], limitations=list(CONTINUATION_LIMITATIONS),
+        **_visibility(record['body']['request']))
     if admitted:
         reply['prompt'] = value['prompt']
     return reply

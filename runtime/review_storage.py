@@ -717,7 +717,17 @@ def _birth_history_snapshot(config, context, db, targets, budget):
 
 def _birth_history_shape(value):
     state._fields(value, ('version', 'machine', 'inventory', 'related', 'screening_sources'))
-    _require(type(value['version']) is int and value['version'] == 1)
+    _require(type(value['version']) is int and value['version'] in (1, 2))
+    if value['version'] == 2:
+        state._fields(value['machine'], ('path', 'parents'))
+        _path(value['machine']['path'])
+        parents = value['machine']['parents']
+        _require(isinstance(parents, dict) and 0 < len(parents) <= 128)
+        for path, binding in parents.items():
+            _path(path); state._canonical_binding(binding)
+        _require(all(value[name] == [] for name in ('inventory', 'related', 'screening_sources'))
+            and len(evidence._raw(value)) <= evidence.MAX_ARTIFACT)
+        return value
     state._fields(value['machine'], ('path', 'binding', 'parents', 'configuration', 'provenance_metadata'))
     _path(value['machine']['path']); state._canonical_binding(value['machine']['binding'])
     state._fields(value['machine']['configuration'], ('version','state','private_data_dir','parents','machine_parents','authority','provenance','owner','created_at'))
@@ -763,13 +773,21 @@ def _capture_birth_history(record):
             _require(stat.S_ISDIR(info.st_mode) and dict(device=info.st_dev,inode=info.st_ino)==parents[str(path.parent)])
             _require(_path(_machine_config_path()) == path); _check_parents(parents)
         snapshot = _configuration_snapshot(path, descriptor); config = snapshot[0]
-        _require(config is not None, 'Canonical birth needs ready machine-private history')
+        if parents is None:
+            parents = _parents(path, existing=True)
         machine = _MACHINE_ACQUISITION.get()
         def observe():
-            _require(active and machine.get('active') is True and _MACHINE_ACQUISITION.get() is machine
+            if config is None:
+                _check_observation_deadline(budget)
+            _require(active and (machine is None or machine.get('active') is True)
+                and _MACHINE_ACQUISITION.get() is machine and _path(_machine_config_path()) == path
                 and _configuration_snapshot(path, descriptor) == snapshot)
-            context = _ready_context(config, parents, deadline=budget['deadline'])
-            _storage_outside(context, path, targets)
+            _check_parents(parents)
+            if config is None:
+                _require(not os.path.lexists(path) and _parents(path, existing=True) == parents)
+            else:
+                context = _ready_context(config, parents, deadline=budget['deadline'])
+                _storage_outside(context, path, targets)
             _require(evidence._binding(Path(record['project_root'])) == record['project_binding'])
             for repository in record['repositories']:
                 for selected in repository['checkouts']:
@@ -778,6 +796,13 @@ def _capture_birth_history(record):
                         git_dir=selected['git_dir'], git_common_dir=repository['git_common_dir'],
                         binding=repository['binding'] | selected['binding'])
                     _require(error is None and all(observed[key] == value for key, value in expected.items()))
+            if config is None:
+                _check_observation_deadline(budget)
+                _check_parents(parents)
+                _require(_path(_machine_config_path()) == path and not os.path.lexists(path)
+                    and _parents(path, existing=True) == parents)
+                return dict(version=2, machine=dict(path=str(path), parents=_canonical_plain(parents)),
+                    inventory=[], related=[], screening_sources=[])
             with evidence._context_database(context) as db:
                 return _birth_history_snapshot(config, context, db, targets, budget)
         history = observe(); _birth_history_shape(history)
@@ -785,6 +810,20 @@ def _capture_birth_history(record):
             _require(observe() == history, 'Canonical birth history changed')
         try: yield history, reobserve
         finally: active = False
+
+
+def _check_retained_birth_history(actual, expected):
+    if expected['version'] == 2:
+        _birth_history_shape(expected)
+        _check_parents(expected['machine']['parents'])
+        _require(actual['machine']['path'] == expected['machine']['path']
+            and actual['related'] == [] and actual['screening_sources'] == [])
+        return
+    _require(actual['machine'] == expected['machine'] and actual['related'] == expected['related'])
+    current = {evidence._raw(row['reference']): row for row in actual['inventory']}
+    old = {evidence._raw(row['reference']): row for row in expected['inventory']}
+    _require(all(current.get(evidence._raw(ref)) == old[evidence._raw(ref)] for ref in expected['related'])
+        and actual['screening_sources'] == expected['screening_sources'])
 
 
 def _retained_birth_history(certificate):
@@ -831,11 +870,8 @@ def _retained_birth_history(certificate):
             _require(path not in bindings or bindings[path]==binding)
             bindings[path]=binding
     with _capture_birth_history(record) as (actual,reobserve):
-        expected=intent['history']; _require(actual['machine']==expected['machine'] and actual['related']==expected['related'])
-        current={evidence._raw(row['reference']):row for row in actual['inventory']}
-        old={evidence._raw(row['reference']):row for row in expected['inventory']}
-        _require(all(current.get(evidence._raw(ref))==old[evidence._raw(ref)] for ref in expected['related'])
-            and actual['screening_sources']==expected['screening_sources'])
+        expected = intent['history']
+        _check_retained_birth_history(actual, expected)
         reobserve()
 
 
@@ -866,11 +902,7 @@ def _enrolled_history(config, context, observed, budget, *, data=None):
             _require(handoff is not None)
             expected = handoff['certificate']['intent']['history']
             actual = _birth_history_snapshot(config,context,db,targets,budget)
-            _require(actual['machine']==expected['machine'] and actual['related']==expected['related'])
-            current = {evidence._raw(row['reference']):row for row in actual['inventory']}
-            previous = {evidence._raw(row['reference']):row for row in expected['inventory']}
-            _require(all(current.get(evidence._raw(ref))==previous[evidence._raw(ref)] for ref in expected['related'])
-                and actual['screening_sources']==expected['screening_sources'])
+            _check_retained_birth_history(actual, expected)
         elif related:
             raise _HistoryConflict(related)
     # A serial gap cannot silently adopt a changed authority, baseline or handoff.
@@ -954,8 +986,12 @@ def _enrolled_result(selected, acquisitions, budget, *, scope=None, control=None
     with _machine_guard(deadline=budget['deadline']) as (path, descriptor, parents):
         snapshot = _configuration_snapshot(path, descriptor)
         config = snapshot[0]
-        if baseline['content'].get('birth_expectation') is not None:
-            _require(config is not None, 'Original birth history needs ready machine-private storage')
+        if config is None and baseline['content'].get('birth_expectation') is not None:
+            with evidence._context_database(context) as db:
+                handoff = evidence._read_birth_handoff(context, db)
+            _require(handoff is not None and handoff['certificate']['intent']['history']['version'] == 2,
+                'Original birth history needs ready machine-private storage')
+            _retained_birth_history(handoff['certificate'])
         history = dict(complete=False, reason='machine_configuration_absent')
         temporary_context = owners = None
         if config is not None:

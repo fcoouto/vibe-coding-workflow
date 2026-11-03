@@ -124,7 +124,7 @@ Use the [scope contract's decision rules](../policies/01-project-scope.md#when-i
 
 Record each material decision as `id, scope, options, selected_value, provenance, status, affected_actions, invalidation_trigger`. Provenance distinguishes user confirmation, existing project rules, observed facts and assumptions. Status is `confirmed`, `inherited`, `proposed` or `pending`. Store the evidence/reference behind inherited choices. The enrollment journal also binds approvals to a design/plan digest, scope and user-message reference. Material revisions reopen only affected decisions and approvals.
 
-Use the host's question UI when available and ordinary conversation otherwise. Hook subprocesses never attempt an interactive questionnaire. In a noninteractive run, return the pending question and continue independent authorized work.
+Follow the [native question-box procedure](../skills/onboard-my-project/references/procedure.md#basic-onboarding). Hook subprocesses never attempt an interactive questionnaire.
 
 ## 3. Architecture
 

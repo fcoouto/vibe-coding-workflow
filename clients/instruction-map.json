@@ -185,7 +185,7 @@
       ]
     },
     "clients/runtime.md": {
-      "sha256": "2531624a0d85eeee3bfcbcbe836cd7ff9b0ead20227ab14950d1e40b26c18b15",
+      "sha256": "17f99eb2be1de95112fe5bd2faad9bebd264662bbd68666faf422b1b24fbfbca",
       "ranges": [
         [
           1,
@@ -193,7 +193,7 @@
         ],
         [
           44,
-          85
+          96
         ]
       ]
     },
@@ -206,8 +206,17 @@
         ]
       ]
     },
+    "clients/worker-visibility.md": {
+      "sha256": "de7fb8703af2cbf4ec4e36e5b361465f361f2a277fe21925b1dbcab1d850c46d",
+      "ranges": [
+        [
+          1,
+          130
+        ]
+      ]
+    },
     "clients/workstreams-naming.md": {
-      "sha256": "ac9defa94eb9dd0c20d7ff587dbaf4e77dc42880d422f1838b202c0584f6e1e3",
+      "sha256": "5e3214d64c62669e31e484fca8fca6f1a4775395c3284bcf76c77492eacc1846",
       "ranges": [
         [
           1,
@@ -215,7 +224,7 @@
         ],
         [
           143,
-          143
+          144
         ]
       ]
     },
@@ -251,15 +260,15 @@
       ]
     },
     "clients/workstreams-titles.md": {
-      "sha256": "28f3f776b60115646bac2546bda907c8bcbcf9244afec30ecd711fe96b4ef028",
+      "sha256": "0371a85d7863a7d711f9677d8e32beb43d803b46ab1f23e118e660a1cc2ba424",
       "ranges": [
         [
           1,
-          142
+          145
         ],
         [
-          143,
-          169
+          146,
+          189
         ]
       ]
     },
@@ -300,7 +309,7 @@
       ]
     },
     "policies/03-agent-delegation.md": {
-      "sha256": "369ce393a9de036e1001f292a87ac6eb32d51dc8bdfbc774869ba15e5a2d4af0",
+      "sha256": "d61073d192a2f86dbca6e970d1dd1c4f11ac4cf6de7e51cb89797847bde2e67a",
       "ranges": [
         [
           1,
@@ -308,7 +317,7 @@
         ],
         [
           42,
-          58
+          60
         ]
       ]
     },
@@ -437,15 +446,15 @@
       ]
     },
     "skills/manage-openrouter/references/procedure.md": {
-      "sha256": "be29e6f7747372ad12ced31278f8f49393d591e4d4e605eb8a1f6d010ad05189",
+      "sha256": "1ff0961cc1f29de657e84a0fa20d828d3040ebc74ed53e7cd6b8015812131705",
       "ranges": [
         [
           1,
-          134
+          131
         ],
         [
-          135,
-          136
+          132,
+          143
         ]
       ]
     },
@@ -481,11 +490,11 @@
       ]
     },
     "skills/onboard-my-project/references/procedure.md": {
-      "sha256": "a0628f8482d9fcc20a9a1eabf8076251fc58412e96be00efdde11002001813f8",
+      "sha256": "498a4e7593c16566a34d3fbcc00ac4d39ba2084ea24b0fb5568ba5f24d41ce23",
       "ranges": [
         [
           1,
-          24
+          57
         ]
       ]
     },
@@ -547,15 +556,15 @@
       ]
     },
     "skills/openrouter-workers/references/procedure.md": {
-      "sha256": "86aaa1036b9b0ad3ab1f42b14e300f2035e76c9b186a12ce178995b29824bb5b",
+      "sha256": "e63e0c79f6ec1110677d8c11748478fe9ee38ad718c290e57d00a06a1f812c90",
       "ranges": [
         [
           1,
-          125
+          122
         ],
         [
-          126,
-          170
+          123,
+          181
         ]
       ]
     },

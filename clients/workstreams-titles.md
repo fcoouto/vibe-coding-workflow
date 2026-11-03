@@ -12,10 +12,24 @@ First inspect the existing title and any recorded presentation ownership. Reuse
 an adopted family/member mapping, reconcile manual edits before writing, and
 retain any manual-title pause. A known user-selected title is an override even
 before managed adoption; preserve it until the user explicitly requests adoption.
-If ownership is unknown for an existing title, report that limitation rather than
-treat the title as permission to replace it. An eligible parent or child's
-observed automatic/default title or native creation marker may be adopted without
-a separate naming request.
+Explicit title instructions and recorded pauses also take precedence over
+automatic adoption.
+
+At the [implementation naming trigger](workstreams-naming.md#automatic-implementation-naming),
+the naming policy authorizes a first managed title for an eligible context even
+if earlier turns were planning. This permission applies to the current
+implementation family and does not establish who set the current title.
+Do not require a native title-author signal. Outside this trigger, preserve an
+existing title of unknown ownership unless the user explicitly requests adoption.
+An eligible context's independently observed automatic/default title also
+permits adoption when no known override or pause applies.
+
+Observe the initial title, then re-read it after preparation immediately before
+writing. Preserve any observed intervening change instead of overwriting it.
+The first successful write and matching readback establish the last verified
+managed title. Retain an uncertain write as pending and reconcile it against that
+same native identity; do not restart adoption or reset the baseline to each new
+observation.
 
 When a workflow task is already bound, configure an eligible title once through
 the enrolled package, using the naming rule as the workflow decision
@@ -124,7 +138,9 @@ not modified by title delivery.
 
 Before an automatic write, reconcile any pending delivery and compare the current
 title with the last verified managed title. Apply these rules to both direct
-display-title controls and runtime synchronization.
+display-title controls and runtime synchronization. An unexplained mismatch
+indicates an external change, not who made it; the user, client or another
+automation may have changed the title.
 
 - If only the topic changed and the format is unambiguous, adopt the topic and
   continue meter/status updates. Queued updates use the new topic.
@@ -142,6 +158,10 @@ cannot complete work or change family identity or permissions. New turns, runtim
 restarts and milestones do not silently resume title synchronization. A concurrent
 manual edit can still race a native write; the client currently provides no
 verified compare-and-set operation. Detect observed conflicts and preserve them.
+On initial adoption, a manual rename before the very first title observation is
+indistinguishable from the initial title without native origin metadata. Do not
+claim that this path detects every pre-adoption manual rename. The final
+read-to-write race also remains; baseline comparison does not eliminate it.
 
 For a runtime-bound presentation read, use `task title status`; for explicit
 repair, use `task title sync`. These take only `{client, session_id}`. Configuration and

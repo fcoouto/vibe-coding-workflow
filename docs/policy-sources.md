@@ -1,5 +1,29 @@
 # Policy source map
 
+## Shared worker roles — 3 November 2026
+
+The user approved explicit role and custom-name visibility for native and
+OpenRouter workers. The [shared visibility contract](../clients/worker-visibility.md)
+extends the existing optional OpenRouter/local-delegation display transport.
+It preserves Toolkit delegation, specialist responsibility, ownership and
+independent verification requirements. Native and external identities remain
+distinct; immutable markers, original pins and authority roles are unchanged.
+The extension grants no new execution route or installation authority. Source
+fixtures verify label delivery behavior; actual client rendering and first-binding
+compatibility remain unqualified.
+
+## Managed-runtime birth without unrelated history — 3 November 2026
+
+The user's selected D4 slice removes temporary-review storage as a prerequisite
+for fresh managed-runtime creation. The [runtime contract](../clients/runtime.md#change-a-pinned-runtime)
+and [D4 boundary](d4-onboarding-plan.md#operation-boundaries) retain explicit
+authority, original pins and provenance, known peer/owner/descendant protection,
+durable birth receipts and recovery. A tagged absent-history witness grants no
+stopped-writer evidence or optional control readiness. Existing ready-history
+requirements remain unchanged. This implements the accepted D4 ownership and
+pilot-readiness requirements; it does not adopt new Toolkit components or enable
+any installation, native qualification, repository enforcement or external route.
+
 For policy authoring, setup, reviewed updates and coverage audits only. Runtime reads the local policy index and applicable contracts; it does not need this file, Toolkit access or a permanent source snapshot.
 
 Vibe Coding Toolkit remains the workflow authority. The contracts express its applicable requirements in local wording, with the user's extensions identified below. `vibe-setup` is an implementation reference only.
@@ -93,6 +117,7 @@ On 26 October 2026, rechecked orchestration Parts B/C and the parallel execution
 | [Qualification and activation](../skills/onboard-my-project/references/qualification.md) | Selected managed activation or maintainer adapter qualification; actual frontend/source/configuration observations, bounded scope, writer reconciliation, native evidence limits and no implied task/merge/external authority | Prompt 14 and evaluation guide; applicable user-approved activation and staged qualification decisions |
 | [Basic onboarding procedure](../skills/onboard-my-project/references/procedure.md) | Relevant instructions/configuration; complete Toolkit component assessment for relevance; authorized recoverable changes; useful guidance/working commands/relevant checks/limits/undo; selective loading of managed and advanced references | Toolkit overview/catalog and Prompt 12; minimal-default decision |
 | [Tool Integrations](../policies/11-tool-integrations.md) | Required versus optional capability, reuse, scoped configuration/authentication, current client formats, distinct discovery/trust/execution, safe probes and invalidation | Catalog scope matrix; Prompt 12 sections 2, 7, 9 |
+| [Native onboarding question boxes](../skills/onboard-my-project/references/procedure.md#basic-onboarding) | Publication, merge and Workstreams questions; single-select choices, preserved labels and pending decisions | User decision after the onboarding dialogue pilot |
 | [onboard-my-project procedure](../skills/onboard-my-project/references/procedure.md) | Resolve one source revision for a new run; load Prompt 12's required source bundle including explicit guides 17–23; enumerate named catalog components across sources, apply stage-specific mandate/applicability, group only explicit members with shared disposition, preserve immutable source declarations and partial assessment checkpoints; retain pinned/offline resume semantics; distinguish planning from application and qualification | Prompt 12; overview; complete tool catalog; project defaults and document manifest; required guides 17–23 |
 
 The local contract tables also retain their triggers, onboarding decisions, evidence and blockers. Model catalogs, installation examples and external skill internals are not runtime requirements. Clients discover actual controls; setup handles integrations. A worker retains the task's applicable development/check discipline without importing another skill as a universal dependency.
@@ -234,6 +259,36 @@ Instruction-path review covers solo implementation, questions, planning with and
 without workers, implementation review, follow-up questions after completion and
 manual overrides. Package checks, instruction observations and installed native
 execution remain separate evidence; this source map claims no live delivery.
+
+### Initial title baseline · 3 November 2026
+
+The user proposed retaining the feature's last title and comparing the current
+title to detect external changes. Existing applied/pending reconciliation already
+provides that baseline; no registry or receipt mechanism is added. A fresh
+Desktop implementation check exposed the initial-adoption gap: the native title
+had no exposed actor provenance, and the unknown-ownership guard prevented the
+first managed title.
+
+The [title procedure](../clients/workstreams-titles.md) now distinguishes verified
+fresh, first-turn implementation from historical, forked or continued contexts.
+The accepted naming policy authorizes initial adoption in that fresh case while
+known manual titles, explicit instructions and pauses still win. Permission is
+not proof of title origin. Initial observation, a final pre-write comparison and
+successful write/readback establish the managed baseline; uncertain writes retain
+pending delivery instead of adopting each observed value anew. Later unexplained
+changes are preserved under the existing topic-edit and pause/resume rules,
+without attributing the change to an actor. Native identity and model controls,
+question/planning exclusions and runtime-free operation remain unchanged.
+
+The client cannot distinguish a manual rename before the first observation from
+the initial title, and no verified compare-and-set closes the final native write
+race. These limits remain explicit; instruction changes and source checks do not
+establish fresh Desktop execution.
+
+The planning-transition fix extends that initial adoption permission to the
+first authorized implementation action after planning. Existing title
+ownership and pending delivery take precedence. The same limits on title
+provenance and concurrent edits apply.
 
 ## Workstreams main-runtime port · 1 November 2026
 

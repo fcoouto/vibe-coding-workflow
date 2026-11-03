@@ -10,6 +10,15 @@ Contract revised 2 November 2026 after the self-host pilot exposed unrelated-his
 
 The operational contract lives in [apply and recovery](../skills/onboard-my-project/references/apply-and-recovery.md). [Project Onboarding](../policies/10-project-onboarding.md) retains complete Toolkit assessment. [Source coverage](policy-sources.md) tracks authoring requirements. [Earlier validation](d4-validation.md) records historical observations, not current admission requirements.
 
+Explicit managed-runtime creation can start without machine-private temporary
+history. The birth protocol records a version-2 absence witness without preparing
+that unrelated storage. Original ready-history witnesses remain version 1.
+Both paths preserve existing D4 authority, writer, peer, journal, baseline and
+recovery checks. Completed absence witnesses tolerate later unrelated storage;
+new related history blocks dependent use without changing original evidence.
+Refuse a destination that would create a missing ancestor of the machine
+configuration before mutation, rather than invalidate its own absence witness.
+
 ## Essential transaction protections
 
 Verify actual user authority for exact effects. Parse a bounded supported journal and validate the consumed effect/receipt/backup bindings. Lock overlapping resources, check correct checkout and safe physical paths, preserve changed bytes/modes/inodes, verify original backups or absence, and reconcile relevant live or uncertain writers.
