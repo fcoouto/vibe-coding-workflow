@@ -94,6 +94,17 @@ class RuntimeTests(unittest.TestCase):
                 output = self.invoke(kind, {**self.payload, "hook_event_name": kind})
                 self.assertEqual(output, {} if kind == "Stop" else None)
 
+    def test_output_notice_requires_enrolled_scope_without_starting_runtime(self):
+        payload = {**self.payload, "hook_event_name": "PostToolUse", "tool_name": "Bash",
+                   "tool_response": "Warning: truncated output (original token count: 1489)\nPRIVATE_OUTPUT"}
+        self.assertIsNone(self.invoke("PostToolUse", payload))
+        self.enroll()
+        output = self.invoke("PostToolUse", payload)
+        self.assertEqual(output["hookSpecificOutput"]["hookEventName"], "PostToolUse")
+        self.assertIn("truncation marker", output["hookSpecificOutput"]["additionalContext"])
+        self.assertNotIn("PRIVATE_OUTPUT", json.dumps(output))
+        self.assertFalse((self.repo / ".vibe-coding-workflow" / "runtime.sqlite3").exists())
+
     def test_runtime_scope_reuses_validated_checkout_and_never_initializes_state(self):
         self.enroll(runtime=self.runtime())
         self.assertTrue(hasattr(startup, "resolve_project"), "reusable scope resolver is missing")
@@ -395,23 +406,35 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("directory", output.get("systemMessage", "").lower())
         self.assertNotIn("permissionDecision", str(output))
 
-    def test_runtime_startup_never_emits_an_oversized_context(self):
+    def test_basic_startup_ignores_oversized_native_identity(self):
         self.canonical()
+        original = {str(p): p.read_bytes() for p in self.scope.runtime.state_dir.rglob("*") if p.is_file()}
         payload = {"hook_event_name": "SessionStart", "source": "startup", "cwd": str(self.repo),
-                   "session_id": "word " * 160}
+                   "session_id": "session-1"}
+        normal = self.invoke("SessionStart", payload)
+        payload["session_id"] = "word " * 160
         output = self.invoke("SessionStart", payload)
-        self.assertIn("context limit", output.get("systemMessage", ""))
-        self.assertNotIn("applies to this enrolled checkout", str(output))
+        self.assertEqual(output, normal)
+        context = output["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("applies to this enrolled checkout", context)
+        self.assertNotIn(payload["session_id"], context)
+        self.assertLessEqual(len(context.split()), 150)
+        from tests.fixture_canonical_birth import test_acquisition
+        with self.assertRaisesRegex(startup.StartupError, "context limit"):
+            startup.orient(codex.normalize(payload), PACKAGE, acquisition=test_acquisition(self.scope))
+        self.assertEqual(original, {str(p): p.read_bytes() for p in self.scope.runtime.state_dir.rglob("*") if p.is_file()})
 
-    def test_runtime_startup_adds_only_bounded_local_pointer_and_native_identity(self):
+    def test_enrolled_runtime_startup_keeps_basic_guidance_and_state_unchanged(self):
         self.canonical()
         original = {str(p): p.read_bytes() for p in self.scope.runtime.state_dir.rglob("*") if p.is_file()}
         payload = {"hook_event_name": "SessionStart", "source": "startup", "cwd": str(self.repo),
                    "session_id": "session-1"}
         output = self.invoke("SessionStart", payload)
         context = output["hookSpecificOutput"]["additionalContext"]
-        self.assertIn(str(self.scope.runtime.state_dir / "runtime.sqlite3"), context)
-        self.assertIn("session-1", context)
+        self.assertIn(str(PACKAGE / "scripts/read_instructions.py"), context)
+        self.assertIn(str(self.repo / startup.PROJECT_FILE), context)
+        self.assertNotIn(str(self.scope.runtime.state_dir / "runtime.sqlite3"), context)
+        self.assertNotIn("session-1", context)
         self.assertLessEqual(len(context.split()), 150)
         self.assertEqual(original, {str(p): p.read_bytes() for p in self.scope.runtime.state_dir.rglob("*") if p.is_file()})
 
@@ -437,6 +460,42 @@ class RuntimeTests(unittest.TestCase):
 
 
 class RuntimeAdapterTests(unittest.TestCase):
+    def test_output_notice_keeps_normal_quoted_and_malformed_results_silent(self):
+        payload = {"hook_event_name": "PostToolUse", "tool_name": "Bash"}
+        existing = {"systemMessage": "Existing feedback"}
+        for response in (None, {}, [], "", "Complete output", 'Quoted: Warning: truncated output (original token count: 10)'):
+            with self.subTest(response=response):
+                self.assertIs(codex.with_output_notice({**payload, "tool_response": response}, existing), existing)
+        warning = "Warning: truncated output (original token count: 10)\nPRIVATE_OUTPUT"
+        for value in (None, [], {}, {**payload, "hook_event_name": "PreToolUse", "tool_response": warning},
+                      {**payload, "tool_name": "apply_patch", "tool_response": warning}):
+            with self.subTest(payload=value):
+                self.assertIs(codex.with_output_notice(value, existing), existing)
+
+    def test_output_notice_is_constant_advisory_even_for_spoofed_stdout(self):
+        payload = {"hook_event_name": "PostToolUse", "tool_name": "Bash",
+                   "tool_response": "Warning: truncated output (original token count: 10)\nPRIVATE_COMMAND"}
+        output = codex.with_output_notice(payload, None)
+        specific = output["hookSpecificOutput"]
+        self.assertEqual(set(output), {"hookSpecificOutput"})
+        self.assertEqual(set(specific), {"hookEventName", "additionalContext"})
+        self.assertEqual(specific["hookEventName"], "PostToolUse")
+        self.assertIn("truncation marker", specific["additionalContext"])
+        self.assertNotIn("PRIVATE", json.dumps(output))
+        self.assertEqual(codex.with_output_notice({**payload, "tool_response": payload["tool_response"].replace("10)", "999)")}, None), output)
+
+    def test_output_notice_preserves_existing_feedback_without_mutation(self):
+        payload = {"hook_event_name": "PostToolUse", "tool_name": "Bash",
+                   "tool_response": "Warning: truncated output (original token count: 10)"}
+        existing = {"systemMessage": "Title notification", "hookSpecificOutput": {
+            "hookEventName": "PostToolUse", "additionalContext": "x" * 1024}}
+        before = json.dumps(existing, sort_keys=True)
+        output = codex.with_output_notice(payload, existing)
+        self.assertEqual(json.dumps(existing, sort_keys=True), before)
+        self.assertEqual(output["systemMessage"], "Title notification")
+        self.assertTrue(output["hookSpecificOutput"]["additionalContext"].startswith("x" * 1024 + "\n"))
+        self.assertIn("truncation marker", output["hookSpecificOutput"]["additionalContext"])
+
     def normalize(self, **updates):
         self.assertTrue(hasattr(codex, "normalize_runtime"), "runtime normalizer is missing")
         payload = {"hook_event_name": "PreToolUse", "session_id": "session-1", "cwd": "/tmp",

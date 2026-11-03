@@ -21,9 +21,13 @@ repository protections.
 
 ## Instruction output budgets
 
-Keep instruction reads within the complete outer tool response budget. Child output limits do not raise that shared limit. With `functions.exec`, set a supported outer `max_output_tokens` budget covering the selected child limits and response wrappers, or use smaller, separate batches. Keep large diagnostics, diffs and third-party guides out of a batch already filling that budget.
+Use `python3 -I -B <package>/scripts/read_instructions.py <paths>` for Vibe instructions; paths are package-relative (`policies/02-task-planning.md`). Select triggered files and follow every page before relying on a contract. Return each page alone. On reader failure, report the limitation and use bounded native source reads. Never run `--prepare` during routine tasks.
 
-Required procedures must arrive completely. When a response is truncated, retain the complete material already received and recover only missing files or sections before proceeding. Required review, freshness checks and context recovery still apply.
+Size each child instruction read for its complete selected files or sections. With `functions.exec`, use supported child `max_output_tokens` limits and an outer `max_output_tokens` budget covering their sum plus response wrappers. A larger outer budget cannot restore child-truncated text. Use available size information without adding a sizing command to every read; split large or uncertain reads into smaller, contiguous sections. Keep large diagnostics, diffs and third-party guides separate when they would exhaust either budget.
+
+Required procedures must arrive completely. Requested limits may be capped; inspect both child and outer results for truncation or omitted text. Success exit codes, summaries and previews do not establish completeness. Retain complete material already received and recover only missing files or sections before proceeding, adjusting the limit or selection at the layer that omitted them. Required review, freshness checks and context recovery still apply.
+
+In enrolled checkouts, the existing `PostToolUse` hook surfaces the observed child-truncation marker as a short recovery notice. The notice is advisory: stdout can imitate the marker. It does not replace completed output, run recovery commands or observe later outer clipping. Normal results remain silent.
 
 ## Startup implementation
 
