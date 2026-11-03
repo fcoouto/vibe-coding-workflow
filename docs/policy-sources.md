@@ -247,6 +247,31 @@ without workers, implementation review, follow-up questions after completion and
 manual overrides. Package checks, instruction observations and installed native
 execution remain separate evidence; this source map claims no live delivery.
 
+### Initial title baseline · 3 November 2026
+
+The user proposed retaining the feature's last title and comparing the current
+title to detect external changes. Existing applied/pending reconciliation already
+provides that baseline; no registry or receipt mechanism is added. A fresh
+Desktop implementation check exposed the initial-adoption gap: the native title
+had no exposed actor provenance, and the unknown-ownership guard prevented the
+first managed title.
+
+The [title procedure](../clients/workstreams-titles.md) now distinguishes verified
+fresh, first-turn implementation from historical, forked or continued contexts.
+The accepted naming policy authorizes initial adoption in that fresh case while
+known manual titles, explicit instructions and pauses still win. Permission is
+not proof of title origin. Initial observation, a final pre-write comparison and
+successful write/readback establish the managed baseline; uncertain writes retain
+pending delivery instead of adopting each observed value anew. Later unexplained
+changes are preserved under the existing topic-edit and pause/resume rules,
+without attributing the change to an actor. Native identity and model controls,
+question/planning exclusions and runtime-free operation remain unchanged.
+
+The client cannot distinguish a manual rename before the first observation from
+the initial title, and no verified compare-and-set closes the final native write
+race. These limits remain explicit; instruction changes and source checks do not
+establish fresh Desktop execution.
+
 ## Workstreams main-runtime port · 1 November 2026
 
 The user selected Workstreams and its essential dependencies instead of importing the 88-commit development ancestry. At that historical port, the implementation used main's schema-2 task, evidence and delegation authority; it preserved independently merged Naming/status rules and omitted canonical3 lifecycle/accounting, OpenRouter and observability extensions. The later fresh canonical composition is a separate development step and does not rewrite that history or existing authorities.
