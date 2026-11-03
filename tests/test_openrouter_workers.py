@@ -175,9 +175,26 @@ print(json.dumps({{'type':'step_finish','part':{{'reason':'stop','cost':0,'token
         self.assertNotEqual(external, self.brief['coordinator_chat_id'])
         self.assertEqual({event['agent_id'] for event in client.events}, {external})
         self.assertEqual({event['session_id'] for event in client.events}, {self.brief['coordinator_chat_id']})
-        self.assertEqual({event['agent_type'] for event in client.events}, {'Evidence scout · Model'})
+        self.assertEqual({event['agent_type'] for event in client.events}, {'Scout · Model'})
         self.assertEqual([event['hook_event_name'] for event in client.events].count('SubagentStart'), 1)
         self.assertEqual([event['hook_event_name'] for event in client.events].count('SubagentStop'), 1)
+
+    def test_existing_openrouter_receipt_keeps_its_original_badge(self):
+        from runtime import worker_visibility
+        from tests.test_worker_visibility import fixture_transport
+        client, transport = fixture_transport()
+        run = self.api.prepare(self.runs, dict(self.brief, custom_role_name='Evidence scout'))
+        endpoint, account = 'http://127.0.0.1:1', 'account'
+        metadata = self.api.visibility_declaration(dict(self.brief, custom_role_name='Evidence scout'))
+        external = str(uuid.uuid5(uuid.NAMESPACE_URL, str(run)))
+        binding = dict(parent=self.brief['coordinator_chat_id'], agent_id=external,
+            label='Evidence scout · Model', cwd=self.brief['source_root'])
+        legacy = worker_visibility.publisher(transport, endpoint, account, binding, metadata, run / 'visibility.json')
+        self.assertTrue(legacy('Working')['delivered'])
+        with patch.object(worker_visibility, 'transport', return_value=transport):
+            publish = self.api.habblaud_publisher(self.root, run, endpoint, account)
+            self.assertTrue(publish('accepted')['delivered'])
+        self.assertEqual({event['agent_type'] for event in client.events}, {'Evidence scout · Model'})
 
     def test_approved_native_fallback_preserves_frozen_name_with_a_real_child_id(self):
         from runtime import worker_visibility
@@ -214,7 +231,7 @@ print(json.dumps({{'type':'step_finish','part':{{'reason':'stop','cost':0,'token
         external = str(uuid.uuid5(uuid.NAMESPACE_URL, str(run)))
         self.assertNotEqual(child, external)
         starts = {event['agent_id']: event['agent_type'] for event in client.events if event['hook_event_name'] == 'SubagentStart'}
-        self.assertEqual(starts, {external: 'Evidence scout · Model', child: 'Evidence scout · Native model'})
+        self.assertEqual(starts, {external: 'Scout · Model', child: 'Evidence scout · Native model'})
 
     def test_slow_visibility_does_not_consume_worker_deadline(self):
         run = self.api.prepare(self.runs, dict(self.brief, timeout_seconds=1))

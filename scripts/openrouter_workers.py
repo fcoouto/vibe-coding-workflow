@@ -174,10 +174,18 @@ def habblaud_publisher(plugin_root, run, endpoint, account):
     """Reuse installed transport, never create local-delegation jobs or native logs."""
     brief = json.loads((run / 'brief.json').read_text())
     metadata = visibility_declaration(brief)
+    receipt = run / 'visibility.json'
+    display_role = {key: value for key, value in metadata.items() if key != 'custom_role_name'}
+    previous = worker_visibility.read(receipt)
+    if previous and 'binding' in previous:
+        # A published run keeps its original label when verification resumes.
+        legacy_label = worker_visibility.display_label(metadata, brief['model_display_name'])
+        if previous['binding'].get('label') == legacy_label:
+            display_role = metadata
     binding = {'parent': brief['coordinator_chat_id'], 'agent_id': str(uuid.uuid5(uuid.NAMESPACE_URL, str(run))),
-               'label': worker_visibility.display_label(metadata, brief['model_display_name']), 'cwd': brief['source_root']}
+               'label': worker_visibility.display_label(display_role, brief['model_display_name']), 'cwd': brief['source_root']}
     return worker_visibility.publisher(worker_visibility.transport(plugin_root), endpoint, account, binding,
-                                       metadata, run / 'visibility.json')
+                                       metadata, receipt)
 
 
 @contextmanager

@@ -207,11 +207,11 @@
       ]
     },
     "clients/worker-visibility.md": {
-      "sha256": "9204a73eca5c706e9abeb72acc29e49a725e2d0953b23a378dc52f2c67d1c3fc",
+      "sha256": "de7fb8703af2cbf4ec4e36e5b361465f361f2a277fe21925b1dbcab1d850c46d",
       "ranges": [
         [
           1,
-          129
+          130
         ]
       ]
     },
@@ -556,7 +556,7 @@
       ]
     },
     "skills/openrouter-workers/references/procedure.md": {
-      "sha256": "be7fe34779601c5c2c9a69fa083543f04be0154f7aceafca7d7a86dbb46fb55b",
+      "sha256": "e63e0c79f6ec1110677d8c11748478fe9ee38ad718c290e57d00a06a1f812c90",
       "ranges": [
         [
           1,
@@ -564,7 +564,7 @@
         ],
         [
           123,
-          179
+          181
         ]
       ]
     },

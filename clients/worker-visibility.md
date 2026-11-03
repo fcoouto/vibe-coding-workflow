@@ -18,8 +18,9 @@ Choose the actual responsibility: `Coordinator`, `Scout`, `Builder`, `Tester`,
 specialty or D6 authority role. Supply `custom_role_name` only when explicitly
 declared. Specialty and custom name are nonblank printable text, each at most
 4,096 characters. Preserve Unicode and the exact custom name. A custom name
-appears as `Custom role name · Model Display Name`; otherwise use
-`Role · Model Display Name`. Retain canonical role and specialty separately.
+appears on native workers as `Custom role name · Model Display Name`. New
+OpenRouter badges display `Role · Model Display Name`. Retain canonical role and
+specialty separately.
 The full label is sent in the existing display field without truncation. Report
 an unsupported label or receiver capability explicitly; the transport enforces
 its wire byte limit separately from the declared text lengths. Never substitute a

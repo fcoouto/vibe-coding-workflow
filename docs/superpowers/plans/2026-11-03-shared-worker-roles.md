@@ -130,3 +130,9 @@ actual coordinator. The retained result was accepted after local process stop.
 Reported cost was $0.0002142948. The temporary primary input copies were
 removed after hash verification, and the primary worktree status matched its
 original snapshot.
+
+The display convention was refined after this run. New external badges use the
+declared role and model display name, so a new Scout would display
+`Scout · GLM 5.3 Flash`. The recorded live badge predates this change. The
+original receipt stays bound to its observed label. The updated badge has
+software regression coverage, with live confirmation pending.

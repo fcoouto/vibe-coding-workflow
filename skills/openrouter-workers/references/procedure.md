@@ -56,8 +56,10 @@ python3 -I -B <plugin-root>/scripts/openrouter_workers.py run
 The brief requires `task_id`, `role`, `specialty`, `coordinator_chat_id`,
 `model`, `model_display_name`, `provider`, `effort`, `objective`, `source_root`,
 `files`, `timeout_seconds`, `steps`, and `approval_ref`. Add optional
-`custom_role_name` only for an explicit custom label, using the shared declaration
-bounds. The existing sized brief may also include `sizing`. Use the actual
+`custom_role_name` only for an explicit native fallback declaration, using the
+shared bounds. New external badges display the declared role followed by the
+model display name, for example `Scout · GLM 5.3 Flash`. Existing receipts keep
+their original badge. The existing sized brief may also include `sizing`. Use the actual
 root coordinator chat UUID for the Habblaud parent; retain the genuine native
 supervisor UUID separately in evidence. This keeps both workers visible in consumers
 whose sidebar does not render nested children. Do not invent a native identity. Model is an
