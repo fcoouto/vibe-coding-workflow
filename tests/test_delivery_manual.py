@@ -133,13 +133,103 @@ class ManualDeliveryTests(unittest.TestCase):
         self.assertEqual(self.transport.calls, [])
 
     def test_ready_retains_exact_private_sources_after_metadata_readback(self):
+        from contextlib import contextmanager
+        from runtime import delegation, repository_gate
+        from tests.test_repository_readiness import RepositoryReadinessTests
+
         self.retained_readiness(seed=False)
-        result = self.operate('ready', gate=self.fake_gate())
-        receipt = result['plan']['publications'][0]['candidate']['readiness']
-        self.assertIsNotNone(receipt)
+        source_case = RepositoryReadinessTests('runTest')
+        source_case.local, source_case.scope = self.fixture, self.scope
+        source_case.candidate = evidence.capture_candidate(self.scope,
+            evidence._load_plan(self.scope, self.fixture.identity))
+        source_case.binding = delivery._publication_binding(self.status()['plan']['publications'][0])
+        source = source_case.source()
+        source.repository = self.transport.adapter
+        source_case.request = self.fixture.request(action='ready', publication_id='pr-0', operation_id='e' * 64)
+        metadata, finalize = source.repository.mutate, source.finalize
+        observed = dict(metadata=0, publication=0)
+        fixture = self
+
+        def assert_held(db):
+            task = state._task(db, state._scope_id(self.scope), 'codex', 'parent')
+            self.assertEqual(task['evidence']['verification'], observed['verification'])
+            proof = evidence._read(self.scope, observed['verification'], db=db)
+            self.assertEqual(proof['purpose'], 'merge-evidence')
+            self.assertEqual(proof['blockers'], [])
+            self.assertEqual(proof['candidate_digest'], source_case.binding['snapshot']['digest'])
+            records = {row['id']: row for row in delegation._ledger(self.scope, db)}
+            for identity in (proof['barrier_id'], source.operation):
+                self.assertEqual(records[identity]['data']['status'], 'prepared')
+            return proof['barrier_id']
+
+        def mutate(*args, **kwargs):
+            with state._database(self.scope) as db:
+                observed['barrier'] = assert_held(db)
+            source.remote_effects = 'uncertain'
+            observed['metadata'] += 1
+            return metadata(*args, **kwargs)
+
+        def finalizing(publish, *, db=None):
+            self.assertIsNotNone(db)
+            self.assertTrue(db.in_transaction)
+            calls = len(self.transport.calls)
+            assert_held(db)
+            result = finalize(publish, db=db)
+            records = {row['id']: row for row in delegation._ledger(self.scope, db)}
+            self.assertEqual(records[observed['barrier']]['data']['status'], 'prepared')
+            self.assertEqual(records[source.operation]['data']['status'], 'settled')
+            self.assertEqual(len(self.transport.calls), calls)
+            observed['publication'] += 1
+            return result
+
+        source.repository.mutate, source.finalize = mutate, finalizing
+
+        class Gate:
+            @contextmanager
+            def acquire_readiness(self, scope, request, binding):
+                with repository_gate.acquire_readiness(scope, request, binding) as held:
+                    fixture.assertIs(type(held), repository_gate.RepositoryReadiness)
+                    fixture.assertIs(held.repository, fixture.transport.adapter)
+                    fixture.assertFalse(held.withdrawal_only)
+                    observed['verification'] = held.local_verification
+                    yield held
+
+        with patch.object(repository_gate, '_acquire_qualified_readiness_source', return_value=source):
+            result = self.operate('ready', gate=Gate())
+        receipt = evidence._read(self.scope, result['plan']['publications'][0]['candidate']['readiness'])
+        effect = evidence._read(self.scope, receipt['operation'])
+        gate = evidence._read(self.scope, receipt['source'])
+        facts = evidence._read(self.scope, gate['source'])
+        self.assertEqual(receipt['binding'], source_case.binding)
+        self.assertEqual(effect['binding'], receipt['binding'])
+        self.assertEqual(effect['source'], receipt['source'])
+        self.assertEqual(effect['local_verification'], receipt['local_verification'])
+        self.assertEqual(receipt['local_verification'], observed['verification'])
+        self.assertEqual(gate['local_verification'], observed['verification'])
+        self.assertEqual(gate['binding'], source_case.binding)
+        self.assertEqual(gate['dependencies'], source.dependencies)
+        self.assertEqual(facts['binding'], source_case.binding)
+        self.assertEqual(facts['check_run']['repository_id'], source_case.binding['repository_id'])
+        self.assertEqual(facts['outcome'], 'ready')
+        self.assertGreater(observed['metadata'], 0)
+        self.assertEqual(observed['publication'], 1)
+        with state._database(self.scope) as db:
+            records = {row['id']: row for row in delegation._ledger(self.scope, db)}
+        for identity in (observed['barrier'], source.operation):
+            self.assertEqual(records[identity]['data']['status'], 'settled')
+            self.assertEqual(records[identity]['data']['result']['outcome'], 'completed')
         self.assertFalse(self.transport.pr['draft'])
         self.assertEqual(self.transport.labels, {'[READY]'})
-        self.assertEqual(self.fixture.verify()['task']['state'], 'WAITING')
+        self.assertNotEqual(result['task']['state'], 'DONE')
+        waiting = self.fixture.verify()
+        self.assertEqual(waiting['task']['state'], 'WAITING')
+        marker = waiting['task']['delivery']['merge_wait']
+        self.assertEqual(marker['verification'], waiting['task']['evidence']['verification'])
+        self.case.merged()
+        self.case.reconcile('actual-gate-manual-merge')
+        settled = self.operate('settle')
+        self.assertEqual(settled['task']['state'], 'REVIEW')
+        self.assertEqual(self.fixture.verify()['task']['state'], 'DONE')
 
     def test_reopen_withdraws_remote_readiness_before_acknowledging_edits(self):
         from contextlib import contextmanager

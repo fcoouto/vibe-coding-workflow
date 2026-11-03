@@ -68,7 +68,7 @@ class RepositoryReadinessTests(unittest.TestCase):
                 facts = dict(version=1, kind='repository-readiness-source', binding=deepcopy(binding),
                     base=test.candidate['base'], tree=test.local.git('rev-parse', 'HEAD^{tree}'),
                     definitions_digest='a' * 64, source_binding_digest='b' * 64,
-                    check_run=None if withdrawal else dict(id=31, repository_id=21, app_id=41,
+                    check_run=None if withdrawal else dict(id=31, repository_id=binding['repository_id'], app_id=41,
                         head_sha=binding['head'], name='Readiness', external_id='fixture-operation',
                         status='completed', conclusion='success', merge_authority=False),
                     dependencies=self.dependencies, outcome='blocked' if withdrawal else 'ready',

@@ -26,7 +26,7 @@ The consumer requires an actual private `RepositoryReadiness` acquisition, its e
 
 Focused proof is **seven passing cases before a whole-run timeout, plus one separately passing missing selector**, not eight in one run. The whole run stopped at its 60-second ceiling; its failure history and old temporary cleanup remain retained as unknown. The missing unavailable-source selector passed once from a fresh frozen snapshot in 5.022 seconds; preparation and execution took 5.416808166 seconds, with its new process/group recorded and absence confirmed. The eight cases cover private-source promotion/readback, confirmed and failed withdrawal, manual settlement followed by ordinary verification, explicit pause and changed-candidate rejection, and unavailable/raw-flag rejection. Fixtures substitute the exact private protocol only inside tests; they do not qualify actual custody, native execution or metadata writes.
 
-Earlier fixture failures exposed missing accepted rule-change decisions, candidate binding before the accepted plan change, and absence of an explicit task start. Logs remain intact. Independent Astra diagnosis reviewed the fixture order/lifecycle before the final run. No production guard was weakened. Cumulative bounded proof and process inventory took 164.768413665 of 180 seconds before the separate package/whitespace check. That staged result is fixture evidence, not actual Gate interface proof. Full discovery, actual positive-readiness Gate integration and production qualification remain unobserved.
+Earlier fixture failures exposed missing accepted rule-change decisions, candidate binding before the accepted plan change, and absence of an explicit task start. Logs remain intact. Independent Astra diagnosis reviewed the fixture order/lifecycle before the final run. No production guard was weakened. Cumulative bounded proof and process inventory took 164.768413665 of 180 seconds before the separate package/whitespace check. That staged result is fixture evidence, not actual Gate interface proof. Full discovery, actual positive-readiness Gate integration and production qualification were unobserved at that boundary; the later positive-context software proof is recorded below.
 
 ### Actual withdrawal-context regression
 
@@ -36,7 +36,15 @@ The existing positive reopen case now uses the actual Gate context, substituting
 
 Before the fix, that exact case failed inside local publication through the actual Gate writer; its database boundary sanitized the underlying rejection to `StateError`. After the one-line fix, the same case passed: **one test in 9.171 seconds**, 9.490248334 seconds including process cleanup. The pre-fix run took 9.174011875 seconds including cleanup, charged to the delivery phase; the affected post-fix check uses Gate's previously unspent integration allowance. Both process/group identities and absence were recorded. No eight-case rerun or budget reset occurred. The earlier seven-plus-one result remains evidence for the pre-fix source; this single affected regression is the subsequent final-source interface proof.
 
-This proves the withdrawal consumer works with the actual private Gate implementation and an isolated fixture source. It does not qualify a production host source, native custody, publishing credentials, actual provider mutation or positive-readiness integration. Old killed-run temporary cleanup remains unknown and untouched. Final package/whitespace results and hashes accompany the controlled source handoff.
+This proves the withdrawal consumer works with the actual private Gate implementation and an isolated fixture source. That withdrawal run did not qualify a production host source, native custody, publishing credentials, actual provider mutation or positive-readiness integration. Old killed-run temporary cleanup remains unknown and untouched. Final package/whitespace results and hashes accompany the controlled source handoff.
+
+### Positive Gate-context integration
+
+On 3 November 2026, a test-only change based on main `bc711e3` replaced the positive-ready case's substitute readiness class with the actual `RepositoryReadiness` context. Only the qualified host-source factory is substituted. The existing source fixture now uses its bound repository ID rather than a fixed ID.
+
+Four focused cases passed on the first run: positive readiness, actual withdrawal, changed merged-candidate rejection, and Gate writer finalization. Unittest took 35.068 seconds; preparation, execution and cleanup took 35.409353541 seconds. The process group was confirmed absent. Independent Sol review cleared the test changes; no production code changed.
+
+The positive case verifies held local verification through metadata and finalization, retained source bindings, generated merge `WAITING`, manual settlement to `REVIEW`, and ordinary verification owning `DONE`. This closes the positive software-interface gap. Native and provider observations remain fixtures. The production host-source factory stays closed; App custody, actual publication and server enforcement remain unqualified.
 
 ## Evidence and limits
 
