@@ -193,6 +193,19 @@ original-runtime reconciliation and the existing approved fresh-authority update
 remain required. Source validation and actual native hook observation are
 reported separately.
 
+### Automatic native delegation naming · 3 November 2026
+
+The user requested automatic Thread naming for native delegation regardless of
+Workstreams enablement, preserving manual-title overrides and native identities.
+[Agent Delegation](../policies/03-agent-delegation.md) and the
+[native contract](../clients/delegation.md) now load the existing
+[naming rules](../clients/workstreams-naming.md) for ordinary workers and
+independent reviewers. The [title procedure](../clients/workstreams-titles.md)
+separates existing runtime-bound synchronization from ordinary supported display
+controls without requiring runtime activation. Both preserve manual pauses and
+immutable creation markers. This instruction change neither enables Workstreams
+features nor qualifies live title delivery.
+
 ## Workstreams main-runtime port · 1 November 2026
 
 The user selected Workstreams and its essential dependencies instead of importing the 88-commit development ancestry. At that historical port, the implementation used main's schema-2 task, evidence and delegation authority; it preserved independently merged Naming/status rules and omitted canonical3 lifecycle/accounting, OpenRouter and observability extensions. The later fresh canonical composition is a separate development step and does not rewrite that history or existing authorities.

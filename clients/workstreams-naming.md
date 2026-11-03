@@ -2,6 +2,29 @@
 
 For adoption, event repair and manual edits, read [title synchronization](workstreams-titles.md).
 
+## Automatic native delegation naming
+
+Apply this convention automatically to the coordinator and its native children,
+including independent reviewers, whenever native delegation is used. No separate
+naming request or enabled Workstreams feature is required. This is display
+metadata handling; it does not activate managed task controls.
+
+Before dispatch, reserve or reuse the parent's family code. Allocate the next
+unused child ordinal only for a new native context in the existing task plan.
+After the native tool returns the actual child identity, record that identity
+against its ordinal and adopt
+the display title through the title procedure. Keep the prepared native
+`task_name`, attempt marker, lineage and ownership unchanged. Continuations keep
+their existing family/member mapping; replacement contexts receive new ordinals.
+
+Check existing title ownership before adoption or an update. Preserve known
+manual titles and paused synchronization; do not configure again or resume merely
+because another worker starts or a feature preference changes. The title
+procedure owns manual-edit reconciliation for both runtime-bound and ordinary
+native work. Touch only the current delegation family, not unrelated chats. If
+title controls or ownership observations are unavailable, report the naming
+limitation without guessing a title, identity or successful update.
+
 Use this display title, with exactly five meter cells and one ASCII space
 between the meter and family code:
 

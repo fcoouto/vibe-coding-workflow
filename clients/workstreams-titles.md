@@ -1,14 +1,24 @@
 # Workstreams title synchronization
 
-Load for adopting a managed title, recording task progress, resolving a manual
-rename, or diagnosing missed title updates. The [naming contract](workstreams.md#names-identify-the-parent-and-its-children)
-owns the format. The task's canonical state is rendered verbatim; there is no
-separate display-status list.
+Load for automatic native delegation naming, adopting a managed title, recording
+task progress, resolving a manual rename, or diagnosing missed title updates.
+The [naming contract](workstreams-naming.md) owns the format and adoption trigger.
+For runtime-bound tasks, render canonical state verbatim; there is no separate
+display-status list.
 
 ## Adopt a parent or child
 
-After the workflow task is bound, configure its title once through the enrolled
-package. Use the current task identity and revision:
+First inspect the existing title and any recorded presentation ownership. Reuse
+an adopted family/member mapping, reconcile manual edits before writing, and
+retain any manual-title pause. A known user-selected title is an override even
+before managed adoption; preserve it until the user explicitly requests adoption.
+If ownership is unknown for an existing title, report that limitation rather than
+treat the title as permission to replace it. A new child's observed default title
+or creation marker may be adopted without a separate naming request.
+
+When a workflow task is already bound, configure an eligible title once through
+the enrolled package, using the native naming rule as the workflow decision
+reference. Use the current task identity and revision:
 
 ```text
 python3 -I -B <package>/scripts/workflow.py task title configure --cwd <checkout> < title.json
@@ -42,10 +52,25 @@ The family/member identity remains stable; an existing manual-title pause surviv
 configuration until the user explicitly requests resumption. Unmanaged threads and unrelated chats stay outside
 automatic title synchronization.
 
+Choose the path per native thread: a bound parent does not bind its workers or
+reviewers. For an already-adopted bound thread, use `task title sync` rather than
+configure again. A failed runtime synchronization retains its pending state;
+do not bypass it with a direct write.
+
+For ordinary native work without a bound runtime task, use supported client
+display-title controls directly after observing the actual native identity. Keep
+the family/member mapping, last verified managed title, pending delivery and any
+manual-title pause in the existing task plan. Apply the manual-title rules below
+before every write and acknowledge delivery by readback. Resolve an uncertain
+write against that same identity before retrying. Update titles during existing
+milestone, phase and blocker handling using accepted plan progress. Do not create
+a runtime task or runtime database, watcher or extra model turn solely for naming. This
+direct path does not acquire the runtime event-repair guarantees below.
+
 ## Record status and accepted progress
 
-During normal work, the coordinator records a task transition when the user's
-instruction, acceptance or next action changes. Discussion, design, investigation,
+For a runtime-bound thread, the coordinator records a task transition when the
+user's instruction, acceptance or next action changes. Discussion, design, investigation,
 implementation and fixes use `WORKING`. A concrete result awaiting acceptance uses
 `REVIEW`. Approval that starts another agreed phase returns to `WORKING`; it does
 not complete the whole task. A neutral acknowledgment changes no state.
@@ -55,7 +80,9 @@ The existing `WAITING` state covers merge waits; its reason identifies the depen
 One or several PRs do not change the title format. A child's wait never assigns
 the parent's state or progress; the parent follows its own accepted scope.
 
-Use the existing task update command and its revision checks. Optional
+For direct display controls, use the same phase meanings in the existing task
+plan without creating runtime state. For runtime-bound threads, use the existing
+task update command and its revision checks. Optional
 `milestones` entries are exactly `{id, weight, accepted, reference}`. IDs are
 unique; weights are positive bounded integers; accepted is boolean; references
 record the coordinator's acceptance decision. Keep milestones in this task plan,
@@ -95,15 +122,19 @@ not modified by title delivery.
 ## Manual titles
 
 Before an automatic write, reconcile any pending delivery and compare the current
-title with the last verified managed title.
+title with the last verified managed title. Apply these rules to both direct
+display-title controls and runtime synchronization.
 
 - If only the topic changed and the format is unambiguous, adopt the topic and
   continue meter/status updates. Queued updates use the new topic.
 - If meter, family, member, status or overall format changed, preserve the title
   and pause title synchronization for that thread. Announce the pause once.
-- Resume only after an explicit user request. Use `task title resume` with the
-  current task identity, revision and decision reference. Optional `topic`
-  supplies the user's intended wording; other managed fields come from authority.
+- Resume only after an explicit user request. For runtime-bound titles, use
+  `task title resume` with the current task identity, revision and decision
+  reference. Optional `topic` supplies the user's intended wording; other managed
+  fields come from authority. For direct controls, retain the recorded
+  family/member identity and accepted plan progress, read the current title as
+  the new baseline, and clear the recorded pause only for that explicit request.
 
 Pausing title synchronization does not pause the task. A manually typed `DONE`
 cannot complete work or change family identity or permissions. New turns, runtime
@@ -111,8 +142,8 @@ restarts and milestones do not silently resume title synchronization. A concurre
 manual edit can still race a native write; the client currently provides no
 verified compare-and-set operation. Detect observed conflicts and preserve them.
 
-For a presentation read, use `task title status`; for explicit repair, use
-`task title sync`. These take only `{client, session_id}`. Configuration and
+For a runtime-bound presentation read, use `task title status`; for explicit
+repair, use `task title sync`. These take only `{client, session_id}`. Configuration and
 resumption require the complete identity/revision request above. Resume retains
 the original family/member binding.
 
