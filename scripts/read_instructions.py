@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MAP = Path("clients/instruction-map.json")
 SOURCE_BYTES = 8000
 OUTPUT_BYTES = 9500
+BATCH_OUTPUT_BYTES = 24000
 BOOTSTRAP = ["clients/codex.md", "policies/00-index.md"]
 
 
@@ -54,7 +55,7 @@ def build_manifest(root):
     return {"version": 1, "files": files}
 
 
-def load_page(root, paths, page=1, revision=None):
+def _load_pages(root, paths, page, revision):
     manifest = json.loads(source_path(root, str(MAP)).read_bytes())
     if not isinstance(manifest, dict) or manifest.get("version") != 1 or not isinstance(manifest.get("files"), dict):
         raise ValueError("Invalid prepared instruction map")
@@ -103,21 +104,48 @@ def load_page(root, paths, page=1, revision=None):
         pages.append(group)
     if page > len(pages):
         raise ValueError("Instruction page is outside the selected source range")
+    return current, pages
+
+
+def load_page(root, paths, page=1, revision=None):
+    current, pages = _load_pages(root, paths, page, revision)
     return dict(revision=current, page=page, pages=len(pages), sections=pages[page - 1])
 
 
+def load_batch(root, paths, page=1, revision=None):
+    current, pages = _load_pages(root, paths, page, revision)
+    result, sections = None, []
+    for number in range(page, len(pages) + 1):
+        single = dict(revision=current, page=number, pages=len(pages), sections=pages[number - 1])
+        render_page(single)  # Every included page must remain usable by the small-page fallback.
+        candidate = dict(revision=current, page=page, last_page=number, pages=len(pages),
+                         sections=sections + single["sections"])
+        try:
+            render_page(candidate)
+        except ValueError:
+            break
+        result, sections = candidate, candidate["sections"]
+    if result is None:
+        raise ValueError("Instruction page does not fit the batch output budget")
+    return result
+
+
 def render_page(result):
-    output = [f"Vibe instructions: page {result['page']}/{result['pages']}; revision {result['revision']}\n"]
+    last = result.get("last_page", result["page"])
+    batch = "last_page" in result
+    label = f"pages {result['page']}-{last}" if batch else f"page {result['page']}"
+    output = [f"Vibe instructions: {label}/{result['pages']}; revision {result['revision']}\n"]
     for section in result["sections"]:
         output.append(f"\n--- {section['path']} lines {section['start_line']}-{section['end_line']} ---\n")
         output.append(section["text"])
         output.append("\n--- source complete ---\n" if section["complete"] else "\n--- source continues ---\n")
-    if result["page"] < result["pages"]:
-        output.append(f"\nContinue the same selection with --page {result['page'] + 1} --revision {result['revision']}.\n")
+    if last < result["pages"]:
+        mode = "--batch " if batch else ""
+        output.append(f"\nContinue the same selection with {mode}--page {last + 1} --revision {result['revision']}.\n")
     else:
         output.append("\nSelection complete.\n")
     text = "".join(output)
-    if len(text.encode("utf-8")) > OUTPUT_BYTES:
+    if len(text.encode("utf-8")) > (BATCH_OUTPUT_BYTES if batch else OUTPUT_BYTES):
         raise ValueError("Selection metadata exceeds the output budget; select fewer sources")
     return text
 
@@ -127,16 +155,18 @@ def main():
     parser.add_argument("paths", nargs="*")
     parser.add_argument("--page", type=int, default=1)
     parser.add_argument("--revision")
+    parser.add_argument("--batch", action="store_true", help="combine consecutive pages within one bounded response")
     parser.add_argument("--prepare", action="store_true", help="authoring only: rebuild the package map")
     args = parser.parse_args()
     try:
         if args.prepare:
-            if args.paths or args.page != 1 or args.revision:
+            if args.paths or args.page != 1 or args.revision or args.batch:
                 raise ValueError("Preparation cannot be combined with a read")
             (ROOT / MAP).write_text(json.dumps(build_manifest(ROOT), indent=2) + "\n", encoding="utf-8")
             return 0
         paths = BOOTSTRAP if args.paths == ["bootstrap"] else args.paths
-        print(render_page(load_page(ROOT, paths, args.page, args.revision)), end="")
+        read = load_batch if args.batch else load_page
+        print(render_page(read(ROOT, paths, args.page, args.revision)), end="")
         return 0
     except (ValueError, OSError, KeyError, TypeError) as error:
         print(f"Prepared instruction read unavailable: {error}", file=sys.stderr)

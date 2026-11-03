@@ -7,6 +7,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from collections import Counter
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
+from unittest.mock import patch
 
 
 PACKAGE = Path(__file__).resolve().parents[1]
@@ -133,6 +137,104 @@ class PreparedInstructionsTests(unittest.TestCase):
         self.assertLessEqual(len(result.stdout), 9500)
         self.assertIn(b"clients/codex.md", result.stdout)
         self.assertNotIn(b"runtime.sqlite3", result.stdout)
+
+    def test_batch_cli_retains_complete_bootstrap_and_rejects_preparation(self):
+        before = (PACKAGE / "clients/instruction-map.json").read_bytes()
+        result = subprocess.run([sys.executable, "-I", "-B", str(SCRIPT), "--batch", "bootstrap"],
+                                capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(b"Selection complete.", result.stdout)
+        self.assertLessEqual(len(result.stdout), 24000)
+        for name in ("clients/codex.md", "policies/00-index.md"):
+            self.assertIn((PACKAGE / name).read_bytes(), result.stdout)
+        invalid = subprocess.run([sys.executable, "-I", "-B", str(SCRIPT), "--prepare", "--batch"],
+                                 capture_output=True, timeout=5)
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertEqual(invalid.stdout, b"")
+        self.assertEqual((PACKAGE / "clients/instruction-map.json").read_bytes(), before)
+
+    def test_batches_reconstruct_exact_utf8_sources_with_fewer_responses(self):
+        self.assertTrue(hasattr(self.reader, "load_batch"), "Bounded batch reader is missing")
+        paths = ["clients/codex.md", "policies/rules.md", "policies/rules.md"]
+        first = self.reader.load_batch(self.root, paths)
+        self.assertGreater(first["last_page"], first["page"])
+        recovered = {name: "" for name in paths}
+        page, count = 1, 0
+        while page <= first["pages"]:
+            batch = self.reader.load_batch(self.root, paths, page, first["revision"] if page > 1 else None)
+            self.assertGreaterEqual(batch["last_page"], page)
+            text = self.reader.render_page(batch)
+            self.assertLessEqual(len(text.encode()), 24000)
+            self.assertNotIn("unused procedure", text)
+            for section in batch["sections"]:
+                recovered[section["path"]] += section["text"]
+            if batch["last_page"] < batch["pages"]:
+                self.assertIn(f"--batch --page {batch['last_page'] + 1} --revision {first['revision']}", text)
+            else:
+                self.assertIn("Selection complete.", text)
+            count += 1
+            page = batch["last_page"] + 1
+        self.assertLess(count, first["pages"])
+        self.assertEqual(recovered["policies/rules.md"], self.source)
+        self.assertEqual(recovered["clients/codex.md"], "# Client\nRead applicable contracts.\n")
+
+    def test_batch_observes_each_selected_source_once(self):
+        self.assertTrue(hasattr(self.reader, "load_batch"), "Bounded batch reader is missing")
+        reads = Counter()
+        read_bytes = Path.read_bytes
+
+        def observe(path):
+            reads[path] += 1
+            return read_bytes(path)
+
+        with patch.object(Path, "read_bytes", observe):
+            batch = self.reader.load_batch(self.root, ["clients/codex.md", "policies/rules.md"])
+        self.assertGreater(batch["last_page"], 1)
+        self.assertEqual(reads, Counter({(self.root / name).resolve(): 1 for name in
+                                        ("clients/instruction-map.json", "clients/codex.md", "policies/rules.md")}))
+
+    def test_batch_includes_metadata_in_bound_and_single_page_fallback_resumes_exactly(self):
+        self.assertTrue(hasattr(self.reader, "load_batch"), "Bounded batch reader is missing")
+        paths = ["policies/" + letter * 120 + ".md" for letter in "abc"]
+        for name in paths:
+            (self.root / name).write_text("x" * 7899 + "\n")
+        self.prepare()
+        first = self.reader.load_batch(self.root, paths)
+        self.assertEqual(first["pages"], 3)
+        self.assertEqual(first["last_page"], 2)
+        self.assertLessEqual(len(self.reader.render_page(first).encode()), 24000)
+        final = self.reader.load_page(self.root, paths, 3, first["revision"])
+        self.assertEqual([s["path"] for s in final["sections"]], [paths[2]])
+        self.assertEqual(final["sections"][0]["text"], "x" * 7899 + "\n")
+        self.assertLessEqual(len(self.reader.render_page(final).encode()), 9500)
+
+    def test_batch_continuation_rejects_missing_stale_or_changed_selection(self):
+        self.assertTrue(hasattr(self.reader, "load_batch"), "Bounded batch reader is missing")
+        paths = ["policies/rules.md"]
+        first = self.reader.load_batch(self.root, paths)
+        next_page = first["last_page"] + 1
+        self.assertLessEqual(next_page, first["pages"])
+        with self.assertRaises(ValueError):
+            self.reader.load_batch(self.root, paths, next_page)
+        with self.assertRaises(ValueError):
+            self.reader.load_batch(self.root, paths + ["clients/codex.md"], next_page, first["revision"])
+        (self.root / paths[0]).write_text(self.source + "New mandatory instruction.\n")
+        with self.assertRaises(ValueError):
+            self.reader.load_batch(self.root, paths, next_page, first["revision"])
+        self.prepare()
+        with self.assertRaises(ValueError):
+            self.reader.load_batch(self.root, paths, next_page, first["revision"])
+
+    def test_batch_cli_rejects_later_invalid_source_without_partial_stdout(self):
+        (self.root / "policies/rules.md").write_text("Changed mandatory instructions\n")
+        stdout, stderr = StringIO(), StringIO()
+        with patch.object(self.reader, "ROOT", self.root), \
+                patch.object(sys, "argv", [str(SCRIPT), "--batch", "clients/codex.md", "policies/rules.md"]), \
+                redirect_stdout(stdout), redirect_stderr(stderr):
+            result = self.reader.main()
+        self.assertEqual(result, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("Prepared source changed", stderr.getvalue())
 
 
 if __name__ == "__main__":
