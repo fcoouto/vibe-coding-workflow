@@ -36,7 +36,7 @@ Automatic routing must never reclassify a package escape as external or replace 
 **Interfaces:** Frozen baseline `2179691387316eee3f5154430a371b249aeac861`, reviewed candidate, unchanged fixture/prompts/settings. Analyzer handles per-source automatic routing separately from legacy explicit-mode counts.
 
 - [x] Qualify the actual mixed selection, automatic draining, clipping recovery and early yield; independently audit source bytes and budgets.
-- [ ] Freeze fresh controls, stage/trust/preflight both arms under existing authorization and complete implementation, independent review and one resume per arm. Attempted once: candidate resume failed at model capacity; a complete pair remains outstanding.
+- [x] Freeze fresh controls, stage/trust/preflight both arms under existing authorization and complete implementation, independent review and one resume per arm. The complete replacement pair is recorded below; prior interrupted attempts remain separate.
 - [x] Independently audit source selection, delivery, recovery budgets and normalized usage. Record limitations and leave the slice unmerged.
 
 ## Local review and validation
@@ -82,7 +82,7 @@ Source scope differed: candidate implementation selected Graphify while omitting
 
 Budget adoption outside the runner remains cooperative. Candidate review used 10,000-token children with 12,000-token outer headroom. Its initial native RTK/AGENTS reads used 10,000/default 10,000, although actual output was complete. Those reads were not recovery after reader failure. The automatic mixed-source and bounded clipping paths passed; the independent audit found no new router/drainer defect requiring another repair cycle.
 
-The slice remains unmerged and is not installed live. A complete paired benchmark remains outstanding after model capacity returns. No full-runtime-suite repair was attempted; the previously recorded unrelated `tests.test_state.StateTests.test_symlink_paths_missing_database_and_read_only_status_are_safe` failure remains outside this slice.
+The slice remained unmerged and was not installed live. At this stage a complete paired benchmark was still outstanding; the replacement result below resolves that measurement gap. No full-runtime-suite repair was attempted; the previously recorded unrelated `tests.test_state.StateTests.test_symlink_paths_missing_database_and_read_only_status_are_safe` failure remains outside this slice.
 
 ## Authorized complete rerun: external changes interrupted comparison
 
@@ -92,4 +92,39 @@ Candidate implementation completed successfully, but its post-phase guard detect
 
 Astra investigated the repeated validation interruption. The new skills were absent from the candidate implementation's startup catalog and were not directly read, but subsequent review/resume would have a changed available-skill environment. The decision is to preserve this attempt, retain the strict guard and run both arms afresh after confirmation that external updates have finished. Do not roll back the additions, exclude them from the guard or continue only the candidate arm.
 
-Evidence and spent usage are retained in `/tmp/vibe-scope-rerun-20261103/analysis/external-drift-stop.json`, the external-diff receipt and the independent delivery audit. Replacement scripts are prepared under `/tmp/vibe-scope-rerun2-20261103`; they have not been initialized or run. Confirmation that external updates have finished remains pending.
+Evidence and spent usage are retained in `/tmp/vibe-scope-rerun-20261103/analysis/external-drift-stop.json`, the external-diff receipt and the independent delivery audit. The user subsequently confirmed that external updates had finished, authorizing the prepared replacement under `/tmp/vibe-scope-rerun2-20261103`.
+
+## Replacement benchmark controls
+
+The replacement froze the updated environment, including 865 external Markdown files, and retained the same product commits, prompts, fixture, CLI 0.165.0 and explicit `gpt-6.1-sol`/`ultra` flags. During baseline implementation, the global default model changed from Sol to Astra. The raw guard stopped after the model phase completed successfully. Independent native records proved every actual response used the explicitly pinned Sol/ultra settings through OpenAI; 1,783 file hashes and 201 other setting leaves were unchanged.
+
+Astra approved retaining that completed implementation. A reviewed private checkpoint verified the fixture, allowed changes, configuration, recorded result and native evidence hashes, package fingerprint, hook trust and effective model configuration. It appended the original result once and continued with the unchanged independent review and single resume, without resetting or rerunning implementation. The private guard now compares effective controls: only the global model default shadowed by the explicit model flag is excluded. Raw snapshots and the original guard failure remain recorded, and six other-control mutations still reject. The same comparison protects the candidate prerequisite. No user default, product code or other plugin was changed by this correction.
+
+Evidence: `/tmp/vibe-scope-rerun2-20261103/analysis/astra-model-guard-decision.md`, `analysis/model-default-checkpoint/`, and `before/model-default-continuation/admission.json`. Reported phase runtime sums the model-process durations; it excludes harness preparation, hook trust and the coordinator's checkpoint-review pause. Prior interrupted attempts remain separate.
+
+## Complete replacement result
+
+Both arms completed implementation, independent review and one resume. Both independent reviews reported no code or security findings, and both results passed the same eight acceptance cases. Baseline generated seven passing tests; candidate generated six. No implementation phase was repeated or counted twice.
+
+| Metric across all three measured phases | Baseline | Candidate | Change |
+|---|---:|---:|---:|
+| Fresh input tokens | 146,466 | 119,343 | −18.5% |
+| Output tokens, including reasoning | 11,723 | 12,410 | +5.9% |
+| Reasoning tokens, already included above | 4,240 | 6,454 | +52.2% |
+| Summed phase runtime, seconds | 324.264 | 315.875 | −2.6% |
+| Provider responses | 31 | 28 | −9.7% |
+| Prepared instruction outer calls | 11 | 8 | −27.3% |
+| Prepared reader commands | 17 | 14 | −17.6% |
+| Helper commands | 9 | 6 | −33.3% |
+
+Fresh input is total input minus cached input. Total input was 1,538,594 versus 1,348,399, including 1,392,128 versus 1,229,056 cached tokens. Visible output fell from 7,483 to 5,956 tokens; increased reasoning accounts for the higher combined output. Candidate review produced more reasoning than baseline review, while candidate implementation was shorter. These are observed phase differences, not a causal explanation of model decisions or proof of repeatable savings.
+
+All six phase usages reconcile with unique native provider response records after subtracting prior implementation usage from cumulative resume counters. All 23 effective guard snapshots passed, including checkpoint admission; 18 raw snapshots record the shadowed Sol-to-Astra default change. Every actual phase remained Sol/ultra through OpenAI, all guarded files and other settings stayed fixed, and both trust-only sessions had zero model turns. The 486.836-second interval between baseline implementation completion and review startup, including checkpoint handling, is outside summed phase runtime.
+
+Per-phase figures and audit receipts: `/tmp/vibe-scope-rerun2-20261103/analysis/metric-findings.md` and `paired-metrics.json`. Earlier interrupted attempts are not included in this complete pair. Product commits, RTK, other plugin files and the task prompts were not changed to obtain this result.
+
+The final independent source audit verified every explicitly selected source exactly once per phase in both arms. Candidate completed three mixed package/external selections with canonical launchers/helpers and independently reconstructed revisions. Baseline had one mixed-scope rejection requiring complete native recovery; candidate had none. All instruction outer calls, including native reads and probes, fell from 15 to 12, and instruction-related commands fell from 32 to 25. Observed aggregate-budget gaps fell from three to zero. Neither arm lost text or skipped a successful continuation. Both reviews received all 48,304 Graphify bytes.
+
+The source workloads were similar in size but not identical: 224,151 versus 224,026 delivered source bytes. Candidate implementation omitted the Caveman source read by baseline, candidate review added the base Ponytail guide, and candidate resume reread RTK. No within-phase full-source reread or global skill-catalog search occurred. Delivery and observed budgets are established; full semantic applicability and universal route adoption are not. Candidate exceptional native fallback was not needed, and clipping/yield recovery remains covered by the separate qualification above.
+
+Final delivery evidence: `/tmp/vibe-scope-rerun2-20261103/delivery-audit/paired-source-delivery-comparison.md` and its JSON proof. The requested complete comparison is finished. The result supports the mixed-scope reliability fix and shows fewer instruction calls, but does not establish repeatable whole-task savings. No new product defect was identified. This turn changed benchmark records and the private measurement harness only; no merge or live installation was performed.
