@@ -15,18 +15,14 @@ before managed adoption; preserve it until the user explicitly requests adoption
 Explicit title instructions and recorded pauses also take precedence over
 automatic adoption.
 
-For a verified fresh native context whose first turn starts implementation or
-supports an active implementation, with no prior turns, fork, resumption or
-continuation, the approved naming policy authorizes the first managed title
-without a separate naming request. Standalone question, planning and review
-contexts do not acquire this permission. Do not
-require a native title-author signal on this path: the client may expose the
-initial title without its origin. This is workflow permission to adopt the
-initial title, not proof that the title was automatic. For a nonfresh or
-historical context with unknown title ownership, retain the conservative guard:
-report that limitation instead of replacing the title. An eligible context's
-independently observed automatic/default title also permits adoption when no
-known override or pause applies.
+At the [implementation naming trigger](workstreams-naming.md#automatic-implementation-naming),
+the naming policy authorizes a first managed title for an eligible context even
+if earlier turns were planning. This permission applies to the current
+implementation family and does not establish who set the current title.
+Do not require a native title-author signal. Outside this trigger, preserve an
+existing title of unknown ownership unless the user explicitly requests adoption.
+An eligible context's independently observed automatic/default title also
+permits adoption when no known override or pause applies.
 
 Observe the initial title, then re-read it after preparation immediately before
 writing. Preserve any observed intervening change instead of overwriting it.
@@ -162,7 +158,7 @@ cannot complete work or change family identity or permissions. New turns, runtim
 restarts and milestones do not silently resume title synchronization. A concurrent
 manual edit can still race a native write; the client currently provides no
 verified compare-and-set operation. Detect observed conflicts and preserve them.
-On fresh adoption, a manual rename before the very first title observation is
+On initial adoption, a manual rename before the very first title observation is
 indistinguishable from the initial title without native origin metadata. Do not
 claim that this path detects every pre-adoption manual rename. The final
 read-to-write race also remains; baseline comparison does not eliminate it.

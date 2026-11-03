@@ -273,6 +273,11 @@ the initial title, and no verified compare-and-set closes the final native write
 race. These limits remain explicit; instruction changes and source checks do not
 establish fresh Desktop execution.
 
+The planning-transition fix extends that initial adoption permission to the
+first authorized implementation action after planning. Existing title
+ownership and pending delivery take precedence. The same limits on title
+provenance and concurrent edits apply.
+
 ## Workstreams main-runtime port · 1 November 2026
 
 The user selected Workstreams and its essential dependencies instead of importing the 88-commit development ancestry. At that historical port, the implementation used main's schema-2 task, evidence and delegation authority; it preserved independently merged Naming/status rules and omitted canonical3 lifecycle/accounting, OpenRouter and observability extensions. The later fresh canonical composition is a separate development step and does not rewrite that history or existing authorities.
