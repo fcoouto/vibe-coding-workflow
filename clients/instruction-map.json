@@ -446,15 +446,15 @@
       ]
     },
     "skills/manage-openrouter/references/procedure.md": {
-      "sha256": "be29e6f7747372ad12ced31278f8f49393d591e4d4e605eb8a1f6d010ad05189",
+      "sha256": "1ff0961cc1f29de657e84a0fa20d828d3040ebc74ed53e7cd6b8015812131705",
       "ranges": [
         [
           1,
-          134
+          131
         ],
         [
-          135,
-          136
+          132,
+          143
         ]
       ]
     },

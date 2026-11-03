@@ -7,15 +7,22 @@ they do not load this management procedure or enable a route automatically.
 ## Select scope and inspect status
 
 Resolve the explicitly selected checkout using its current working directory.
-Configuration and enablement require an enrolled Codex POSIX Git checkout with an
-accepted current canonical scope and its existing schema-3 private runtime database.
+A configured Codex POSIX Git checkout without a selected managed runtime can
+configure the read-only workers route. Its consent lives in the private
+`~/.vcw-openrouter-consent` store and binds the current canonical
+enrollment and physical checkout. A change to that enrollment requires fresh
+consent. When the checkout selects a managed runtime, configuration and
+enablement require an accepted canonical scope and its existing schema-3
+database. Proposal routes require that managed authority. Selecting a managed
+runtime switches to its separate consent store. Existing basic consent cannot
+admit workers in managed mode and does not migrate.
 Status and disable instead verify the current physical project/scope identity and
 ownership of its saved private settings. Stale qualification, changed source digests
 or a missing, replaced or corrupt database do not prevent viewing or disabling
 established consent. Preserve historical bindings, expected revisions and atomic
 ownership checks; never repin or renew consent during recovery. A basic checkout
 without saved consent reports unconfigured. This skill supplies no native qualification reader. Enrollment lives in
-`.vibe-coding-workflow/project.json`; settings live outside Git in that runtime's
+`.vibe-coding-workflow/project.json`; managed settings live outside Git in that runtime’s
 private state directory. A repository clone, sibling worktree, parent directory or
 account connection does not inherit consent. Consent remains checkout-bound;
 Project-wide consent and other client adapters are not implemented.

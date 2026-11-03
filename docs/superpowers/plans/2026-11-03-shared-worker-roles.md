@@ -114,3 +114,19 @@ and one read-only run with the two inspected fixtures, four steps and 120 second
 The primary checkout reports configured enrollment without accepted managed
 authority or a schema-3 runtime. The supported OpenRouter configuration path
 requires both. Consent remains unsaved and the canary allocation remains unused.
+
+## Primary OpenRouter receiver qualification
+
+The primary checkout used the workers-only basic consent path with saved
+consent version 2 and revision 2. The run used the approved two copied files
+with a four-step ceiling and a 120-second deadline. The actual OpenCode session
+read both paths, used three steps, and returned the independently recomputed
+total of 38.75. The response included one fenced JSON object and explanatory
+prose. This verifies the findings and worker display without establishing
+strict JSON-only output.
+
+The Habblaud snapshot showed `Order rules scout · GLM 5.3 Flash` under the
+actual coordinator. The retained result was accepted after local process stop.
+Reported cost was $0.0002142948. The temporary primary input copies were
+removed after hash verification, and the primary worktree status matched its
+original snapshot.
