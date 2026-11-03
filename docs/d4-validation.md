@@ -1,5 +1,57 @@
 # D4 onboarding validation
 
+## Managed-runtime birth without machine history — 3 November 2026
+
+Fresh explicitly selected D4 creation now records a version-2 absent-machine
+witness instead of creating unrelated temporary-review storage. Version-1 ready
+history keeps its original requirements. Existing authority, peer, writer,
+descendant, exact-pin and recovery checks remain in place. Original certificates
+are retained; later unrelated storage is accepted by retained-history/accounting
+checks, while related owners still block dependent use. Reapplying an original
+transaction continues to require its exact captured history.
+
+The genuine `history=False` regression first failed at the ready-history gate.
+Fourteen new cases cover creation/undo, absent and existing private parents,
+malformed or missing known storage, related history, callback expiry/escape,
+mutable/appearing parents, configuration appearing during checkout inspection,
+and interrupted resume. Those cases plus the existing ready-history lifetime
+test passed: 15 tests in 20.392 seconds.
+
+Independent general/security review found two boundary defects. A final machine
+path/parents/absence/deadline recheck closes the stale-at-issuance race. Preflight
+refusal prevents a destination from creating a missing machine-configuration
+ancestor and invalidating its own witness. Both findings have observed failing
+regressions followed by passing fixes. A destination beneath an already-existing
+private machine parent remains supported.
+
+Final compatibility/recovery run: all 78 selected tests passed in 349.765 seconds.
+The earlier run had 76 passing tests and two pre-existing startup-orientation
+fixture errors, independently reproduced on unchanged main. The shared
+`qualified_entry` mock now accepts and forwards the `managed` keyword, preserving
+its qualifier and state/authority assertions. Both affected tests first reproduced
+the errors, then passed after the fix. Independent follow-up review found no
+blocking issue in that mock change. Package validation and `git diff --check`
+passed. This establishes the selected source/fixture behavior, not a complete
+repository-wide suite or native-client qualification.
+
+Integration with main `c010e7f` also covers prepared instruction loading and the
+updated startup/runtime paths. Regenerating the prepared map changes only the
+`clients/runtime.md` entry; its two bounded pages reconstruct all 96 lines exactly.
+The expanded run passed 205 of 207 cases in 537.097 seconds. Two orientation
+assertions expected a period after the quoted authority path, while newer main
+continues that sentence. Removing only that punctuation expectation preserves
+the exact path, state/inode/mode/mtime and member-authority checks. Both affected
+cases then passed in 9.211 seconds. Independent integration review confirmed that
+production code and the map were unchanged, so the other 205 results remain
+applicable: cumulative coverage is 207/207, not a second full-suite run.
+
+Manual/static instruction checks cover ordinary native editing, explicit birth,
+known-owner conflicts and file-only undo. Required local procedures remain
+reachable without Toolkit retrieval; ordinary work gains no runtime prerequisite.
+No installation, hook-trust change, live project/runtime activation or native
+client qualification was performed. Primary WIP and installed runtime pins were
+not changed.
+
 ## File configuration and recovery — 2 November 2026
 
 The simplified canonical file path separates configuration, activation and undo. It reuses the existing transaction primitives and retains explicit runtime creation, active/shared-state transitions and command controls on their applicable paths. Original package/source pins remain provenance; file undo can use a newer supported reader.

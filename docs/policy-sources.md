@@ -1,5 +1,17 @@
 # Policy source map
 
+## Managed-runtime birth without unrelated history — 3 November 2026
+
+The user's selected D4 slice removes temporary-review storage as a prerequisite
+for fresh managed-runtime creation. The [runtime contract](../clients/runtime.md#change-a-pinned-runtime)
+and [D4 boundary](d4-onboarding-plan.md#operation-boundaries) retain explicit
+authority, original pins and provenance, known peer/owner/descendant protection,
+durable birth receipts and recovery. A tagged absent-history witness grants no
+stopped-writer evidence or optional control readiness. Existing ready-history
+requirements remain unchanged. This implements the accepted D4 ownership and
+pilot-readiness requirements; it does not adopt new Toolkit components or enable
+any installation, native qualification, repository enforcement or external route.
+
 For policy authoring, setup, reviewed updates and coverage audits only. Runtime reads the local policy index and applicable contracts; it does not need this file, Toolkit access or a permanent source snapshot.
 
 Vibe Coding Toolkit remains the workflow authority. The contracts express its applicable requirements in local wording, with the user's extensions identified below. `vibe-setup` is an implementation reference only.
