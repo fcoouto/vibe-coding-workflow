@@ -24,6 +24,8 @@ The user approved the first guidance/default-gate slice in the staged `minimal-d
 
 Representative instruction paths for this slice: (1) basic enrollment loads the skill, policy index/scope/onboarding and ordinary procedure, then the file recovery contract only for configuration/undo; it does not load managed planning or qualification; (2) an explicitly selected managed dispatcher additionally loads `managed-plan.md`; (3) an explicitly selected adapter/activation campaign loads `qualification.md`; (4) ordinary Codex editing, tests and review use native workflow without task-state or runtime prerequisites; (5) selected merge enforcement loads Merge Readiness controls while existing repository protections continue to apply. These paths check required guidance and unwanted default gates, not runtime behavior.
 
+The standalone basic file-authoring scope may inspect relevant inputs and exact planned effect/evidence paths without a whole-checkout snapshot. Preserve applicable instruction and target preimages, label the snapshot partial, and keep command checks native. This inspection choice changes neither the complete Toolkit component assessment nor permissions, managed authority or runtime requirements for operations that actually select them.
+
 ## Reviewed sources
 
 These contracts were checked against Toolkit revision `790a895304e0c08b70a5b215c9d334f1c86b816c`. This records the reviewed basis, not a claim that it is still the latest revision.

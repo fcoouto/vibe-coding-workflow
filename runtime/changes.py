@@ -2026,6 +2026,10 @@ def _validate_scoped(request, plan, *, operation=None):
     d3._object(request, ("schema_version", "manifest", "approval"), ("observations",))
     m = request["manifest"]
     d3._object(m, ("schema_version", "transaction_id", "plan", "pins", "authorization_reference", "approved_scope", "owners", "actions", "enrollment"))
+    if d3._relevant_inspection(plan['project_scope']):
+        d3._require(_file_configuration(m, plan) and not any(entry['configuration'] and entry['configuration']['runtime']
+            for _, _, entry in _scoped_entries(m['enrollment']['record']).values()),
+            'Relevant inspection supports only file configuration; use a full inspection for managed execution')
     d3._require(type(request["schema_version"]) is int and request["schema_version"] == 2 and type(m["schema_version"]) is int and m["schema_version"] == 2,
                 "Unsupported scoped transaction schema")
     d3._require(isinstance(m["transaction_id"], str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", m["transaction_id"]), "Invalid transaction ID")
@@ -5449,6 +5453,25 @@ def _scoped_fresh(plan, journal):
     d3._require(plan["package_pins"] == d3._package_pins() and not d3._source_blockers(plan, d3._sources(plan["sources"]["declared"])), "Installed package or Toolkit sources changed")
 
 
+def _relevant_forward_inputs(plan, journal):
+    if not d3._relevant_inspection(plan['project_scope']):
+        return
+    manifest = journal['manifest']
+    for assessment in d3._assessments(plan['assessments']):
+        root = Path(assessment['owner']['root'])
+        old = assessment['identity']['snapshot']
+        current = d3._snapshot(root, d3._relevant_inputs(plan['project_scope'], assessment), relevant=True)
+        effects = {effect['path'] for action in manifest['actions'] if action['owner'] == assessment['owner']
+                   for effect in action['effects']}
+        if journal['enrollment'] is not None and root == Path(manifest['enrollment']['record']['project_root']):
+            d3._require(_scoped_owned_authority(journal), 'Canonical enrollment physical ownership changed')
+            effects.add(str(PROJECT_FILE))
+        owned = effects | {'instruction:' + str(root / name) for name in effects}
+        d3._require(all(old['fingerprints'].get(name) == current['fingerprints'].get(name)
+                       for name in old['fingerprints'].keys() | current['fingerprints'].keys() if name not in owned),
+                    'Relevant configuration or instruction inputs changed')
+
+
 def _scoped_input_digest(manifest):
     root = Path(manifest["enrollment"]["record"]["project_root"])
     return d3._digest(dict(authority=_scoped_target(root, str(PROJECT_FILE)), package_pins=d3._package_pins(),
@@ -5754,6 +5777,8 @@ def _run_scoped(plan_dir, request, operation, *, host=None, entry_authorizer=Non
         m = request["manifest"]; root = Path(m["enrollment"]["record"]["project_root"])
         file_only = _file_configuration(m, plan) and (operation == 'rollback'
             or getattr(getattr(host, 'owner', None), '_creation', None) is None)
+        d3._require(not d3._relevant_inspection(plan['project_scope']) or file_only,
+            'Relevant inspection supports only file configuration; use a full inspection for managed execution')
         originals, dependencies, affected, suspend = _validate_scoped(request, plan,
             operation=operation if file_only else None)
         authority, prior = _scoped_prior(plan)
@@ -5895,6 +5920,7 @@ def _run_scoped(plan_dir, request, operation, *, host=None, entry_authorizer=Non
                 d3._require(journal["state"] not in ("rolled_back", "rollback_partial"), "Rolled back transaction cannot resume application")
                 if not authority_owned: raise Pending("Canonical authority changed outside owned postimages")
                 if file_only:
+                    _relevant_forward_inputs(plan, journal)
                     _check_operation_files(path, journal)
                 else:
                     _scoped_fresh(plan, journal)
@@ -5913,6 +5939,7 @@ def _run_scoped(plan_dir, request, operation, *, host=None, entry_authorizer=Non
                         journal["blocked"].append(dict(id=action["id"], reason="Scoped action approval/dependency missing")); continue
                     try:
                         if originals[action["id"]]["target"] != str(PROJECT_FILE):
+                            _relevant_forward_inputs(plan, journal)
                             _scoped_writers(writer_locations, affected_roots, affected_git, changed_paths=changed_paths, live_only=file_only)
                             if not file_only and journal.get('birth'):_birth_current_history(m['enrollment']['record'],journal['birth']['intent']['history'])
                             _scoped_apply_action(path, journal, action, originals[action["id"]], observation, descriptors.get(action["owner"].get("git_dir")),
@@ -5924,6 +5951,7 @@ def _run_scoped(plan_dir, request, operation, *, host=None, entry_authorizer=Non
                     raise Pending("Required scoped adoption effects are incomplete")
                 activates = any(e[2]["activation"]["status"] == "active" for key, e in _scoped_entries(m["enrollment"]["record"]).items() if key in affected)
                 if activates: _scoped_qualification(journal,observation,m["enrollment"]["record"])
+                _relevant_forward_inputs(plan, journal)
                 _scoped_writers(writer_locations, affected_roots, affected_git, changed_paths=changed_paths, live_only=file_only)
                 if not _scoped_owned_authority(journal): raise Pending("Canonical preimage ownership changed before publication")
                 _scoped_publish(path, journal, "final", m["enrollment"]["record"])
