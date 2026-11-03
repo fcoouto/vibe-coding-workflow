@@ -263,7 +263,7 @@ class StateError(StartupError):
 
 
 def _runtime_sources():
-    return sorted([*(PACKAGE / "runtime").glob("*.py"), *(PACKAGE / "runtime/adapters").glob("*.py"), PACKAGE / "scripts/workflow.py", PACKAGE / "scripts/workstreams_family.py", PACKAGE / "scripts/workstreams_recovery.py", PACKAGE / "scripts/onboard_coordinator.py", PACKAGE / "scripts/delivery_coordinator.py", PACKAGE / "scripts/read_instructions.py"])
+    return sorted([*(PACKAGE / "runtime").glob("*.py"), *(PACKAGE / "runtime/adapters").glob("*.py"), PACKAGE / "scripts/workflow.py", PACKAGE / "scripts/workstreams_family.py", PACKAGE / "scripts/workstreams_recovery.py", PACKAGE / "scripts/onboard_coordinator.py", PACKAGE / "scripts/delivery_coordinator.py", PACKAGE / "scripts/read_instructions.py", PACKAGE / "scripts/drain_instructions.js"])
 
 
 def runtime_fingerprint(*, budget=None):

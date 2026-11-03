@@ -173,6 +173,11 @@ def render_page(result):
     return text
 
 
+def envelope(text, kind, **metadata):
+    return json.dumps(dict(version=1, kind=kind, text=text, characters=len(text), **metadata),
+                      ensure_ascii=False)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("paths", nargs="*")
@@ -180,17 +185,35 @@ def main():
     parser.add_argument("--revision")
     parser.add_argument("--batch", action="store_true", help="combine consecutive pages within one bounded response")
     parser.add_argument("--external", action="store_true", help="read explicitly selected absolute local Markdown paths outside the package")
+    parser.add_argument("--json", action="store_true", help="return a complete native-reader envelope")
+    parser.add_argument("--helper", action="store_true", help="load the fixed packaged native continuation helper")
     parser.add_argument("--prepare", action="store_true", help="authoring only: rebuild the package map")
     args = parser.parse_args()
     try:
+        if args.helper:
+            if args.paths or args.page != 1 or args.revision or args.batch or args.external or args.prepare or args.json:
+                raise ValueError("Helper loading cannot be combined with preparation or instruction reads")
+            helper = (ROOT / "scripts/drain_instructions.js").resolve(strict=True)
+            if not helper.is_relative_to(ROOT.resolve()) or not helper.is_file():
+                raise ValueError("Native helper must stay inside the package")
+            text = helper.read_text(encoding="utf-8")
+            if len(text.encode("utf-8")) > OUTPUT_BYTES:
+                raise ValueError("Native helper exceeds its loading budget")
+            print(envelope(text, "helper"))
+            return 0
         if args.prepare:
-            if args.paths or args.page != 1 or args.revision or args.batch or args.external:
+            if args.paths or args.page != 1 or args.revision or args.batch or args.external or args.json:
                 raise ValueError("Preparation cannot be combined with a read")
             (ROOT / MAP).write_text(json.dumps(build_manifest(ROOT), indent=2) + "\n", encoding="utf-8")
             return 0
         paths = BOOTSTRAP if args.paths == ["bootstrap"] and not args.external else args.paths
         read = load_batch if args.batch else load_page
-        print(render_page(read(ROOT, paths, args.page, args.revision, external=args.external)), end="")
+        result = read(ROOT, paths, args.page, args.revision, external=args.external)
+        text = render_page(result)
+        if args.json:
+            text = envelope(text, "instructions", page=result["page"], last_page=result.get("last_page", result["page"]),
+                            pages=result["pages"], revision=result["revision"], external=args.external, batch=args.batch)
+        print(text, end="")
         return 0
     except (ValueError, OSError, KeyError, TypeError) as error:
         print(f"Prepared instruction read unavailable: {error}", file=sys.stderr)

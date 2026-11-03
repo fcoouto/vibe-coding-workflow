@@ -45,6 +45,29 @@ class PreparedInstructionsTests(unittest.TestCase):
         path.write_bytes(text.encode("utf-8"))
         return path
 
+    def test_json_cli_preserves_unicode_and_exclusive_helper_envelope(self):
+        path = self.external_file("# Skill\r\nPreserve 😀, 漢字 and Straße.\r\n")
+        command = [sys.executable, "-I", "-B", str(SCRIPT)]
+        result = subprocess.run(command + ["--json", "--external", "--batch", str(path)],
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        packet = json.loads(result.stdout)
+        self.assertEqual(packet["characters"], len(packet["text"]))
+        self.assertIn(path.read_bytes().decode(), packet["text"])
+        self.assertEqual([packet[k] for k in ("version", "kind", "page", "last_page", "pages", "external", "batch")],
+                         [1, "instructions", 1, 1, 1, True, True])
+        helper = subprocess.run(command + ["--helper"], capture_output=True, text=True, timeout=5)
+        self.assertEqual(helper.returncode, 0, helper.stderr)
+        data = json.loads(helper.stdout)
+        self.assertEqual(data["kind"], "helper")
+        self.assertEqual(data["characters"], len(data["text"]))
+        self.assertEqual(data["text"], (PACKAGE / "scripts/drain_instructions.js").read_text())
+        for flags in (["--prepare", "--json"], ["--helper", str(path)], ["--helper", "--external"],
+                      ["--helper", "--json"], ["--helper", "--page", "2"], ["--helper", "--batch"]):
+            rejected = subprocess.run(command + flags, capture_output=True, timeout=5)
+            self.assertNotEqual(rejected.returncode, 0, flags)
+            self.assertEqual(rejected.stdout, b"")
+
     def test_external_cli_delivers_selected_source_without_preparation_or_source_changes(self):
         path = self.external_file("# External skill\r\nPreserve Straße and 漢字.\r\n")
         original = path.read_bytes()

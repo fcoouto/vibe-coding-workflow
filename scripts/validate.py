@@ -86,6 +86,7 @@ def validate(root=ROOT):
     local_file(root, "./runtime/adapters/codex.py")
     from scripts.read_instructions import build_manifest
     local_file(root, "./scripts/read_instructions.py")
+    local_file(root, "./scripts/drain_instructions.js")
     if read_json(local_file(root, "./clients/instruction-map.json")) != build_manifest(root):
         raise ValueError("Prepared instruction map is stale; run scripts/read_instructions.py --prepare during authoring")
     validate_codex_hooks(root, manifest)
