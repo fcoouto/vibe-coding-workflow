@@ -295,7 +295,7 @@ print(json.dumps({{'type':'step_finish','part':{{'reason':'stop','cost':0,'token
         self.assertFalse(config['provider']['openrouter']['models']['vendor/model']['options']['provider']['allow_fallbacks'])
 
     def test_worker_reuses_qualified_catalog_without_a_background_refresh(self):
-        exe = self.fixture("import os\nassert os.environ.get('OPENCODE_DISABLE_MODELS_FETCH') == 'true'\n"
+        exe = self.fixture("sys.stdin.read()\nimport os\nassert os.environ.get('OPENCODE_DISABLE_MODELS_FETCH') == 'true'\n"
                            "print(json.dumps({'type':'text','part':{'text':'Fixture answer'}}))\n"
                            "print(json.dumps({'type':'step_finish','part':{'reason':'stop','cost':0,'tokens':{}}}))\n")
         run = self.api.prepare(self.runs, self.brief)
@@ -340,7 +340,7 @@ print(json.dumps({{'type':'step_finish','part':{{'reason':'stop','cost':0,'token
 
     def test_sized_preparation_and_child_receive_larger_finite_budget(self):
         brief, _, _ = self.sized_brief()
-        exe = self.fixture("import os\nconfig=json.loads(os.environ['OPENCODE_CONFIG_CONTENT'])\n"
+        exe = self.fixture("sys.stdin.read()\nimport os\nconfig=json.loads(os.environ['OPENCODE_CONFIG_CONTENT'])\n"
             "assert config['provider']['openrouter']['models']['vendor/model']['options']['maxOutputTokens']==8192\n"
             "assert config['permission']['*']=='deny'\n"
             "print(json.dumps({'type':'text','part':{'text':'sized'}}))\n"
@@ -459,7 +459,7 @@ for event in [
         self.assertEqual(self.api.verify(run, 'accepted', ['Native line count: 3; matches response'])['state'], 'accepted')
 
     def test_error_even_with_zero_exit_never_becomes_success(self):
-        exe = self.fixture("print(json.dumps({'type':'error','error':{'message':'SECRET'}}))\n")
+        exe = self.fixture("sys.stdin.read()\nprint(json.dumps({'type':'error','error':{'message':'SECRET'}}))\n")
         run = self.api.prepare(self.runs, self.brief, now=100)
         result = self.api.execute(run, exe, self.root / 'auth')
         self.assertEqual(result['state'], 'failed')
@@ -721,7 +721,7 @@ for event in [
             if process.poll() is None: process.kill(); process.wait()
 
     def test_native_rejection_allows_takeover_without_an_external_replay(self):
-        exe = self.fixture("print(json.dumps({'type':'text','part':{'text':'Wrong answer'}}))\n"
+        exe = self.fixture("sys.stdin.read()\nprint(json.dumps({'type':'text','part':{'text':'Wrong answer'}}))\n"
                            "print(json.dumps({'type':'step_finish','part':{'reason':'stop','cost':0,'tokens':{}}}))\n")
         run = self.api.prepare(self.runs, self.brief)
         result = self.api.execute(run, exe, self.root / 'auth')
