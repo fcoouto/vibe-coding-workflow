@@ -114,15 +114,12 @@ class RuntimeTests(unittest.TestCase):
         self.assertIsNone(scope.runtime)
         self.assertEqual(scope.policy_digest, startup.policy_digest(PACKAGE))
 
-    def test_runtime_enabled_patch_is_denied_without_state_writes(self):
+    def test_runtime_enabled_patch_is_diagnostic_without_state_writes(self):
         self.enroll(runtime=self.runtime())
         output = self.invoke()
-        self.assertIn("hookSpecificOutput", output)
-        hook = output["hookSpecificOutput"]
-        self.assertEqual(hook["hookEventName"], "PreToolUse")
-        self.assertEqual(hook["permissionDecision"], "deny")
-        self.assertIn("original_pinned_package", hook["permissionDecisionReason"])
-        self.assertNotIn("updatedInput", hook)
+        self.assertIn("original_pinned_package", output["systemMessage"])
+        self.assertNotIn("permissionDecision", str(output))
+        self.assertNotIn("updatedInput", str(output))
         self.assertFalse((self.base / "state").exists())
         self.assertNotIn("PRIVATE_PATCH", str(output))
 
@@ -299,10 +296,10 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotIn("Traceback", result.stdout.decode())
         self.assertFalse((self.base / "state").exists())
 
-    def test_stale_policy_denies_only_accepted_runtime_patch_scope(self):
+    def test_stale_policy_reports_diagnostic_without_vetoing_patch(self):
         self.enroll(policy_digest="stale", runtime=self.runtime())
         output = self.invoke()
-        self.assertEqual(output.get("hookSpecificOutput", {}).get("permissionDecision"), "deny")
+        self.assertNotIn("permissionDecision", str(output))
         self.assertFalse((self.base / "state").exists())
         self.enroll(policy_digest="stale")
         output = self.invoke()
@@ -330,7 +327,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertIsNone(self.invoke(payload=payload))
         self.enroll(linked, runtime=self.runtime())
         output = self.invoke(payload=payload)
-        self.assertEqual(output.get("hookSpecificOutput", {}).get("permissionDecision"), "deny")
+        self.assertNotIn("permissionDecision", str(output))
         self.enroll(linked, repository_root=str(self.repo), runtime=self.runtime())
         output = self.invoke(payload=payload)
         self.assertIn("does not cover", output["systemMessage"])

@@ -63,10 +63,12 @@ def main():
             request = json_object(raw or b"{}", limit=settings.MAX_CONFIG)
         if args.action == "status" and request:
             raise StartupError("invalid_observability_status_request")
-        scope = _entry_scope(acquire_project_entry(SimpleNamespace(client="codex", cwd=Path(args.cwd)), PACKAGE))
-        if (type(scope) is not AcceptedScope or scope.client != "codex" or scope.runtime is None
-                or scope.runtime.schema_version != 3):
-            raise StartupError("existing_enrolled_runtime_required")
+        scope = Path(args.cwd)
+        if args.action not in ('status', 'disable'):
+            scope = _entry_scope(acquire_project_entry(SimpleNamespace(client="codex", cwd=scope), PACKAGE))
+            if (type(scope) is not AcceptedScope or scope.client != "codex" or scope.runtime is None
+                    or scope.runtime.schema_version != 3):
+                raise StartupError("existing_enrolled_runtime_required")
         if args.action == "status":
             result = settings.status(scope)
         elif args.action == "store-credentials":

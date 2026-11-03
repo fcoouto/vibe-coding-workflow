@@ -15,7 +15,7 @@ from types import MappingProxyType
 
 from runtime.engine import HookResult, evaluate, guarded_mutation
 from runtime.startup import (StartupError, AcceptedScope, RuntimeSettings, PROJECT_FILE, json_object, _canonical_plain, _canonical_freeze,
-    _canonical_path, _canonical_binding, _canonical_ref, _canonical_hash, _budgeted_source_read)
+    _canonical_path, _canonical_binding, _canonical_ref, _canonical_hash, _budgeted_source_read, _entry_budget_check)
 
 
 SCHEMA_VERSION = 2
@@ -1342,20 +1342,20 @@ def _scope_version(scope):
     return SCHEMA_VERSION
 
 
-def _pins(scope):
+def _pins(scope, *, budget=None):
     version = _scope_version(scope) if isinstance(scope, AcceptedScope) else SCHEMA_VERSION
-    runtime = scope.runtime_digest if version == 3 else runtime_fingerprint()
+    runtime = scope.runtime_digest if version == 3 else runtime_fingerprint(budget=budget)
     pins = dict(schema_version=version, policy_digest=scope.policy_digest, runtime_digest=runtime)
-    if version == 3 and not _installed_compatible(pins):
+    if version == 3 and not _installed_compatible(pins, budget=budget):
         raise StateError("Installed runtime differs from accepted canonical scope")
     if version == 3:
         pins["accepted_scope_digest"] = scope.accepted_scope_digest
     return pins
 
 
-def _installed_compatible(pins):
+def _installed_compatible(pins, *, budget=None):
     from runtime.startup import _package_compatible, policy_digest
-    return _package_compatible(pins, dict(runtime_digest=runtime_fingerprint(), policy_digest=policy_digest(PACKAGE)))
+    return _package_compatible(pins, dict(runtime_digest=runtime_fingerprint(budget=budget), policy_digest=policy_digest(PACKAGE, budget=budget)))
 
 
 def _scope_id(scope):
@@ -1685,22 +1685,27 @@ def _source_baseline(scope, db, *, context=None):
     return _canonical_freeze(dict(reference=reference, content=content, dependencies=metadata['dependencies']))
 
 
-def _check_current_authority(scope, db):
+def _check_current_authority(scope, db, *, budget=None):
+    if budget is not None: _entry_budget_check(budget)
     baseline = _source_baseline(scope, db)
-    if (baseline is None or baseline['content']['runtime_digest'] != _pins(scope)['runtime_digest']
+    if budget is not None: _entry_budget_check(budget)
+    if (baseline is None or baseline['content']['runtime_digest'] != _pins(scope, budget=budget)['runtime_digest']
             or baseline['content']['project_id'] != scope.project_id):
         raise StateError('Canonical authority belongs to another or unproven runtime generation; retain its original pinned reader')
     from runtime import onboarding
-    observed = onboarding._authority_observation(scope.project_root, dict(paths=0, bytes=0), canonical_only=True)
+    observed = onboarding._authority_observation(scope.project_root, budget if budget is not None else dict(paths=0, bytes=0), canonical_only=True)
+    if budget is not None: _entry_budget_check(budget)
     if observed['error'] or observed['target'] != _canonical_plain(scope.authority_target):
         raise StateError('Canonical project authority changed; reacquire the accepted scope')
 
 
 @contextmanager
-def _database(scope, write=False, initialize=False, *, guard_existing=False, historical=False):
+def _database(scope, write=False, initialize=False, *, guard_existing=False, historical=False, deadline=None):
     db = creation = None
+    budget = dict(paths=0, bytes=0, deadline=deadline) if deadline is not None else None
     with ExitStack() as guards:
         try:
+            if budget is not None: _entry_budget_check(budget)
             version = _scope_version(scope)
             if historical:
                 if version != 2 or write or initialize or guard_existing:
@@ -1742,30 +1747,47 @@ def _database(scope, write=False, initialize=False, *, guard_existing=False, his
                         raise StateError('Canonical authority database is missing; the owned D4 operation is required')
                     yield None
                     return
+            if budget is not None: _entry_budget_check(budget)
             _sidecars(path)
             if creation is not None:
                 _check_creation(path, creation)
-            db = sqlite3.connect(path.as_uri() + ('?mode=rw' if write else '?mode=ro'), uri=True, timeout=0.1)
+            if budget is not None: _entry_budget_check(budget)
+            remaining = min(0.1, max(0, deadline - time.monotonic())) if deadline is not None else 0.1
+            db = sqlite3.connect(path.as_uri() + ('?mode=rw' if write else '?mode=ro'), uri=True, timeout=remaining)
+            if deadline is not None:
+                db.set_progress_handler(lambda: time.monotonic() >= deadline, 1000)
+                _entry_budget_check(budget)
             if creation is not None:
                 _check_creation(path, creation, db)
-            db.execute('pragma busy_timeout=100')
+            remaining = min(0.1, max(0, deadline - time.monotonic())) if deadline is not None else 0.1
+            db.execute('pragma busy_timeout=' + str(int(remaining * 1000)))
             db.execute('pragma trusted_schema=off')
             if historical:db.execute('pragma query_only=on')
+            if budget is not None: _entry_budget_check(budget)
             _schema(db, version=version)
+            if budget is not None:
+                _entry_budget_check(budget)
+                db.execute('pragma busy_timeout=' + str(int(min(0.1, max(0, deadline - time.monotonic())) * 1000)))
             db.execute('begin immediate' if write else 'begin')
+            if budget is not None: _entry_budget_check(budget)
             if creation is not None:
                 from runtime.evidence import _register_source_baseline
                 _register_source_baseline(scope, db, creation)
                 _check_creation(path, creation, db)
             elif version == 3:
-                _check_current_authority(scope, db)
+                _check_current_authority(scope, db, budget=budget)
+            if budget is not None: _entry_budget_check(budget)
             yield db
+            if budget is not None: _entry_budget_check(budget)
             if write:
                 if version == 3 and creation is None:
-                    _check_current_authority(scope, db)
+                    _check_current_authority(scope, db, budget=budget)
                 _sidecars(path)
                 if creation is not None:
                     _check_creation(path, creation, db)
+                if budget is not None:
+                    _entry_budget_check(budget)
+                    db.execute('pragma busy_timeout=' + str(int(min(0.1, max(0, deadline - time.monotonic())) * 1000)))
                 db.commit()
                 if creation is not None:
                     _check_creation(path, creation, db)
@@ -2014,8 +2036,8 @@ def _save(db, scope_id, task):
                task["task_id"], json.dumps(task, separators=(",", ":"))))
 
 
-def _compatible(scope, task):
-    if task is not None and (task["state"] not in STATES or task["pins"] != _pins(scope) or isinstance(scope, AcceptedScope)
+def _compatible(scope, task, *, budget=None):
+    if task is not None and (task["state"] not in STATES or task["pins"] != _pins(scope, budget=budget) or isinstance(scope, AcceptedScope)
                             and task["accepted_identity"] != _canonical_plain(scope.accepted_identity)):
         raise StateError("Task policy, runtime or schema pins differ; retain the original pinned package and arrange fresh approved D4 enrollment")
 
@@ -2262,8 +2284,94 @@ def update_task(scope, request):
         return _status(db, scope, request["client"], request["session_id"])
 
 
-def process_event(scope, event):
-    """Evaluate and apply in one short transaction; hooks never initialize state."""
+
+def _unbound_patch_conflict(db, root, context, *, deadline=None):
+    from runtime import delegation
+    rows = db.execute("select t.scope_id,t.client,t.session_id,t.task_id from tasks t join checkouts c "
+        "on c.scope_id=t.scope_id where c.repository_root=? and "
+        "json_extract(t.data,'$.mode')='editable' and "
+        "json_extract(t.data,'$.lifecycle.safe_closed_at') is null limit 4097", (str(root),)).fetchall()
+    if len(rows) > 4096:
+        raise StateError('Existing writer inspection exceeds its bound')
+    uncertain = False
+    for task_scope, client, session, task_id in rows:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise StateError('Writer observation deadline exceeded')
+        try:
+            task = _task(db, task_scope, client, session, task_id)
+            if task is not None and not task.get('retirement'):
+                return 'An existing managed editable task retains this checkout; reconcile its original writer'
+        except (StateError, KeyError, TypeError):
+            uncertain = True
+    claim = delegation._claims([dict(kind='path', key=str(root), mode='write')])[0]
+    assignments = db.execute("select id from assignments where coalesce(json_extract(data,'$.status'),'')!='settled' limit 4097").fetchall()
+    if len(assignments) > 4096:
+        raise StateError('Existing writer inspection exceeds its bound')
+    for assignment_id, in assignments:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise StateError('Writer observation deadline exceeded')
+        try:
+            for record in delegation._ledger(None, db, context=context, assignment_id=assignment_id):
+                for held in record['data']['claims']:
+                    current = delegation._claims([dict(kind=held['kind'], key=held['path'], mode=held['mode'])])[0] if 'path' in held else held
+                    if any(delegation._overlap(claim, candidate) and
+                           (claim['mode'] == 'write' or candidate['mode'] == 'write') for candidate in (held, current)):
+                        return 'An overlapping managed writer remains unresolved; reconcile its original assignment'
+        except (StateError, KeyError, TypeError):
+            uncertain = True
+    if uncertain:
+        raise StateError('Some existing writer ownership could not be observed')
+    return None
+
+
+def retained_patch_guard(event, *, deadline=None):
+    """Protect selected local writers when current managed activation is unavailable."""
+    if not guarded_mutation(event):
+        return None
+    from runtime import local_ownership, evidence
+    try:
+        owner = local_ownership.acquire(event.cwd, deadline=deadline)
+    except (StartupError, OSError, ValueError, TypeError, KeyError):
+        return None
+    if not os.path.lexists(owner.database):
+        return None
+    selected = False
+    try:
+        targets = local_ownership.targets(owner, deadline=deadline)
+        remaining = max(0, min(0.1, deadline - time.monotonic())) if deadline is not None else 0.1
+        with closing(sqlite3.connect(owner.database.as_uri() + '?mode=ro', uri=True, timeout=remaining)) as db:
+            if deadline is not None:
+                db.set_progress_handler(lambda: time.monotonic() >= deadline, 1000)
+            db.execute('pragma trusted_schema=off')
+            db.execute('pragma query_only=on')
+            db.execute('begin')
+            authority = dict(directory=str(owner.state_dir), database=str(owner.database),
+                directory_binding=targets['directory'], database_binding=targets['database'])
+            context = evidence._existing_authority_context(authority, db=db)
+            row = db.execute('select * from checkouts where scope_id=?', (owner.scope_id,)).fetchone()
+            physical = _physical_identity(_canonical_plain(owner.accepted_identity))
+            if (row is None or row[:4] != (owner.scope_id, physical['project_id'],
+                    str(owner.repository_root), str(owner.git_common_dir)) or json_object(row[5]) != physical):
+                raise StateError('Retained checkout differs from its physical owner')
+            selected = db.execute('select 1 from bindings where scope_id=? and client=? and session_id=?',
+                (owner.scope_id, event.client, event.session_id)).fetchone() is not None
+            reason = ('The selected managed task requires current authority; inspect its original task status'
+                if selected else _unbound_patch_conflict(db, owner.repository_root, context, deadline=deadline))
+            selected = selected or reason is not None
+            if local_ownership.targets(owner, deadline=deadline) != targets:
+                raise StateError('Existing managed writer identity changed')
+            evidence._check_context(context, db)
+            return HookResult(event.kind, 'deny', reason) if reason else None
+    except (StartupError, OSError, sqlite3.Error, ValueError, KeyError, TypeError):
+        return HookResult(event.kind, 'deny' if selected else 'context',
+            'Existing managed ownership could not be observed; advanced execution remains unavailable')
+
+
+def process_event(scope, event, *, deadline=None):
+    """Evaluate selected managed tasks; ordinary hooks never require or create one."""
+    task = None
+    selected = False
+    budget = dict(paths=0, bytes=0, deadline=deadline) if deadline is not None else None
     try:
         if isinstance(scope, AcceptedScope): _scope_version(scope)
         if scope.runtime is None:
@@ -2271,7 +2379,7 @@ def process_event(scope, event):
         _require_claude_scope(scope, event.client)
         if isinstance(scope, AcceptedScope) and event.client != scope.client:
             raise StateError("Event client differs from accepted scope")
-        with _database(scope, write=True) as db:
+        with _database(scope, write=True, deadline=deadline) as db:
             if db is None:
                 raise StateError("Task state has not been initialized")
             scope_id = _scope_id(scope)
@@ -2287,8 +2395,19 @@ def process_event(scope, event):
                         retired_event=True
                         if event.kind!="PostToolUse":raise StateError("Retired receipt cannot be replayed as new work")
             _checkout_row(db, scope)
+            if guarded_mutation(event):
+                selected = db.execute('select 1 from bindings where scope_id=? and client=? and session_id=?',
+                    (scope_id, event.client, event.session_id)).fetchone() is not None
             task = _task(db, scope_id, event.client, event.session_id)
-            _compatible(scope, task)
+            if guarded_mutation(event) and task is None:
+                from runtime import evidence
+                conflict = _unbound_patch_conflict(db, scope.repository_root, evidence._evidence_context(scope), deadline=deadline)
+                if conflict:
+                    selected = True
+                    return HookResult(event.kind, 'deny', conflict)
+            if budget is not None: _entry_budget_check(budget)
+            _compatible(scope, task, budget=budget)
+            if budget is not None: _entry_budget_check(budget)
             closed=task is not None and task.get("lifecycle",{}).get("safe_closed_at") is not None
             if closed and event.kind!="PostToolUse":_assert_open(task)
             identity = (scope_id, event.client, event.session_id, event.turn_id)
@@ -2303,9 +2422,10 @@ def process_event(scope, event):
                 if changes.get('poison_receipt'):
                     db.execute('update receipts set conflicted=1 where scope_id=? and client=? and session_id=? and turn_id=? and tool_call_id=? and kind=?',receipt_identity)
                 return HookResult(event.kind,'context','Terminal task remains closed; external completion freshness was observed')
+            if budget is not None: _entry_budget_check(budget)
             result, changes = evaluate(event, dict(task=task, turn={"task_id": row[0], "continuation_consumed": row[1]} if row else None,
                                                    receipt={"fingerprint": receipt[0], "conflicted": receipt[1]} if receipt else None))
-            if guarded_mutation(event) and result.action != 'deny':
+            if guarded_mutation(event) and task is not None and result.action != 'deny':
                 admission = _capability(scope, task, 'task-patch')
                 from runtime import delegation
                 delegation._qualification_event_allocation(scope, db, task, admission, event)
@@ -2313,6 +2433,7 @@ def process_event(scope, event):
                 admission = _capability(scope, task, 'task-continue')
                 from runtime import delegation
                 delegation._qualification_event_allocation(scope, db, task, admission, event)
+            if budget is not None: _entry_budget_check(budget)
             if changes["generation_delta"]:
                 _checkout_row(db, scope, initialize=True)
                 db.execute("update checkouts set generation=generation+? where scope_id=?", (changes["generation_delta"], scope_id))
@@ -2327,12 +2448,15 @@ def process_event(scope, event):
             if "task" in changes:
                 _save(db, scope_id, changes["task"])
             return result
-    except (StateError, KeyError, TypeError):
-        if guarded_mutation(event):
+    except (StartupError, StateError, KeyError, TypeError):
+        if guarded_mutation(event) and (selected or task is not None):
             reason = ("Runtime state is missing, unsafe or incompatible; inspect task status"
                       if event.client == "codex" else
                       "Runtime state is missing, unsafe or incompatible; inspect the bound task")
             return HookResult(event.kind, "deny", reason)
+        retained = retained_patch_guard(event, deadline=deadline)
+        if retained is not None:
+            return retained
         if event.kind == "Stop":
             return HookResult(event.kind)
         return HookResult(event.kind, "context", "Runtime state is unavailable; event processing and coverage are unverified")

@@ -59,7 +59,7 @@ def evaluate(event, snapshot):
                 task["turn_id"] = event.turn_id
                 task["turn_uncertain"] = False
         if event.tool_name == "apply_patch":
-            if (not task or task["state"] != "WORKING" or task["mode"] != "editable" or any(
+            if task and (task["state"] != "WORKING" or task["mode"] != "editable" or any(
                     condition["status"] == "pending" and condition["kind"] in {"blocker", "decision"}
                     for condition in task["conditions"])):
                 result = HookResult(event.kind, "deny", "Patching requires a WORKING editable bound task without applicable blockers")

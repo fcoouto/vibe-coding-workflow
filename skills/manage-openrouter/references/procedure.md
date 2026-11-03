@@ -7,10 +7,14 @@ they do not load this management procedure or enable a route automatically.
 ## Select scope and inspect status
 
 Resolve the explicitly selected checkout using its current working directory.
-The supported scope is an already enrolled Codex POSIX Git checkout with an
+Configuration and enablement require an enrolled Codex POSIX Git checkout with an
 accepted current canonical scope and its existing schema-3 private runtime database.
-Configured, unqualified, conflicting, legacy or outside scopes cannot authorize
-these controls. This skill supplies no native qualification reader. Enrollment lives in
+Status and disable instead verify the current physical project/scope identity and
+ownership of its saved private settings. Stale qualification, changed source digests
+or a missing, replaced or corrupt database do not prevent viewing or disabling
+established consent. Preserve historical bindings, expected revisions and atomic
+ownership checks; never repin or renew consent during recovery. A basic checkout
+without saved consent reports unconfigured. This skill supplies no native qualification reader. Enrollment lives in
 `.vibe-coding-workflow/project.json`; settings live outside Git in that runtime's
 private state directory. A repository clone, sibling worktree, parent directory or
 account connection does not inherit consent. Consent remains checkout-bound;

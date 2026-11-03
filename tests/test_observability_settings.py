@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -118,6 +119,86 @@ class ObservabilitySettingsTests(unittest.TestCase):
             self.assertEqual(report["remote_history"], "unchanged")
             with self.assertRaises(self.settings.SettingsError):
                 self.settings.probe(self.scope, dict(expected_revision=3))
+
+    def test_status_and_disable_recover_consent_without_qualification_or_database_health(self):
+        self.settings.configure(self.scope, CONFIGURE)
+        with patch('runtime.langfuse.verify_project', return_value=None):
+            self.settings.enable(self.scope, dict(expected_revision=1))
+        binding = json.loads(self.path.read_bytes())['binding']
+        authority = self.scope.authority_path
+        project = json.loads(authority.read_bytes())
+        project['repositories'][0]['checkouts'][0]['clients'][0]['configuration']['runtime_digest'] = 'b' * 64
+        authority.write_text(json.dumps(project))
+        database = self.scope.runtime.state_dir / 'runtime.sqlite3'
+        database.write_bytes(b'broken runtime database')
+        with patch.object(startup, 'acquire_project_entry', side_effect=startup.StartupError('qualification unavailable')), \
+                patch('runtime.langfuse.verify_project', side_effect=AssertionError('network')), \
+                patch('runtime.langfuse.synthetic_probe', side_effect=AssertionError('network')), \
+                patch('runtime.observability_credentials.load', side_effect=AssertionError('credentials')):
+            self.assertTrue(self.settings.status(self.scope)['desired_opt_in'])
+            with self.assertRaises(self.settings.SettingsError):
+                self.settings.disable(self.scope, dict(expected_revision=1))
+            report = self.settings.disable(self.scope, dict(expected_revision=2))
+            self.assertFalse(report['desired_opt_in'])
+            self.assertEqual(report['revision'], 3)
+            self.assertEqual(json.loads(self.path.read_bytes())['binding'], binding)
+            for operation in (self.settings.enable, self.settings.probe):
+                with self.assertRaises(self.settings.SettingsError):
+                    operation(self.scope, dict(expected_revision=3))
+            with self.assertRaises(self.settings.SettingsError):
+                self.settings.configure(self.scope, dict(CONFIGURE, expected_revision=3))
+        self.assertEqual(database.read_bytes(), b'broken runtime database')
+
+    def test_recovery_ignores_missing_or_replaced_database_without_repinning_consent(self):
+        self.settings.configure(self.scope, CONFIGURE)
+        with patch('runtime.langfuse.verify_project', return_value=None):
+            self.settings.enable(self.scope, dict(expected_revision=1))
+        before = self.path.read_bytes()
+        database = self.scope.runtime.state_dir / 'runtime.sqlite3'
+        replacement = database.with_suffix('.replacement')
+        replacement.write_bytes(database.read_bytes())
+        replacement.chmod(0o600)
+        database.unlink()
+        self.assertTrue(self.settings.status(self.scope)['configured'])
+        self.assertFalse(database.exists())
+        replacement.replace(database)
+        self.assertTrue(self.settings.status(self.scope)['configured'])
+        self.assertFalse(self.settings.disable(self.scope, dict(expected_revision=2))['desired_opt_in'])
+        self.assertEqual(json.loads(self.path.read_bytes())['binding'], json.loads(before)['binding'])
+
+    def test_recovery_cli_controls_saved_consent_without_healthy_runtime(self):
+        self.settings.configure(self.scope, CONFIGURE)
+        with patch('runtime.langfuse.verify_project', return_value=None):
+            self.settings.enable(self.scope, dict(expected_revision=1))
+        database = self.scope.runtime.state_dir / 'runtime.sqlite3'
+        database.write_bytes(b'broken runtime database')
+        command = self.fixture.workflow_command()
+        command[-1] = command[-1].replace(repr(str(PACKAGE / 'scripts/workflow.py')),
+                                         repr(str(PACKAGE / 'scripts/observability.py')))
+        for action, request in (('status', {}), ('disable', dict(expected_revision=2))):
+            with self.subTest(action=action):
+                result = subprocess.run(command + [action, '--cwd', str(self.scope.repository_root)],
+                    input=json.dumps(request).encode(), capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stdout.decode())
+                self.assertEqual(json.loads(result.stdout)['desired_opt_in'], action == 'status')
+
+    def test_unconfigured_recovery_does_not_create_settings_or_database_content(self):
+        database = self.scope.runtime.state_dir / 'runtime.sqlite3'
+        database.write_bytes(b'broken runtime database')
+        with patch.object(startup, 'acquire_project_entry', side_effect=startup.StartupError('qualification unavailable')):
+            self.assertFalse(self.settings.status(self.scope)['configured'])
+            self.assertFalse(self.settings.disable(self.scope, dict(expected_revision=0))['configured'])
+        self.assertFalse(self.directory.exists())
+        self.assertEqual(database.read_bytes(), b'broken runtime database')
+
+    def test_file_only_status_and_disable_require_no_runtime(self):
+        authority = self.scope.authority_path
+        project = json.loads(authority.read_bytes())
+        project['repositories'][0]['checkouts'][0]['clients'][0]['configuration']['runtime'] = None
+        authority.write_text(json.dumps(project))
+        self.assertFalse(self.settings.status(self.scope.repository_root)['configured'])
+        self.assertFalse(self.settings.disable(self.scope.repository_root, dict(expected_revision=0))['configured'])
+        self.assertFalse(self.directory.exists())
 
     def test_live_destination_cannot_change_before_disable(self):
         self.settings.configure(self.scope, CONFIGURE)

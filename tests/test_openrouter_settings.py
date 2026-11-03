@@ -124,7 +124,8 @@ class SettingsTests(unittest.TestCase):
 
     def test_default_status_is_off_without_writes_or_client_execution(self):
         before = self.snapshot()
-        report = self.settings.status(self.repo)
+        with patch.object(startup, 'acquire_project_entry', side_effect=startup.StartupError('qualification unavailable')):
+            report = self.settings.status(self.repo)
         self.assertFalse(report['configured'])
         self.assertFalse(report['enabled'])
         self.assertEqual(report['revision'], 0)
@@ -132,6 +133,13 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(report['connection'], 'not_checked')
         self.assertFalse(self.locks.exists())
         self.assertEqual(self.snapshot(), before)
+
+    def test_local_recovery_identity_cannot_authorize_runtime_execution(self):
+        from runtime import local_ownership
+        owner = local_ownership.acquire(self.repo)
+        self.assertNotIsInstance(owner, startup.AcceptedScope)
+        with self.assertRaises(state.StateError):
+            with state._database(owner): self.fail('recovery authorized execution')
 
     def test_configure_is_private_off_and_does_not_mutate_native_state(self):
         database = self.scope.runtime.state_dir / 'runtime.sqlite3'
@@ -159,6 +167,66 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(self.settings.disable(self.repo, dict(expected_revision=3)), off)
         self.assertTrue(self.settings.enable(self.repo, dict(expected_revision=3))['enabled'])
 
+    def test_status_and_disable_recover_saved_consent_without_runtime_qualification(self):
+        self.enabled()
+        binding = json.loads(self.path.read_bytes())['binding']
+        authority = self.repo / startup.PROJECT_FILE
+        project = json.loads(authority.read_bytes())
+        project['repositories'][0]['checkouts'][0]['clients'][0]['configuration']['runtime_digest'] = 'b' * 64
+        authority.write_text(json.dumps(project))
+        database = self.scope.runtime.state_dir / 'runtime.sqlite3'
+        database.write_bytes(b'broken runtime database')
+        before = database.read_bytes()
+        with patch.object(startup, 'acquire_project_entry', side_effect=startup.StartupError('qualification unavailable')):
+            self.assertTrue(self.settings.status(self.repo)['enabled'])
+            with self.assertRaises(self.settings.SettingsError):
+                self.settings.disable(self.repo, dict(expected_revision=1))
+            report = self.settings.disable(self.repo, dict(expected_revision=2))
+            self.assertFalse(report['enabled'])
+            self.assertEqual(report['revision'], 3)
+            self.assertEqual(json.loads(self.path.read_bytes())['binding'], binding)
+            with self.assertRaises(self.settings.SettingsError):
+                self.settings.enable(self.repo, dict(expected_revision=3))
+            with self.assertRaises(self.settings.SettingsError):
+                self.settings.configure(self.repo, dict(self.request, expected_revision=3))
+        self.assertEqual(database.read_bytes(), before)
+
+    def test_file_only_status_and_disable_require_no_runtime(self):
+        authority = self.repo / startup.PROJECT_FILE
+        project = json.loads(authority.read_bytes())
+        project['repositories'][0]['checkouts'][0]['clients'][0]['configuration']['runtime'] = None
+        authority.write_text(json.dumps(project))
+        self.assertFalse(self.settings.status(self.repo)['configured'])
+        self.assertFalse(self.settings.disable(self.repo, dict(expected_revision=0))['configured'])
+        self.assertFalse(self.path.parent.exists())
+
+    def test_recovery_rechecks_namespace_before_atomic_disable(self):
+        self.enabled()
+        before = self.path.read_bytes()
+        atomic = changes._atomic
+        def replace_database(*args, **kwargs):
+            folder = self.path.parent
+            folder.rename(folder.with_name('retired-openrouter'))
+            folder.mkdir(mode=0o700)
+            return atomic(*args, **kwargs)
+        with patch.object(changes, '_atomic', side_effect=replace_database):
+            with self.assertRaises(self.settings.SettingsError):
+                self.settings.disable(self.repo, dict(expected_revision=2))
+        self.assertEqual((self.path.parent.with_name('retired-openrouter') / self.path.name).read_bytes(), before)
+        self.assertFalse(self.path.exists())
+
+    def test_recovery_cli_needs_no_qualification_or_valid_runtime_database(self):
+        self.enabled()
+        self._openrouter_observations.clear()
+        database = self.scope.runtime.state_dir / 'runtime.sqlite3'
+        database.write_bytes(b'broken runtime database')
+        for action, request in (('status', {}), ('disable', dict(expected_revision=2))):
+            with self.subTest(action=action):
+                result = subprocess.run(fixture_command(self, PACKAGE / 'scripts/openrouter.py', action, '--cwd', self.repo),
+                    input=json.dumps(request), text=True, capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 0, {'stdout': result.stdout, 'stderr': result.stderr})
+                self.assertEqual(json.loads(result.stdout)['enabled'], action == 'status')
+
     def test_status_does_not_read_credentials_or_invoke_the_configured_runtime(self):
         self.enabled()
         secret = self.auth / 'credential-sentinel'
@@ -179,18 +247,20 @@ class SettingsTests(unittest.TestCase):
         self.assertNotIn('SECRET', json.dumps(report))
         self.assertEqual(self.snapshot(), before)
 
-    def test_missing_or_replaced_authority_cannot_bootstrap_or_repin(self):
+    def test_missing_or_replaced_database_does_not_block_opt_out_or_repin(self):
         self.enabled()
         old = self.path.read_bytes()
         database = self.scope.runtime.state_dir / 'runtime.sqlite3'
         saved = database.with_suffix('.saved')
         database.rename(saved)
-        with self.assertRaises(self.settings.SettingsError): self.settings.status(self.repo)
+        self.assertTrue(self.settings.status(self.repo)['enabled'])
         self.assertFalse(database.exists())
         database.write_bytes(saved.read_bytes())
         database.chmod(0o600)
-        with self.assertRaises(self.settings.SettingsError): self.settings.status(self.repo)
+        self.assertTrue(self.settings.status(self.repo)['enabled'])
         self.assertEqual(self.path.read_bytes(), old)
+        self.assertFalse(self.settings.disable(self.repo, dict(expected_revision=2))['enabled'])
+        self.assertEqual(json.loads(self.path.read_bytes())['binding'], json.loads(old)['binding'])
 
     def test_benign_enrollment_and_database_updates_preserve_consent(self):
         self.enabled()

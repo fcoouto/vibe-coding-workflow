@@ -18,7 +18,7 @@ Canonical Project authority is schema 2; its runtime configuration and SQLite st
 
 ## Staged qualification
 
-For an already approved disposable target, follow [staged qualification](../skills/onboard-my-project/references/apply-and-recovery.md#staged-disposable-qualification). A planned qualification task may select its retained owner-issued `attempt_ref` at `task start`. The runtime validates the original task, operation, scope and allocations before retaining its owner-derived qualification purpose. A reference alone grants nothing. That purpose remains attached to the task after later setup coverage improves; replacing a receipt cannot renew its allocations or turn its results into ordinary evidence. Inspections and exact recovery retain their existing owners.
+For an already approved disposable target, follow [staged qualification](../skills/onboard-my-project/references/qualification.md#staged-disposable-qualification). A planned qualification task may select its retained owner-issued `attempt_ref` at `task start`. The runtime validates the original task, operation, scope and allocations before retaining its owner-derived qualification purpose. A reference alone grants nothing. That purpose remains attached to the task after later setup coverage improves; replacing a receipt cannot renew its allocations or turn its results into ordinary evidence. Inspections and exact recovery retain their existing owners.
 
 ## Controls
 
