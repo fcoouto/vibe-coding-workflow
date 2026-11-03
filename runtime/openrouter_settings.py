@@ -1,5 +1,6 @@
 """Private checkout consent for qualified helper paths, independent of accounts."""
 from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
 import fcntl
 import json
 import os
@@ -11,6 +12,7 @@ import uuid
 from runtime import changes, local_ownership, onboarding, startup, state
 
 PACKAGE = Path(__file__).resolve().parents[1]
+BASIC_STORAGE = Path.home() / ".vcw-openrouter-consent"
 MAX_CONFIG = 8192
 MAX_REVISION = 2 ** 53 - 1
 FIELDS = {'version', 'revision', 'binding', 'routes', 'opencode', 'auth_data', 'enabled'}
@@ -43,7 +45,44 @@ def resolve(cwd):
     return scope
 
 
+@dataclass(frozen=True)
+class BasicWorkerScope:
+    repository_root: Path
+    owner: local_ownership.LocalOwnership
+    recovery: bool
+
+
+def basic_worker_scope(owner, *, recovery=False):
+    if owner.runtime is not None or owner.accepted_identity is None:
+        return None
+    if recovery:
+        return BasicWorkerScope(owner.repository_root, owner, True)
+    selected = owner.accepted_identity
+    record = owner.acquisition.record.data
+    repo = next(row for row in record['repositories'] if row['repository_id'] == selected['repository_id'])
+    checkout = next(row for row in repo['checkouts'] if row['checkout_id'] == selected['checkout_id'])
+    entry = next(row for row in checkout['clients'] if row['client'] == 'codex')
+    if entry['activation']['status'] != 'configured':
+        return None
+    current = startup.acquire_project_entry(SimpleNamespace(client='codex', cwd=owner.repository_root),
+        PACKAGE, managed=False)
+    require(current.resolution.reason == 'basic_guidance'
+            and current.authority_path == owner.acquisition.authority_path
+            and local_ownership.settings_scope(owner.repository_root) == owner,
+            'openrouter_basic_scope_changed')
+    return BasicWorkerScope(owner.repository_root, owner, False)
+
+
 def authority(scope):
+    if isinstance(scope, BasicWorkerScope):
+        owner = scope.owner
+        require(basic_worker_scope(local_ownership.settings_scope(scope.repository_root), recovery=scope.recovery) == scope,
+            'openrouter_basic_scope_changed')
+        onboarding._no_links(BASIC_STORAGE)
+        state._private(BASIC_STORAGE, True)
+        return dict(scope_id=owner.scope_id, repository=identity(scope.repository_root.lstat()),
+            git_common=identity(owner.git_common_dir.lstat()), directory=identity(BASIC_STORAGE.lstat()),
+            enrollment=state._digest(startup._canonical_plain(owner.acquisition.authority_target)))
     if type(scope) is local_ownership.LocalOwnership:
         return dict(scope_id=scope.scope_id, repository=identity(scope.repository_root.lstat()),
             git_common=identity(scope.git_common_dir.lstat()), directory=local_ownership.settings_directory(scope))
@@ -84,10 +123,12 @@ def runtime_references(opencode, auth_data):
 
 
 class Store:
-    def __init__(self, scope, root, directory, binding):
+    def __init__(self, scope, root, directory, binding, *, refresh=False):
         self.scope, self.root, self.directory = scope, root, directory
-        self.folder = scope.runtime.state_dir / 'openrouter' if scope.runtime else None
+        storage = BASIC_STORAGE if isinstance(scope, BasicWorkerScope) else scope.runtime.state_dir if scope.runtime else None
+        self.folder = storage / 'openrouter' if storage else None
         self.binding = dict(binding)
+        self.stale_enrollment = isinstance(scope, BasicWorkerScope) and (scope.recovery or refresh)
         if directory is not None: self.binding['namespace'] = identity(os.fstat(directory))
         self.name = binding['scope_id'] + '.json'
         self.path = self.folder / self.name if self.folder else None
@@ -101,8 +142,13 @@ class Store:
 
     def check(self):
         current = authority(self.scope)
-        excluded = ('namespace', 'database') if type(self.scope) is local_ownership.LocalOwnership else ('namespace',)
-        require(current == {key: value for key, value in self.binding.items() if key not in excluded}
+        excluded = {'namespace'}
+        if type(self.scope) is local_ownership.LocalOwnership:
+            excluded.add('database')
+        if self.stale_enrollment:
+            excluded.add('enrollment')
+        require({key: value for key, value in current.items() if key not in excluded}
+                == {key: value for key, value in self.binding.items() if key not in excluded}
                 and identity(os.fstat(self.root)) == current['directory'], 'openrouter_authority_changed')
         try: named = self.folder.lstat()
         except FileNotFoundError:
@@ -128,11 +174,16 @@ class Store:
                     'invalid_or_changed_openrouter_configuration')
             startup._canonical_binding(binding['database'])
             binding = {key: value for key, value in binding.items() if key != 'database'}
+        if self.stale_enrollment:
+            startup._canonical_hash(binding['enrollment'])
+            binding = dict(binding, enrollment=self.binding['enrollment'])
         require(set(record) == FIELDS and type(record['version']) is int and record['version'] in (1, 2)
                 and integer(record['revision']) and record['revision'] > 0
                 and type(record['enabled']) is bool and binding == self.binding,
                 'invalid_or_changed_openrouter_configuration')
         validate_routes(record['routes'])
+        if isinstance(self.scope, BasicWorkerScope):
+            require(record['routes'] == ['workers'], 'openrouter_basic_workers_only')
         if 'workers' in record['routes']:
             require(reference(record['opencode']) and reference(record['auth_data']), 'invalid_openrouter_configuration')
         else:
@@ -191,15 +242,28 @@ class Store:
 def guard(cwd, *, write=False, create=False, recovery=False):
     in_body = False
     try:
-        scope = local_ownership.settings_scope(cwd) if recovery else resolve(cwd)
-        if recovery and local_ownership.settings_absent(scope, 'openrouter'):
+        local = local_ownership.settings_scope(cwd)
+        basic = basic_worker_scope(local, recovery=recovery)
+        if basic is not None:
+            if create:
+                try: onboarding._plan_path(BASIC_STORAGE)
+                except FileExistsError: onboarding._plan_path(BASIC_STORAGE, create=False)
+            if not os.path.lexists(BASIC_STORAGE):
+                yield Store(basic, None, None, dict(scope_id=local.scope_id))
+                require(not os.path.lexists(BASIC_STORAGE)
+                    and basic_worker_scope(local_ownership.settings_scope(cwd), recovery=recovery) == basic,
+                    'openrouter_basic_scope_changed')
+                return
+        scope = basic if basic is not None else local if recovery else resolve(cwd)
+        if recovery and basic is None and local_ownership.settings_absent(scope, 'openrouter'):
             yield Store(scope, None, None, dict(scope_id=scope.scope_id))
             require(local_ownership.settings_absent(scope, 'openrouter'), 'openrouter_configuration_changed')
             return
+        storage = BASIC_STORAGE if basic is not None else scope.runtime.state_dir
         with ExitStack() as stack:
-            if write: stack.enter_context(changes._authority_guards([scope.runtime.state_dir]))
+            if write and basic is None: stack.enter_context(changes._authority_guards([storage]))
             binding = authority(scope)
-            root = onboarding._open_path(scope.runtime.state_dir, os.O_RDONLY | os.O_DIRECTORY)
+            root = onboarding._open_path(storage, os.O_RDONLY | os.O_DIRECTORY)
             stack.callback(os.close, root)
             if create:
                 try:
@@ -209,14 +273,14 @@ def guard(cwd, *, write=False, create=False, recovery=False):
             try:
                 directory = os.open('openrouter', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
                 stack.callback(os.close, directory)
-                state._private(scope.runtime.state_dir / 'openrouter', True)
-                require(identity(os.fstat(directory)) == identity((scope.runtime.state_dir / 'openrouter').lstat()),
+                state._private(storage / 'openrouter', True)
+                require(identity(os.fstat(directory)) == identity((storage / 'openrouter').lstat()),
                         'openrouter_namespace_changed')
                 try: fcntl.flock(directory, (fcntl.LOCK_EX if write else fcntl.LOCK_SH) | fcntl.LOCK_NB)
                 except BlockingIOError: raise SettingsError('openrouter_operation_busy') from None
             except FileNotFoundError:
                 directory = None
-            owner = Store(scope, root, directory, binding)
+            owner = Store(scope, root, directory, binding, refresh=create)
             owner.load()
             owner.check()
             in_body = True
@@ -251,6 +315,8 @@ def operate(cwd, action, request):
         if action == 'configure':
             require(current is None or not current['enabled'], 'disable_before_openrouter_reconfiguration')
             validate_routes(request['routes'])
+            if isinstance(owner.scope, BasicWorkerScope):
+                require(request['routes'] == ['workers'], 'openrouter_basic_workers_only')
             opencode, auth = request['opencode'], request['auth_data']
             if 'workers' in request['routes']:
                 require(reference(opencode) and reference(auth), 'invalid_openrouter_runtime_references')
@@ -261,7 +327,10 @@ def operate(cwd, action, request):
             try: os.mkdir(owner.binding['scope_id'], mode=0o700, dir_fd=owner.directory)
             except FileExistsError: pass
             state._private(owner.data, True)
-            updated = dict(version=1, revision=revision + 1, binding=owner.binding,
+            binding = owner.binding
+            if isinstance(owner.scope, BasicWorkerScope):
+                binding = dict(binding, enrollment=authority(owner.scope)['enrollment'])
+            updated = dict(version=1, revision=revision + 1, binding=binding,
                 routes=sorted(request['routes']), opencode=opencode, auth_data=auth, enabled=False)
         else:
             if action == 'disable' and current is None: return owner.report()

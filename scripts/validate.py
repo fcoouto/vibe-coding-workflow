@@ -98,6 +98,7 @@ def validate(root=ROOT):
                  "runtime/recovery_uses.py", "runtime/resource_accounting.py", "runtime/closure_witness.py",
                  "runtime/review_storage.py", "runtime/screening.py",
                  "runtime/delegation.py", "clients/delegation.md", "runtime/repository_gate.py",
+                 "runtime/worker_visibility.py", "scripts/worker_visibility.py", "clients/worker-visibility.md",
                  "scripts/repository_gate.py", "clients/repository-gate.md",
                  "skills/onboard-my-project/SKILL.md",
                  "skills/onboard-my-project/references/procedure.md",

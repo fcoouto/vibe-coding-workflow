@@ -131,14 +131,14 @@ def _review_id(value):
 
 
 @contextmanager
-def _native_reader(methods, *, on_notification=None, deadline=None):
+def _native_reader(methods, *, on_notification=None, deadline=None, executable=None):
     process = None
     limit = time.monotonic() + REVIEW_TIMEOUT
     deadline = limit if deadline is None else min(limit, deadline)
     if time.monotonic() >= deadline:
         raise ObservationError('timeout')
     try:
-        executable = shutil.which("codex")
+        executable = executable if executable is not None else shutil.which("codex")
         if executable is None:
             raise ObservationError("unavailable")
         observed_version = version(executable, deadline)
@@ -406,6 +406,89 @@ def discover_native_workers(scope, control_observation):
 def observe_native_worker(scope, attempt, parent_turn_id, spawn_item_id):
     """Bind one prepared assignment to native history without claiming writer shutdown."""
     return _observe_native_assignment(scope, attempt, parent_turn_id, spawn_item_id, review=False)
+
+
+def _visibility_spawn_task(request, parent, child, binding):
+    """Correlate the original declaration when native history omits agent_path."""
+    turn = _review_id(binding['parent_turn_id'])
+    item_id = _review_id(binding['spawn_item_id'])
+    rows = request('thread/items/read', {'threadId': parent, 'turnId': turn, 'itemIds': [item_id]}).get('data')
+    if (not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict)
+            or rows[0].get('turnId') != turn):
+        raise ObservationError('spawn_unverified')
+    item = rows[0].get('item')
+    if (not isinstance(item, dict) or item.get('id') != item_id or item.get('type') != 'collabAgentToolCall'
+            or item.get('tool') != 'spawnAgent' or item.get('status') != 'completed'
+            or item.get('senderThreadId') != parent or item.get('receiverThreadIds') != [child]):
+        raise ObservationError('spawn_unverified')
+    prompt = item.get('prompt')
+    if not isinstance(prompt, str) or len(prompt.encode('utf-8')) > MAX_OUTPUT:
+        raise ObservationError('assignment_unverified')
+    if 'ledger_assignment_digest' in binding:
+        from runtime.evidence import _digest
+        envelope = json_object(prompt.encode('utf-8'), limit=MAX_OUTPUT)
+        if 'ownership' in envelope:
+            body, digest = envelope['ownership'], envelope.get('ledger_assignment_digest')
+        else:
+            body, digest = envelope.get('assignment'), envelope.get('assignment_digest')
+        if (not isinstance(body, dict) or digest != binding['ledger_assignment_digest'] or _digest(body) != digest
+                or body['binding']['task_name'] != binding['task_name']
+                or body['request']['visibility'] != binding['visibility']):
+            raise ObservationError('assignment_unverified')
+    elif prompt.partition('\n')[0] != binding['prompt_marker']:
+        raise ObservationError('assignment_unverified')
+    return _review_id(binding['task_name'])
+
+
+def observe_worker_visibility(checkout, parent_session_id, worker_id, *, spawn_binding=None, deadline=None, executable=None):
+    """Read actual native lineage for display only; no runtime enrollment or stop proof."""
+    from types import SimpleNamespace
+    import uuid
+    try:
+        for identity in (parent_session_id, worker_id):
+            if not isinstance(identity, str) or str(uuid.UUID(identity)) != identity:
+                raise ObservationError('identity_unverified')
+        if worker_id == parent_session_id:
+            raise ObservationError('child_mismatch')
+        checkout = Path(checkout)
+        if not checkout.is_absolute() or checkout.resolve(strict=True) != checkout or not checkout.is_dir():
+            raise ObservationError('checkout_unverified')
+        scope = SimpleNamespace(repository_root=checkout)
+        methods = {'initialize', 'thread/read'}
+        if spawn_binding is not None:
+            methods.add('thread/items/read')
+        options = {} if deadline is None else {'deadline': deadline}
+        if executable is not None:
+            options['executable'] = executable
+        with _native_reader(methods, **options) as (observed_version, request):
+            parent = _native_metadata(scope, request, parent_session_id, observed_version)
+            surface = 'codex-cli' if parent.get('source') == 'exec' else 'codex-desktop'
+            _native_surface(parent, surface, observed_version)
+            child = _native_metadata(scope, request, worker_id, observed_version)
+            source = child.get('source')
+            subagent = source.get('subAgent') if isinstance(source, dict) else None
+            origin = subagent.get('thread_spawn') if isinstance(subagent, dict) else None
+            if (child.get('parentThreadId') != parent_session_id or not isinstance(origin, dict)
+                    or origin.get('parent_thread_id') != parent_session_id):
+                raise ObservationError('child_mismatch')
+            agent_path = origin.get('agent_path')
+            task_name = None
+            if agent_path is not None:
+                if not _review_id(agent_path).startswith('/'):
+                    raise ObservationError('child_mismatch')
+                task_name = agent_path.rsplit('/', 1)[-1]
+            if spawn_binding is not None and agent_path is None:
+                if _visibility_spawn_task(request, parent_session_id, worker_id, spawn_binding) != (task_name or spawn_binding['task_name']):
+                    raise ObservationError('assignment_unverified')
+                task_name = spawn_binding['task_name']
+            return dict(version=1, parent_session_id=parent_session_id, worker_id=worker_id,
+                checkout=str(checkout), client_surface=surface, native_version=observed_version,
+                agent_path=agent_path, task_name=task_name, configured_model=_native_setting(child.get('model')),
+                configured_provider=_native_setting(child.get('modelProvider')),
+                execution_model=None, execution_effort=None,
+                **({'native_role': origin['agent_role']} if origin.get('agent_role') is not None else {}))
+    except (ObservationError, OSError, ValueError, TypeError, KeyError, RecursionError, subprocess.TimeoutExpired):
+        raise StartupError('Native display identity unavailable; visibility remains unverified') from None
 
 
 def observe_native_review_assignment(scope, attempt_id, parent_turn_id, spawn_item_id):

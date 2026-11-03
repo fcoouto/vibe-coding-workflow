@@ -136,6 +136,32 @@ class WorkstreamsTests(unittest.TestCase):
         self.assertEqual(task['delegation']['attempts_consumed'], 1)
         self.assertEqual(task['delegation']['resource_units_consumed'], 1)
 
+    def test_continuation_keeps_original_visibility_and_rejects_overrides(self):
+        enabled = self.enable()
+        self.fixture.plan()
+        visibility = dict(version=1, role='Builder', specialty='Parser fixes', custom_role_name='Parser owner')
+        try:
+            prepared = self.fixture.prepare(workstream_revision=enabled['revision'], workstream_limits=self.limits,
+                visibility=visibility)
+        except state.StateError as error:
+            self.fail('Workstream visibility was rejected: ' + str(error))
+        self.observe(prepared)
+        request = self.continuation(prepared)
+        with self.assertRaises(state.StateError):
+            self.api.prepare_continuation(self.scope, request | dict(visibility=visibility))
+        intent = self.api.prepare_continuation(self.scope, request)
+        self.assertEqual(intent['visibility'], visibility)
+        self.assertEqual(intent['worker_id'], 'child')
+        self.assertEqual(intent['task_name'], prepared['task_name'])
+        consume = self.fixture.request(attempt_id=prepared['attempt_id'],
+            workstream_revision=request['workstream_revision'], token=intent['token'])
+        with self.assertRaises(state.StateError):
+            self.api.consume_continuation(self.scope, consume | dict(visibility=visibility))
+        result = self.api.consume_continuation(self.scope, consume)
+        self.assertEqual(result['visibility'], visibility)
+        self.assertEqual(result['worker_id'], 'child')
+        self.assertEqual(self.fixture.raw_assignment(prepared['attempt_id'])['role'], 'worker')
+
     def test_host_retry_and_unknown_failures_block_automatic_continuation(self):
         prepared = self.prepare()
         for fields in (dict(failure_code='serverOverloaded', will_retry=True),

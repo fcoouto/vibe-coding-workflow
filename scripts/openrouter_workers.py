@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Opt-in read-only OpenCode workers. Native supervisors own acceptance."""
 import argparse
+from contextlib import contextmanager
 from email.utils import parsedate_to_datetime
 import fcntl
-import importlib
 import importlib.util
 import hashlib
 import json
@@ -11,18 +11,20 @@ import math
 import os
 from pathlib import Path
 import re
+from queue import Empty, Full, Queue
 import selectors
 import signal
 import subprocess
 import sys
+from threading import Event, Thread
 import time
 import uuid
 
 PACKAGE = Path(__file__).resolve().parents[1]
 if str(PACKAGE) not in sys.path: sys.path.insert(0, str(PACKAGE))
-from runtime import openrouter_settings as settings, onboarding
+from runtime import openrouter_settings as settings, onboarding, worker_visibility
 
-ROLES = {'Scout', 'Builder', 'Tester', 'Reviewer', 'Scribe', 'Investigator'}
+ROLES = worker_visibility.ROLES - {'Coordinator'}
 LIMIT = 4 * 1024 * 1024
 MAX_INPUT = 1024 * 1024
 
@@ -64,6 +66,11 @@ def save(path, value):
     temporary.replace(path)
 
 
+def visibility_declaration(brief):
+    return worker_visibility.declaration(dict(version=1, role=brief['role'], specialty=brief['specialty'],
+        **({'custom_role_name': brief['custom_role_name']} if 'custom_role_name' in brief else {})))
+
+
 def prepare(root, brief, now=None):
     if not isinstance(brief, dict): raise ValueError('invalid_brief_fields')
     # Older callers supplied credit observations; they no longer gate or persist.
@@ -71,13 +78,14 @@ def prepare(root, brief, now=None):
     required = {'task_id', 'role', 'specialty', 'coordinator_chat_id', 'model',
                 'model_display_name', 'provider', 'objective', 'source_root', 'files',
                 'timeout_seconds', 'steps', 'approval_ref', 'effort'}
-    if set(brief) not in (required, required | {'sizing'}): raise ValueError('invalid_brief_fields')
+    if not required <= set(brief) <= required | {'sizing', 'custom_role_name'}: raise ValueError('invalid_brief_fields')
     if len(json.dumps(brief, ensure_ascii=True, allow_nan=False).encode()) > MAX_INPUT: raise ValueError('input_limit')
     for key in required - {'files', 'timeout_seconds', 'steps'}:
         if not isinstance(brief[key], str) or not brief[key].strip() or len(brief[key]) > 16000:
             raise ValueError('invalid_brief_value')
     if not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,63}', brief['task_id']): raise ValueError('invalid_task_id')
     if brief['role'] not in ROLES: raise ValueError('invalid_role')
+    if 'custom_role_name' in brief: visibility_declaration(brief)
     if brief['effort'] not in ('low', 'medium', 'high', 'max'): raise ValueError('invalid_effort')
     uuid.UUID(brief['coordinator_chat_id'])
     if not re.fullmatch(r'[\w.-]+/[\w./:-]+', brief['model']): raise ValueError('invalid_model')
@@ -164,30 +172,62 @@ def progress(run, phase):
 
 def habblaud_publisher(plugin_root, run, endpoint, account):
     """Reuse installed transport, never create local-delegation jobs or native logs."""
-    sys.path.insert(0, str(Path(plugin_root).resolve(strict=True)))
-    module = importlib.import_module('local_model_delegation.habblaud')
     brief = json.loads((run / 'brief.json').read_text())
-    clean = ' '.join(''.join(c for c in brief['model_display_name'] if c.isprintable()).split())
+    metadata = visibility_declaration(brief)
+    receipt = run / 'visibility.json'
+    display_role = {key: value for key, value in metadata.items() if key != 'custom_role_name'}
+    previous = worker_visibility.read(receipt)
+    if previous and 'binding' in previous:
+        # A published run keeps its original label when verification resumes.
+        legacy_label = worker_visibility.display_label(metadata, brief['model_display_name'])
+        if previous['binding'].get('label') == legacy_label:
+            display_role = metadata
     binding = {'parent': brief['coordinator_chat_id'], 'agent_id': str(uuid.uuid5(uuid.NAMESPACE_URL, str(run))),
-               'label': brief['role'] + ' · ' + clean, 'cwd': brief['source_root']}
-    client = module.Client(endpoint)
-    started = False
+               'label': worker_visibility.display_label(display_role, brief['model_display_name']), 'cwd': brief['source_root']}
+    return worker_visibility.publisher(worker_visibility.transport(plugin_root), endpoint, account, binding,
+                                       metadata, receipt)
 
-    def publish(phase):
-        nonlocal started
+
+@contextmanager
+def visibility_updates(publish):
+    """Keep optional loopback delivery out of the worker's finite execution window."""
+    if publish is None:
+        yield None
+        return
+    pending, closed = Queue(maxsize=1), Event()
+
+    def deliver():
+        while (phase := pending.get()) is not None:
+            try:
+                publish(phase)
+            except (ValueError, OSError, KeyError, TypeError, AttributeError, RecursionError):
+                pass
+            if closed.is_set() and pending.empty():
+                return
+
+    thread = Thread(target=deliver, daemon=True)
+    try:
+        thread.start()
+    except RuntimeError:
+        yield None
+        return
+
+    def submit(phase):
         try:
-            client.snapshot(account)
-            if not started:
-                client.event(account, module._event(binding, 'SubagentStart'))
-                started = True
-            client.event(account, module._event(binding, 'PreToolUse', phase))
-            if phase in ('accepted', 'rejected', 'failed', 'unresolved'):
-                client.event(account, module._event(binding, 'SubagentStop'))
-            save(run / 'visibility.json', {'delivered': True, 'agent_id': binding['agent_id'], 'phase': phase,
-                                          'account': account, 'parent': binding['parent'], 'observed_at': time.time()})
-        except (ValueError, OSError, KeyError):
-            save(run / 'visibility.json', {'delivered': False, 'phase': phase})
-    return publish
+            pending.get_nowait()
+        except Empty:
+            pass
+        pending.put_nowait(phase)
+
+    try:
+        yield submit
+    finally:
+        closed.set()
+        try:
+            pending.put_nowait(None)
+        except Full:
+            pass
+        thread.join(timeout=2)
 
 
 def terminal_failure(error):
@@ -265,7 +305,8 @@ def execute(run, executable, auth_data, publish=None):
         if json.loads((run / 'result.json').read_text())['state'] != 'prepared': raise ValueError('already_started')
         original = signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
         try:
-            return _execute(run, brief, Path(executable), Path(auth_data), publish)
+            with visibility_updates(publish) as update:
+                return _execute(run, brief, Path(executable), Path(auth_data), update)
         finally:
             signal.signal(signal.SIGTERM, original)
 
@@ -290,7 +331,7 @@ def _execute(run, brief, executable, auth_data, publish):
     save(run / 'result.json', result)
     def emit(phase):
         progress(run, phase)
-        if publish: publish(phase)
+        if publish and proc is not None: publish(phase)
     proc = None
     terminal = False
     failed = False
@@ -421,7 +462,7 @@ def _execute(run, brief, executable, auth_data, publish):
     return result
 
 
-def verify(run, disposition, checks):
+def verify(run, disposition, checks, publish=None):
     run = Path(run)
     result = json.loads((run / 'result.json').read_text())
     if result['state'] != 'awaiting_verification' or disposition not in ('accepted', 'rejected'):
@@ -432,6 +473,9 @@ def verify(run, disposition, checks):
                   native_fallback_ready=disposition == 'rejected' and result.get('local_execution_stopped') is True)
     save(run / 'result.json', result)
     progress(run, disposition)
+    with visibility_updates(publish) as update:
+        if update:
+            update(disposition)
     return result
 
 
@@ -509,12 +553,14 @@ def main():
     if args.visibility_plugin and args.action != 'status':
         try:
             publisher = habblaud_publisher(args.visibility_plugin, run, args.habblaud_endpoint, args.habblaud_account)
-        except (ValueError, OSError, ImportError, AttributeError):
-            save(run / 'visibility.json', {'delivered': False, 'reason': 'adapter_unavailable'})
+        except (ValueError, OSError, ImportError, AttributeError, TypeError, KeyError, RecursionError):
+            try:
+                worker_visibility.save(run / 'visibility.json', {'delivered': False, 'reason': 'adapter_unavailable'}, exclusive=True)
+            except (ValueError, OSError):
+                pass
     if args.action == 'run': result = execute(run, args.opencode, args.auth_data, publisher)
     elif args.action == 'verify':
-        result = verify(run, request['disposition'], request['checks'])
-        if publisher: publisher(result['state'])
+        result = verify(run, request['disposition'], request['checks'], publisher)
     else: result = status(run, compact=args.compact)
     print(json.dumps(result, allow_nan=False))
 

@@ -17,6 +17,8 @@ cache or an `approval_ref` alone does not replace saved checkout consent.
 1. Follow the project's native worker selection and declaration contract. Reserve
    the private run directory and give a genuine native supervisor the assignment,
    exact runner/runtime paths, role, specialty, copied inputs, checks and stop rule.
+   For selected Habblaud visibility, use the [shared role declaration](../../../clients/worker-visibility.md)
+   for both the supervisor and external worker, with their own actual responsibilities.
    Keep its native model identity truthful. Use `Task (via Model Display Name)` in
    progress details; the native card represents the supervisor, not OpenRouter.
 2. Load only the discovery/cache and triage sections of
@@ -51,9 +53,13 @@ python3 -I -B <plugin-root>/scripts/openrouter_workers.py run
   --auth-data <saved-opencode-data-directory>
 ```
 
-The brief contains exactly `task_id`, `role`, `specialty`, `coordinator_chat_id`,
+The brief requires `task_id`, `role`, `specialty`, `coordinator_chat_id`,
 `model`, `model_display_name`, `provider`, `effort`, `objective`, `source_root`,
-`files`, `timeout_seconds`, `steps`, and `approval_ref`. Use the actual
+`files`, `timeout_seconds`, `steps`, and `approval_ref`. Add optional
+`custom_role_name` only for an explicit native fallback declaration, using the
+shared bounds. New external badges display the declared role followed by the
+model display name, for example `Scout · GLM 5.3 Flash`. Existing receipts keep
+their original badge. The existing sized brief may also include `sizing`. Use the actual
 root coordinator chat UUID for the Habblaud parent; retain the genuine native
 supervisor UUID separately in evidence. This keeps both workers visible in consumers
 whose sidebar does not render nested children. Do not invent a native identity. Model is an
@@ -106,6 +112,9 @@ reports process-group absence; `native_fallback_ready` indicates a failed,
 unresolved or natively rejected result with that observation. These local reports
 do not authenticate approval or replace the supervisor's trusted host evidence.
 If stop cannot be confirmed, retain unresolved ownership and reconcile it first.
+On approved native fallback, retain the frozen role, specialty and custom role
+name from the original brief. Follow the shared visibility contract for a real
+new native child; the external display ID is never a native identity.
 Unknown upstream cancellation or billing does not prevent independent native work
 once local quiescence is confirmed. Preserve partial results and known accounting;
 independently establish any finding reused during takeover.
@@ -132,12 +141,14 @@ emits tool events at completion/error; while a tool is running, report only that
 the worker is active. A heartbeat is presence, not evidence of progress. Forward
 events through native supervisor commentary. Do not imply exact native-card parity.
 
-Habblaud displays `Role · Model Display Name`, but retains Codex account/provider
+Habblaud receives the shared full label and retains Codex account/provider
 association. Its Stats model/token fields are not populated by these hooks. Failure
 or interruption may look like completion; the runner's state remains authoritative.
 No prompts, raw tool results, credentials or model reasoning enter Habblaud events.
-Habblaud delivery failure does not change task acceptance. Display entries can affect
-native counts and World projection, as in the existing local-worker adapter.
+Habblaud delivery is best effort and stays outside the worker deadline. Pending
+display updates can coalesce; the runner waits at most two seconds for delivery
+after execution or verification. Delivery failure does not change task acceptance. Display entries
+can affect native counts and World projection, as in the existing local-worker adapter.
 
 ## Verify and stop
 

@@ -536,6 +536,44 @@ class AdmissionTests(unittest.TestCase):
     def prepare(self, **updates):
         return self.api.prepare_assignment(self.scope, self.prepare_request(**updates))
 
+    def test_visibility_is_bound_to_worker_replay_without_granting_authority(self):
+        self.plan()
+        visibility = dict(version=1, role='Builder', specialty='Parser fixes', custom_role_name='Parser owner')
+        with self.assertRaises(state.StateError):
+            self.prepare(visibility=visibility | dict(role='Unknown'))
+        request = self.prepare_request(visibility=visibility)
+        try:
+            prepared = self.api.prepare_assignment(self.scope, request)
+        except state.StateError as error:
+            self.fail('Native worker visibility was rejected: ' + str(error))
+        binding = self.api.prepared_native_assignment(self.scope, prepared['attempt_id'])
+        self.assertEqual(prepared['visibility'], visibility)
+        self.assertEqual(binding['visibility'], visibility)
+        self.assertEqual(binding['task_name'], 'worker_' + prepared['attempt_id'])
+        body = json.loads(prepared['prompt'])['assignment']
+        self.assertEqual(body['role'], 'worker')
+        self.assertEqual(body['request']['visibility'], visibility)
+        replay = self.api.prepare_assignment(self.scope, request)
+        self.assertFalse(replay['launch_admitted'])
+        self.assertEqual(replay['attempt_id'], prepared['attempt_id'])
+        self.assertEqual(replay['visibility'], visibility)
+        for changed in (dict(role='Reviewer'), dict(specialty='Other work'), dict(custom_role_name='Other owner')):
+            with self.subTest(changed=changed), self.assertRaisesRegex(state.StateError, 'changed payload'):
+                self.api.prepare_assignment(self.scope, request | dict(visibility=visibility | changed))
+        status = self.api.delegation_status(self.scope, 'codex', 'parent')
+        self.assertEqual(status['budgets']['attempts_consumed'], 1)
+        self.assertEqual(status['budgets']['resource_units_consumed'], 1)
+        invalid_body = deepcopy(body)
+        invalid_body['request']['visibility']['role'] = 'Unknown'
+        invalid = self.raw_assignment(prepared['attempt_id'])
+        invalid['assignment'] = fixture_artifact(self.scope, self.identity, invalid_body)
+        invalid['request_digest'] = evidence._digest(invalid_body['request'])
+        with state._database(self.scope) as db:
+            row = db.execute('select id,scope_id,client,session_id,task_id,dispatch_id,data from assignments where id=?',
+                (prepared['attempt_id'],)).fetchone()
+            with self.assertRaisesRegex(state.StateError, 'visibility'):
+                self.api._record_data(self.scope, row[:-1] + (json.dumps(invalid),), invalid, db=db)
+
     def raw_assignment(self, attempt_id):
         with state._database(self.scope) as db:
             return json.loads(db.execute('select data from assignments where id=?', (attempt_id,)).fetchone()[0])
@@ -2515,6 +2553,31 @@ class Stage4NativeReviewTests(unittest.TestCase):
 
     def prepared(self, **updates):
         return evidence.prepare_review(self.scope, self.review_request(**updates))
+
+    def test_review_visibility_preserves_readonly_authority_and_digest_domains(self):
+        self.plan(self.review_plan())
+        visibility = dict(version=1, role='Reviewer', specialty='Parser safety', custom_role_name='Safety reviewer')
+        request = self.review_request(visibility=visibility)
+        try:
+            prepared = evidence.prepare_review(self.scope, request)
+        except state.StateError as error:
+            self.fail('Independent review visibility was rejected: ' + str(error))
+        binding = evidence.prepared_native_review(self.scope, prepared['attempt_id'])
+        self.assertEqual(prepared['visibility'], visibility)
+        self.assertEqual(binding['visibility'], visibility)
+        body = json.loads(prepared['prompt'])['ownership']
+        self.assertEqual(body['role'], 'review')
+        self.assertTrue(all(claim['mode'] == 'read' for claim in body['claims']))
+        self.assertEqual(body['request']['visibility'], visibility)
+        self.assertEqual(binding['task_name'], 'review_' + prepared['attempt_id'])
+        self.assertEqual(prepared['assignment_digest'], hashlib.sha256(request['assignment'].encode()).hexdigest())
+        self.assertEqual(binding['ledger_assignment_digest'], prepared['ledger_assignment_digest'])
+        self.assertNotEqual(binding['ledger_assignment_digest'], prepared['assignment_digest'])
+        replay = evidence.prepare_review(self.scope, request)
+        self.assertFalse(replay['launch_admitted'])
+        self.assertEqual(replay['visibility'], visibility)
+        with self.assertRaisesRegex(state.StateError, 'changed payload'):
+            evidence.prepare_review(self.scope, request | dict(visibility=visibility | dict(custom_role_name='Other reviewer')))
 
     def observed(self, prepared, *, turn_status='completed', raw=None, **updates):
         binding = self.api.prepared_native_review_assignment(self.scope, prepared['attempt_id'])
