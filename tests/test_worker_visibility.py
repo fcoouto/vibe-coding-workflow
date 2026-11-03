@@ -4,6 +4,8 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+import subprocess
+import sys
 from types import SimpleNamespace
 import unittest
 import uuid
@@ -226,6 +228,40 @@ class NativeVisibilityTests(unittest.TestCase):
         helper = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(helper)
         return helper
+
+    def test_original_start_event_gets_only_bound_private_label(self):
+        helper = self.native_helper()
+        request = self.native_request()
+        path = helper.hook_context_path(self.task_context, self.parent, 'review_original')
+        path.parent.mkdir(mode=0o700)
+        helper.prepare_native(path, request)
+        executable = Path(sys.executable).resolve()
+        event = dict(hook_event_name='SubagentStart', session_id=self.parent,
+                     agent_id=self.child, cwd=str(self.root), agent_type='default', extra='preserve')
+        with patch.object(codex, 'observe_worker_visibility', return_value=self.observe()):
+            actual = helper.enrich_start(event, self.task_context, self.root, executable)
+            self.assertEqual(actual, event | dict(agent_role='Audit lead · Native model',
+                                                   agent_type='Audit lead · Native model'))
+            self.assertEqual(event['agent_type'], 'default')
+            self.assertEqual(helper.enrich_start(event | dict(agent_role='Native reviewer'),
+                                                 self.task_context, self.root, executable)['agent_role'], 'Native reviewer')
+            other = event | dict(agent_id=str(uuid.uuid4()))
+            self.assertEqual(helper.enrich_start(other, self.task_context, self.root, executable), other)
+            unrelated = event | dict(cwd=str(self.task_context))
+            self.assertEqual(helper.enrich_start(unrelated, self.task_context, self.root, executable), unrelated)
+
+    def test_start_wrapper_preserves_original_bytes_and_exit_status(self):
+        helper = self.native_helper()
+        raw = b'not JSON\n' + b'x' * (130 * 1024)
+        result = subprocess.run([sys.executable, '-I', '-B', helper.__file__, 'forward-start',
+            '--context-directory', str(self.task_context), '--checkout', str(self.root),
+            '--codex-executable', str(Path(sys.executable).resolve()), '--',
+            sys.executable, '-c',
+            'import sys; sys.stdout.buffer.write(sys.stdin.buffer.read()); sys.exit(7)'],
+            input=raw, capture_output=True)
+        self.assertEqual(result.stdout, raw)
+        self.assertEqual(result.stderr, b'')
+        self.assertEqual(result.returncode, 7)
 
     def test_native_binding_preserves_context_and_child_across_continuation(self):
         from runtime import worker_visibility

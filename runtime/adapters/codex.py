@@ -131,14 +131,14 @@ def _review_id(value):
 
 
 @contextmanager
-def _native_reader(methods, *, on_notification=None, deadline=None):
+def _native_reader(methods, *, on_notification=None, deadline=None, executable=None):
     process = None
     limit = time.monotonic() + REVIEW_TIMEOUT
     deadline = limit if deadline is None else min(limit, deadline)
     if time.monotonic() >= deadline:
         raise ObservationError('timeout')
     try:
-        executable = shutil.which("codex")
+        executable = executable if executable is not None else shutil.which("codex")
         if executable is None:
             raise ObservationError("unavailable")
         observed_version = version(executable, deadline)
@@ -440,7 +440,7 @@ def _visibility_spawn_task(request, parent, child, binding):
     return _review_id(binding['task_name'])
 
 
-def observe_worker_visibility(checkout, parent_session_id, worker_id, *, spawn_binding=None):
+def observe_worker_visibility(checkout, parent_session_id, worker_id, *, spawn_binding=None, deadline=None, executable=None):
     """Read actual native lineage for display only; no runtime enrollment or stop proof."""
     from types import SimpleNamespace
     import uuid
@@ -457,7 +457,10 @@ def observe_worker_visibility(checkout, parent_session_id, worker_id, *, spawn_b
         methods = {'initialize', 'thread/read'}
         if spawn_binding is not None:
             methods.add('thread/items/read')
-        with _native_reader(methods) as (observed_version, request):
+        options = {} if deadline is None else {'deadline': deadline}
+        if executable is not None:
+            options['executable'] = executable
+        with _native_reader(methods, **options) as (observed_version, request):
             parent = _native_metadata(scope, request, parent_session_id, observed_version)
             surface = 'codex-cli' if parent.get('source') == 'exec' else 'codex-desktop'
             _native_surface(parent, surface, observed_version)
@@ -482,7 +485,8 @@ def observe_worker_visibility(checkout, parent_session_id, worker_id, *, spawn_b
                 checkout=str(checkout), client_surface=surface, native_version=observed_version,
                 agent_path=agent_path, task_name=task_name, configured_model=_native_setting(child.get('model')),
                 configured_provider=_native_setting(child.get('modelProvider')),
-                execution_model=None, execution_effort=None)
+                execution_model=None, execution_effort=None,
+                **({'native_role': origin['agent_role']} if origin.get('agent_role') is not None else {}))
     except (ObservationError, OSError, ValueError, TypeError, KeyError, RecursionError, subprocess.TimeoutExpired):
         raise StartupError('Native display identity unavailable; visibility remains unverified') from None
 

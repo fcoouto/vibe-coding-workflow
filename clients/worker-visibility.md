@@ -53,6 +53,38 @@ first line of the brief. This binds visibility when native history omits the
 agent path. Preparation reserves display metadata only; preserve the native
 tool's original `task_name` and attempt marker.
 
+### Forward the original Desktop start event
+
+When the existing Habblaud `SubagentStart` command is configured to use this
+adapter, prepare with `--context-directory <private-directory>` instead of
+`--context`. Use the exact directory configured in the hook and retain the
+returned context path. Allocate a distinct task name for each new child.
+
+Wrap the existing command with the reviewed package:
+
+```text
+python3 -I -B <package>/scripts/worker_visibility.py forward-start
+  --context-directory <private-directory> --checkout <canonical-checkout>
+  --codex-executable <absolute-reviewed-Codex-executable>
+  -- <original-command-and-arguments>
+```
+
+Preserve the original hook configuration for recovery. Review the changed
+command through Codex's supported hook trust flow and use a Desktop session
+that has loaded it. Project hooks run alongside user hooks. Adding a second
+hook does not replace the original Habblaud command.
+
+The wrapper checks the genuine child, parent, checkout and creation name with
+the native observer. It preserves a native role and forwards the original
+event if the private declaration or live identity is unavailable. When the
+declaration matches, it adds the label to the event copy and calls the existing
+command. Habblaud 1.0.3 may capitalize or clip labels. This route forwards
+labels that fit 200 UTF-16 units and survive that normalization. Qualify the
+first visible badge using a fresh worker. Rollout discovery can still register
+the child before the hook.
+
+### Publish after dispatch
+
 After successful dispatch, use the actual returned child UUID and a short
 observed `phase` in `{"worker_id":"<actual-child-uuid>","phase":"Working"}`:
 
