@@ -203,6 +203,8 @@ class CoordinatorOperationOwner:
             self._require(key not in rows and len(rows)<64 and changes._command_owner(identity['git_dir']) is None)
             row=dict(claim_id=uuid.uuid4().hex,attempt_ref=startup._canonical_plain(attempt_ref),identity=identity,allocation_digest=onboarding._digest(attempt),
                 status='claimed',returncode=None,pid=None,stopped=False,result=None,before=None,after=None,context=None,reconciliation=None)
+            contract=source._native_source_contract(attempt)
+            if contract is not None:row['source_contract']=contract
             if attempt.get('probe') is not None:
                 row['before']=source._probe_fact(identity,attempt['probe']['canary'])
                 self._require(row['before']['target']['fingerprint']['sha256']==attempt['probe']['before_sha256'])
@@ -255,7 +257,7 @@ class CoordinatorOperationOwner:
             return startup._canonical_freeze(source._native_reference(directory,row))
 
     def reconcile_native_source(self, attempt_ref, claim_ref, verified_stopped):
-        """Record independently verified original-child/descendant facts, including after expiry."""
+        """Settle the original declared source contract from independently verified facts."""
         from runtime import setup_observation as source
         decision=startup._canonical_plain(self._decision);directory=Path(decision['plan_directory']['path'])
         with changes._public_plan_lock(directory):
@@ -269,11 +271,7 @@ class CoordinatorOperationOwner:
             projection=startup._canonical_plain(startup.canonical_scope_projection(startup.decode_project_record(record),
                 repository_id=identity['repository_id'],checkout_id=identity['checkout_id'],client=identity['client']))
             self._require(identity==projection)
-            onboarding._object(verified_stopped,('claim_id','pid','returncode','stopped','descendants_stopped','evidence'))
-            self._require(verified_stopped['claim_id']==row['claim_id'] and verified_stopped['pid']==row['pid']
-                and verified_stopped['returncode']==row['returncode'] and verified_stopped['stopped'] is True
-                and verified_stopped['descendants_stopped'] is True and changes._evidence(verified_stopped['evidence'],many=True)
-                and len({onboarding._digest(ref) for ref in verified_stopped['evidence']})>=2)
+            source._native_reconciliation(row,verified_stopped)
             self._require(row['reconciliation'] is None or row['reconciliation']==verified_stopped)
             marker=dict(schema_version=1,plan_dir=str(directory),transaction_id=journal['transaction_id'],id='native-'+onboarding._digest(attempt_ref),attempt_id=row['claim_id'])
             held=changes._command_owner(row['identity']['git_dir'])

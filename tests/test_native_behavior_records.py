@@ -290,13 +290,24 @@ class NativeBehaviorOwnerTests(unittest.TestCase):
             os.killpg(original['pid'], 0)
         facts = (f"fixture:observed-reaped-child:{original['pid']}:{original['returncode']}",
             f"fixture:observed-empty-original-process-group:{original['pid']}")
-        stopped = dict(claim_id=original['claim_id'], pid=original['pid'], returncode=original['returncode'],
-            stopped=True, descendants_stopped=True, evidence=[dict(reference=value,
-                sha256=hashlib.sha256(value.encode()).hexdigest()) for value in facts])
+        if 'source_contract' in original:
+            # These audited fixture scripts wait for their known hooks; this is no native-client closure claim.
+            writer_fact = 'fixture:audited-script-known-writers-and-project-effects:'+str(original['pid'])
+            stopped = dict(claim_id=original['claim_id'], pid=original['pid'], returncode=original['returncode'],
+                stopped=True, reaped=True, process_evidence=dict(reference=facts[0],
+                    sha256=hashlib.sha256(facts[0].encode()).hexdigest()),
+                writer_assessment_evidence=dict(reference=writer_fact,
+                    sha256=hashlib.sha256(writer_fact.encode()).hexdigest()),
+                identified_writers_reconciled=True, pending_workflow_hooks=False,
+                unexpected_tool_or_spawn=False, unexplained_project_effects=False, ownership_conflicts=False)
+        else:
+            stopped = dict(claim_id=original['claim_id'], pid=original['pid'], returncode=original['returncode'],
+                stopped=True, descendants_stopped=True, evidence=[dict(reference=value,
+                    sha256=hashlib.sha256(value.encode()).hexdigest()) for value in facts])
         self.assertEqual(source, owner.reconcile_native_source(reference, source, stopped))
         return original
 
-    def _observe_original_cli(self):
+    def _observe_original_cli(self, *, limited=False):
         import copy
         import os
         import sys
@@ -360,6 +371,8 @@ class NativeBehaviorOwnerTests(unittest.TestCase):
             'Software fixture: submit the approved public canary patch once.'], cwd=str(self.fixture.repo),
             timeout_seconds=10, external_effects=[dict(path=str(home), kind='vendor-owned-state', recovery='manual')],
             serialization_reference=dict(reference='fixture:independently-verified-native-state-exclusion', sha256='b'*64))
+        if limited:
+            native['source_contract'] = 'bounded-native-source-v1'
         attempt = dict(reference=reference, task=None, native_sessions=[], operations=['observe-cli-basic'],
             capability_keys=['startup-context'], limits=dict(deadline=time.time()+60, max_attempts=1, max_resource_units=1),
             stop_conditions=['Stop after original policy canary; retain uncertainty'], native_execution=native,
@@ -487,7 +500,7 @@ class NativeBehaviorOwnerTests(unittest.TestCase):
     def test_real_owner_metadata_policy_source_keeps_toolkit_cases_pending(self):
         self._observe_metadata(self._observe_original_cli())
 
-    def _publish_partial_source(self, observed, original, name, *, managed_attempt=None):
+    def _publish_partial_source(self, observed, original, name, *, managed_attempt=None, legacy_context=False):
         import copy
         import os
         import time
@@ -525,6 +538,8 @@ class NativeBehaviorOwnerTests(unittest.TestCase):
         decision = self.birth.decision(self.fixture, request, 'apply', (context,))
         reference = dict(reference='fixture:'+name+'-context-cli', sha256=hashlib.sha256(name.encode()).hexdigest())
         allocation = copy.deepcopy(original['allocation'])
+        if legacy_context:
+            allocation['native_execution'].pop('source_contract', None)
         allocation.update(reference=reference, context_reference=startup._canonical_plain(binding['receipt']),
             limits=dict(deadline=time.time()+90, max_attempts=1, max_resource_units=1))
         allocation['native_execution']['argv'] = [str(original['executable']), 'exec', '--json', '--sandbox', 'read-only',
@@ -574,17 +589,21 @@ class NativeBehaviorOwnerTests(unittest.TestCase):
         self.request = request
         return dict(scope=scope, decision=decision, allocation=allocation, binding=binding, source=retained, directory=directory)
 
-    def _qualified_context(self, *, managed_pre=False):
+    def _qualified_context(self, *, managed_pre=False, limited=False, legacy_context=False):
         import copy
         import os
         import sys
         from unittest.mock import patch
         from runtime import state
         from scripts.onboard_coordinator import CoordinatorOperationOwner
-        original = self._observe_original_cli()
+        original = self._observe_original_cli(limited=limited)
         first_raw = original['rollout'].read_bytes()
         metadata = self._observe_metadata(original)
-        published = self._publish_partial_source(metadata, original, 'native-bootstrap-publication')
+        historical = {Path(value['source']['reference'].partition('#')[0]):
+            Path(value['source']['reference'].partition('#')[0]).read_bytes()
+            for value in (original, metadata)} if legacy_context else {}
+        published = self._publish_partial_source(metadata, original, 'native-bootstrap-publication',
+            legacy_context=legacy_context)
         data = json.loads(original['settings'].read_bytes())
         data.update(thread_id='qualification-native-thread', rollout=str(original['home']/'qualification-rollout.jsonl'),
             records=[row('session_meta', dict(id='qualification-native-thread', cwd=str(self.fixture.repo))),
@@ -630,10 +649,43 @@ class NativeBehaviorOwnerTests(unittest.TestCase):
                 task=dict(client='codex', session_id='ordinary', task_id='ordinary'), operation='task-patch')
         first_journal = json.loads((published['directory']/'transaction.json').read_bytes())
         self.assertIn(startup._canonical_digest(self.identity), first_journal['setup_receipts'])
+        for path, before in historical.items():
+            self.assertEqual(path.read_bytes(), before)
         return dict(published=final, original=followup, managed=managed)
 
     def test_real_owner_qualification_context_uses_actual_hook_and_retained_receipt(self):
         self._qualified_context()
+
+    def test_real_owner_bounded_source_retains_limitation_through_qualification_context(self):
+        observed = self._qualified_context(limited=True)
+        content = startup._canonical_plain(observed['published']['source'].content)
+        contract = content['source']['native_source_contract']
+        self.assertEqual(contract['kind'], 'bounded-native-source-v1')
+        self.assertEqual(contract['client_startup_descendants'], 'unknown')
+        self.assertIn('may remain unobserved and cause late effects', contract['limitation'])
+        self.assertNotIn('descendants_stopped', contract)
+        original = observed['original']['original']
+        self.assertEqual(original['source_contract'], contract)
+        journal = json.loads(Path(content['source']['native_origin']['reference'].partition('#')[0]).read_bytes())
+        for native in journal['native_observations'].values():
+            self.assertEqual(native['source_contract'], contract)
+            self.assertNotIn('descendants_stopped', native['reconciliation'])
+            self.assertTrue(native['reconciliation']['reaped'])
+
+    def test_real_owner_legacy_successor_keeps_bounded_ancestor_limitation(self):
+        observed = self._qualified_context(limited=True, legacy_context=True)
+        content = startup._canonical_plain(observed['published']['source'].content)
+        self.assertTrue(content['source']['native_safety']['evidence'])
+        self.assertTrue(content['source']['observations']['startup-context'])
+        contract = content['source']['native_source_contract']
+        self.assertEqual(contract['kind'], 'bounded-native-source-v1')
+        self.assertEqual(contract['client_startup_descendants'], 'unknown')
+        self.assertIn('may remain unobserved and cause late effects', contract['limitation'])
+        self.assertNotIn('source_contract', observed['original']['original'])
+        journal = json.loads(Path(content['source']['native_origin']['reference'].partition('#')[0]).read_bytes())
+        for native in journal['native_observations'].values():
+            self.assertNotIn('source_contract', native)
+            self.assertTrue(native['reconciliation']['descendants_stopped'])
 
     def test_real_parent_managed_pre_and_post_use_actual_owner_receipts(self):
         import copy
