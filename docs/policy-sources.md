@@ -206,6 +206,31 @@ controls without requiring runtime activation. Both preserve manual pauses and
 immutable creation markers. This instruction change neither enables Workstreams
 features nor qualifies live title delivery.
 
+### Implementation Thread Naming and status placement · 3 November 2026
+
+The user clarified that automatic Thread Naming serves all implementation chats,
+including solo work, while question-only, exploratory and planning chats remain
+untouched even with native delegation. They selected Option 2: five meter cells,
+one space, the exact uppercase status, then family/member and stable topic.
+This supersedes the delegation-only activation above; it is a user-authorized
+presentation decision, not an added upstream Toolkit requirement.
+
+[Task Planning](../policies/02-task-planning.md) routes the implementation boundary
+to the canonical [naming contract](../clients/workstreams-naming.md).
+[Agent Delegation](../policies/03-agent-delegation.md) and the
+[native contract](../clients/delegation.md) apply that eligibility to supporting
+children. The [title procedure](../clients/workstreams-titles.md) preserves manual
+ownership, topic edits, explicit resumption, pending delivery and native identity
+for both runtime-bound and ordinary native work. Solo work acquires no managed
+task prerequisite. Original runtime readers and active pins remain intact;
+recognizing saved status-last presentation permits reconciliation during an
+authorized update, not a bulk rename or silent runtime migration.
+
+Instruction-path review covers solo implementation, questions, planning with and
+without workers, implementation review, follow-up questions after completion and
+manual overrides. Package checks, instruction observations and installed native
+execution remain separate evidence; this source map claims no live delivery.
+
 ## Workstreams main-runtime port · 1 November 2026
 
 The user selected Workstreams and its essential dependencies instead of importing the 88-commit development ancestry. At that historical port, the implementation used main's schema-2 task, evidence and delegation authority; it preserved independently merged Naming/status rules and omitted canonical3 lifecycle/accounting, OpenRouter and observability extensions. The later fresh canonical composition is a separate development step and does not rewrite that history or existing authorities.

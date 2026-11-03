@@ -234,7 +234,7 @@ class CompactCliTests(unittest.TestCase):
         self.assertEqual((native.title, native.writes), (title, writes))
         self.assertEqual(state.task_status(fixture.scope, 'codex', 'parent')['task']['state'], 'REVIEW')
         status(False)
-        self.assertTrue(native.title.endswith(' · REVIEW'))
+        self.assertIn(' REVIEW · [', native.title)
 
     def test_native_flag_uses_selected_scope_without_mutating_state(self):
         from tests.test_runtime import DelegationDispatcherTests
