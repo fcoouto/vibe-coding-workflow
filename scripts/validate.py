@@ -8,6 +8,7 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
 
 def read_json(path):
@@ -83,6 +84,10 @@ def validate(root=ROOT):
         raise ValueError("Default hooks would duplicate Claude's explicit registration")
     local_file(root, "./clients/codex.md")
     local_file(root, "./runtime/adapters/codex.py")
+    from scripts.read_instructions import build_manifest
+    local_file(root, "./scripts/read_instructions.py")
+    if read_json(local_file(root, "./clients/instruction-map.json")) != build_manifest(root):
+        raise ValueError("Prepared instruction map is stale; run scripts/read_instructions.py --prepare during authoring")
     validate_codex_hooks(root, manifest)
     validate_startup_hook(root, claude, "claude-code", "CLAUDE_PLUGIN_ROOT")
     for path in ("scripts/workflow.py", "runtime/__init__.py", "runtime/startup.py",

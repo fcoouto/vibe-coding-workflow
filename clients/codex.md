@@ -21,6 +21,8 @@ repository protections.
 
 ## Instruction output budgets
 
+Use `python3 -I -B <package>/scripts/read_instructions.py <paths>` for Vibe instructions; paths are package-relative (`policies/02-task-planning.md`). Select triggered files and follow every page before relying on a contract. Return each page alone. On reader failure, report the limitation and use bounded native source reads. Never run `--prepare` during routine tasks.
+
 Size each child instruction read for its complete selected files or sections. With `functions.exec`, use supported child `max_output_tokens` limits and an outer `max_output_tokens` budget covering their sum plus response wrappers. A larger outer budget cannot restore child-truncated text. Use available size information without adding a sizing command to every read; split large or uncertain reads into smaller, contiguous sections. Keep large diagnostics, diffs and third-party guides separate when they would exhaust either budget.
 
 Required procedures must arrive completely. Requested limits may be capped; inspect both child and outer results for truncation or omitted text. Success exit codes, summaries and previews do not establish completeness. Retain complete material already received and recover only missing files or sections before proceeding, adjusting the limit or selection at the layer that omitted them. Required review, freshness checks and context recovery still apply.
