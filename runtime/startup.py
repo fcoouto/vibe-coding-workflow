@@ -401,11 +401,29 @@ def resolve_project(event, package, *, budget=None) -> ProjectScope | None:
                         runtime)
 
 
+def qualification_only(scope):
+    return (isinstance(scope,AcceptedScope) and scope.qualification is not None
+        and not {'startup-context','pre-tool-enforcement'} <= set(scope.qualification['verified']))
+
+
+def qualification_context(scope, package):
+    if not qualification_only(scope):return None
+    return ('Vibe Coding Workflow: qualification-only scope for this approved disposable checkout. '
+        'Use only its exact owner-admitted qualification attempts, within their original operations, claims, native identities and finite budgets. '
+        f'Read {json.dumps(str(package/"skills/onboard-my-project/references/apply-and-recovery.md"))} and accepted configuration '
+        f'{json.dumps(str(scope.authority_path))}. '
+        'Native policy rejection evidence does not establish Toolkit startup or task guards. '
+        'Ordinary managed work, successful onboarding, READY, publication, merge and primary activation remain unavailable. '
+        'This context creates no task or task authority; retain pending evidence and uncertain writers.')
+
+
 def orient(event, package, *, acquisition=None):
     acquisition = acquisition or acquire_project_entry(event, package)
     scope = _entry_scope(acquisition, managed=False)
     if scope is None:
         return None
+    restricted = qualification_context(scope,package)
+    if restricted is not None:return restricted
     client_file = package / "clients" / f"{event.client}.md"
     authority_path = scope.authority_path if isinstance(scope, AcceptedScope) else scope.repository_root / PROJECT_FILE
     context = (
@@ -1002,7 +1020,8 @@ def _compare_canonical_scope(record, *, authority, observation, client, installe
     if activation["status"] == "pending":
         return result("pending", "activation_pending")
     capabilities = qualification.get('capabilities')
-    if capabilities is not None and 'startup-context' not in capabilities['verified']:
+    if (capabilities is not None and 'startup-context' not in capabilities['verified']
+            and not capabilities.get('bootstrap_verified',False)):
         return result('configured', 'startup_unqualified')
     if preview:
         return ScopePreview(True, "eligible")

@@ -505,7 +505,7 @@ def _journal(path, *, file_only=False):
     except FileNotFoundError:
         return None
     result = d3.read_request(raw, limit=MAX_JOURNAL)
-    d3._object(result, ("schema_version", "transaction_id", "manifest_digest", "manifest", "approval", "plan", "state", "receipts", "enrollment", "blocked", "directories", "observations"), ("birth", "setup_receipts", "qualification_scope") if result.get("schema_version") == 2 else ())
+    d3._object(result, ("schema_version", "transaction_id", "manifest_digest", "manifest", "approval", "plan", "state", "receipts", "enrollment", "blocked", "directories", "observations"), ("birth", "setup_receipts", "qualification_scope", "native_observations") if result.get("schema_version") == 2 else ())
     if result.get("schema_version") == 2:
         return _scoped_journal_shape(result, file_only=file_only)
     d3._require(result["schema_version"] == 1 and result["state"] in
@@ -5201,13 +5201,16 @@ def inspect_lifecycle_recovery(authorities,task_refs):
 
 
 def _scoped_journal_shape(journal, *, file_only=False):
-    d3._object(journal, ("schema_version", "transaction_id", "manifest_digest", "manifest", "approval", "plan", "state", "receipts", "enrollment", "blocked", "directories", "observations"), ("birth", "setup_receipts", "qualification_scope"))
+    d3._object(journal, ("schema_version", "transaction_id", "manifest_digest", "manifest", "approval", "plan", "state", "receipts", "enrollment", "blocked", "directories", "observations"), ("birth", "setup_receipts", "qualification_scope", "native_observations"))
     d3._require(type(journal["schema_version"]) is int and journal["schema_version"] == 2 and journal["manifest_digest"] == d3._digest(journal["manifest"])
                 and journal["state"] in ("prepared", "applying", "interrupted", "applied", "blocked", "rollback_partial", "rolled_back"), "Invalid scoped journal")
     d3._require(isinstance(journal["receipts"], dict) and isinstance(journal["directories"], dict) and isinstance(journal["observations"], list), "Invalid scoped recovery containers")
     if 'qualification_scope' in journal:
         from runtime.setup_observation import _authorization_shape
         _authorization_shape(journal['qualification_scope'])
+    if 'native_observations' in journal:
+        from runtime.setup_observation import _native_rows_shape
+        _native_rows_shape(journal)
     if 'setup_receipts' in journal:
         from runtime.setup_observation import receipt_shape
         d3._require(isinstance(journal['setup_receipts'], dict) and len(journal['setup_receipts']) <= 64, 'Invalid owner setup receipt collection')
@@ -5783,6 +5786,8 @@ def _run_scoped(plan_dir, request, operation, *, host=None, entry_authorizer=Non
                 locks.enter_context(_scoped_failure_guard(path,ownership,operation))
             journal = _load_journal(path, file_only=file_only)
             if journal is not None:
+                d3._require(all(row['stopped'] for row in journal.get('native_observations',{}).values()),
+                    'Original external native descendants remain uncertain; reconcile their exact source claims before project effects')
                 d3._require(journal["schema_version"] == 2 and journal["manifest"] == m and journal["approval"] == request["approval"] and journal["plan"] == plan, "Scoped journal binding changed")
                 if entry_authorizer is None:
                     ownership["journal"]=journal

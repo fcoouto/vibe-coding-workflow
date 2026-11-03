@@ -277,7 +277,7 @@ def main():
     requested_event = sys.argv[2] if len(sys.argv) == 3 else None
     from runtime.adapters import claude_code, codex, session_start
     from runtime.engine import HookResult
-    from runtime.startup import MAX_INPUT, RuntimeScopeError, StartupError, json_object, orient, acquire_project_entry, _entry_scope
+    from runtime.startup import MAX_INPUT, RuntimeScopeError, StartupError, json_object, orient, acquire_project_entry, _entry_scope, qualification_only
     runtime_kind = requested_event if requested_event in codex.RUNTIME_EVENTS else None
 
     def failure(reason):
@@ -302,7 +302,7 @@ def main():
             if start.client == "codex":
                 try:
                     scope = _entry_scope(acquisition, managed=False)
-                    if scope is not None and scope.runtime is not None:
+                    if scope is not None and scope.runtime is not None and not qualification_only(scope):
                         from runtime.title_sync import repair
                         presentation = repair(scope, start.client, payload.get("session_id"), force=True)
                         if presentation.get("notification"):

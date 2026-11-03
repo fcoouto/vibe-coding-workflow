@@ -1041,6 +1041,39 @@ def _historical_read(scope, context, db, artifact_refs, reference):
     return value
 
 
+def _qualification_before_data(value, identity, owner, body):
+    state._fields(value, ('version', 'kind', 'assignment_id', 'identity', 'pins', 'revision',
+        'generation', 'receipt_watermark', 'candidate', 'plan', 'probe'))
+    _require(type(value['version']) is int and value['version'] == 1 and
+        value['kind'] == 'qualification-native-before' and value['assignment_id'] == identity and
+        value['identity'] == owner and value['pins'] == body['pins'] and
+        value['candidate'] == body['candidate'] and value['plan'] == body['plan'],
+        'Original qualification before binding changed')
+    for key in ('revision', 'generation', 'receipt_watermark'):
+        state._integer(value[key], 'original qualification ' + key, 1 if key == 'revision' else 0)
+        _require(value[key].bit_length() <= 63, 'Original qualification cursor exceeds its database bound')
+    _require(value['revision'] + 1 == body['revision'], 'Original qualification before revision changed')
+    probe = value['probe']
+    if probe is not None:
+        from runtime import startup, setup_observation
+        state._fields(probe, ('descriptor', 'before'))
+        descriptor, before = probe['descriptor'], probe['before']
+        state._fields(descriptor, ('canary', 'before_sha256', 'patch'))
+        startup._canonical_path(descriptor['canary'])
+        startup._canonical_hash(descriptor['before_sha256'])
+        state._fields(before, ('canary', 'target', 'readback'))
+        state._fields(before['target'], ('path', 'binding', 'parents', 'fingerprint'))
+        _require(isinstance(before['readback'], str), 'Original qualification probe readback must be text')
+        raw = before['readback'].encode('utf-8')
+        _require(len(raw) <= 65536 and before['canary'] == descriptor['canary'] == before['target']['path'] and
+            before['target']['binding'] is not None and
+            before['target']['fingerprint']['sha256'] == descriptor['before_sha256'] == hashlib.sha256(raw).hexdigest(),
+            'Original qualification public probe changed')
+        setup_observation._public_canary_patch(descriptor, Path(min(before['target']['parents'], key=len)), readback=before['readback'])
+    evidence._bounded(value, evidence.MAX_ARTIFACT)
+    return value
+
+
 def _record(scope, row, *, db=None, context=None, artifact_refs=None):
     identity, scope_id, client, session, task_id, dispatch_id, raw = row
     try:
@@ -1112,11 +1145,13 @@ def _record_data(scope, row, data, *, db=None, context=None, artifact_refs=None)
     if data['role'] in NATIVE_ROLES:
         state._fields(body, ('version', 'owner', 'pins', *canonical_fields, 'request', 'job_id', 'role', 'claims', 'resource_units',
             'revision', 'plan', 'plan_digest', 'git_routing', 'host_capacity', 'binding', 'candidate',
-            'discovery', 'policy', 'report_contract', 'guidance', 'retry_of', 'diagnostic'), ('review',))
+            'discovery', 'policy', 'report_contract', 'guidance', 'retry_of', 'diagnostic'), ('review', 'qualification_before'))
         _reference(body['plan'])
         plan = read(body['plan'])
         _require(body['plan']['digest'] == data['plan_digest'] and
             plan['route']['parent_session_id'] == session, 'Native assignment has no actual original plan')
+        if 'qualification_before' in body:
+            _qualification_before_data(read(body['qualification_before']), identity, owner, body)
         if data['role'] == 'review':
             review = body['review']
             state._fields(review, ('assignment_digest', 'coverage', 'criteria', 'd5_plan'))
@@ -1508,6 +1543,7 @@ def _admission(scope, db, task, plan, job, claims, records, request):
              len(managed) < min([limits['host_capacity']] + [r['data']['host_capacity'] for r in managed]),
              'Managed worker capacity is exhausted, including uncertain historical admissions')
     _resources_available(scope, db, claims, records)
+    return admission
 
 
 def _check_claims(scope, definition):
@@ -1909,10 +1945,8 @@ def _prepare_native(scope, request, *, role):
             coverage=request['coverage'], criteria=request['criteria'], d5_plan=task['evidence']['plan'])
         body['report_contract'] = dict(version=1, assignment_digest=body['review']['assignment_digest'],
             required=['version', 'attempt_id', 'assignment_digest', 'candidate_digest', 'coverage', 'findings', 'limitations'])
-    evidence._bounded(body)
-    assignment_ref = evidence._artifact(scope, body, owner=evidence._artifact_owner(scope, task))
     data = dict(version=ADMISSION_VERSION, job_id=job['id'], role=role, status='prepared', request_digest=evidence._digest(_semantic(request)),
-        assignment=assignment_ref, candidate=candidate_ref, claims=claims, resource_units=request['resource_units'],
+        assignment=None, candidate=candidate_ref, claims=claims, resource_units=request['resource_units'],
         revision=request['expected_revision'] + 1, plan_digest=plan_digest, host_capacity=plan['limits']['host_capacity'],
         binding=content_binding, retry_of=request.get('retry_of'), diagnostic=diagnostic,
         observation=None, reconciliation=None, result=None)
@@ -1935,7 +1969,20 @@ def _prepare_native(scope, request, *, role):
             evidence._review_admission(scope, task, proof_plan, request)
         else:
             _require(_brief(scope, job, request['brief'], proof_plan) == claims, 'Prepared worker resources changed')
-        _admission(scope, db, task, plan, job, claims, records, request)
+        admission = _admission(scope, db, task, plan, job, claims, records, request)
+        if admission.mode == 'qualification':
+            from runtime import setup_observation
+            descriptor = state._canonical_plain(admission.original_attempt)['attempt'].get('probe')
+            probe = None if descriptor is None else dict(descriptor=descriptor, before=setup_observation._probe_fact(
+                state._accepted_identity(scope.accepted_identity), descriptor['canary']))
+            before = _qualification_before_data(dict(version=1, kind='qualification-native-before',
+                assignment_id=attempt_id, identity=owner, pins=task['pins'], revision=task['revision'],
+                generation=db.execute('select generation from checkouts where scope_id=?', (state._scope_id(scope),)).fetchone()[0],
+                receipt_watermark=db.execute('select coalesce(max(rowid),0) from receipts').fetchone()[0],
+                candidate=candidate_ref, plan=body['plan'], probe=probe), attempt_id, owner, body)
+            body['qualification_before'] = evidence._artifact(scope, before, owner=evidence._artifact_owner(scope, task), db=db)
+        evidence._bounded(body)
+        data['assignment'] = evidence._artifact(scope, body, owner=evidence._artifact_owner(scope, task), db=db)
         _insert_assignment(db, scope, task, dict(id=attempt_id, owner=owner, data=data, body=body))
         record = dict(id=attempt_id, owner=owner, data=data, body=body)
         if role == 'review':
