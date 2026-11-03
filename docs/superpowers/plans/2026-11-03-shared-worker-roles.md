@@ -84,3 +84,17 @@ The primary checkout reported OpenRouter unconfigured and disabled. The feature
 checkout had no eligible saved scope. OpenCode 1.19.5 was present. Live external
 qualification requires an eligible checkout with explicit current worker consent
 and a separately bounded canary. The retained prior canary approval is spent.
+
+## Desktop hook canary against main 9562f1d
+
+Codex's bundled observer listed the exact staged user hook as trusted and
+enabled. One fresh read-only child in the existing Desktop chat completed.
+Native metadata matched the declared parent, checkout and task name. Habblaud
+1.0.3 displayed `Subagente (Codex)`, and the private context contained no
+hook binding. Hook execution and metadata availability at start remain
+unverified for that chat.
+
+An offline replay with the same observed child and an isolated context copy
+produced `Canary scout · 東京 · gpt-6.1-sol`. This checks correlation after
+metadata is available. It leaves the live first badge gate open. A Desktop
+chat that loads the changed hook is needed for the next bounded attempt.
