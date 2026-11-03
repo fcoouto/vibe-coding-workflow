@@ -1,7 +1,7 @@
-async function drainInstructions({root, paths, external, exec, emit}) {
+async function drainInstructions({root, paths, exec, emit}) {
     const quote = s => "'" + s.replace(/'/g, "'\\''") + "'";
     const reader = ["python3", "-I", "-B", root + "/scripts/read_instructions.py"].map(quote).join(" ");
-    const selection = (external ? " --external" : "") + " -- " + paths.map(quote).join(" ");
+    const selection = " --auto -- " + paths.map(quote).join(" ");
     const read = (page, revision, batch) => exec({
         cmd: reader + " --json" + (batch ? " --batch" : "") + " --page " + page +
             (revision ? " --revision " + revision : "") + selection,
@@ -14,7 +14,7 @@ async function drainInstructions({root, paths, external, exec, emit}) {
             !Number.isSafeInteger(p.characters) || p.characters < 1 || [...p.text].length !== p.characters) return null;
         if (![p.page,p.last_page,p.pages].every(Number.isSafeInteger) || p.page < 1 ||
             p.page > p.last_page || p.last_page > p.pages || !/^[a-f0-9]{64}$/.test(p.revision) ||
-            p.external !== external || typeof p.batch !== "boolean") throw new Error("Invalid instruction metadata");
+            p.mode !== "auto" || p.external !== false || typeof p.batch !== "boolean") throw new Error("Invalid instruction metadata");
         return p;
     };
     let packet = decode(await read(1, null, true)), page = 1, revision = null, pages = null, batch = true, delivered = 0;

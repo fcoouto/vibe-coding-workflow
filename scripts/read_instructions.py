@@ -59,17 +59,36 @@ def build_manifest(root):
     return {"version": 1, "files": files}
 
 
-def _load_pages(root, paths, page, revision, external=False):
-    if not external:
-        manifest = json.loads(source_path(root, str(MAP)).read_bytes())
-        if not isinstance(manifest, dict) or manifest.get("version") != 1 or not isinstance(manifest.get("files"), dict):
-            raise ValueError("Invalid prepared instruction map")
+def automatic_source(root, name):
+    path = Path(name)
+    if not name.isprintable():
+        raise ValueError("Select explicit printable instruction paths")
+    if not path.is_absolute():
+        return name, False
+    package = root.resolve()
+    target = path.resolve(strict=True)
+    # A package alias followed by an escape must not become an external read.
+    package_origin = any(parent.resolve(strict=True).is_relative_to(package) for parent in path.parents)
+    if package_origin or target.is_relative_to(package):
+        if not target.is_relative_to(package):
+            raise ValueError("Instruction source must stay inside the package")
+        local = path.parent.resolve(strict=True) / path.name
+        key = local if local.is_relative_to(package) else target
+        return key.relative_to(package).as_posix(), False
+    return name, True
+
+
+def _load_pages(root, paths, page, revision, external=False, auto=False):
+    if external and auto:
+        raise ValueError("Automatic and explicit external modes cannot be combined")
+    manifest = None
     if not paths or type(page) is not int or page < 1 or (page > 1 and not revision):
         raise ValueError("Select sources and bind continuation pages to their revision")
     selected = list(dict.fromkeys(paths))
     identity, sections = [], []
     for name in selected:
-        if external:
+        source, is_external = automatic_source(root, name) if auto else (name, external)
+        if is_external:
             path = Path(name)
             if not path.is_absolute() or path.suffix.lower() != ".md" or not name.isprintable():
                 raise ValueError("Select explicit absolute local Markdown instruction files")
@@ -79,10 +98,15 @@ def _load_pages(root, paths, page, revision, external=False):
             raw = path.read_bytes()
             entry = dict(source_entry(raw, name), resolved=str(path))
         else:
-            if name not in manifest["files"] or not instruction_name(name):
+            if manifest is None:
+                manifest = json.loads(source_path(root, str(MAP)).read_bytes())
+                if not isinstance(manifest, dict) or manifest.get("version") != 1 or not isinstance(manifest.get("files"), dict):
+                    raise ValueError("Invalid prepared instruction map")
+            if source not in manifest["files"] or not instruction_name(source):
                 raise ValueError("Select a packaged instruction path from the policy/client references")
-            entry = manifest["files"][name]
-            raw = source_path(root, name).read_bytes()
+            entry = manifest["files"][source]
+            path = source_path(root, source)
+            raw = path.read_bytes()
             if not isinstance(entry, dict) or hashlib.sha256(raw).hexdigest() != entry.get("sha256"):
                 raise ValueError(f"Prepared source changed: {name}; use bounded native reads or update the package")
         lines = raw.decode("utf-8").splitlines(keepends=True)
@@ -103,7 +127,12 @@ def _load_pages(root, paths, page, revision, external=False):
             expected = end + 1
         if expected != len(lines) + 1:
             raise ValueError("Prepared ranges omit instruction text")
+        if auto:
+            entry = dict(entry, authority="external" if is_external else "package", resolved=str(path),
+                         prepared_key=None if is_external else source)
         identity.append([name, entry])
+    if auto:
+        identity = dict(mode="auto", sources=identity)
     current = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     if revision is not None and revision != current:
         raise ValueError("Instruction selection changed; restart with the current source revision")
@@ -122,26 +151,32 @@ def _load_pages(root, paths, page, revision, external=False):
     return current, pages
 
 
-def load_page(root, paths, page=1, revision=None, *, external=False):
-    current, pages = _load_pages(root, paths, page, revision, external)
+def load_page(root, paths, page=1, revision=None, *, external=False, auto=False):
+    current, pages = _load_pages(root, paths, page, revision, external, auto)
     result = dict(revision=current, page=page, pages=len(pages), sections=pages[page - 1])
     if external:
         result["external"] = True
+    if auto:
+        result["mode"] = "auto"
     return result
 
 
-def load_batch(root, paths, page=1, revision=None, *, external=False):
-    current, pages = _load_pages(root, paths, page, revision, external)
+def load_batch(root, paths, page=1, revision=None, *, external=False, auto=False):
+    current, pages = _load_pages(root, paths, page, revision, external, auto)
     result, sections = None, []
     for number in range(page, len(pages) + 1):
         single = dict(revision=current, page=number, pages=len(pages), sections=pages[number - 1])
         if external:
             single["external"] = True
+        if auto:
+            single["mode"] = "auto"
         render_page(single)  # Every included page must remain usable by the small-page fallback.
         candidate = dict(revision=current, page=page, last_page=number, pages=len(pages),
                          sections=sections + single["sections"])
         if external:
             candidate["external"] = True
+        if auto:
+            candidate["mode"] = "auto"
         try:
             render_page(candidate)
         except ValueError:
@@ -156,14 +191,15 @@ def render_page(result):
     last = result.get("last_page", result["page"])
     batch = "last_page" in result
     label = f"pages {result['page']}-{last}" if batch else f"page {result['page']}"
-    source = "External" if result.get("external") else "Vibe"
+    source = "Selected" if result.get("mode") == "auto" else "External" if result.get("external") else "Vibe"
     output = [f"{source} instructions: {label}/{result['pages']}; revision {result['revision']}\n"]
     for section in result["sections"]:
         output.append(f"\n--- {section['path']} lines {section['start_line']}-{section['end_line']} ---\n")
         output.append(section["text"])
         output.append("\n--- source complete ---\n" if section["complete"] else "\n--- source continues ---\n")
     if last < result["pages"]:
-        mode = ("--external " if result.get("external") else "") + ("--batch " if batch else "")
+        mode = ("--auto " if result.get("mode") == "auto" else "--external " if result.get("external") else "")
+        mode += "--batch " if batch else ""
         output.append(f"\nContinue the same selection with {mode}--page {last + 1} --revision {result['revision']}.\n")
     else:
         output.append("\nSelection complete.\n")
@@ -184,14 +220,16 @@ def main():
     parser.add_argument("--page", type=int, default=1)
     parser.add_argument("--revision")
     parser.add_argument("--batch", action="store_true", help="combine consecutive pages within one bounded response")
-    parser.add_argument("--external", action="store_true", help="read explicitly selected absolute local Markdown paths outside the package")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--external", action="store_true", help="read explicitly selected absolute local Markdown paths outside the package")
+    mode.add_argument("--auto", action="store_true", help="validate each explicit source under its package or external authority")
     parser.add_argument("--json", action="store_true", help="return a complete native-reader envelope")
     parser.add_argument("--helper", action="store_true", help="load the fixed packaged native continuation helper")
     parser.add_argument("--prepare", action="store_true", help="authoring only: rebuild the package map")
     args = parser.parse_args()
     try:
         if args.helper:
-            if args.paths or args.page != 1 or args.revision or args.batch or args.external or args.prepare or args.json:
+            if args.paths or args.page != 1 or args.revision or args.batch or args.external or args.auto or args.prepare or args.json:
                 raise ValueError("Helper loading cannot be combined with preparation or instruction reads")
             helper = (ROOT / "scripts/drain_instructions.js").resolve(strict=True)
             if not helper.is_relative_to(ROOT.resolve()) or not helper.is_file():
@@ -202,17 +240,18 @@ def main():
             print(envelope(text, "helper"))
             return 0
         if args.prepare:
-            if args.paths or args.page != 1 or args.revision or args.batch or args.external or args.json:
+            if args.paths or args.page != 1 or args.revision or args.batch or args.external or args.auto or args.json:
                 raise ValueError("Preparation cannot be combined with a read")
             (ROOT / MAP).write_text(json.dumps(build_manifest(ROOT), indent=2) + "\n", encoding="utf-8")
             return 0
         paths = BOOTSTRAP if args.paths == ["bootstrap"] and not args.external else args.paths
         read = load_batch if args.batch else load_page
-        result = read(ROOT, paths, args.page, args.revision, external=args.external)
+        result = read(ROOT, paths, args.page, args.revision, external=args.external, auto=args.auto)
         text = render_page(result)
         if args.json:
             text = envelope(text, "instructions", page=result["page"], last_page=result.get("last_page", result["page"]),
-                            pages=result["pages"], revision=result["revision"], external=args.external, batch=args.batch)
+                            pages=result["pages"], revision=result["revision"], external=args.external, batch=args.batch,
+                            mode="auto" if args.auto else "external" if args.external else "package")
         print(text, end="")
         return 0
     except (ValueError, OSError, KeyError, TypeError) as error:

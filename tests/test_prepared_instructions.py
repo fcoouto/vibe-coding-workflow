@@ -3,6 +3,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -44,6 +45,141 @@ class PreparedInstructionsTests(unittest.TestCase):
         path = Path(directory.name).resolve() / name
         path.write_bytes(text.encode("utf-8"))
         return path
+
+    def test_auto_cli_mixed_sources_keep_package_checks_and_exclusive_flags(self):
+        external = self.external_file("# External\r\nKeep 😀 and every rule.\r\n")
+        package = PACKAGE / "clients/workstreams-titles.md"
+        command = [sys.executable, "-I", "-B", str(SCRIPT)]
+        result = subprocess.run(command + ["--auto", "--json", "--batch", str(external), str(package)],
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        packet = json.loads(result.stdout)
+        self.assertEqual(packet["mode"], "auto")
+        self.assertFalse(packet["external"])
+        self.assertEqual(packet["characters"], len(packet["text"]))
+        self.assertIn(external.read_bytes().decode(), packet["text"])
+        sections = re.findall(rf"\n--- {re.escape(str(package))} lines \d+-\d+ ---\n(.*?)\n--- source (?:complete|continues) ---\n",
+                              packet["text"], re.S)
+        self.assertEqual("".join(sections), package.read_text())
+        self.assertLess(packet["text"].index(str(external)), packet["text"].index(str(package)))
+        for flags in (["--auto", "--external"], ["--auto", "--helper"], ["--auto", "--prepare"]):
+            rejected = subprocess.run(command + flags, capture_output=True, timeout=5)
+            self.assertNotEqual(rejected.returncode, 0, flags)
+            self.assertEqual(rejected.stdout, b"")
+
+    def test_auto_batches_reconstruct_mixed_sources_in_order_with_bounded_fallback(self):
+        external = self.external_file(self.source.replace("\n", "\r\n"))
+        paths = ["clients/codex.md", str(external), str(self.root / "policies/unrelated.md")]
+        expected = ["# Client\nRead applicable contracts.\n", external.read_bytes().decode(),
+                    "Do not load this unused procedure.\n"]
+        first = self.reader.load_batch(self.root, paths, auto=True)
+        recovered = dict.fromkeys(paths, "")
+        batch = first
+        while True:
+            rendered = self.reader.render_page(batch)
+            self.assertLessEqual(len(rendered.encode()), 24000)
+            for section in batch["sections"]:
+                recovered[section["path"]] += section["text"]
+            page = batch["last_page"] + 1
+            if page > batch["pages"]:
+                break
+            self.assertIn(f"--auto --batch --page {page} --revision {first['revision']}", rendered)
+            batch = self.reader.load_batch(self.root, paths, page, first["revision"], auto=True)
+        self.assertEqual(list(recovered.values()), expected)
+        fallback = self.reader.load_page(self.root, paths, first["last_page"] + 1, first["revision"], auto=True)
+        self.assertLessEqual(len(self.reader.render_page(fallback).encode()), 9500)
+        part = fallback["sections"][0]
+        self.assertEqual(part["start_line"], first["sections"][-1]["end_line"] + 1)
+
+    def test_auto_preserves_absolute_alias_manifest_authority(self):
+        alias = self.root / "policies/alias.md"
+        alias.symlink_to("rules.md")
+        self.prepare()
+        outside = self.external_file("# Outside\n")
+        directory_alias = outside.parent / "package"
+        directory_alias.symlink_to(self.root, target_is_directory=True)
+        outside_alias = outside.parent / "package-source.md"
+        outside_alias.symlink_to(self.root / "policies/rules.md")
+        for name in (str(alias), str(directory_alias / "policies/alias.md"), str(outside_alias)):
+            self.assertIn("Preserve Straße", self.reader.render_page(self.reader.load_page(self.root, [name], auto=True)))
+        manifest_path = self.root / "clients/instruction-map.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["files"]["policies/alias.md"]["sha256"] = "0" * 64
+        manifest_path.write_text(json.dumps(manifest))
+        for name in ("policies/alias.md", str(alias), str(directory_alias / "policies/alias.md")):
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "Prepared source changed"):
+                self.reader.load_page(self.root, [name], auto=True)
+        (self.root / "policies/rules.md").write_text("# Changed package source\n")
+        with self.assertRaisesRegex(ValueError, "Prepared source changed"):
+            self.reader.load_page(self.root, [str(outside_alias)], auto=True)
+
+    def test_auto_rejects_package_origin_escapes_before_reading_external_bytes(self):
+        outside = self.root.parent / (self.root.name + "-outside.md")
+        outside.write_text("# External bytes must not bypass package authority\n")
+        self.addCleanup(outside.unlink)
+        escaped = self.root / "policies/escape.md"
+        escaped.symlink_to(outside)
+        alias_parent = self.external_file("# Alias parent\n").parent
+        alias = alias_parent / "package"
+        alias.symlink_to(self.root, target_is_directory=True)
+        reads = Counter()
+        original = Path.read_bytes
+        def observe(path):
+            reads[path] += 1
+            return original(path)
+        with patch.object(Path, "read_bytes", observe):
+            for name in ("policies/escape.md", str(escaped), str(alias / "policies/escape.md"),
+                         str(alias / ".." / outside.name)):
+                with self.subTest(name=name), self.assertRaises(ValueError):
+                    self.reader.load_batch(self.root, [name], auto=True)
+        self.assertNotIn(outside.resolve(), reads)
+
+    def test_auto_revision_binds_mode_target_authority_and_order(self):
+        external = self.external_file(self.source)
+        other = self.external_file(self.source)
+        alias = external.parent / "alias.md"
+        alias.symlink_to(external)
+        paths = [str(alias)]
+        first = self.reader.load_batch(self.root, paths, auto=True)
+        page = first["last_page"] + 1
+        self.assertLessEqual(page, first["pages"])
+        with self.assertRaises(ValueError):
+            self.reader.load_batch(self.root, paths, page, first["revision"], external=True)
+        legacy = self.reader.load_batch(self.root, paths, external=True)
+        with self.assertRaises(ValueError):
+            self.reader.load_batch(self.root, paths, page, legacy["revision"], auto=True)
+        with self.assertRaises(ValueError):
+            self.reader.load_batch(self.root, ["clients/codex.md"] + paths, page, first["revision"], auto=True)
+        for target in (other, self.root / "policies/rules.md"):
+            alias.unlink(); alias.symlink_to(target)
+            with self.subTest(target=target), self.assertRaises(ValueError):
+                self.reader.load_batch(self.root, paths, page, first["revision"], auto=True)
+
+    def test_auto_external_selection_reads_once_without_a_package_manifest(self):
+        external = self.external_file("# Small external\n")
+        (self.root / "clients/instruction-map.json").unlink()
+        reads = Counter()
+        original = Path.read_bytes
+        def observe(path):
+            reads[path] += 1
+            return original(path)
+        with patch.object(Path, "read_bytes", observe):
+            result = self.reader.load_batch(self.root, [str(external), str(external)], auto=True)
+        self.assertEqual(reads, Counter({external: 1}))
+        self.assertEqual(result["sections"][0]["text"], "# Small external\n")
+
+    def test_auto_invalid_later_source_produces_no_partial_stdout(self):
+        external = self.external_file("# Valid external first\n")
+        (self.root / "clients/codex.md").write_text("# Changed prepared source\n")
+        stdout, stderr = StringIO(), StringIO()
+        with patch.object(self.reader, "ROOT", self.root), \
+                patch.object(sys, "argv", [str(SCRIPT), "--auto", "--json", "--batch", str(external),
+                                          str(self.root / "clients/codex.md")]), \
+                redirect_stdout(stdout), redirect_stderr(stderr):
+            result = self.reader.main()
+        self.assertEqual(result, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("Prepared source changed", stderr.getvalue())
 
     def test_json_cli_preserves_unicode_and_exclusive_helper_envelope(self):
         path = self.external_file("# Skill\r\nPreserve 😀, 漢字 and Straße.\r\n")

@@ -11,7 +11,7 @@ assert(block, 'Codex native drain bootstrap is missing');
 const source = block[1].split('// Loader\n')[1];
 assert(source, 'Bootstrap selection must be separate from its unchanged loader');
 const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
-const bootstrap = new AsyncFunction('root', 'paths', 'external', 'tools', 'notify', 'text', source);
+const bootstrap = new AsyncFunction('root', 'paths', 'tools', 'notify', 'text', source);
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe native drain '));
 const input = path.join(directory, "skill ' $(touch INJECTION).md");
 const alias = path.join(directory, 'alias.md');
@@ -41,9 +41,11 @@ async function run(mode, original = large) {
   if (fs.existsSync(alias)) fs.unlinkSync(alias);
   fs.symlinkSync(input, alias);
   const selected = mode === 'target' ? alias : input;
+  const paths = mode.startsWith('mixed') ? [selected, path.join(root, 'clients/workstreams-titles.md')] : [selected];
   const messages = [], receipts = [], commands = [];
   let readers = 0, damaged = false;
-  const tools = {exec_command: async ({cmd}) => {
+  const tools = {exec_command: async ({cmd, max_output_tokens}) => {
+    assert.equal(max_output_tokens, 10000, 'Every instruction and recovery read keeps the fixed child budget');
     commands.push(cmd);
     const helper = cmd.includes('--helper');
     if (!helper) readers++;
@@ -67,12 +69,13 @@ async function run(mode, original = large) {
       const packet = JSON.parse(result.output);
       if (mode === 'first-page' && readers === 1) packet.page++;
       if (mode === 'first-batch' && readers === 1) packet.batch = false;
-      if (['first-page', 'first-batch'].includes(mode)) result.output = JSON.stringify(packet);
+      if (mode === 'first-mode' && readers === 1) packet.mode = 'external';
+      if (['first-page', 'first-batch', 'first-mode'].includes(mode)) result.output = JSON.stringify(packet);
       if (mode === 'empty') {
         packet.text = ''; packet.characters = 0;
         result.output = JSON.stringify(packet);
       }
-      if ((mode === 'clip-first' && readers === 1) ||
+      if ((['clip-first', 'mixed-clip'].includes(mode) && readers === 1) ||
           (mode === 'clip-later' && readers === 2) || mode === 'always-clip') {
         packet.text = packet.text.slice(0, 60) + packet.text.slice(-60);
         result.output = JSON.stringify(packet); // Valid JSON/header/footer, invalid body length.
@@ -90,6 +93,7 @@ async function run(mode, original = large) {
     return result;
   }};
   const notify = value => {
+    assert(Buffer.byteLength(value) <= 24000, 'Recovery bodies remain separate bounded notifications');
     messages.push(value);
     if (messages.length === 1 && mode === 'stale') fs.appendFileSync(input, 'Changed source.\n');
     if (messages.length === 1 && mode === 'target') {
@@ -98,11 +102,11 @@ async function run(mode, original = large) {
     if (mode === 'emit-error') throw Error('notification failed');
   };
   let failure;
-  try { await bootstrap(root, [selected], true, tools, notify, value => receipts.push(value)); }
+  try { await bootstrap(root, paths, tools, notify, value => receipts.push(value)); }
   catch (error) { failure = error; }
   assert(!fs.existsSync(path.join(directory, 'INJECTION')), 'Instruction paths must remain shell data');
   const failed = mode.startsWith('helper') || ['stale', 'target', 'cancel', 'pending', 'metadata', 'revision',
-    'always-clip', 'emit-error', 'empty', 'first-page', 'first-batch'].includes(mode);
+    'always-clip', 'emit-error', 'empty', 'first-page', 'first-batch', 'first-mode'].includes(mode);
   if (failed) {
     assert(failure, mode + ' must fail');
     assert.equal(receipts.length, 0, mode + ' must not report completion');
@@ -116,10 +120,11 @@ async function run(mode, original = large) {
     assert.equal(receipts.length, 1);
     assert.equal(receipts[0].complete, true);
     verifyCoverage(messages, selected, original);
+    if (mode.startsWith('mixed')) verifyCoverage(messages, paths[1], fs.readFileSync(paths[1], 'utf8'));
     assert.equal(commands.filter(c => c.includes('--helper')).length, 1);
     assert(commands[0].includes('--helper'), 'Load the fixed runner before reading instructions');
     if (mode === 'small') assert.equal(readers, 1);
-    if (mode.startsWith('clip-')) {
+    if (mode.startsWith('clip-') || mode === 'mixed-clip') {
       assert(damaged);
       assert(commands.some(c => !c.includes('--helper') && !c.includes('--batch')), 'Recover using bounded single pages');
     }
@@ -131,7 +136,7 @@ async function run(mode, original = large) {
     const modes = ['small', 'large', 'clip-first', 'clip-later', 'always-clip', 'stale', 'target',
                    'cancel', 'pending', 'metadata', 'revision', 'helper', 'emit-error', 'empty',
                    'helper-pending', 'helper-exit', 'helper-empty', 'helper-kind', 'helper-version',
-                   'helper-count', 'first-page', 'first-batch'];
+                   'helper-count', 'first-page', 'first-batch', 'first-mode', 'mixed', 'mixed-clip'];
     for (const mode of modes) {
       await run(mode, ['small', 'empty'].includes(mode) ? '# Small\r\nPreserve 😀 and every rule.\r\n' : large);
     }

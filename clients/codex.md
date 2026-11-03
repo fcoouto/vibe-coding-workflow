@@ -21,16 +21,15 @@ repository protections.
 
 ## Instruction output budgets
 
-Select only applicable instruction files. Vibe paths are package-relative (`policies/02-task-planning.md`); external skills and their triggered Markdown references use absolute paths in a separate selection. Never run `--prepare` during routine tasks.
+Select only applicable instruction files. Supply Vibe paths relative to the package or as absolute paths; supply external skills and their triggered Markdown references as absolute paths. A selection may mix both: the reader determines each source's authority and retains its package or external checks. Never run `--prepare` during routine tasks.
 
-With `functions.exec`, use this complete launcher in one invocation for each selection. Set only `root`, `paths` and `external`; keep the launcher body intact. It loads one fixed packaged runner per selection, which automatically drains continuations through separate `notify` outputs, including bounded small-page recovery. Do not print/collect batch bodies into the direct result, run continuation calls manually, or evaluate instruction contents. If the cell yields as running, wait for its terminal result before proceeding. Only `complete: true` establishes delivery of the selected text; it does not establish applicability, semantic compliance or retention after compaction.
+With `functions.exec`, use this complete launcher in one invocation for each selection. Set only `root` and `paths`; keep the launcher body intact. It loads one fixed packaged runner per selection, which automatically drains continuations through separate `notify` outputs, including bounded small-page recovery. Do not print/collect batch bodies into the direct result, run continuation calls manually, or evaluate instruction contents. If the cell yields as running, wait for its terminal result before proceeding. Only `complete: true` establishes delivery of the selected text; it does not establish applicability, semantic compliance or retention after compaction.
 
 <!-- native-instruction-loader:start -->
 ```javascript
 // @exec: {"yield_time_ms":60000,"max_output_tokens":1000}
 const root = "/absolute/Vibe/package";
 const paths = ["policies/02-task-planning.md"];
-const external = false;
 // Loader
 const quote = s => "'" + s.replace(/'/g, "'\\''") + "'";
 const r = await tools.exec_command({cmd:"python3 -I -B " + quote(root + "/scripts/read_instructions.py") + " --helper",
@@ -41,11 +40,11 @@ if (!helper || helper.version !== 1 || helper.kind !== "helper" || typeof helper
     !Number.isSafeInteger(helper.characters) || helper.characters < 1 || [...helper.text].length !== helper.characters)
   throw new Error("Instruction delivery incomplete: helper output was omitted");
 const drain = (0,eval)("(" + helper.text + ")");
-text(await drain({root, paths, external, exec:tools.exec_command, emit:notify}));
+text(await drain({root, paths, exec:tools.exec_command, emit:notify}));
 ```
 <!-- native-instruction-loader:end -->
 
-If this native surface is unavailable, use `python3 -I -B <package>/scripts/read_instructions.py --batch <paths>` (with `--external` for external paths), return each batch alone and complete every continuation with the same mode, selection and revision. On reader or unrecovered transport failure, report incomplete delivery and recover only missing source ranges with bounded native reads before relying on the contract. Preserve already received text and freshness; a changed source requires a new consistent selection.
+If this native surface is unavailable, use `python3 -I -B <package>/scripts/read_instructions.py --auto --batch <paths>`, return each batch alone and complete every continuation with the same mode, selection and revision. On reader or unrecovered transport failure, report incomplete delivery and recover only missing source ranges with bounded native reads before relying on the contract. Give each recovery read its own notification or outer call; never aggregate recovery bodies. For a direct `functions.exec` result, use one child with `max_output_tokens:10000` and an outer `max_output_tokens:12000` for wrapper headroom. Preserve already received text and freshness; a changed source requires a new consistent selection.
 
 Size each child instruction read for its complete selected files or sections. For outputs accumulated into the direct `functions.exec` result, use supported child `max_output_tokens` limits and an outer budget covering their sum plus response wrappers. The loader above delivers separate notifications; its direct budget covers only the receipt. A larger outer budget cannot restore child-truncated text. Use available size information without adding a sizing command to every read; split large or uncertain reads into smaller, contiguous sections. Keep large diagnostics, diffs and third-party guides separate when they would exhaust either budget.
 
