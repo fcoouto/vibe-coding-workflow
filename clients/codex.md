@@ -25,6 +25,8 @@ Size each child instruction read for its complete selected files or sections. Wi
 
 Required procedures must arrive completely. Requested limits may be capped; inspect both child and outer results for truncation or omitted text. Success exit codes, summaries and previews do not establish completeness. Retain complete material already received and recover only missing files or sections before proceeding, adjusting the limit or selection at the layer that omitted them. Required review, freshness checks and context recovery still apply.
 
+In enrolled checkouts, the existing `PostToolUse` hook surfaces the observed child-truncation marker as a short recovery notice. The notice is advisory: stdout can imitate the marker. It does not replace completed output, run recovery commands or observe later outer clipping. Normal results remain silent.
+
 ## Startup implementation
 
 Read [startup implementation and qualification](codex-startup-implementation.md) when implementing or diagnosing startup, preparing enrollment, qualifying a client adapter, or changing hook registration, trust or packaging.

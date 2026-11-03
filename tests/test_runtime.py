@@ -94,6 +94,17 @@ class RuntimeTests(unittest.TestCase):
                 output = self.invoke(kind, {**self.payload, "hook_event_name": kind})
                 self.assertEqual(output, {} if kind == "Stop" else None)
 
+    def test_output_notice_requires_enrolled_scope_without_starting_runtime(self):
+        payload = {**self.payload, "hook_event_name": "PostToolUse", "tool_name": "Bash",
+                   "tool_response": "Warning: truncated output (original token count: 1489)\nPRIVATE_OUTPUT"}
+        self.assertIsNone(self.invoke("PostToolUse", payload))
+        self.enroll()
+        output = self.invoke("PostToolUse", payload)
+        self.assertEqual(output["hookSpecificOutput"]["hookEventName"], "PostToolUse")
+        self.assertIn("truncation marker", output["hookSpecificOutput"]["additionalContext"])
+        self.assertNotIn("PRIVATE_OUTPUT", json.dumps(output))
+        self.assertFalse((self.repo / ".vibe-coding-workflow" / "runtime.sqlite3").exists())
+
     def test_runtime_scope_reuses_validated_checkout_and_never_initializes_state(self):
         self.enroll(runtime=self.runtime())
         self.assertTrue(hasattr(startup, "resolve_project"), "reusable scope resolver is missing")
@@ -437,6 +448,42 @@ class RuntimeTests(unittest.TestCase):
 
 
 class RuntimeAdapterTests(unittest.TestCase):
+    def test_output_notice_keeps_normal_quoted_and_malformed_results_silent(self):
+        payload = {"hook_event_name": "PostToolUse", "tool_name": "Bash"}
+        existing = {"systemMessage": "Existing feedback"}
+        for response in (None, {}, [], "", "Complete output", 'Quoted: Warning: truncated output (original token count: 10)'):
+            with self.subTest(response=response):
+                self.assertIs(codex.with_output_notice({**payload, "tool_response": response}, existing), existing)
+        warning = "Warning: truncated output (original token count: 10)\nPRIVATE_OUTPUT"
+        for value in (None, [], {}, {**payload, "hook_event_name": "PreToolUse", "tool_response": warning},
+                      {**payload, "tool_name": "apply_patch", "tool_response": warning}):
+            with self.subTest(payload=value):
+                self.assertIs(codex.with_output_notice(value, existing), existing)
+
+    def test_output_notice_is_constant_advisory_even_for_spoofed_stdout(self):
+        payload = {"hook_event_name": "PostToolUse", "tool_name": "Bash",
+                   "tool_response": "Warning: truncated output (original token count: 10)\nPRIVATE_COMMAND"}
+        output = codex.with_output_notice(payload, None)
+        specific = output["hookSpecificOutput"]
+        self.assertEqual(set(output), {"hookSpecificOutput"})
+        self.assertEqual(set(specific), {"hookEventName", "additionalContext"})
+        self.assertEqual(specific["hookEventName"], "PostToolUse")
+        self.assertIn("truncation marker", specific["additionalContext"])
+        self.assertNotIn("PRIVATE", json.dumps(output))
+        self.assertEqual(codex.with_output_notice({**payload, "tool_response": payload["tool_response"].replace("10)", "999)")}, None), output)
+
+    def test_output_notice_preserves_existing_feedback_without_mutation(self):
+        payload = {"hook_event_name": "PostToolUse", "tool_name": "Bash",
+                   "tool_response": "Warning: truncated output (original token count: 10)"}
+        existing = {"systemMessage": "Title notification", "hookSpecificOutput": {
+            "hookEventName": "PostToolUse", "additionalContext": "x" * 1024}}
+        before = json.dumps(existing, sort_keys=True)
+        output = codex.with_output_notice(payload, existing)
+        self.assertEqual(json.dumps(existing, sort_keys=True), before)
+        self.assertEqual(output["systemMessage"], "Title notification")
+        self.assertTrue(output["hookSpecificOutput"]["additionalContext"].startswith("x" * 1024 + "\n"))
+        self.assertIn("truncation marker", output["hookSpecificOutput"]["additionalContext"])
+
     def normalize(self, **updates):
         self.assertTrue(hasattr(codex, "normalize_runtime"), "runtime normalizer is missing")
         payload = {"hook_event_name": "PreToolUse", "session_id": "session-1", "cwd": "/tmp",

@@ -331,6 +331,8 @@ def main():
                 if presentation.get("notification"):
                     output = dict(output or {})
                     output["systemMessage"] = (output.get("systemMessage", "") + " " + presentation["notification"]).strip()
+            if scope is not None and event.kind == "PostToolUse":
+                output = codex.with_output_notice(payload, output)
     except RuntimeScopeError as error:
         from runtime.state import retained_patch_guard
         retained = retained_patch_guard(event, deadline=deadline) if runtime_kind == "PreToolUse" else None
