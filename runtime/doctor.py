@@ -1,4 +1,4 @@
-"""Read-only package/state checks and bounded native hook discovery, never execution."""
+"""Bounded native transport and observations; diagnostics do not authorize execution."""
 
 import hashlib
 from contextvars import ContextVar
@@ -62,6 +62,84 @@ def _native_witness_content(witness):
         raise ObservationError("unissued_native_witness")
     from runtime.startup import _canonical_plain
     return _canonical_plain(witness._content)
+
+
+def native_behavior_records(raw, *, thread_id, source_reference):
+    """Decode bounded original rollout bytes; retain actual IDs and exact line sources."""
+    from runtime.startup import CANONICAL_MAX_ROWS, _canonical_freeze
+    try:
+        def identifier(value):
+            if not isinstance(value, str) or not value.strip() or len(value) > 256 or not value.isprintable():
+                raise ValueError
+            return value
+        identifier(thread_id)
+        if (not isinstance(raw, bytes) or not raw or len(raw) > MAX_OUTPUT or not raw.endswith(b'\n')
+                or not isinstance(source_reference, str) or not source_reference.isprintable()
+                or len(source_reference) > 4096 or not Path(source_reference).is_absolute()
+                or '#' in source_reference):
+            raise ValueError
+        lines = raw.splitlines(keepends=True)
+        if len(lines) > CANONICAL_MAX_ROWS:
+            raise ValueError
+        records, turns, started, completed = [], [], set(), set()
+        session = active = None
+        offset = 0
+        for line in lines:
+            if not line.endswith(b'\n') or len(line) > MAX_INPUT:
+                raise ValueError
+            value = json_object(line)
+            if (not {'timestamp', 'type', 'payload'} <= set(value)
+                    or set(value) - {'timestamp', 'type', 'payload', 'ordinal', 'metadata'}
+                    or not isinstance(value['timestamp'], str) or not value['timestamp']
+                    or len(value['timestamp']) > 128 or not isinstance(value['payload'], dict)):
+                raise ValueError
+            kind, payload = value['type'], value['payload']
+            identifier(kind)
+            ordinal = value.get('ordinal')
+            if ordinal is not None and (type(ordinal) is not int or not 0 <= ordinal < 2**64):
+                raise ValueError
+            if 'metadata' in value and (kind != 'response_item'
+                    or value['metadata'] is not None and not isinstance(value['metadata'], dict)):
+                raise ValueError
+            source = dict(reference=f'{source_reference}#bytes:{offset}:{len(line)}',
+                sha256=hashlib.sha256(line).hexdigest())
+            offset += len(line)
+            if kind == 'session_meta':
+                if session is not None or identifier(payload.get('id')) != thread_id:
+                    raise ValueError
+                session = thread_id
+            elif session is None:
+                raise ValueError
+            elif kind == 'turn_context' or kind == 'event_msg' and payload.get('type') in {
+                    'task_started', 'turn_started', 'task_complete', 'turn_complete'}:
+                turn = payload.get('turn_id')
+                if turn is None and kind == 'turn_context':
+                    continue
+                turn = identifier(turn)
+                event = payload.get('type')
+                if event in {'task_complete', 'turn_complete'}:
+                    if active != turn or turn in completed:
+                        raise ValueError
+                    completed.add(turn)
+                    active = None
+                else:
+                    if active not in (None, turn) or turn in completed:
+                        raise ValueError
+                    if event in {'task_started', 'turn_started'}:
+                        if turn in started:
+                            raise ValueError
+                        started.add(turn)
+                    active = turn
+                if turn not in turns:
+                    turns.append(turn)
+            elif kind == 'response_item':
+                identifier(payload.get('type'))
+                records.append(dict(turn_id=active, payload=payload, source=source))
+        if session != thread_id:
+            raise ValueError
+        return _canonical_freeze(dict(thread_id=session, turn_ids=turns, records=records))
+    except (StartupError, ValueError, TypeError, KeyError, UnicodeError, RecursionError):
+        raise ObservationError('native_records_unavailable') from None
 
 
 class HookCollector:

@@ -381,7 +381,7 @@ def _capability(scope, task, operation, *, attempt_ref=None):
                 or decision.issuer is not setup_observation._ISSUER
                 or decision.mode not in ('ordinary', 'qualification')):
             raise StateError('Capability admission requires its retained owner')
-        if decision.mode == 'ordinary' and operation in ('task-start', 'task-patch'):
+        if decision.mode == 'ordinary' and (operation == 'task-patch' or operation == 'task-start' and task['mode'] == 'editable'):
             decision = setup_observation.require_capability(scope, (*keys, 'post-tool-handling'),
                 task=task, operation=operation)
         if decision.mode == 'qualification':

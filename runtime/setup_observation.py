@@ -72,17 +72,18 @@ def qualification_attempt_projection(decision, *, operation=None, case_id, proce
     if process is not None:
         context = getattr(decision._owner,'_setup_context',None)
         d3._require(decision._process is process and context is not None and context['process'] is process
-            and context['attempt_ref'] == startup._canonical_plain(decision.attempt_ref),
+            and context['attempt_ref'] == startup._canonical_plain(decision.attempt_ref) and process.deadline>time.monotonic(),
             'Frontend observation requires the exact active D4-owned process')
     return decision.original_attempt
 
 
 def _projection_shape(value):
-    d3._object(value, ('reference', 'verified', 'complete'))
+    d3._object(value, ('reference', 'verified', 'complete'), ('bootstrap_verified',))
     startup._canonical_ref(value['reference'])
     d3._require(type(value['complete']) is bool and isinstance(value['verified'], (list, tuple))
         and len(set(value['verified'])) == len(value['verified']) and set(value['verified']) <= set(BEHAVIOR_CASES),
         'Invalid retained capability projection')
+    if 'bootstrap_verified' in value:d3._require(type(value['bootstrap_verified']) is bool,'Invalid native bootstrap projection')
 
 
 def _budget(deadline=None):
@@ -116,7 +117,15 @@ def _children(path, budget):
 
 def plugin_content_hash(root, budget):
     """Codex's bounded codex-plugin-bundle-v1 fingerprint, including directory names."""
+    return _package_scan(root,budget)[0]
+
+
+def _package_scan(root, budget, *, runtime_sources=None):
     root = Path(root)
+    sources = list(runtime_sources) if runtime_sources is not None else None
+    selected = set(sources) if sources is not None else set()
+    runtime = hashlib.sha256() if sources is not None else None
+    consumed = 0
     pending = [root]
     digest = hashlib.sha256(b'codex-plugin-bundle-v1')
     while pending:
@@ -136,17 +145,13 @@ def plugin_content_hash(root, budget):
             raw = _read(path, budget)
             d3._require(len(raw) == info.st_size, 'Plugin contents changed during setup observation')
             digest.update(b'file'); digest.update(info.st_size.to_bytes(8, 'little')); digest.update(raw)
+            relative_source=path.relative_to(root)
+            if relative_source in selected:
+                d3._require(relative_source==sources[consumed],'Runtime source scan order changed')
+                runtime.update(str(relative_source).encode()+b'\0'+raw+b'\0');consumed+=1
     startup._entry_budget_check(budget)
-    return 'sha256:' + digest.hexdigest()
-
-
-def _runtime_digest(package, budget):
-    from runtime import state
-    digest = hashlib.sha256()
-    for source in state._runtime_sources():
-        relative = source.relative_to(state.PACKAGE)
-        digest.update(str(relative).encode()+b'\0'+_read(package/relative, budget)+b'\0')
-    return digest.hexdigest()
+    d3._require(sources is None or consumed==len(sources),'Runtime source scan lost required membership')
+    return 'sha256:' + digest.hexdigest(),runtime.hexdigest() if runtime is not None else None
 
 
 def _projection(value, config, *, user=False):
@@ -211,7 +216,7 @@ def _configuration_files(config, cwd):
     return [files[key] for key in sorted(files)]
 
 
-def current_configuration(config, cwd, budget=None, *, bundle_budget=None):
+def current_configuration(config, cwd, budget=None, *, bundle_budget=None, runtime_sources=None):
     """Compare captured local inputs; never query native processes or reconstruct precedence."""
     budget = budget if budget is not None else _budget()
     observed = []
@@ -224,17 +229,23 @@ def current_configuration(config, cwd, budget=None, *, bundle_budget=None):
         sha256=hashlib.sha256(_read(source, budget)).hexdigest())
     scan = bundle_budget if bundle_budget is not None else budget
     scan['paths'] = budget['paths']
-    bundle = plugin_content_hash(root, scan)
+    bundle,runtime_digest = _package_scan(root, scan, runtime_sources=runtime_sources)
     versions = sorted(p.name for p in _children(root.parent, scan) if p.is_dir())
     budget['paths'] = scan['paths']
     material = dict(files=observed, bundle=bundle, installation_versions=versions)
-    return dict(digest=d3._digest(material), hook_owner=hook_owner, material=material)
+    result=dict(digest=d3._digest(material), hook_owner=hook_owner, material=material)
+    if runtime_sources is not None:result['runtime_digest']=runtime_digest
+    return result
 
 
 def _assessment(value, *, staged=False):
     from runtime.changes import _evidence
     value = startup._canonical_copy(value)
-    d3._object(value, ('cases', 'requirements', 'general_review', 'security_review', 'semantic_assessment'))
+    d3._object(value, ('cases', 'requirements', 'general_review', 'security_review', 'semantic_assessment'), ('bootstrap',) if staged else ())
+    if 'bootstrap' in value:
+        d3._object(value['bootstrap'],('status','evidence'))
+        _outcome(value['bootstrap'])
+        d3._require(value['bootstrap']['status'] in ('pending','verified'),'Native bootstrap cannot be waived')
     d3._require(isinstance(value['cases'], list) and len(value['cases']) == len(BEHAVIOR_CASES), 'Complete setup behavior matrix is required')
     seen = set()
     for row in value['cases']:
@@ -281,6 +292,21 @@ def _coverage(content):
     return verified, complete
 
 
+def _native_safety(value):
+    from runtime.changes import _evidence
+    d3._object(value,('claim','evidence'))
+    d3._require(value['claim']=='submitted-write-policy-rejection' and _evidence(value['evidence'],many=True)
+        and len(value['evidence'])==4,'Actual native policy rejection and independent readbacks are required')
+    return value
+
+
+def _bootstrap_verified(content):
+    assessment=content['assessment'].get('bootstrap')
+    safety=content.get('source',{}).get('native_safety')
+    return bool(assessment and assessment['status']=='verified' and safety
+        and all(reference in assessment['evidence'] for reference in _native_safety(safety)['evidence']))
+
+
 def collect_setup(witness, accepted_identity, transaction_id, verified_assessment, *, predecessor=None):
     """Consume Native's genuine frontend witness, never labels or fabricated hook pairs.
 
@@ -298,7 +324,7 @@ def collect_setup(witness, accepted_identity, transaction_id, verified_assessmen
 
 def _collect_content(observed, accepted_identity, transaction_id, verified_assessment, *, predecessor=None, capture_reference=None):
     from runtime.doctor import inspect_hooks
-    from runtime.state import _accepted_identity
+    from runtime.state import _accepted_identity, _runtime_sources, PACKAGE
     identity = _accepted_identity(accepted_identity)
     d3._require(identity['client'] == 'codex', 'Only the Codex local setup source is supported')
     binding = observed['binding']
@@ -318,10 +344,12 @@ def _collect_content(observed, accepted_identity, transaction_id, verified_asses
         'Genuine frontend bootstrap observations are missing')
     d3._require(set(observed['observations']) <= set(BEHAVIOR_CASES), 'Unknown frontend behavior claim')
     observations = dict(observed['observations'])
+    inherited_safety=None
     if predecessor is not None:
         previous, _ = _retained_reference(predecessor,budget)
         d3._require(previous['identity'] == identity, 'Successor frontend observation changed original accepted scope')
         _monotonic_coverage(previous,dict(version=2,assessment=assessment))
+        inherited_safety=previous.get('source',{}).get('native_safety')
         for row in previous.get('assessment',{}).get('cases',[]):
             if row.get('status','verified') == 'verified':
                 observations.setdefault(row['id'],previous.get('source',{}).get('observations',{}).get(row['id'],row['evidence']))
@@ -331,8 +359,8 @@ def _collect_content(observed, accepted_identity, transaction_id, verified_asses
         if case['status'] == 'verified':
             d3._require(actual and all(proof in case['evidence'] for proof in actual),
                 'A verified behavior lacks its actual frontend observations')
-    d3._require(identity['configuration']['policy_digest'] == startup.policy_digest(package, budget=budget)
-        and identity['configuration']['runtime_digest'] == _runtime_digest(package, budget), 'Setup candidate policy/runtime identity differs')
+    d3._require(identity['configuration']['policy_digest'] == startup.policy_digest(package, budget=budget),
+        'Setup candidate policy/runtime identity differs')
     d3._require(d3._filesystem_binding(Path(identity['project_root'])) == identity['project_binding']
         and all(d3._filesystem_binding(Path(identity['repository_root' if key == 'root' else key])) == binding
             for key, binding in identity['bindings'].items()), 'Setup physical project/checkout identity differs')
@@ -377,7 +405,8 @@ def _collect_content(observed, accepted_identity, transaction_id, verified_asses
         allow_managed_hooks_only=requirements.get('allowManagedHooksOnly'), hooks=requirements.get('hooks'),
         marketplaces=requirements.get('marketplaces'))
     d3._require(not _projection(relevant, config), 'Managed hook/plugin requirements are outside this personal setup source')
-    current = current_configuration(config, root, budget)
+    current = current_configuration(config, root, budget, runtime_sources=[source.relative_to(PACKAGE) for source in _runtime_sources()])
+    d3._require(identity['configuration']['runtime_digest']==current['runtime_digest'],'Setup candidate policy/runtime identity differs')
     observed_files = {item['path']: item['values'] for item in current['material']['files']}
     d3._require(all(observed_files.get(path) == projection for path, projection in expected.items()), 'Native origins differ from their actual local files')
     d3._require(all(not observed_files[str(system_files[0].parent/name)] for name in ('requirements.toml', 'managed_config.toml')), 'Unmapped local requirements prevent personal activation')
@@ -393,6 +422,14 @@ def _collect_content(observed, accepted_identity, transaction_id, verified_asses
         native=native, configuration=config, runs=[], assessment=assessment, predecessor=predecessor,
         source=dict(binding=binding,bootstrap=observed['bootstrap'],observations=observations,
             pending_reason=observed['pending_reason']))
+    if observed.get('native_safety') is not None:
+        content['source']['native_safety']=_native_safety(observed['native_safety'])
+    elif inherited_safety is not None:
+        d3._require(previous['configuration']['digest']==config['digest'] and previous['native']['executable']==native['executable'],
+            'Original native safety source changed during the observed setup successor')
+        content['source']['native_safety']=inherited_safety
+    if assessment.get('bootstrap',{}).get('status')=='verified':
+        d3._require(_bootstrap_verified(content),'Native bootstrap needs its actual safety sources and independent assessment')
     if capture_reference is not None:content['source']['capture_reference'] = capture_reference
     d3._bounded(content)
     return _SetupObservation(startup._canonical_freeze(content), _ISSUER)
@@ -429,10 +466,13 @@ def receipt_shape(content):
             startup._canonical_ref(content['predecessor'])
             d3._require('#setup:' in content['predecessor']['reference'],'Setup predecessor must name a full retained setup receipt')
         source = content['source']
-        d3._object(source, ('binding','observations','bootstrap','pending_reason'), ('capture_reference','command_origins','command_origin','source_capture'))
+        d3._object(source, ('binding','observations','bootstrap','pending_reason'), ('capture_reference','command_origins','command_origin','source_capture','native_safety','native_origin','native_capture','managed'))
+        if 'native_safety' in source:_native_safety(source['native_safety'])
+        if content['assessment'].get('bootstrap',{}).get('status')=='verified':
+            d3._require(_bootstrap_verified(content),'Original native bootstrap lost its actual safety evidence')
         d3._object(source['binding'], ('accepted_scope_digest','attempt_ref','transaction_id'))
         d3._require(source['binding']['accepted_scope_digest'] == d3._digest(content['identity'])
-            and (source['binding']['transaction_id'] == content['transaction_id'] or 'capture_reference' in source),
+            and (source['binding']['transaction_id'] == content['transaction_id'] or 'capture_reference' in source or 'native_origin' in source),
             'Original frontend witness binding differs')
         if 'capture_reference' in source:
             startup._canonical_ref(source['capture_reference'])
@@ -440,6 +480,10 @@ def receipt_shape(content):
         if 'source_capture' in source:
             startup._canonical_ref(source['source_capture'])
             d3._require('#command-capture:' in source['source_capture']['reference'],'Original CLI source is not its command capture')
+        for key in ('native_origin','native_capture'):
+            if key in source:
+                startup._canonical_ref(source[key])
+                d3._require('#native-observation:' in source[key]['reference'],'Original native source belongs to another reference family')
         startup._canonical_ref(source['binding']['attempt_ref'])
         from runtime.changes import _evidence
         d3._require(_evidence(source['bootstrap'],many=True) and isinstance(source['observations'],dict)
@@ -476,6 +520,7 @@ def _retained_reference(reference, budget):
     if content.get('source',{}).get('source_capture') is not None:
         original,prior=_retained_capture(content['source']['source_capture'],budget)
         d3._require(_capture_identity(original,prior)==content['identity'],'Original CLI capture changed accepted scope')
+    _native_provenance(content,budget)
     return content, journal
 
 
@@ -592,6 +637,15 @@ def _stopped_source(journal,origin):
 def setup_capture_projection(decision, *, process):
     projection=qualification_attempt_projection(decision,operation='observe-setup-metadata',case_id='startup-context',process=process)
     reference=startup._canonical_plain(projection['attempt'].get('source_capture'))
+    if '#native-observation:' in reference['reference']:
+        row,_,part=_read_native_reference(reference,_budget())
+        d3._require(part is None and row['result']['kind']=='native-fragment'
+            and row['identity']==startup._canonical_plain(projection['identity']),
+            'Metadata selected another original native fragment')
+        payload=row['result']['content']
+        d3._require(sorted(projection['attempt']['native_sessions'])==sorted(thread['id'] for thread in payload['native']['threads']),
+            'Metadata selected another original native session')
+        return startup._canonical_freeze(payload)
     capture,journal=_retained_capture(reference,_budget())
     identity=_capture_identity(capture,journal);payload=capture['witness']
     sessions=sorted(thread['id'] for thread in payload['native']['threads'])
@@ -600,14 +654,23 @@ def setup_capture_projection(decision, *, process):
     return startup._canonical_freeze(payload)
 
 
-def collect_retained_setup(reference, identity, new_transaction, assessment):
+def collect_retained_setup(reference, identity, new_transaction, assessment, *, witness=None):
     """Publish an exact successor, preserving the actual native capture transaction."""
-    budget=_budget();original,journal=_retained_reference(reference,budget)
+    budget=_budget();native_origin='#native-observation:' in reference['reference']
+    if native_origin:
+        row,journal,part=_read_native_reference(reference,budget)
+        d3._require(part is None and row['result']['kind']=='setup','A filtered native setup source is required')
+        original=row['result']['content']
+    else:original,journal=_retained_reference(reference,budget)
     d3._require(original['identity']==startup._canonical_plain(identity) and 'assessment' in original
         and original['transaction_id']!=new_transaction,'Retained setup needs a complete filtered source and a new exact transaction')
     assessment=_assessment(assessment,staged=True)
     _monotonic_coverage(original,dict(assessment=assessment))
-    observations=original.get('source',{}).get('observations',{})
+    content=startup._canonical_copy(original)
+    if witness is not None:
+        d3._require(not native_origin,'Managed behavior must extend its original full setup receipt')
+        _merge_managed_witness(content,reference,identity,witness)
+    observations=content.get('source',{}).get('observations',{})
     for row in assessment['cases']:
         actual=observations.get(row['id'],[])
         d3._require(row['status']!='verified' or actual and all(proof in row['evidence'] for proof in actual),
@@ -615,10 +678,57 @@ def collect_retained_setup(reference, identity, new_transaction, assessment):
     current=current_configuration(original['configuration'],Path(identity['repository_root']),budget)
     d3._require(current['digest']==original['configuration']['digest'] and current['hook_owner']==original['configuration']['hook_owner'],
         'Original observable setup configuration changed')
-    content=startup._canonical_copy(original)
-    content.update(version=2,transaction_id=new_transaction,assessment=assessment,predecessor=reference)
-    content['source']['capture_reference']=reference
+    content.update(version=2,transaction_id=new_transaction,assessment=assessment,predecessor=original.get('predecessor') if native_origin else reference)
+    content['source']['native_origin' if native_origin else 'capture_reference']=reference
     return _SetupObservation(startup._canonical_freeze(content),_ISSUER)
+
+
+def _merge_managed_witness(content,reference,identity,witness):
+    from runtime import doctor,state,delegation
+    try:value=doctor._native_witness_content(witness)
+    except doctor.ObservationError:raise startup.StartupError('Actual issued managed behavior source is required') from None
+    d3._object(value,('binding','setup_reference','observations'))
+    d3._object(value['binding'],('accepted_scope_digest','attempt_ref','transaction_id'))
+    d3._require(value['setup_reference']==reference and value['binding']['accepted_scope_digest']==d3._digest(identity)
+        and value['binding']['transaction_id']==content['transaction_id'] and value['observations'],
+        'Managed behavior belongs to another setup source')
+    acquired=startup.acquire_project_entry(SimpleNamespace(client=identity['client'],cwd=Path(identity['repository_root'])),state.PACKAGE)
+    scope=acquired.resolution.scope
+    d3._require(scope is not None and scope.accepted_scope_digest==d3._digest(identity)
+        and startup._canonical_plain(scope.qualification['reference'])==reference,'Original managed setup scope changed')
+    for case,proofs in value['observations'].items():
+        d3._require(case in ('pre-tool-enforcement','post-tool-handling') and len(proofs)==4,
+            'Unsupported managed behavior source')
+        before_ref,after_ref=proofs[-2:]
+        path,separator,selector=after_ref['reference'].partition('#managed-observation:')
+        assignment_id,split,call_id=selector.partition(':')
+        d3._require(separator and split and path==str(state._path(scope)),'Managed readback belongs to another original authority')
+        with state._database(scope) as db:
+            record=next((row for row in delegation._ledger(scope,db,assignment_id=assignment_id) if row['id']==assignment_id),None)
+            d3._require(record is not None,'Original managed assignment is unavailable')
+            owner=record['owner'];task=state._task(db,owner['scope_id'],owner['client'],owner['session_id'],owner['task_id'])
+            history=delegation._worker_history(scope,record['data']['observation'],db=db)
+            d3._require(task is not None and history,'Original native execution is unobserved')
+            receipt=history[0][1]['receipt']
+            task_ref={key:task[key] for key in ('client','session_id','task_id','scope_ref')}
+            task_ref.update(expected_revision=task['revision'],attempt_id=assignment_id,call_id=call_id,turn_id=task['turn_id'],
+                **{key:receipt[key] for key in ('parent_turn_id','spawn_item_id')})
+        projection=managed_observation_projection(scope,task_ref,value['binding']['attempt_ref'],case_id=case)
+        actual=managed_observation_readback(scope,task_ref,value['binding']['attempt_ref'],case_id=case)
+        before=projection['probe']['before'];after=startup._canonical_plain(actual)
+        d3._require(projection['probe']['reference']==before_ref and after['reference']==after_ref
+            and projection['binding']['client_surface']==content['native']['surface']
+            and after['receipt'] is not None and not after['receipt']['conflicted']
+            and after['receipt']['rowid']>before['receipt_watermark'],'Managed behavior lost its actual owner facts or native surface')
+        if case=='pre-tool-enforcement':
+            d3._require(before['probe'] is not None and after['canary']==startup._canonical_plain(before['probe']['before']),
+                'Managed guard needs its original approved canary and independent readback')
+        else:d3._require(after['post_receipts_count']>0 and after['generation']-before['generation']==after['post_receipts_count'],
+            'Post-tool behavior lacks fully attributed actual generation change')
+        retained=content['source']['observations'].setdefault(case,[])
+        retained.extend(proof for proof in proofs if proof not in retained)
+        content['source'].setdefault('managed',{})[case]=dict(before=startup._canonical_plain(before),after=after,
+            assignment=assignment_id,before_reference=before_ref,after_reference=after_ref)
 
 
 def _monotonic_coverage(previous, successor):
@@ -630,6 +740,45 @@ def _monotonic_coverage(previous, successor):
             d3._require(row['id'] in retained and (status == 'pending' or
                 retained[row['id']]['status'] == status and all(proof in retained[row['id']]['evidence'] for proof in row['evidence'])),
                 'Successor lost original qualified evidence or catalog coverage')
+    original=old.get('bootstrap')
+    if original and original['status']=='verified':
+        retained=new.get('bootstrap')
+        d3._require(retained is not None and retained['status']=='verified'
+            and all(reference in retained['evidence'] for reference in original['evidence']),
+            'Successor lost the original independently verified native bootstrap evidence')
+
+
+def _public_canary_patch(descriptor, repository_root, *, readback=None):
+    """The qualification probe supports one unambiguous public-file update hunk."""
+    d3._object(descriptor,('canary','patch','before_sha256'))
+    canary=startup._canonical_path(descriptor['canary']);root=startup._canonical_path(str(repository_root))
+    startup._canonical_hash(descriptor['before_sha256'])
+    patch=descriptor['patch']
+    d3._require(isinstance(patch,str) and 0<len(patch.encode('utf-8'))<=65536
+        and not any(ord(character)<32 and character not in '\n\t' or 127<=ord(character)<=159 for character in patch),
+        'Public canary patch contains unsupported bytes')
+    lines=patch.removesuffix('\n').split('\n')
+    d3._require(len(lines)>=6 and lines[0]=='*** Begin Patch' and lines[-1]=='*** End Patch'
+        and lines[1].startswith('*** Update File: ') and lines[2]=='@@',
+        'Public canary patch requires one Update File hunk')
+    relative=lines[1][len('*** Update File: '):]
+    d3._require(relative and not Path(relative).is_absolute() and '\\' not in relative
+        and all(part not in ('','.','..') for part in relative.split('/')) and root/relative==canary,
+        'Public canary patch selected another file')
+    hunk=lines[3:-1]
+    d3._require(all(line and line[0] in ' +-' for line in hunk)
+        and any(line.startswith('-') for line in hunk) and any(line.startswith('+') for line in hunk),
+        'Public canary patch requires a nonempty single-file change')
+    original=[line[1:] for line in hunk if line[0] in ' -']
+    changed=[line[1:] for line in hunk if line[0] in ' +']
+    d3._require(original!=changed and any(line[1:] for line in hunk if line[0] in '+-'),
+        'Public canary patch does not change original content')
+    if readback is not None:
+        d3._require(isinstance(readback,str) and len(readback.encode('utf-8'))<=65536,'Public canary readback exceeds its bound')
+        current='\n'+readback.removesuffix('\n')+'\n';needle='\n'+'\n'.join(original)+'\n'
+        occurrence=current.find(needle)
+        d3._require(occurrence>=0 and current.find(needle,occurrence+1)==-1,
+            'Public canary patch does not match its original readback')
 
 
 def _authorization_shape(value):
@@ -644,7 +793,7 @@ def _authorization_shape(value):
         'An exact approved disposable target and bounded attempts are required')
     seen = set()
     for attempt in value['attempts']:
-        d3._object(attempt, ('reference', 'task', 'native_sessions', 'operations', 'capability_keys', 'limits', 'stop_conditions'), ('plan_reference','command_action','source_capture'))
+        d3._object(attempt, ('reference', 'task', 'native_sessions', 'operations', 'capability_keys', 'limits', 'stop_conditions'), ('plan_reference','command_action','source_capture','native_execution','probe','context_reference'))
         startup._canonical_ref(attempt['reference'])
         token = d3._digest(attempt['reference'])
         d3._require(token not in seen, 'Duplicate original qualification attempt');seen.add(token)
@@ -665,8 +814,19 @@ def _authorization_shape(value):
         d3._require((attempt['operations'] in (['observe-cli-basic'],['observe-setup-metadata']) and attempt['capability_keys'] == ['startup-context']) if bootstrap
             else attempt['task']['session_id'] in attempt['native_sessions'] and 'observe-cli-basic' not in attempt['operations'],
             'Attempt lost its native/task scope')
-        if bootstrap:
+        if 'native_execution' in attempt:
+            d3._require(bootstrap and 'command_action' not in attempt,'Native external observation cannot borrow managed command execution')
+            _native_execution(attempt['native_execution'])
+            d3._require(attempt['native_execution']['cwd']==target['repository_root'],'Native observation selected another checkout')
+        elif bootstrap:
             startup._canonical_text(attempt.get('command_action'),128)
+        if 'probe' in attempt:
+            d3._object(attempt['probe'],('canary','patch','before_sha256'))
+            path=startup._canonical_path(attempt['probe']['canary'])
+            d3._require(('native_execution' in attempt or not bootstrap) and not metadata and path.is_relative_to(Path(target['repository_root'])),
+                'Native canary must be an originally approved public checkout file')
+            _public_canary_patch(attempt['probe'],Path(target['repository_root']))
+        if 'context_reference' in attempt:startup._canonical_ref(attempt['context_reference'])
         if metadata:startup._canonical_ref(attempt.get('source_capture'))
         else:d3._require('source_capture' not in attempt,'Only the claimed metadata operation consumes a frontend fragment')
         if 'plan_reference' in attempt:
@@ -678,6 +838,299 @@ def _authorization_shape(value):
             and all(type(limits[key]) is int and 0 < limits[key] <= 4096 for key in ('max_attempts','max_resource_units')),
             'Qualification needs original finite allocations')
     return value
+
+
+def _native_execution(value):
+    d3._object(value,('argv','cwd','timeout_seconds','external_effects','serialization_reference'))
+    d3._strings(value['argv'],empty=False);startup._canonical_path(value['cwd'])
+    d3._require(type(value['timeout_seconds']) is int and 1<=value['timeout_seconds']<=300,
+        'Native observation needs its original bounded duration')
+    startup._canonical_ref(value['serialization_reference'])
+    d3._require(isinstance(value['external_effects'],list) and 0<len(value['external_effects'])<=64,
+        'Native vendor-owned effects and manual serialization must be explicitly authorized')
+    for effect in value['external_effects']:
+        d3._object(effect,('path','kind','recovery'));startup._canonical_path(effect['path'])
+        d3._require(effect['kind']=='vendor-owned-state' and effect['recovery']=='manual',
+            'Vendor-owned state is not recoverable project-file output')
+
+
+def _native_allocation(journal,row):
+    allocation=next((attempt for attempt in journal['qualification_scope']['attempts'] if attempt['reference']==row['attempt_ref']),None)
+    d3._require(allocation is not None and d3._digest(allocation)==row['allocation_digest'],'Original native source declaration changed')
+    return allocation
+
+
+def _native_rows_shape(journal):
+    rows=journal['native_observations']
+    d3._require(isinstance(rows,dict) and len(rows)<=64,'Native source claim bound exceeded')
+    for key,row in rows.items():
+        d3._object(row,('claim_id','attempt_ref','identity','allocation_digest','status','returncode','pid','stopped','result','before','after','context','reconciliation'))
+        allocation=_native_allocation(journal,row)
+        d3._require(key==d3._digest(row['attempt_ref']) and 'native_execution' in allocation,
+            'Native source lost its original allocation')
+        d3._require(d3._digest(row['identity'])==journal['qualification_scope']['target']['accepted_scope_digest'],
+            'Native source changed its originally approved scope')
+        startup._canonical_text(row['claim_id'],128)
+        d3._require(row['status'] in ('claimed','observed','failed','reconciled') and type(row['stopped']) is bool
+            and (row['returncode'] is None or type(row['returncode']) is int)
+            and (row['pid'] is None or type(row['pid']) is int and row['pid']>0),'Unknown native observation outcome')
+        d3._require(row['status']!='reconciled' or row['stopped'] and row['reconciliation'] is not None,
+            'Native source lacks original descendant reconciliation')
+        if row['result'] is not None:
+            d3._object(row['result'],('kind','content'))
+            if row['result']['kind']=='setup':receipt_shape(row['result']['content'])
+            else:
+                payload=row['result']['content']
+                d3._require(row['result']['kind']=='native-fragment' and all(payload[key] is None for key in ('hooks','layers','requirements'))
+                    and payload['observations']=={},'Raw native metadata must be filtered before retention')
+
+
+def _native_result(context,result):
+    from runtime import doctor
+    row=context['native_row'];allocation=context['allocation']
+    if isinstance(result,_SetupObservation):
+        content=_issued(result);receipt_shape(content)
+        d3._require(content['identity']==row['identity'] and content['transaction_id']==context['journal']['transaction_id']
+            and content['source']['binding']['attempt_ref']==row['attempt_ref'],'Native result selected another source owner')
+        capture=allocation.get('source_capture')
+        if capture is not None:
+            original,_,part=_read_native_reference(capture,_budget())
+            d3._require(part is None and original['result']['kind']=='native-fragment' and original['identity']==row['identity'],
+                'Native metadata result lost its original frontend')
+            payload=original['result']['content']
+            d3._require(content['configuration']['codex_home']==payload['codex_home']
+                and content['configuration']['package_root']==payload['package_root']
+                and content['native']['executable']==payload['native']['executable'],'Native metadata changed original frontend inputs')
+            content['source']['native_capture']=capture
+        return dict(kind='setup',content=content)
+    try:payload=doctor._native_witness_content(result)
+    except doctor.ObservationError:raise startup.StartupError('Actual issued native source is required') from None
+    d3._require(all(payload[key] is None for key in ('hooks','layers','requirements')) and payload['observations']=={}
+        and payload['binding']==dict(accepted_scope_digest=d3._digest(row['identity']),attempt_ref=row['attempt_ref'],
+            transaction_id=context['journal']['transaction_id']),'Only the original bounded CLI fragment may be retained')
+    return dict(kind='native-fragment',content=payload)
+
+
+def _native_reference(directory,row,part=None):
+    token=d3._digest(row['attempt_ref']);route=str(Path(directory)/'transaction.json')+'#native-observation:'+token+':'+row['claim_id']
+    if part is None:
+        body={key:row[key] for key in ('claim_id','attempt_ref','identity','allocation_digest','result')}
+    else:
+        d3._require(part in ('before','after','context'),'Unknown native source fact');route+=':'+part;body=row[part]
+    d3._require(body is not None,'Native source fact is unavailable')
+    return dict(reference=route,sha256=d3._digest(body))
+
+
+def _read_native_reference(reference,budget):
+    from runtime import changes
+    startup._canonical_ref(reference)
+    path,separator,tail=reference['reference'].partition('#native-observation:')
+    parts=tail.split(':')
+    d3._require(separator and len(parts) in (2,3),'Original native source route differs')
+    pointer=startup._canonical_path(path)
+    d3._require(pointer.name=='transaction.json','Native observation must retain its original journal')
+    d3._private(pointer.parent.stat(),directory=True)
+    journal=d3.read_request(_read(pointer,budget,private=True,limit=changes.MAX_JOURNAL),changes.MAX_JOURNAL)
+    changes._scoped_journal_shape(journal)
+    row=journal.get('native_observations',{}).get(parts[0])
+    d3._require(row is not None and row['claim_id']==parts[1] and row['status']=='reconciled' and row['stopped']
+        and row['reconciliation'] is not None and row['result'] is not None,
+        'Original native observation and writable descendants are not reconciled')
+    part=parts[2] if len(parts)==3 else None
+    d3._require(reference==_native_reference(pointer.parent,row,part),'Original native observation changed')
+    return dict(row,allocation=_native_allocation(journal,row)),journal,part
+
+
+def _native_provenance(content,budget):
+    source=content.get('source',{})
+    if 'native_origin' in source:
+        row,_,part=_read_native_reference(source['native_origin'],budget)
+        d3._require(part is None and row['result']['kind']=='setup','Original filtered native source is unavailable')
+        original=row['result']['content']
+        d3._require(all(original[key]==content[key] for key in ('identity','native','configuration'))
+            and all(original['source'].get(key)==source.get(key) for key in ('binding','bootstrap','native_safety','native_capture'))
+            and all(all(proof in source['observations'].get(case,[]) for proof in proofs)
+                for case,proofs in original['source']['observations'].items()),
+            'Native setup source was replayed or changed')
+    if 'native_capture' in source:
+        row,_,part=_read_native_reference(source['native_capture'],budget)
+        d3._require(part is None and row['result']['kind']=='native-fragment' and row['identity']==content['identity'],
+            'Original native frontend capture changed')
+    if source.get('native_safety') is not None:
+        safety=_native_safety(source['native_safety']);before_ref,after_ref=safety['evidence'][-2:]
+        before,_,before_part=_read_native_reference(before_ref,budget)
+        after,_,after_part=_read_native_reference(after_ref,budget)
+        probe=before['allocation'].get('probe')
+        original_route=before_ref['reference'].rsplit(':',1)[0]
+        after_source=after['allocation'].get('source_capture')
+        d3._require(before_part=='before' and after_part=='after' and before['identity']==content['identity']==after['identity']
+            and probe is not None and before['before'] is not None and before['before']['canary']==probe['canary']
+            and before['before']['target']['fingerprint']['sha256']==probe['before_sha256']
+            and before['before']['target']['fingerprint']['mode'] & 0o222 and after['after']==before['before']
+            and (after['claim_id']==before['claim_id'] or after_source is not None and after_source['reference']==original_route),
+            'Native policy probe lost its independent original before/after facts')
+
+
+def _live_native_context(decision,process):
+    qualification_attempt_projection(decision,case_id='startup-context',process=process)
+    context=decision._owner._setup_context
+    return context
+
+
+def _probe_fact(identity,canary):
+    from runtime import changes
+    path=startup._canonical_path(canary);root=Path(identity['repository_root'])
+    d3._require(path.is_relative_to(root),'Native canary left its approved public checkout')
+    target=changes._scoped_target(root,str(path.relative_to(root)))
+    info=path.stat()
+    d3._require(target['fingerprint']['status']=='read' and target['binding']==dict(device=info.st_dev,inode=info.st_ino)
+        and info.st_mode & 0o222 and os.access(path,os.W_OK),
+        'Native policy probe requires an actually writable public canary')
+    raw=d3._read_file(path,65536,expected_binding=target['binding'])
+    after=path.stat()
+    d3._require(hashlib.sha256(raw).hexdigest()==target['fingerprint']['sha256'] and all(getattr(info,key)==getattr(after,key)
+        for key in ('st_dev','st_ino','st_mode','st_mtime_ns','st_ctime_ns','st_size','st_nlink')),
+        'Public canary changed during owner observation')
+    target['fingerprint']['mode']=stat.S_IMODE(info.st_mode)
+    return dict(canary=str(path),target=target,readback=raw.decode('utf-8'))
+
+
+def _native_probe_source(context):
+    record=context.get('native_row')
+    if record is None:return None,None
+    row=dict(record,allocation=context['allocation']);directory=context['directory']
+    if row['allocation'].get('probe') is not None or row['allocation'].get('context_reference') is not None:return row,directory
+    reference=row['allocation'].get('source_capture')
+    if reference is None:return None,None
+    if '#native-observation:' not in reference['reference']:return None,None
+    original,journal,part=_read_native_reference(reference,_budget())
+    d3._require(part is None and original['identity']==row['identity'],'Native probe selected another original source')
+    return original,Path(reference['reference'].split('#')[0]).parent
+
+
+def setup_probe_projection(decision, *, process):
+    context=_live_native_context(decision,process);row,directory=_native_probe_source(context)
+    if row is None or row['allocation'].get('probe') is None:return None
+    probe=row['allocation']['probe']
+    return startup._canonical_freeze(dict(patch=probe['patch'],canary=probe['canary'],before=row['before'],
+        reference=_native_reference(directory,row,'before')))
+
+
+def setup_probe_readback(decision, *, process):
+    from runtime import changes
+    context=_live_native_context(decision,process);original,directory=_native_probe_source(context)
+    if original is None or original['allocation'].get('probe') is None:return None
+    row=context['native_row'];actual=_probe_fact(row['identity'],original['allocation']['probe']['canary'])
+    d3._require(row['after'] is None or row['after']==actual,'Original native readback cannot be replaced')
+    row['after']=actual
+    changes._save(context['directory'],context['journal'])
+    return startup._canonical_freeze(dict(before_reference=_native_reference(directory,original,'before'),after=row['after'],
+        reference=_native_reference(context['directory'],row,'after')))
+
+
+def setup_context_projection(decision, *, process):
+    context=_live_native_context(decision,process);original,directory=_native_probe_source(context)
+    if original is None:return None
+    reference=original['allocation'].get('context_reference')
+    if reference is None:return None
+    from runtime import state
+    acquired=startup.acquire_project_entry(SimpleNamespace(client=original['identity']['client'],cwd=Path(original['identity']['repository_root'])),state.PACKAGE)
+    scope=acquired.resolution.scope
+    d3._require(scope is not None and scope.accepted_scope_digest==d3._digest(original['identity'])
+        and scope.qualification is not None and startup._canonical_plain(scope.qualification['reference'])==reference,
+        'Original qualification context scope changed')
+    text=startup.qualification_context(scope,state.PACKAGE)
+    d3._require(text is not None and original['context'] is not None
+        and hashlib.sha256(text.encode()).hexdigest()==original['context']['sha256'],
+        'Original qualification instruction changed')
+    return startup._canonical_freeze(dict(text=text,sha256=original['context']['sha256'],reference=_native_reference(directory,original,'context')))
+
+
+def _managed_source(scope,task_ref,attempt_ref,case_id):
+    from runtime import state,delegation,evidence
+    d3._require(isinstance(scope,startup.AcceptedScope) and case_id in BEHAVIOR_CASES,'Actual managed qualification scope is required')
+    d3._object(task_ref,('client','session_id','task_id','scope_ref','expected_revision','attempt_id','parent_turn_id','spawn_item_id','turn_id','call_id'))
+    with state._database(scope) as db:
+        d3._require(db is not None,'Managed source authority is unavailable')
+        task=state._task(db,state._scope_id(scope),task_ref['client'],task_ref['session_id'],task_ref['task_id'])
+        d3._require(task is not None and task['scope_ref']==task_ref['scope_ref'] and task['revision']==task_ref['expected_revision']
+            and task.get('qualification_attempt')==startup._canonical_plain(attempt_ref),'Original managed task or qualification purpose changed')
+        record=next((row for row in delegation._ledger(scope,db,assignment_id=task_ref['attempt_id'])
+            if row['id']==task_ref['attempt_id']),None)
+        d3._require(record is not None and record['data']['role'] in ('worker','review')
+            and all(record['owner'][key]==task[key] for key in ('client','session_id','task_id')),
+            'Original native assignment belongs to another task')
+        operation='native-review' if record['data']['role']=='review' else 'native-worker'
+        admission=require_capability(scope,OPERATION_CAPABILITIES[operation],task=task,operation=operation,attempt_ref=attempt_ref)
+        d3._require(admission.mode=='qualification' and case_id in admission.capability_keys,'Original native capability is not admitted')
+        reference=record['body'].get('qualification_before')
+        d3._require(reference is not None,'Original managed before observation is unavailable')
+        before=evidence._read(scope,reference,db=db)
+        d3._require(before['assignment_id']==record['id'] and before['identity']==record['owner']
+            and before['pins']==record['body']['pins']==state._pins(scope) and before['revision']+1==record['body']['revision']
+            and before['candidate']==record['data']['candidate'] and before['plan']==record['body']['plan'],
+            'Original managed before artifact changed')
+        history=delegation._worker_history(scope,record['data']['observation'],db=db)
+        observed=history[0][1] if history else None
+        d3._require(observed is not None and observed['status']=='observed' and not observed['error'] and observed['conflict'] is None,
+            'Actual native execution identity is not independently observed')
+        receipt=observed['receipt']
+        d3._require(all(receipt[key]==task_ref[key] for key in ('parent_turn_id','spawn_item_id'))
+            and receipt['parent_session_id']==record['data']['binding']['parent_session_id']==task['session_id']
+            and task_ref['turn_id']==task['turn_id'],
+            'Native selector differs from the original assignment observation')
+        binding=delegation._native_binding(record);binding.update(worker_id=receipt['worker_id'],worker_turn_id=receipt['worker_turn_id'])
+        physical=evidence._managed_metadata(scope,reference,db=db)
+        source=dict(reference=physical['managed']['path'],sha256=physical['managed']['sha256'])
+        binding.update(role=record['data']['role'],observation=receipt)
+        return task,record,before,binding,source,admission
+
+
+def managed_observation_projection(scope,task_ref,attempt_ref, *, case_id):
+    task,record,before,binding,reference,admission=_managed_source(scope,task_ref,attempt_ref,case_id)
+    from runtime import state
+    content,_=_retained_reference(startup._canonical_plain(scope.qualification['reference']),_budget())
+    descriptor=before['probe']['descriptor'] if before['probe'] is not None else None
+    probe=dict(patch=descriptor['patch'] if descriptor else None,canary=descriptor['canary'] if descriptor else None,
+        before=before,reference=reference)
+    attempt=startup._canonical_plain(admission.original_attempt['attempt']);attempt.update(assignment_id=record['id'],before=before)
+    return startup._canonical_freeze(dict(identity=state._accepted_identity(scope.accepted_identity),transaction_id=content['transaction_id'],
+        attempt=attempt,binding=binding,
+        selectors=dict(stream='parent',**{key:task_ref[key] for key in ('parent_turn_id','spawn_item_id','turn_id','call_id')}),probe=probe,
+        setup_reference=startup._canonical_plain(scope.qualification['reference'])))
+
+
+def managed_observation_readback(scope,task_ref,attempt_ref, *, case_id):
+    from runtime import state
+    task,record,before,binding,_,_=_managed_source(scope,task_ref,attempt_ref,case_id)
+    with state._database(scope) as db:
+        current=state._task(db,state._scope_id(scope),task_ref['client'],task_ref['session_id'],task_ref['task_id'])
+        d3._require(current==task,'Managed owner changed during independent readback')
+        kind='PreToolUse' if case_id=='pre-tool-enforcement' else 'PostToolUse'
+        row=db.execute('select rowid,fingerprint,conflicted from receipts where scope_id=? and client=? and session_id=? and turn_id=? and tool_call_id=? and kind=?',
+            (state._scope_id(scope),task_ref['client'],task['session_id'],task_ref['turn_id'],task_ref['call_id'],kind)).fetchone()
+        generation=db.execute('select generation from checkouts where scope_id=?',(state._scope_id(scope),)).fetchone()[0]
+        receipt=None if row is None else dict(rowid=row[0],fingerprint=row[1],conflicted=bool(row[2]),kind=kind)
+        post_count=None
+        if kind=='PostToolUse':
+            rows=db.execute('select rowid,client,session_id,turn_id,tool_call_id,fingerprint,conflicted from receipts '
+                'where scope_id=? and kind=? and rowid>? limit 4097',(state._scope_id(scope),kind,before['receipt_watermark'])).fetchall()
+            d3._require(0<len(rows)<=4096 and receipt is not None and receipt['rowid'] in {item[0] for item in rows},
+                'Post-tool target is not a fresh original-scope receipt')
+            for item in rows:
+                event=dict(scope_id=state._scope_id(scope),client=item[1],session_id=item[2],turn_id=item[3])
+                d3._require(all(isinstance(value,str) and value for value in item[1:6]) and not item[6]
+                    and not state._retired(db,'turn',event) and not state._retired(db,'receipt',event|dict(tool_call_id=item[4],kind=kind)),
+                    'Post-tool generation includes ambiguous or retired observations')
+                startup._canonical_hash(item[5])
+            post_count=len(rows)
+            d3._require(generation-before['generation']==post_count,'Post-tool generation includes unattributed effects')
+        canary=None if before['probe'] is None else _probe_fact(startup._canonical_plain(scope.accepted_identity),before['probe']['descriptor']['canary'])
+        result=dict(identity=state._accepted_identity(scope.accepted_identity),attempt_ref=startup._canonical_plain(attempt_ref),
+            assignment_digest=record['data']['assignment']['digest'],task_revision=current['revision'],generation=generation,receipt=receipt,canary=canary,
+            post_receipts_count=post_count)
+    result['reference']=dict(reference=str(state._path(scope))+'#managed-observation:'+record['id']+':'+task_ref['call_id'],sha256=d3._digest(result))
+    return startup._canonical_freeze(result)
 
 
 def _staged_scope(content, journal):
@@ -729,6 +1182,7 @@ def persist_setup(directory, journal, observations, *, qualification_scope=None)
     from runtime import changes
     record = journal['manifest']['enrollment']['record']
     receipts = journal.get('setup_receipts', {})
+    budget=_budget()
     if qualification_scope is not None:
         authorization = _authorization_shape(startup._canonical_copy(qualification_scope))
         d3._require('qualification_scope' not in journal or journal['qualification_scope'] == authorization,
@@ -750,6 +1204,7 @@ def persist_setup(directory, journal, observations, *, qualification_scope=None)
             and (not rule['security_required'] or bool(assessment['security_review'])), 'Complete scoped adoption/security qualification is missing')
         if content['version'] == 2:
             _staged_scope(content, journal)
+            _native_provenance(content,budget)
             if content['predecessor'] is not None:
                 previous, _ = _retained_reference(content['predecessor'], _budget())
                 d3._require(previous['identity'] == identity and previous['transaction_id'] != content['transaction_id'],
@@ -789,6 +1244,7 @@ def _read_qualification(record, facts, *, cwd=None, pending_journal=None, budget
         receipt_shape(content)
         if content['version'] == 2:
             _staged_scope(content, journal)
+            _native_provenance(content,budget)
             predecessor = content['predecessor'];seen = set();original_identity = content['identity']
             while predecessor is not None:
                 token = d3._digest(predecessor)
@@ -821,7 +1277,8 @@ def _read_qualification(record, facts, *, cwd=None, pending_journal=None, budget
             receipt=binding['receipt'], binding=binding, provenance=dict(kind='trusted-coordinator', **binding['receipt']))
         if content['version'] == 2:
             verified, complete = _coverage(content)
-            result['capabilities'] = dict(reference=binding['receipt'], verified=verified, complete=complete)
+            result['capabilities'] = dict(reference=binding['receipt'], verified=verified, complete=complete,
+                bootstrap_verified=_bootstrap_verified(content))
         return result, content
     except (startup.StartupError, OSError, ValueError, TypeError, KeyError, StopIteration):
         return None

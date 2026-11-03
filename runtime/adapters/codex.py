@@ -112,9 +112,12 @@ def _review_id(value):
 
 
 @contextmanager
-def _native_reader(methods, *, on_notification=None):
+def _native_reader(methods, *, on_notification=None, deadline=None):
     process = None
-    deadline = time.monotonic() + REVIEW_TIMEOUT
+    limit = time.monotonic() + REVIEW_TIMEOUT
+    deadline = limit if deadline is None else min(limit, deadline)
+    if time.monotonic() >= deadline:
+        raise ObservationError('timeout')
     try:
         executable = shutil.which("codex")
         if executable is None:
@@ -504,6 +507,128 @@ NATIVE_FAILURE_CODES = {"contextWindowExceeded", "sessionBudgetExceeded", "usage
     "badRequest", "threadRollbackFailed", "sandboxError", "other"}
 
 
+NATIVE_READ_ONLY_REJECTION = 'patch rejected: writing is blocked by read-only sandbox; rejected by user approval settings'
+
+
+def _native_policy_rejection(records, *, submitted_patch, turn_id):
+    """Bind the submitted patch to native policy denial, not effective input or OS enforcement."""
+    from runtime.startup import MAX_INPUT, _canonical_freeze, _canonical_plain
+    try:
+        data = _canonical_plain(records)
+        if (not isinstance(submitted_patch, str) or len(submitted_patch.encode()) > MAX_INPUT
+                or not submitted_patch.startswith('*** Begin Patch\n')
+                or not submitted_patch.rstrip('\n').endswith('\n*** End Patch')
+                or submitted_patch.count('*** Update File: ') != 1
+                or not any(line.startswith(('+', '-')) for line in submitted_patch.splitlines())
+                or data['turn_ids'] != [turn_id]):
+            raise ValueError
+        calls = [row for row in data['records'] if row['payload']['type'] in {
+            'custom_tool_call', 'custom_tool_call_output', 'function_call', 'function_call_output', 'local_shell_call'}]
+        if len(calls) != 2:
+            raise ValueError
+        call, output = calls
+        item, result = call['payload'], output['payload']
+        call_id = _review_id(item.get('call_id'))
+        if (call['turn_id'] != turn_id or output['turn_id'] != turn_id
+                or item['type'] != 'custom_tool_call' or item.get('name') != 'apply_patch'
+                or item.get('namespace') not in (None, 'functions') or item.get('input') != submitted_patch
+                or result['type'] != 'custom_tool_call_output' or result.get('call_id') != call_id
+                or result.get('output') != NATIVE_READ_ONLY_REJECTION):
+            raise ValueError
+        return _canonical_freeze(dict(thread_id=data['thread_id'], turn_id=turn_id, call_id=call_id,
+            submitted_patch_sha256=hashlib.sha256(submitted_patch.encode()).hexdigest(),
+            sources=[call['source'], output['source']]))
+    except (StartupError, ValueError, TypeError, KeyError, UnicodeError, RecursionError):
+        raise ObservationError('native_policy_rejection_unobserved') from None
+
+
+def _native_managed_tool(records, *, submitted_patch, turn_id, call_id, case_id):
+    """Correlate native tool records; post success additionally requires Core-owned effects."""
+    from runtime.startup import MAX_INPUT, _canonical_freeze, _canonical_plain
+    try:
+        data = _canonical_plain(records)
+        if (case_id not in {'pre-tool-enforcement', 'post-tool-handling'}
+                or not isinstance(submitted_patch, str) or len(submitted_patch.encode()) > MAX_INPUT
+                or not submitted_patch.startswith('*** Begin Patch\n')
+                or not submitted_patch.rstrip('\n').endswith('\n*** End Patch')
+                or submitted_patch.count('*** Update File: ') != 1
+                or not any(line.startswith(('+', '-')) for line in submitted_patch.splitlines())
+                or turn_id not in data['turn_ids']):
+            raise ValueError
+        _review_id(call_id)
+        calls = [row for row in data['records'] if row['payload'].get('call_id') == call_id
+            and row['payload']['type'] in {'custom_tool_call', 'custom_tool_call_output',
+                'function_call', 'function_call_output', 'local_shell_call'}]
+        if len(calls) != 2:
+            raise ValueError
+        call, output = calls
+        item, result = call['payload'], output['payload']
+        if (call['turn_id'] != turn_id or output['turn_id'] != turn_id
+                or item['type'] != 'custom_tool_call' or item.get('name') != 'apply_patch'
+                or item.get('namespace') not in (None, 'functions') or item.get('input') != submitted_patch
+                or item.get('call_id') != call_id or result['type'] != 'custom_tool_call_output'
+                or result.get('call_id') != call_id or result.get('name') not in (None, 'apply_patch')):
+            raise ValueError
+        text = result.get('output')
+        if case_id == 'pre-tool-enforcement':
+            reason = 'Patching requires a WORKING editable bound task without applicable blockers'
+            if text != f'Command blocked by PreToolUse hook: {reason}. Command: {submitted_patch}':
+                raise ValueError
+        elif not (isinstance(text, str) or isinstance(text, list) and all(isinstance(part, dict)
+                and part.get('type') == 'input_text' and isinstance(part.get('text'), str) for part in text)):
+            raise ValueError
+        return _canonical_freeze(dict(thread_id=data['thread_id'], turn_id=turn_id, call_id=call_id,
+            submitted_patch_sha256=hashlib.sha256(submitted_patch.encode()).hexdigest(), sources=[call['source'], output['source']]))
+    except (StartupError, ValueError, TypeError, KeyError, UnicodeError, RecursionError):
+        raise ObservationError('native_managed_tool_unobserved') from None
+
+
+def _native_hook_context(records, *, expected_context, turn_id):
+    """Observe exact harness-hook context without inventing hook events or source paths."""
+    import xml.etree.ElementTree as xml
+    from runtime.startup import MAX_INPUT, _canonical_freeze, _canonical_plain
+    try:
+        if not isinstance(expected_context, str) or not expected_context or len(expected_context.encode()) > MAX_INPUT:
+            raise ValueError
+        data = _canonical_plain(records)
+        found = []
+        for row in data['records']:
+            item = row['payload']
+            if item['type'] != 'message' or item.get('role') != 'user':
+                continue
+            content = item.get('content')
+            passthrough = item.get('internal_chat_message_metadata_passthrough')
+            metadata = passthrough.get('content_item_metadata') if isinstance(passthrough, dict) else None
+            if not isinstance(content, list) or not isinstance(metadata, list) or len(content) != len(metadata):
+                continue
+            for index, part in enumerate(content):
+                provenance = metadata[index].get('provenance') if isinstance(metadata[index], dict) else None
+                if (not isinstance(part, dict) or part.get('type') != 'input_text'
+                        or not isinstance(provenance, dict) or provenance.get('type') != 'harness'
+                        or provenance.get('hook') is not True):
+                    continue
+                text = part.get('text')
+                if not isinstance(text, str) or '<!' in text or '<?' in text:
+                    raise ValueError
+                fragment = xml.fromstring(text)
+                if (fragment.tag != 'hook_prompt' or set(fragment.attrib) != {'hook_run_id'}
+                        or len(fragment) or fragment.tail is not None):
+                    raise ValueError
+                hook_id = _review_id(fragment.attrib['hook_run_id'])
+                if fragment.text == expected_context:
+                    if row['turn_id'] != turn_id:
+                        raise ValueError
+                    message_id = _review_id(item['id']) if item.get('id') is not None else None
+                    found.append(dict(thread_id=data['thread_id'], turn_id=row['turn_id'],
+                        hook_run_id=hook_id, message_id=message_id, content_index=index,
+                        context_sha256=hashlib.sha256(fragment.text.encode()).hexdigest(), sources=[row['source']]))
+        if len(found) != 1:
+            raise ValueError
+        return _canonical_freeze(found[0])
+    except (StartupError, ValueError, TypeError, KeyError, UnicodeError, RecursionError, xml.ParseError):
+        raise ObservationError('native_hook_context_unobserved') from None
+
+
 def _setup_executable(process):
     from runtime import onboarding as d3
     path = Path(process.argv[0]).resolve(strict=True)
@@ -609,6 +734,56 @@ def observe_setup_metadata(process, attempt):
         requirements = request('configRequirements/read',{}).get('requirements')
         if not isinstance(layers,list):
             raise ObservationError('setup_metadata_layers_unavailable')
+        probe = setup_observation.setup_probe_projection(attempt, process=process)
+        context = setup_observation.setup_context_projection(attempt, process=process)
+        native_path = thread.get('path')
+        if probe is not None or context is not None:
+            if native_path is None:
+                raise ObservationError('setup_native_source_unavailable')
+            from runtime import onboarding as d3
+            path = startup._canonical_path(native_path)
+            if not path.is_relative_to(Path(original['codex_home'])):
+                raise ObservationError('setup_native_source_mismatch')
+            d3._no_links(path)
+            info = path.stat()
+            physical = dict(device=info.st_dev, inode=info.st_ino)
+            if time.monotonic() >= process.deadline:
+                raise ObservationError('timeout')
+            raw = d3._read_file(path, MAX_OUTPUT, expected_binding=physical)
+            records = doctor.native_behavior_records(raw, thread_id=thread_id, source_reference=str(path))
+            if probe is not None:
+                probe = startup._canonical_plain(probe)
+                data = startup._canonical_plain(records)
+                if len(data['turn_ids']) != 1:
+                    raise ObservationError('setup_native_turn_unobserved')
+                rejected = startup._canonical_plain(_native_policy_rejection(records,
+                    submitted_patch=probe['patch'], turn_id=data['turn_ids'][0]))
+                readback = startup._canonical_plain(setup_observation.setup_probe_readback(attempt, process=process))
+                if readback['before_reference'] != probe['reference']:
+                    raise ObservationError('setup_probe_reference_mismatch')
+                original['native_safety'] = dict(claim='submitted-write-policy-rejection',
+                    evidence=[*rejected['sources'], probe['reference'], readback['reference']])
+            if context is not None:
+                context = startup._canonical_plain(context)
+                if hashlib.sha256(context['text'].encode()).hexdigest() != context['sha256']:
+                    raise ObservationError('setup_context_source_mismatch')
+                matches = []
+                # Startup context may precede the first actual turn; never assign one retroactively.
+                for turn_id in (None, *startup._canonical_plain(records)['turn_ids']):
+                    try:
+                        matches.append(_native_hook_context(records, expected_context=context['text'], turn_id=turn_id))
+                    except ObservationError:
+                        continue
+                if len(matches) != 1:
+                    raise ObservationError('setup_context_delivery_unobserved')
+                actual = startup._canonical_plain(matches[0])
+                original['observations']['startup-context'] = [*actual['sources'], context['reference']]
+            if d3._read_file(path, MAX_OUTPUT, expected_binding=physical) != raw:
+                raise ObservationError('setup_native_source_changed')
+            if time.monotonic() >= process.deadline:
+                raise ObservationError('timeout')
+            setup_observation.qualification_attempt_projection(attempt,
+                operation='observe-setup-metadata', case_id='startup-context', process=process)
         original['binding'] = dict(accepted_scope_digest=startup._canonical_digest(projection['identity']),
             attempt_ref=projection['attempt']['reference'],transaction_id=projection['transaction_id'])
         original['native']['version'] = native_version
@@ -617,22 +792,76 @@ def observe_setup_metadata(process, attempt):
             pending_reason='frontend_behavior_unobserved')
         original['bootstrap'].extend([projection['attempt']['source_capture'],*sources])
         return _setup_witness(original)
+    except startup.StartupError:
+        raise
     except (OSError,ValueError,TypeError,KeyError,RecursionError):
         raise ObservationError('setup_metadata_unavailable') from None
 
 
-def observe_managed_case(process, attempt, case_id):
-    """Observe an exact managed source without inferring missing causal effects."""
-    from runtime import setup_observation, startup
-    projection = startup._canonical_plain(setup_observation.qualification_attempt_projection(
-        attempt,case_id=case_id,process=process))
+def observe_managed_case(scope, task_ref, attempt_ref, case_id):
+    """Observe actual parent task hooks; child task routing remains unqualified."""
+    from runtime import onboarding as d3, setup_observation, startup
+    projection = startup._canonical_plain(setup_observation.managed_observation_projection(
+        scope, task_ref, attempt_ref, case_id=case_id))
     try:
-        content = _setup_partial(process,projection)
-        session = content['native']['threads'][0]['id']
-        if (session not in projection['attempt']['native_sessions']
-                or projection['attempt']['task']['session_id'] != session):
-            raise ObservationError('managed_setup_session_mismatch')
-        content['pending_reason'] = 'managed_case_selectors_and_independent_effects_unobserved'
-        return _setup_witness(content)
-    except (OSError,ValueError,TypeError,KeyError,RecursionError):
+        if case_id not in {'pre-tool-enforcement', 'post-tool-handling'}:
+            raise ObservationError('managed_case_pending')
+        binding, selectors, probe = projection['binding'], projection['selectors'], projection['probe']
+        if (selectors['stream'] != 'parent' or probe['patch'] is None or probe['before']['probe'] is None
+                or binding['role'] not in {'worker', 'review'}):
+            raise ObservationError('managed_source_unqualified')
+        assignment = projection['attempt']['assignment_id']
+        prefix = 'review_' if binding['role'] == 'review' else 'worker_'
+        now = time.monotonic()
+        remaining = projection['attempt']['limits']['deadline']-time.time()
+        deadline = now+min(REVIEW_TIMEOUT, max(0, remaining))
+        with _native_reader(REVIEW_METHODS, deadline=deadline) as (observed_version, request):
+            parent, _, _, _, _ = _native_chain(scope, binding, assignment, prefix,
+                selectors['parent_turn_id'], selectors['spawn_item_id'], request, observed_version)
+            if parent['id'] != task_ref['session_id'] or parent['id'] != binding['parent_session_id']:
+                raise ObservationError('managed_parent_mismatch')
+            path = startup._canonical_path(parent.get('path'))
+            d3._no_links(path)
+            info = path.stat()
+            physical = dict(device=info.st_dev, inode=info.st_ino)
+            if time.monotonic() >= deadline:
+                raise ObservationError('timeout')
+            raw = d3._read_file(path, MAX_OUTPUT, expected_binding=physical)
+            from runtime.doctor import native_behavior_records
+            records = native_behavior_records(raw, thread_id=parent['id'], source_reference=str(path))
+            fact = startup._canonical_plain(_native_managed_tool(records, submitted_patch=probe['patch'],
+                turn_id=selectors['turn_id'], call_id=selectors['call_id'], case_id=case_id))
+            after = startup._canonical_plain(setup_observation.managed_observation_readback(
+                scope, task_ref, attempt_ref, case_id=case_id))
+            before = probe['before']; receipt = after['receipt']
+            kind = 'PreToolUse' if case_id == 'pre-tool-enforcement' else 'PostToolUse'
+            if (after['identity'] != projection['identity'] or after['attempt_ref'] != startup._canonical_plain(attempt_ref)
+                    or after['assignment_digest'] != binding['assignment_digest']
+                    or after['task_revision'] != task_ref['expected_revision'] or not isinstance(receipt, dict)
+                    or receipt['kind'] != kind or receipt['conflicted'] is not False
+                    or type(receipt['rowid']) is not int or receipt['rowid'] <= before['receipt_watermark']):
+                raise ObservationError('managed_effects_unobserved')
+            startup._canonical_hash(receipt['fingerprint'])
+            if case_id == 'pre-tool-enforcement':
+                original = before['probe']['before']
+                if after['canary'] != original:
+                    raise ObservationError('managed_canary_changed')
+            else:
+                count = after['post_receipts_count']
+                if type(count) is not int or count <= 0 or after['generation']-before['generation'] != count:
+                    raise ObservationError('managed_generation_unattributed')
+            if d3._read_file(path, MAX_OUTPUT, expected_binding=physical) != raw:
+                raise ObservationError('managed_native_source_changed')
+            if (time.monotonic() >= deadline or projection != startup._canonical_plain(
+                    setup_observation.managed_observation_projection(scope, task_ref, attempt_ref, case_id=case_id))
+                    or after != startup._canonical_plain(setup_observation.managed_observation_readback(
+                        scope, task_ref, attempt_ref, case_id=case_id))):
+                raise ObservationError('managed_owner_changed')
+        return _setup_witness(dict(binding=dict(accepted_scope_digest=startup._canonical_digest(projection['identity']),
+            attempt_ref=startup._canonical_plain(attempt_ref), transaction_id=projection['transaction_id']),
+            setup_reference=projection['setup_reference'],
+            observations={case_id:[*fact['sources'], probe['reference'], after['reference']]}))
+    except startup.StartupError:
+        raise
+    except (OSError, ValueError, TypeError, KeyError, UnicodeError, RecursionError, subprocess.TimeoutExpired):
         raise ObservationError('managed_setup_observation_unavailable') from None

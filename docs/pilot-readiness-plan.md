@@ -1,6 +1,6 @@
 # Pilot readiness
 
-Working coordination plan, 2 November 2026. Baseline: main `3ffabb0`.
+Working coordination plan, 3 November 2026. Baseline: main `55dd6f8` (PR52).
 
 Goal: reach a verified Codex self-host pilot-ready state while coordinating the workstreams in parallel. Actual pilot activation and the approved Python, Next.js and bounded cross-repository rollout follow readiness. Native operation remains the default. OpenRouter and Langfuse are coordinated here as optional integrations.
 
@@ -22,16 +22,14 @@ Use Sol for coupled implementation and review, Luna for suitable small fixtures 
 
 | Slice | Next complete outcome | Exit condition |
 | --- | --- | --- |
-| Setup and activation | Complete the genuine Core receipt/admission path and retained lookup atomically; preserve basic startup guards while pending capabilities remain blocked for ordinary use. | Disposable bounded qualification may proceed under its declared scope. Full onboarding and primary activation still require actual applicable evidence and all 44 requirements. |
-| Native clients | Fix the observer for genuine correlated CLI/Desktop outcomes, then qualify client behavior and writer reconciliation. | Evidence covers only frontend outcomes and scope actually observed; unsupported capabilities remain pending. API proof is not relabeled as frontend evidence. |
+| Setup and activation | Continue the atomic Core receipt/admission path and retained lookup; preserve basic startup guards while pending capabilities remain blocked for ordinary use. | PR52 merged the staged-qualification foundation. The 137 staged software checks and package validation passed; client execution was not checked. This is not native qualification or activation. |
+| Native behavior | Build the trusted coordinator observation route using original allocations and existing-journal claims; record vendor state effects as external, not project-file rollback. Pending qualification-only scope depends on a genuine native policy restriction while Toolkit startup remains pending. | Ordinary basic reading requires observed Toolkit startup and pre-tool behavior; editing additionally requires post-tool evidence. The native apply-patch read-only policy rejection shows the submitted write was rejected under observed launch controls; hooks can rewrite proposals and changes can be remote, so it does not prove an effective patch, canary protection or local OS enforcement. |
 | Evidence and recovery | Retain exact scope, allowed operations, finite budgets, stop conditions and uncertain-writer claims through expiry, interruption and recovery. | No consumed limit reset or implicit scope extension; recovery remains separately authorized. |
 | Merge and delivery | Complete the trusted local gate, manual-merge reconciliation and required repository enforcement evidence. | Foundations PR46/48/49/50/51 are merged, but do not establish native qualification, installation or live enforcement. |
 | Optional providers | OpenRouter and Langfuse remain independent, opt-in qualification work; neither blocks the bounded native pilot unless selected. | No provider qualification is implied by source integration. |
 | Pilot | Integrate reviewed implementation and observed qualification outputs into a current reviewed main revision. | Report PILOT READY only after every applicable mandatory prerequisite, recovery and enforcement check has evidence; activation and broader rollout remain later milestones. |
 
-Keep core receipt/admission and native observer changes in one coherent reviewed activation path. OpenRouter/Langfuse work may proceed independently. Do not infer readiness from merged foundations, source tests or accepted record shapes.
-
-The staged source foundation retains actual CLI provenance, metadata and pending coverage. Behavior collection is incomplete: startup/basic guard and managed pre/post success paths still need owner-bound native observations and independent effects. Until those paths exist and pass qualification, the enrollment loop remains unresolved and the pilot is not ready.
+Keep core receipt/admission and native observer changes in one coherent reviewed activation path. OpenRouter/Langfuse work may proceed independently. Preserve the full 44-item pilot catalog and actual project-specific catalogs; no requirement is removed. Source checks, accepted record shapes and merged foundations do not establish native behavior. Activation remains NOT READY until the applicable owner-bound native observations and independent effects pass.
 
 ## Simplicity review
 

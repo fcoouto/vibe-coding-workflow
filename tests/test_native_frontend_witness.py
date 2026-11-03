@@ -146,7 +146,7 @@ class NativeFrontendWitnessTests(NativeFrontendFixture):
         observe = self.api(codex, 'observe_managed_case')
         child = self.process(b'{"type":"thread.started","thread_id":"thread-fixture"}\n')
         with self.assertRaises(startup.StartupError):
-            observe(child, {}, 'pre-tool-enforcement')
+            observe(child, {}, {}, 'pre-tool-enforcement')
         self.assertEqual(child.bytes_read, 0)
 
 
@@ -212,7 +212,9 @@ class NativeCaptureFixtureTests(NativeFrontendFixture):
                 raise startup.StartupError('Synthetic retained capture changed')
             return startup._canonical_freeze(json.loads(raw))
         with patch.object(setup_observation,'qualification_attempt_projection',side_effect=validate,create=True), \
-                patch.object(setup_observation,'setup_capture_projection',side_effect=source,create=True):
+                patch.object(setup_observation,'setup_capture_projection',side_effect=source,create=True), \
+                patch.object(setup_observation,'setup_probe_projection',return_value=None,create=True), \
+                patch.object(setup_observation,'setup_context_projection',return_value=None,create=True):
             yield decision,projection,calls
 
     def partial(self):
@@ -296,14 +298,13 @@ class NativeCaptureFixtureTests(NativeFrontendFixture):
                 self.api(codex,'observe_setup_metadata')(child,decision)
         self.assertEqual(child.bytes_read,0)
 
-    def test_matching_managed_attempt_without_selectors_stays_pending(self):
+    def test_d4_process_and_attempt_cannot_replace_managed_task_ownership(self):
         child=self.owned()
         with self.admitted(child,managed=True) as (decision,_,calls):
-            witness=self.api(codex,'observe_managed_case')(child,decision,'pre-tool-enforcement')
-        content=doctor._native_witness_content(witness)
-        self.assertEqual(content['observations'],{})
-        self.assertTrue(content['pending_reason'])
-        self.assertEqual(calls,[(None,'pre-tool-enforcement')])
+            with self.assertRaises(startup.StartupError):
+                self.api(codex,'observe_managed_case')(child,{},decision,'pre-tool-enforcement')
+        self.assertEqual(child.bytes_read,0)
+        self.assertEqual(calls,[])
 
     def test_metadata_raw_attempt_rejected_by_real_core_before_io(self):
         child=self.owned(metadata=True)

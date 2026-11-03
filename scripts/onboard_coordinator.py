@@ -5,7 +5,9 @@ values. References and equality checks bind that decision; they do not prove it.
 """
 
 from copy import deepcopy
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from runtime import changes, onboarding, startup
 
@@ -94,9 +96,8 @@ class CoordinatorOperationOwner:
         persist_setup(directory, journal, self._setup_observations,
             qualification_scope=self._qualification_scope)
 
-    def acquire_setup_attempt(self, accepted_identity, attempt_ref):
-        """Bootstrap only; this does not issue AcceptedScope or managed task authority."""
-        from runtime.setup_observation import _attempt_admission, _authorization_shape
+    def _setup_scope(self, accepted_identity):
+        from runtime.setup_observation import _authorization_shape
         from runtime.state import _accepted_identity
         decision = startup._canonical_plain(self._decision)
         directory, observed = changes._public_plan_directory(decision['plan_directory']['path'])
@@ -115,6 +116,18 @@ class CoordinatorOperationOwner:
         target = authority['target']
         self._require(target['accepted_scope_digest'] == onboarding._digest(identity)
             and all(target[key] == identity[key] for key in ('repository_root','git_common_dir')))
+        self._require(onboarding._filesystem_binding(Path(identity['project_root'])) == identity['project_binding'])
+        for name,binding in identity['bindings'].items():
+            self._require(onboarding._filesystem_binding(Path(identity['repository_root' if name=='root' else name])) == binding)
+        from runtime import state
+        self._require(startup.policy_digest(state.PACKAGE)==identity['configuration']['policy_digest']
+            and state.runtime_fingerprint()==identity['configuration']['runtime_digest'])
+        return identity,authority,decision
+
+    def acquire_setup_attempt(self, accepted_identity, attempt_ref):
+        """Bootstrap only; this does not issue AcceptedScope or managed task authority."""
+        from runtime.setup_observation import _attempt_admission
+        identity,authority,decision=self._setup_scope(accepted_identity)
         attempt = next((row for row in authority['attempts'] if row['reference'] == startup._canonical_plain(attempt_ref)),None)
         self._require(attempt is not None and attempt['task'] is None and attempt['operations'] in (['observe-cli-basic'],['observe-setup-metadata'])
             and attempt['capability_keys'] == ['startup-context'])
@@ -166,6 +179,115 @@ class CoordinatorOperationOwner:
                 persist_capture(directory,journal,observation,action['id'],command_attempt_id,process=process)
         finally:
             self._setup_context = None
+
+    def observe_native_source(self, accepted_identity, attempt_ref, observer):
+        """One authorized external native observation; no project-file recovery claim."""
+        import os,subprocess,time,uuid
+        from runtime import doctor,state,setup_observation as source
+        identity,authority,decision=self._setup_scope(accepted_identity)
+        attempt=next((row for row in authority['attempts'] if row['reference']==startup._canonical_plain(attempt_ref)),None)
+        self._require(attempt is not None and 'native_execution' in attempt and callable(observer))
+        execution=attempt['native_execution'];directory=Path(decision['plan_directory']['path'])
+        self._require(attempt['limits']['deadline']>time.time())
+        with changes._public_plan_lock(directory),changes._worktree_lock(identity['git_dir']):
+            journal=changes._load_journal(directory)
+            if journal is None:
+                approved=decision['approved']
+                journal=dict(schema_version=2,transaction_id=approved['manifest']['transaction_id'],
+                    manifest_digest=onboarding._digest(approved['manifest']),manifest=approved['manifest'],approval=approved['approval'],
+                    plan=onboarding._load(directory),state='prepared',receipts={},enrollment=None,blocked=[],directories={},observations=[])
+            self._core(journal['plan'],{key:journal[key] for key in ('manifest','approval')})
+            self._require('qualification_scope' not in journal or journal['qualification_scope']==authority)
+            journal['qualification_scope']=authority;rows=journal.setdefault('native_observations',{})
+            key=onboarding._digest(attempt_ref)
+            self._require(key not in rows and len(rows)<64 and changes._command_owner(identity['git_dir']) is None)
+            row=dict(claim_id=uuid.uuid4().hex,attempt_ref=startup._canonical_plain(attempt_ref),identity=identity,allocation_digest=onboarding._digest(attempt),
+                status='claimed',returncode=None,pid=None,stopped=False,result=None,before=None,after=None,context=None,reconciliation=None)
+            if attempt.get('probe') is not None:
+                row['before']=source._probe_fact(identity,attempt['probe']['canary'])
+                self._require(row['before']['target']['fingerprint']['sha256']==attempt['probe']['before_sha256'])
+                source._public_canary_patch(attempt['probe'],Path(identity['repository_root']),readback=row['before']['readback'])
+            if attempt.get('context_reference') is not None:
+                acquired=startup.acquire_project_entry(SimpleNamespace(client=identity['client'],cwd=Path(identity['repository_root'])),state.PACKAGE)
+                scope=acquired.resolution.scope
+                self._require(scope is not None and scope.accepted_scope_digest==onboarding._digest(identity)
+                    and scope.qualification is not None and startup._canonical_plain(scope.qualification['reference'])==attempt['context_reference'])
+                text=startup.qualification_context(scope,state.PACKAGE)
+                self._require(text is not None)
+                import hashlib
+                row['context']=dict(sha256=hashlib.sha256(text.encode()).hexdigest())
+            rows[key]=row;changes._save(directory,journal)
+            marker=dict(schema_version=1,plan_dir=str(directory),transaction_id=journal['transaction_id'],id='native-'+key,attempt_id=row['claim_id'])
+            location=changes._owner_path(identity['git_dir']);changes._atomic(location.parent,location.name,json.dumps(marker,sort_keys=True).encode())
+            process=None;failed=True
+            deadline=min(time.monotonic()+execution['timeout_seconds'],time.monotonic()+max(0,attempt['limits']['deadline']-time.time()))
+            try:
+                environment={key:value for key,value in os.environ.items() if not key.startswith('GIT_')}
+                home=environment.get('CODEX_HOME') or (str(Path(environment['HOME'])/'.codex') if environment.get('HOME') else None)
+                self._require(home is not None and Path(home).is_absolute() and any(Path(home).resolve().is_relative_to(Path(effect['path']))
+                    for effect in execution['external_effects']))
+                process=doctor.NativeProcess(execution['argv'],deadline,cwd=execution['cwd'],
+                    env=environment,start_new_session=True,
+                    stdin=subprocess.PIPE if attempt['operations']==['observe-setup-metadata'] else subprocess.DEVNULL)
+                self._require(process.launch_codex_home is not None and any(Path(process.launch_codex_home).is_relative_to(Path(effect['path']))
+                    for effect in execution['external_effects']))
+                row['pid']=process.process.pid;changes._save(directory,journal)
+                self._setup_context=dict(process=process,attempt_ref=row['attempt_ref'],native_row=row,allocation=attempt,journal=journal,directory=directory)
+                admission=source._attempt_admission(identity,authority,attempt,journal['transaction_id'],None,attempt['operations'][0],owner=self,process=process)
+                if attempt['operations']==['observe-setup-metadata']:source.setup_capture_projection(admission,process=process)
+                result=observer(process,admission)
+                if result is not None:row['result']=source._native_result(self._setup_context,result)
+                if attempt['operations']==['observe-setup-metadata']:process.process.stdin.close()
+                process.buffer=b''
+                while process.read(deadline):pass
+                process.process.wait(timeout=max(0,deadline-time.monotonic()))
+                failed=False
+            except (doctor.ObservationError,startup.StartupError,OSError,ValueError,TypeError,KeyError,subprocess.TimeoutExpired):
+                failed=True
+            finally:
+                self._setup_context=None
+                try:
+                    if process is not None:process.close()
+                finally:
+                    if process is not None:row['returncode']=process.process.poll()
+                    row['status']='failed' if failed else 'observed';changes._save(directory,journal)
+            if failed:raise changes.Pending('Native source observation is unavailable; original allocation remains consumed and uncertain')
+            return startup._canonical_freeze(source._native_reference(directory,row))
+
+    def reconcile_native_source(self, attempt_ref, claim_ref, verified_stopped):
+        """Record independently verified original-child/descendant facts, including after expiry."""
+        from runtime import setup_observation as source
+        decision=startup._canonical_plain(self._decision);directory=Path(decision['plan_directory']['path'])
+        with changes._public_plan_lock(directory):
+            self._require(changes._public_plan_directory(directory)[1]==decision['plan_directory'])
+            journal=changes._load_journal(directory)
+            self._core(journal['plan'],{key:journal[key] for key in ('manifest','approval')})
+            row=journal.get('native_observations',{}).get(onboarding._digest(attempt_ref))
+            self._require(row is not None and startup._canonical_plain(claim_ref)==source._native_reference(directory,row)
+                and journal.get('qualification_scope')==startup._canonical_plain(self._qualification_scope))
+            identity=row['identity'];record=decision['approved']['manifest']['enrollment']['record']
+            projection=startup._canonical_plain(startup.canonical_scope_projection(startup.decode_project_record(record),
+                repository_id=identity['repository_id'],checkout_id=identity['checkout_id'],client=identity['client']))
+            self._require(identity==projection)
+            onboarding._object(verified_stopped,('claim_id','pid','returncode','stopped','descendants_stopped','evidence'))
+            self._require(verified_stopped['claim_id']==row['claim_id'] and verified_stopped['pid']==row['pid']
+                and verified_stopped['returncode']==row['returncode'] and verified_stopped['stopped'] is True
+                and verified_stopped['descendants_stopped'] is True and changes._evidence(verified_stopped['evidence'],many=True)
+                and len({onboarding._digest(ref) for ref in verified_stopped['evidence']})>=2)
+            self._require(row['reconciliation'] is None or row['reconciliation']==verified_stopped)
+            marker=dict(schema_version=1,plan_dir=str(directory),transaction_id=journal['transaction_id'],id='native-'+onboarding._digest(attempt_ref),attempt_id=row['claim_id'])
+            held=changes._command_owner(row['identity']['git_dir'])
+            self._require(held==marker or held is None and row['stopped'])
+            row['stopped']=True;row['reconciliation']=deepcopy(verified_stopped)
+            if row['status']=='observed':row['status']='reconciled'
+            changes._save(directory,journal)
+            if held is not None:
+                import os
+                location=changes._owner_path(row['identity']['git_dir']);os.unlink(location)
+                descriptor=onboarding._open_path(location.parent,os.O_RDONLY|os.O_DIRECTORY)
+                try:os.fsync(descriptor)
+                finally:os.close(descriptor)
+            return startup._canonical_freeze(source._native_reference(directory,row))
 
     def _birth_authority(self, authority):
         if self._creation is None:
