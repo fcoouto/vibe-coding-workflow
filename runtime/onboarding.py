@@ -1538,6 +1538,8 @@ def _inspect_project_scope(cwd, plan_dir, request):
         report = _finish_project(plan, current, blockers)
         _project_plan_shape(plan)
         _save(plan, path, directory)
+    if _relevant_inspection(plan["project_scope"]):
+        return report
     return _screen_onboarding_plan(plan_dir, plan["revision"], inspection=plan)
 
 
