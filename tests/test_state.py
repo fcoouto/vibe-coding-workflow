@@ -208,14 +208,14 @@ class StateTests(unittest.TestCase):
         self.assertTrue(api.inspect_state(self.scope)["present"])
         original_inode=(self.scope.runtime.state_dir/'runtime.sqlite3').stat().st_ino
         self.assertIsNone(self.status()["task"])
-        self.assertEqual(self.event().action, "deny")
+        self.assertEqual(self.event().action, "pass")
         self.assertEqual(self.event("Stop").action, "pass")
         self.assertEqual((self.scope.runtime.state_dir/'runtime.sqlite3').stat().st_ino,original_inode)
         with api._database(self.scope) as db:self.assertEqual(db.execute('select count(*) from tasks').fetchone()[0],0)
         with self.assertRaises(api.StateError):
             api.start_task(replace(self.scope, runtime=None), self.request)
         self.assertEqual(api.process_event(replace(self.scope, runtime=None), RuntimeEvent(
-            "PreToolUse", "codex", "session", self.scope.repository_root, tool_name="apply_patch")).action, "deny")
+            "PreToolUse", "codex", "session", self.scope.repository_root, tool_name="apply_patch")).action, "context")
         self.assertFalse(api.inspect_state(replace(self.scope,runtime=None))["compatible"])
 
     def test_private_directory_database_sidecars_and_corrupt_state(self):
@@ -242,7 +242,7 @@ class StateTests(unittest.TestCase):
             self.status()
         sidecar.unlink()
         path.chmod(0o644)
-        self.assertEqual(self.event().action, "deny")
+        self.assertEqual(self.event().action, "context")
         self.assertEqual(self.event("Stop").action, "pass")
 
     def test_arbitrary_sqlite_schema_and_schema_version_are_not_adopted(self):
@@ -262,7 +262,7 @@ class StateTests(unittest.TestCase):
             self.status()
         self.assertFalse(self.api().inspect_state(self.scope)["compatible"])
 
-    def test_policy_runtime_pin_mismatch_and_lock_fail_closed(self):
+    def test_policy_runtime_pin_mismatch_and_locked_state(self):
         self.start()
         self.update(state='WORKING')
         changed = replace(self.scope, policy_digest="changed")
@@ -273,11 +273,11 @@ class StateTests(unittest.TestCase):
                 self.update()
         with closing(sqlite3.connect(self.scope.runtime.state_dir / "runtime.sqlite3")) as db, db:
             db.execute("begin exclusive")
-            self.assertEqual(self.event().action, "deny")
+            self.assertEqual(self.event().action, "context")
             self.assertEqual(self.event("Stop").action, "pass")
 
     def test_patch_guard_and_scoped_blockers(self):
-        self.assertEqual(self.event().action, "deny")
+        self.assertEqual(self.event().action, "pass")
         self.start(mode="read-only")
         self.update(state='WORKING')
         self.assertEqual(self.event().action, "deny")

@@ -1,6 +1,6 @@
 """Checkout-scoped connection consent, separate from task evidence and collection."""
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import json
 import os
 from pathlib import Path
@@ -9,7 +9,7 @@ import time
 from types import SimpleNamespace
 import uuid
 
-from runtime import langfuse, observability_credentials as credentials, startup, state
+from runtime import changes, langfuse, local_ownership, onboarding, observability_credentials as credentials, startup, state
 
 
 PACKAGE = Path(__file__).resolve().parents[1]
@@ -40,6 +40,8 @@ def _private(info, *, directory=False):
 
 
 def _authority(scope):
+    if type(scope) is local_ownership.LocalOwnership:
+        return dict(scope_id=scope.scope_id, authority_directory=local_ownership.settings_directory(scope))
     if (type(scope) is not startup.AcceptedScope or scope.client != "codex"
             or scope.runtime is None or scope.runtime.schema_version != 3):
         raise SettingsError("unsupported_observability_scope")
@@ -130,7 +132,16 @@ class _Store:
                 raise SettingsError("invalid_observability_configuration")
             if schema == 2 and record["credential_source"] not in ("environment", "os-store"):
                 raise SettingsError("invalid_observability_configuration")
-            if json.dumps(record["binding"], sort_keys=True) != json.dumps(self.binding, sort_keys=True):
+            binding = record['binding']
+            if type(self.scope) is local_ownership.LocalOwnership:
+                historical = {'qualification_digest', 'accepted_scope_digest', 'authority_database'}
+                if not isinstance(binding, dict) or set(binding) != set(self.binding) | historical:
+                    raise SettingsError("observability_configuration_scope_changed")
+                startup._canonical_hash(binding['qualification_digest'])
+                startup._canonical_hash(binding['accepted_scope_digest'])
+                startup._canonical_binding(binding['authority_database'])
+                binding = {key: value for key, value in binding.items() if key not in historical}
+            if json.dumps(binding, sort_keys=True) != json.dumps(self.binding, sort_keys=True):
                 raise SettingsError("observability_configuration_scope_changed")
             return record
         except SettingsError:
@@ -209,11 +220,26 @@ class _Store:
 
 
 @contextmanager
-def _guard(scope, *, write=False, create=False):
+def _guard(scope, *, write=False, create=False, recovery=False):
     root = directory = lock = None
+    guards = ExitStack()
     try:
+        if recovery:
+            original = scope
+            if type(original) is startup.AcceptedScope: state._scope_version(original)
+            scope = local_ownership.settings_scope(original.repository_root if type(original) is startup.AcceptedScope else original)
+            if local_ownership.settings_absent(scope, 'observability'):
+                yield None
+                if not local_ownership.settings_absent(scope, 'observability'):
+                    raise SettingsError('observability_configuration_changed')
+                return
+            if type(original) is startup.AcceptedScope and (state._physical_identity(state._accepted_identity(original.accepted_identity))
+                    != state._physical_identity(state._accepted_identity(scope.accepted_identity))
+                    or original.runtime != scope.runtime):
+                raise SettingsError('observability_scope_changed')
+            if write: guards.enter_context(changes._authority_guards([scope.state_dir]))
         binding = _authority(scope)
-        root = os.open(scope.runtime.state_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        root = onboarding._open_path(scope.runtime.state_dir, os.O_RDONLY | os.O_DIRECTORY)
         if create:
             try:
                 os.mkdir("observability", mode=0o700, dir_fd=root)
@@ -246,6 +272,7 @@ def _guard(scope, *, write=False, create=False):
         for descriptor in (lock, directory, root):
             if descriptor is not None:
                 os.close(descriptor)
+        guards.close()
 
 
 def _report(record):
@@ -261,7 +288,8 @@ def _report(record):
 
 def status(scope):
     """Read local desired consent only; never acquire keys, refresh readiness or create files."""
-    with _guard(scope) as owner:
+    with _guard(scope, recovery=True) as owner:
+        if owner is None: return _report(None)
         record = owner.load()
         owner.check()
         return _report(record)
@@ -269,7 +297,10 @@ def status(scope):
 
 def _operate(scope, action, request):
     request = _request(action, request)
-    with _guard(scope, write=True, create=action == "configure") as owner:
+    with _guard(scope, write=True, create=action == "configure", recovery=action == 'disable') as owner:
+        if owner is None:
+            if request['expected_revision'] != 0: raise SettingsError('observability_revision_conflict')
+            return _report(None)
         record = owner.load()
         owner.check()
         if request["expected_revision"] != (record["revision"] if record else 0):

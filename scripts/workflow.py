@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 
 
@@ -285,6 +286,7 @@ def main():
             return codex.runtime_diagnostic(runtime_kind, reason)
         return session_start.diagnostic(reason)
 
+    deadline = time.monotonic() + 4
     try:
         adapters = {"codex": codex, "claude-code": claude_code}
         if len(sys.argv) != 3 or sys.argv[1] not in adapters:
@@ -297,7 +299,7 @@ def main():
             raise StartupError("CLI event does not match the payload event")
         if requested_event == "SessionStart":
             start = adapter.normalize(payload)
-            acquisition = acquire_project_entry(start, PACKAGE)
+            acquisition = acquire_project_entry(start, PACKAGE, managed=False, deadline=deadline)
             output = adapter.render(orient(start, PACKAGE, acquisition=acquisition))
             if start.client == "codex":
                 try:
@@ -313,12 +315,15 @@ def main():
                     pass
         else:
             event = codex.normalize_runtime(payload)
-            acquisition = acquire_project_entry(event, PACKAGE)
+            acquisition = acquire_project_entry(event, PACKAGE, deadline=deadline)
             scope = _entry_scope(acquisition, managed=False)
             result = HookResult(event.kind)
             if scope is not None and scope.runtime is not None:
                 from runtime.state import process_event
-                result = process_event(scope, event)
+                result = process_event(scope, event, deadline=deadline)
+            else:
+                from runtime.state import retained_patch_guard
+                result = retained_patch_guard(event, deadline=deadline) or result
             output = codex.render_runtime(result)
             if scope is not None and scope.runtime is not None and event.kind in {"PostToolUse", "Stop"}:
                 from runtime.title_sync import repair
@@ -327,10 +332,9 @@ def main():
                     output = dict(output or {})
                     output["systemMessage"] = (output.get("systemMessage", "") + " " + presentation["notification"]).strip()
     except RuntimeScopeError as error:
-        if runtime_kind == "PreToolUse" and event.tool_name == "apply_patch":
-            output = codex.render_runtime(HookResult(runtime_kind, "deny", str(error)))
-        else:
-            output = failure(str(error))
+        from runtime.state import retained_patch_guard
+        retained = retained_patch_guard(event, deadline=deadline) if runtime_kind == "PreToolUse" else None
+        output = codex.render_runtime(retained) if retained is not None else failure(str(error))
     except StartupError as error:
         output = failure(str(error))
     except (ValueError, OSError, RecursionError, subprocess.TimeoutExpired):

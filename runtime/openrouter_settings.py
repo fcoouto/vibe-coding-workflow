@@ -8,7 +8,7 @@ import stat
 from types import SimpleNamespace
 import uuid
 
-from runtime import changes, onboarding, startup, state
+from runtime import changes, local_ownership, onboarding, startup, state
 
 PACKAGE = Path(__file__).resolve().parents[1]
 MAX_CONFIG = 8192
@@ -44,6 +44,9 @@ def resolve(cwd):
 
 
 def authority(scope):
+    if type(scope) is local_ownership.LocalOwnership:
+        return dict(scope_id=scope.scope_id, repository=identity(scope.repository_root.lstat()),
+            git_common=identity(scope.git_common_dir.lstat()), directory=local_ownership.settings_directory(scope))
     require(resolve(scope.repository_root) == scope, 'openrouter_scope_changed')
     database = state._path(scope)
     state._private(database.parent, True)
@@ -83,12 +86,12 @@ def runtime_references(opencode, auth_data):
 class Store:
     def __init__(self, scope, root, directory, binding):
         self.scope, self.root, self.directory = scope, root, directory
-        self.folder = scope.runtime.state_dir / 'openrouter'
+        self.folder = scope.runtime.state_dir / 'openrouter' if scope.runtime else None
         self.binding = dict(binding)
         if directory is not None: self.binding['namespace'] = identity(os.fstat(directory))
         self.name = binding['scope_id'] + '.json'
-        self.path = self.folder / self.name
-        self.data = self.folder / binding['scope_id']
+        self.path = self.folder / self.name if self.folder else None
+        self.data = self.folder / binding['scope_id'] if self.folder else None
         self.snapshot = None
         self.record = None
 
@@ -98,7 +101,8 @@ class Store:
 
     def check(self):
         current = authority(self.scope)
-        require(current == {key: value for key, value in self.binding.items() if key != 'namespace'}
+        excluded = ('namespace', 'database') if type(self.scope) is local_ownership.LocalOwnership else ('namespace',)
+        require(current == {key: value for key, value in self.binding.items() if key not in excluded}
                 and identity(os.fstat(self.root)) == current['directory'], 'openrouter_authority_changed')
         try: named = self.folder.lstat()
         except FileNotFoundError:
@@ -118,9 +122,15 @@ class Store:
         raw = onboarding._read_file(self.path, MAX_CONFIG, private=True, expected_binding=identity(before))
         require(signature(self.path.lstat()) == self.snapshot, 'openrouter_configuration_changed')
         record = startup.json_object(raw, limit=MAX_CONFIG)
+        binding = record.get('binding')
+        if type(self.scope) is local_ownership.LocalOwnership:
+            require(isinstance(binding, dict) and set(binding) == set(self.binding) | {'database'},
+                    'invalid_or_changed_openrouter_configuration')
+            startup._canonical_binding(binding['database'])
+            binding = {key: value for key, value in binding.items() if key != 'database'}
         require(set(record) == FIELDS and type(record['version']) is int and record['version'] in (1, 2)
                 and integer(record['revision']) and record['revision'] > 0
-                and type(record['enabled']) is bool and record['binding'] == self.binding,
+                and type(record['enabled']) is bool and binding == self.binding,
                 'invalid_or_changed_openrouter_configuration')
         validate_routes(record['routes'])
         if 'workers' in record['routes']:
@@ -128,6 +138,7 @@ class Store:
         else:
             require(record['opencode'] is None and record['auth_data'] is None, 'invalid_openrouter_configuration')
         self.record = record
+        self.binding = dict(record['binding'])
 
     def save(self, record):
         require(integer(record['revision']) and record['revision'] > 0, 'openrouter_revision_exhausted')
@@ -172,14 +183,19 @@ class Store:
             checkout=str(self.scope.repository_root), local_configuration=readiness,
             connection='not_checked', execution_qualification='not_checked',
             opencode=record['opencode'] if record else None, auth_data=record['auth_data'] if record else None,
-            proposal_store=str(self.data / 'discovery.json'), worker_root=str(self.data / 'runs'))
+            proposal_store=str(self.data / 'discovery.json') if self.data else None,
+            worker_root=str(self.data / 'runs') if self.data else None)
 
 
 @contextmanager
-def guard(cwd, *, write=False, create=False):
+def guard(cwd, *, write=False, create=False, recovery=False):
     in_body = False
     try:
-        scope = resolve(cwd)
+        scope = local_ownership.settings_scope(cwd) if recovery else resolve(cwd)
+        if recovery and local_ownership.settings_absent(scope, 'openrouter'):
+            yield Store(scope, None, None, dict(scope_id=scope.scope_id))
+            require(local_ownership.settings_absent(scope, 'openrouter'), 'openrouter_configuration_changed')
+            return
         with ExitStack() as stack:
             if write: stack.enter_context(changes._authority_guards([scope.runtime.state_dir]))
             binding = authority(scope)
@@ -215,7 +231,7 @@ def guard(cwd, *, write=False, create=False):
 
 
 def status(cwd):
-    with guard(cwd) as owner: return owner.report()
+    with guard(cwd, recovery=True) as owner: return owner.report()
 
 
 def operate(cwd, action, request):
@@ -228,7 +244,7 @@ def operate(cwd, action, request):
     if 'consent_version' in request:
         require(type(request['consent_version']) is int and request['consent_version'] == 2,
                 'invalid_openrouter_consent_version')
-    with guard(cwd, write=True, create=action == 'configure') as owner:
+    with guard(cwd, write=True, create=action == 'configure', recovery=action == 'disable') as owner:
         current = owner.record
         revision = current['revision'] if current else 0
         require(request['expected_revision'] == revision, 'openrouter_revision_conflict')

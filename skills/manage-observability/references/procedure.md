@@ -1,6 +1,6 @@
 # Observability integration procedure
 
-Current-scope boundary: local controls require the existing public canonical acquisition to return an active, qualified Codex scope with an existing schema-3 authority. Configured-only, pending, stale, unsupported and legacy scope must fail before credential or account access. Reuse the accepted scope digest and qualification receipt; no legacy bootstrap, alternate authority or SDK fallback is allowed. Local fake-fixture proof does not establish installed-client, native, OS-store or account qualification.
+Configuration, enablement, credential and account operations require the current qualified canonical Codex scope and their existing prerequisites. Local status and disable instead verify the selected project's current physical identity and ownership of its saved private settings. Stale qualification, changed source digests or a missing, replaced or corrupt runtime database do not prevent viewing or disabling established consent. Preserve its historical bindings, expected revision and atomic ownership checks; do not repin, bootstrap or renew consent. A basic checkout without saved consent reports unconfigured. Local fixtures do not establish installed-client, native, OS-store or account qualification.
 
 Use this for explicitly requested integration preparation, status, enablement, scope changes, disabling or dashboard access. It is independent of project enrollment. Routine coding, general Q&A and ordinary disabled tasks do not load this procedure or a provider reference.
 
@@ -12,7 +12,7 @@ The package provides optional local task-status preparation and checkout connect
 
 | Provider | Reference and current support |
 | --- | --- |
-| Langfuse | Read [Langfuse connection controls](langfuse.md) only when selected or its connection/forwarding is specifically discussed. Canonical checkout controls require the current qualified owner; native collection and dashboard qualification remain unavailable. |
+| Langfuse | Read [Langfuse connection controls](langfuse.md) only when selected or its connection/forwarding is specifically discussed. Enablement and account access require the current qualified owner; native collection and dashboard qualification remain unavailable. |
 
 Do not present other providers as available integrations. A future reviewed provider can add its own reference under this same skill; do not install a provider or change a destination merely because it was mentioned. A generic explanation or local capability-status request needs no provider reference.
 
@@ -35,7 +35,7 @@ For unsupported operations, finish with the prepared choices, precise missing ca
 
 ## Local control contract
 
-Run the installed package's `scripts/observability.py` with Python 3.11+ in an explicitly selected, already enrolled checkout. These controls reuse `acquire_project_entry` and `_entry_scope` for a current qualified canonical Codex checkout; Project-wide consent and Windows runtime support remain unavailable. Native credential adapters do not qualify a Windows runtime. Do not bootstrap runtime state, adopt another checkout or edit enrollment to make an observability command succeed.
+Run the installed package's `scripts/observability.py` with Python 3.11+ in an explicitly selected, already enrolled checkout. Configuration, enablement, probes and credential operations require a current qualified canonical Codex checkout. Status and disable use local settings ownership without requiring healthy runtime qualification. Project-wide consent and Windows runtime support remain unavailable. Native credential adapters do not qualify a Windows runtime. Do not bootstrap runtime state, adopt another checkout or edit enrollment to make an observability command succeed.
 
 `python3 -I -B <plugin-root>/scripts/observability.py <action> --cwd <selected-checkout>` accepts one JSON object on stdin, at most 8 KiB. Use actual paths as separate quoted arguments. Do not pass credentials as arguments, input JSON or chat text.
 

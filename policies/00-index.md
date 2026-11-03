@@ -1,14 +1,14 @@
 # Policy contracts
 
-Installation provides capabilities; Project Onboarding adopts and qualifies mandatory policies; Runtime determines applicable actions and verifies their outcomes. Agents assess meaning, risk and capability; scripts enforce supported permissions, limits, ownership and evidence requirements. A completed record alone does not prove a correct decision or working enforcement.
+Installation provides capabilities; Project Onboarding assesses the complete Toolkit component catalog and adopts relevant policies; Runtime determines applicable actions and verifies their outcomes. Agents assess meaning, risk and capability; scripts enforce supported permissions, limits, ownership and evidence requirements. A completed record alone does not prove a correct decision or working enforcement.
 
 ## Loading
 
-Project Onboarding assesses the complete workflow and every contract.
+Project Onboarding assesses the complete Toolkit component catalog. Load each policy contract when its trigger applies; do not require every policy or advanced capability for ordinary onboarding.
 
 During Runtime, read this index, every contract whose trigger applies, and applicable local project instructions. Follow local policy dependencies only when needed. Reassess as the task progresses or its scope changes. Routing summaries do not replace full contracts; leave unrelated material unloaded.
 
-Keep policy adoption, action applicability and action satisfaction distinct. Missing capabilities or unknown applicability cannot count as inapplicable or satisfied. Block only dependent work; never silently skip a mandatory requirement.
+Keep policy adoption, action applicability and action satisfaction distinct. Missing capabilities or unknown applicability cannot count as inapplicable or satisfied. Ordinary native editing, tests and review need no managed task state or runtime activation. Block only work that depends on a missing prerequisite; never silently skip an applicable mandatory requirement. Optional enforcement and advanced execution acquire only their own prerequisites when selected.
 
 Use deterministic tooling or direct execution when sufficient. Consider delegation
 for useful context isolation, specialization, required independence or independent
@@ -25,6 +25,6 @@ planning, verification and applicable review requirements.
 | [Code Review](06-code-review.md) | Before every merge; before completing nontrivial or review-required work; when requested; after changes affecting review evidence. |
 | [Context and Handoff](07-context-and-handoff.md) | At task startup or resume; when behavior, commands, configuration or material decisions change; before handoff. |
 | [Merge Readiness](08-merge-readiness.md) | Before declaring merge readiness or merging; after changes to the candidate, base, required evidence or enforcement. |
-| [Workflow Maintenance](09-workflow-maintenance.md) | During initial setup, material capability changes, recurring workflow failures or authorized updates/evaluations. |
+| [Workflow Maintenance](09-workflow-maintenance.md) | For an explicitly selected behavior evaluation, material capability change, recurring workflow failure or authorized update. |
 | [Project Onboarding](10-project-onboarding.md) | Explicit project enrollment, setup update/repair, or expansion to additional repositories or clients. |
 | [Tool Integrations](11-tool-integrations.md) | When selecting or changing integrations, using unqualified capabilities, or investigating failures that invalidate qualification. |

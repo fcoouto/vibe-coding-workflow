@@ -2,36 +2,36 @@
 
 Apply with the [shared contract rules](00-index.md).
 
-**Mandatory adoption.** Assess the complete workflow and enroll the selected project through verified, recoverable changes.
+Onboard the selected project with the smallest useful, recoverable setup.
 
-**Setup inputs:** the target project, complete current component catalog and recorded source revision, observed client capabilities, existing project decisions and authorized scope. Locate the inventory/source record through the canonical setup document mapped by [Context and Handoff](07-context-and-handoff.md); first-time setup must supply and record that input before coverage decisions. A partial plugin inventory is not the full catalog.
+**Setup inputs:** the target project, current Toolkit guidance, relevant components, existing project decisions and authorized scope. Assess the complete Toolkit component catalog for applicability, but inspect project files and client behavior only as needed for the selected setup. Do not turn catalog coverage into a whole-file census or maintainer qualification campaign.
 
 For each new setup/update, resolve the current Toolkit revision once and use catalog guides, procedures and templates from that revision. Resume interrupted setup at its recorded revision. A trusted versioned copy may support offline setup with freshness explicitly unverified; unavailable sources block only their dependent setup work.
 
 | Element | Contract |
 | --- | --- |
 | Trigger | Explicit project enrollment, an authorized setup update/repair, or expansion to additional repositories or clients. |
-| Decision | Determine each component's need, compatibility, existing equivalent, required action and verification; resolve conflicts without waiving mandatory policies. |
-| Required action | Inventory, plan full coverage, apply authorized changes in dependency order, verify actual behavior and retain recovery records. |
-| Evidence | Record target/source revision, decisions, complete coverage matrix, before/after checks, configuration and execution observations, backups, pending interventions and rerun results. |
-| Blocking condition | A mandatory requirement lacks adoption or qualified operation, a material decision is unresolved, or a required prerequisite/source is unavailable. Keep enrollment incomplete for that scope; continue independent authorized setup work. |
+| Decision | Identify relevant components, compatible existing tools and any material choices. Resolve conflicts without weakening security, permissions or explicit user requirements. |
+| Required action | Inspect relevant instructions/configuration, make authorized changes recoverably, and leave useful guidance, working project commands, relevant checks, limitations and an undo location. |
+| Evidence | Record the target, choices, changes, checks actually run, limitations and recovery location. Keep unknown or unobserved behavior explicit. |
+| Blocking condition | Uncertain target/authority, a material unresolved decision, unsafe recovery, or a missing prerequisite blocks only dependent work. Optional enforcement or unavailable qualification does not block basic onboarding. |
 
 ## Onboarding authority
 
-An explicit request for full onboarding authorizes routine configuration, required checks and activation after those checks pass, within the selected project, clients, permissions and agreed effects. Verify that existing authority covers each concrete operation; an internal stage or separate activation transaction does not itself require another conversational approval. Preserve inspect-only, plan-only and configuration-only limits. A reviewed plan or configuration document never supplies consent by itself.
+An explicit onboarding request authorizes routine, in-project setup and relevant local checks within the selected project, clients, permissions and agreed effects. Verify that existing authority covers each concrete operation. Preserve inspect-only and plan-only limits. A reviewed plan or configuration document never supplies consent by itself.
 
-Ask only for an unresolved material exception: an effect outside the established scope, new permissions or costs, external data sharing, a provider/model change, destructive action, migration, workflow replacement, additional enforcement, or recovery that would discard later edits. Reuse decisions already made; continue independent authorized work while the exception remains pending. Missing qualification is a check or prerequisite to resolve, not a reason to ask the user to approve missing evidence.
+Ask only for an unresolved material exception: an effect outside the established scope, new permissions or costs, external data sharing, a provider/model change, destructive action, migration, workflow replacement, additional enforcement, or recovery that would discard later edits. Reuse decisions already made; continue independent authorized work while the exception remains pending. When a selected capability lacks required evidence, resolve only that prerequisite; missing evidence is not a reason to ask the user to approve it.
 
-Present the concrete [Reviewed Configuration](../skills/onboard-my-project/references/reviewed-configuration.md) in plain language. It explains the work and its status without adding an approval gate. Keep internal stages, digests and receipt mechanics in linked technical records.
+When using managed planning, present the [Reviewed Configuration](../skills/onboard-my-project/references/reviewed-configuration.md) in plain language. It explains the work and its status without adding an approval gate. Keep internal stages, digests and receipt mechanics in linked technical records.
 
 ## Inspect and plan
 
 1. Apply [Project Scope](01-project-scope.md). Keep machine preparation, new-project creation and existing-project enrollment distinct. Do not configure this plugin's own repository as an application merely because the agent is working here; confirm the actual destination.
-2. Inventory product and critical flows, stack/runtime/package manager, lockfiles, workspaces, Git changes, canonical documents, quality commands, services and client capabilities. Separate facts from assumptions. Run safe available baseline checks and record existing failures before edits.
-3. Cover every catalog component, including additions beyond previously known names. Record need, current state, action, scope, dependencies, risk and validation criterion. Outcomes include install/update/integrate, reuse a verified equivalent, justified inapplicability, or a blocker with its resumption condition. Optional choices in a partial-adoption path cannot silently remove items from this full assessment.
-4. Use [Task Planning](02-task-planning.md) and the selected conflict mode for the concrete design and changes. Reuse prior decisions; obtain only missing material decisions. Separate configuration from working integration and required features from optional additions.
+2. Read applicable project instructions and inspect only relevant configuration, commands and paths. Identify the stack and existing checks needed for this setup; separate observed facts from assumptions.
+3. Assess every Toolkit catalog component for relevance, adoption or a reason it does not apply. Load detailed setup or qualification procedures only when that component or an explicitly selected advanced capability requires them.
+4. Use [Task Planning](02-task-planning.md) for material design choices. Reuse prior decisions; ask only for missing choices that change scope, behavior, cost, access or enforcement.
 
-Record a repository's delivery policy in its approved canonical enrollment. Recommend manual merge and separate implementation worktrees by default; preserve explicit opt-outs and stricter target rules. List approved targets and merge methods, with separate references for publication, agent merge, and remote-branch cleanup authority. Per-task merge overrides require a recorded decision and do not change repository defaults. Policy adoption uses the existing D4 review, qualification and recovery procedure; saved settings alone do not qualify delivery execution. Local worktree cleanup remains client-owned.
+If the user selects managed delivery or merge enforcement, load its procedure and record only its own prerequisites and authority. Otherwise ordinary onboarding does not establish merge, publication, worktree or external-route policy. Preserve existing repository protections and any explicitly selected enforcement. Local worktree cleanup remains client-owned.
 
 ## Apply compatible changes
 
@@ -41,18 +41,16 @@ Record a repository's delivery policy in its approved canonical enrollment. Reco
 - Before altering meaningful configuration, retain a recoverable private backup and record original location/content identity. Bind the change plan to the target and current content; journal applied operations. Replace only authorized sections in mixed files and retire obsolete registrations as well as their files. Keep backups outside source control and instruction discovery paths.
 - Resume from verified actual state. Restore only content still matching this operation's output; subsequent user edits require reconciliation. Do not overwrite them during rollback. Preserve recovery records even when some setup components remain blocked.
 
-File-only configuration and undo use the [transaction contract](../skills/onboard-my-project/references/apply-and-recovery.md#file-configuration-and-undo). Configuration completion is distinct from managed activation. Defer runtime creation until an explicitly scoped managed operation needs it. Recovery preserves retained history and does not repeat onboarding assessment or native qualification.
+Use the [configuration and undo contract](../skills/onboard-my-project/references/apply-and-recovery.md#file-configuration-and-undo) for Toolkit-managed file operations. Do not create runtime state for ordinary development. Recovery preserves retained history and works even when activation or qualification is unavailable.
 
 ## Verify and finish
 
-Establish the native evaluation method and relevant initial smoke cases through [Workflow Maintenance](09-workflow-maintenance.md). Compare a disposable improvement candidate only for an observed failure; optional labs and paid experiments are separate choices.
+Run useful project commands and relevant local/client checks. State exactly what they establish and what remains unobserved; adapter qualification campaigns and advanced execution procedures are maintainer work unless explicitly selected.
 
-Apply the [Codex activation guarantee](01-project-scope.md#authority-and-activation): retain observed setup behavior separately from later observable configuration. Opening another session alone does not require repeating setup evaluation. Requalify affected behavior when its applicability changes; unavailable observations remain unknown.
-
-Use [Tests and Builds](05-tests-and-builds.md) for project behavior and [Tool Integrations](11-tool-integrations.md) for real client loading/execution. Check safe reruns for duplicate sections, servers, hooks, skills and scripts while preserving customizations; do not reinstall everything to prove repeatability. A restart, login or trust step remains a precise pending intervention until observed.
+Use [Tests and Builds](05-tests-and-builds.md) for relevant project behavior. Check that authorized changes work and can be undone without overwriting later user edits. A restart, login or trust step remains a pending limitation until observed.
 
 Update canonical records through [Context and Handoff](07-context-and-handoff.md), including commands, decisions, coverage, validated versus configured-only capabilities and maintenance/recovery instructions. Apply required [Code Review](06-code-review.md), including post-implementation security coverage. Repository gates follow [Merge Readiness](08-merge-readiness.md) as a selected plugin requirement, not an implied permission to alter live rules or publish.
 
-Finish authorized setup work when applicable items are resolved or have evidenced external blockers, relevant checks have run, introduced regressions are fixed and records match reality. Mark enrollment successful only after every mandatory requirement qualifies. Report what changed, actual proof, limits, interventions and the next action; confirm successful onboarding once.
+Basic onboarding is complete when the useful guidance and project commands are available, relevant checks have run or their limits are stated, and the user can locate and use recovery. Report changes, evidence, limitations and the next action. Advanced selected capabilities retain their own readiness criteria.
 
-For an explicitly approved disposable qualification target, follow [staged qualification](../skills/onboard-my-project/references/apply-and-recovery.md#staged-disposable-qualification). Keep the complete scope-specific catalog and all nine behavior cases recorded, including pending evidence. Startup acceptance is distinct from successful onboarding; a passing bounded attempt completes only its independently verified entries. Ordinary projects and primary activation retain all applicable prerequisites.
+For an explicitly approved disposable qualification target, follow [staged qualification](../skills/onboard-my-project/references/qualification.md#staged-disposable-qualification). Keep the complete scope-specific catalog and all nine behavior cases recorded, including pending evidence. Startup acceptance is distinct from successful onboarding; a passing bounded attempt completes only its independently verified entries. Ordinary projects and primary activation retain all applicable prerequisites.

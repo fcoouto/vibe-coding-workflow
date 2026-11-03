@@ -418,14 +418,14 @@ def qualification_context(scope, package):
 
 
 def orient(event, package, *, acquisition=None):
-    acquisition = acquisition or acquire_project_entry(event, package)
+    acquisition = acquisition or acquire_project_entry(event, package, managed=False)
     scope = _entry_scope(acquisition, managed=False)
     if scope is None:
         return None
     restricted = qualification_context(scope,package)
     if restricted is not None:return restricted
     client_file = package / "clients" / f"{event.client}.md"
-    authority_path = scope.authority_path if isinstance(scope, AcceptedScope) else scope.repository_root / PROJECT_FILE
+    authority_path = acquisition.authority_path or scope.repository_root / PROJECT_FILE
     context = (
         "Vibe Coding Workflow applies to this enrolled checkout. Read the client instructions at "
         f"{json.dumps(str(client_file))}, the policy index at "
@@ -478,7 +478,7 @@ class AcceptedScope:
 @dataclass(frozen=True)
 class ScopeResolution:
     status: str
-    scope: AcceptedScope | None
+    scope: AcceptedScope | ProjectScope | None
     reason: str
 
 
@@ -784,7 +784,7 @@ def _canonical_runtime_location(value):
         _canonical_provenance(value["provenance"], "runtime-location-observer")
 
 
-def _compare_canonical_scope(record, *, authority, observation, client, installed, preview=False):
+def _compare_canonical_scope(record, *, authority, observation, client, installed, preview=False, managed=True):
     """Compare internal observer facts; external JSON never authenticates scope.
 
     Authority targets are supplied freshness provenance. The future IO wrapper
@@ -976,11 +976,12 @@ def _compare_canonical_scope(record, *, authority, observation, client, installe
     config, activation = config_entry["configuration"], config_entry["activation"]
     if config is None:
         return result("pending", "activation_pending")
-    if (not preview and activation["status"] == "configured" and qualification is None
+    if (managed and not preview and activation["status"] == "configured" and qualification is None
             and activation['qualification'] == 'pending' and activation['qualification_binding'] is None
             and activation['accepted_scope_digest'] is None):
         return result("configured", "activation_configured")
-    if client not in installed["clients"] or not _package_compatible(config, installed):
+    if client not in installed["clients"] or (not _package_compatible(config, installed) if managed else
+            config["policy_digest"] != installed["policy_digest"]):
         return result("suspended", "configuration_changed")
     shared = sorted((s for s in data["shared_policy"] if s["path"] in config["shared_dependencies"]), key=lambda s: s["path"])
     if (len(dependencies) != len(shared) or [d["path"] for d in dependencies] != [s["path"] for s in shared]
@@ -994,6 +995,11 @@ def _compare_canonical_scope(record, *, authority, observation, client, installe
     if any(d["target"]["path"] != d["path"] or d["target"]["fingerprint"].get("sha256") != s["sha256"]
            for d, s in zip(dependencies, shared)):
         return result("suspended", "dependency_changed")
+    if not managed:
+        if activation["status"] not in {"configured", "active"}:
+            return result("suspended", "activation_suspended")
+        return ScopeResolution("configured", ProjectScope(data["project_id"], Path(selected["root"]),
+            Path(repo["git_common_dir"]), config["policy_digest"]), "basic_guidance")
     identity = _canonical_plain(canonical_scope_projection(CanonicalRecord(_canonical_freeze(data)),
         repository_id=repo["repository_id"], checkout_id=selected["checkout_id"], client=client))
     digest = _canonical_digest(identity)
@@ -1034,9 +1040,9 @@ def _compare_canonical_scope(record, *, authority, observation, client, installe
     return ScopeResolution("active", scope, "active")
 
 
-def resolve_canonical_scope(record, *, authority, observation, client, installed) -> ScopeResolution:
+def resolve_canonical_scope(record, *, authority, observation, client, installed, managed=True) -> ScopeResolution:
     """Compare a parsed current authority snapshot with internal observed facts."""
-    return _compare_canonical_scope(record, authority=authority, observation=observation, client=client, installed=installed)
+    return _compare_canonical_scope(record, authority=authority, observation=observation, client=client, installed=installed, managed=managed)
 
 
 def preview_canonical_scope(proposed_record, *, authority, observation, client, installed) -> ScopePreview:
@@ -1215,7 +1221,7 @@ def _acquire_canonical_membership(cwd: Path, *, authority_path: Path | None, bud
         return result("conflict", "observation_unavailable")
 
 
-def acquire_canonical_project(event, package, *, authority_path=None, qualifier=None, deadline=None, budget=None):
+def acquire_canonical_project(event, package, *, authority_path=None, qualifier=None, deadline=None, budget=None, managed=True):
     """Read named canonical authority and current facts; leave public startup gated.
 
     qualifier is an internal trusted-owner, local read-only callback. Its verified
@@ -1242,7 +1248,7 @@ def acquire_canonical_project(event, package, *, authority_path=None, qualifier=
         _entry_budget_check(budget)
         if qualifier is not None and not callable(qualifier):
             raise StartupError("Invalid internal qualification owner")
-        if qualifier is None and event.client == 'codex':
+        if managed and qualifier is None and event.client == 'codex':
             from runtime.setup_observation import read_qualification
             qualifier = lambda record, facts: read_qualification(record, facts, cwd=event.cwd, budget=budget)
         if not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", event.client):
@@ -1269,20 +1275,20 @@ def acquire_canonical_project(event, package, *, authority_path=None, qualifier=
         if config:
             for name in sorted(config["shared_dependencies"]):
                 observation["dependencies"].append(_acquired_dependency(Path(name), budget))
-            if config["runtime"]:
+            if managed and config["runtime"]:
                 observation["runtime_location"] = _acquired_runtime_location(Path(config["runtime"]["state_dir"]),
                     Path(package).resolve(strict=True), data, observation, budget)
         package = Path(package).resolve(strict=True)
         if package != Path(__file__).resolve().parents[1]:
             return result("conflict", "installed_unavailable")
         _check_observation_deadline(budget)
-        installed = dict(policy_digest=policy_digest(package, budget=budget), runtime_digest=runtime_fingerprint(budget=budget),
+        installed = dict(policy_digest=policy_digest(package, budget=budget), runtime_digest=runtime_fingerprint(budget=budget) if managed else "0" * 64,
             clients=[event.client] if (package / "clients" / (event.client + ".md")).is_file() else [], package_root=str(package))
         facts = dict(authority=dict(path=str(pointer), target=_canonical_plain(acquired.authority_target)), observation=observation,
                      client=event.client, installed=installed)
         _check_observation_deadline(budget)
-        resolution = resolve_canonical_scope(record, **facts)
-        if qualifier is not None and resolution.status == "configured" and resolution.reason in {"qualification_unobserved", "activation_configured"}:
+        resolution = resolve_canonical_scope(record, **facts, managed=managed)
+        if managed and qualifier is not None and resolution.status == "configured" and resolution.reason in {"qualification_unobserved", "activation_configured"}:
             observation["qualification"] = qualifier(record, _canonical_freeze(facts | {"deadline": budget["deadline"]}))
             _check_observation_deadline(budget)
             # The trusted callback may inspect facts, but it cannot normalize changed authority bytes.
@@ -1302,14 +1308,14 @@ def acquire_canonical_project(event, package, *, authority_path=None, qualifier=
                     or ([event.client] if (package / "clients" / (event.client + ".md")).is_file() else []) != installed["clients"]
                     or str(package.resolve(strict=True)) != installed["package_root"]):
                 return result("suspended", "configuration_changed")
-            resolution = resolve_canonical_scope(record, **facts)
+            resolution = resolve_canonical_scope(record, **facts, managed=managed)
         _check_observation_deadline(budget)
         return CanonicalAcquisition(resolution, pointer)
     except (StartupError, OSError, TypeError, KeyError, RecursionError, subprocess.SubprocessError):
         return result("conflict", "observation_unavailable")
 
 
-def acquire_project_entry(event, package, *, qualifier=None, deadline=None, budget=None):
+def acquire_project_entry(event, package, *, qualifier=None, deadline=None, budget=None, managed=True):
     """Internal actual-IO selector; no public wiring or native qualification."""
     cap = time.monotonic() + 4
     if deadline is not None:
@@ -1420,7 +1426,7 @@ def acquire_project_entry(event, package, *, qualifier=None, deadline=None, budg
             physical = d3._authority_observation(pointer.parent.parent, budget, canonical_only=True)
             if physical["error"]:
                 raise StartupError("Canonical authority unavailable")
-            result = acquire_canonical_project(event, package, authority_path=pointer, qualifier=qualifier, budget=budget)
+            result = acquire_canonical_project(event, package, authority_path=pointer, qualifier=qualifier, budget=budget, managed=managed)
         elif legacy:
             pointer = root / PROJECT_FILE
             scope = resolve_project(event, package, budget=budget)
@@ -1452,8 +1458,11 @@ def _entry_scope(acquisition, *, managed=True):
     if not isinstance(acquisition, CanonicalAcquisition):
         raise RuntimeScopeError('Project authority acquisition is unavailable')
     resolution = acquisition.resolution
-    if not managed and resolution.status == 'configured' and resolution.reason == 'activation_configured':
-        return None
+    if not managed and resolution.status == 'configured':
+        if resolution.reason == 'basic_guidance' and isinstance(resolution.scope, ProjectScope) and resolution.scope.runtime is None:
+            return resolution.scope
+        if resolution.reason == 'activation_configured':
+            return None
     if resolution.status not in {'active', 'outside'}:
         raise RuntimeScopeError('Project authority is unavailable or requires qualification: ' + resolution.reason)
     return resolution.scope
