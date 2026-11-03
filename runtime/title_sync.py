@@ -7,7 +7,9 @@ from runtime.task_statuses import STATES as STATUSES
 from runtime.evidence import _digest
 MAX_TITLE = 4096
 MAX_STATUS_LENGTH = max(map(len, STATUSES))
-TITLE = re.compile(r'(?P<meter>▰{0,5}▱{0,5}) \[(?P<family>W[1-9][0-9]*)\] (?P<member>P|C[1-9][0-9]*) · (?P<topic>.+) · (?P<status>[A-Z ]+)')
+TITLE = re.compile(r'(?P<meter>▰{0,5}▱{0,5}) (?P<status>[A-Z ]+) · \[(?P<family>W[1-9][0-9]*)\] (?P<member>P|C[1-9][0-9]*) · (?P<topic>.+)')
+# Retain prior observations so an authorized update preserves owner topic edits.
+LEGACY_TITLE = re.compile(r'(?P<meter>▰{0,5}▱{0,5}) \[(?P<family>W[1-9][0-9]*)\] (?P<member>P|C[1-9][0-9]*) · (?P<topic>.+) · (?P<status>[A-Z ]+)')
 
 
 def format_title(family, member, topic, status, cells):
@@ -20,14 +22,14 @@ def format_title(family, member, topic, status, cells):
     if status not in STATUSES or type(cells) is not int or not 0<=cells<=5:
         raise ValueError('Invalid canonical status or progress')
     filled=5 if status=='DONE' else min(cells,4)
-    title = '▰'*filled+'▱'*(5-filled)+f' [{family}] {member} · {topic} · {status}'
+    title = '▰'*filled+'▱'*(5-filled)+f' {status} · [{family}] {member} · {topic}'
     if len(title) - len(status) + MAX_STATUS_LENGTH > MAX_TITLE:
         raise ValueError('Managed title exceeds the supported length')
     return title
 
 
 def _parsed(title):
-    match=TITLE.fullmatch(title) if isinstance(title,str) else None
+    match=(TITLE.fullmatch(title) or LEGACY_TITLE.fullmatch(title)) if isinstance(title,str) else None
     if match is None:return None
     fields=match.groupdict()
     if len(fields['meter'])!=5 or fields['status'] not in STATUSES or ' · ' in fields['topic']:
@@ -36,6 +38,7 @@ def _parsed(title):
         format_title(fields['family'], fields['member'], fields['topic'], fields['status'], fields['meter'].count('▰'))
     except ValueError:
         return None
+    fields['layout'] = 'status-after-meter' if match.re is TITLE else 'status-last'
     return fields
 
 
@@ -48,9 +51,9 @@ def reconcile(saved, current, task):
     if current!=saved['applied']:
         before,after=_parsed(saved['applied']),_parsed(current)
         pending = _parsed(saved['pending'])
-        if pending and after and all(pending[k] == after[k] for k in ('meter','family','member','status')):
+        if pending and after and all(pending[k] == after[k] for k in ('meter','family','member','status','layout')):
             before = pending
-        if before and after and all(before[k]==after[k] for k in ('meter','family','member','status')):
+        if before and after and all(before[k]==after[k] for k in ('meter','family','member','status','layout')):
             saved.update(topic=after['topic'],applied=current,pending=None)
         else:
             saved.update(paused=True,pending=None)

@@ -14,7 +14,7 @@ class TitleSyncTests(unittest.TestCase):
 
     def test_formatter_uses_exact_status_and_full_meter_only_for_done(self):
         self.assertEqual(title_sync.format_title('W1','P','Thread naming','WORKING',2),
-            '▰▰▱▱▱ [W1] P · Thread naming · WORKING')
+            '▰▰▱▱▱ WORKING · [W1] P · Thread naming')
         self.assertTrue(title_sync.format_title('W1','C2','Review','DONE',0).startswith('▰▰▰▰▰ '))
         self.assertTrue(title_sync.format_title('W1','P','Topic','REVIEW',5).startswith('▰▰▰▰▱ '))
         for status in ('active','IN PROGRESS','ready'):
@@ -25,7 +25,7 @@ class TitleSyncTests(unittest.TestCase):
         current=saved['applied'].replace('Thread naming','Better naming')
         new, desired=title_sync.reconcile(saved,current,self.task('REVIEW'))
         self.assertEqual(new['topic'],'Better naming')
-        self.assertTrue(desired.endswith('Better naming · REVIEW'))
+        self.assertEqual(desired, '▰▰▱▱▱ REVIEW · [W1] P · Better naming')
         self.assertFalse(new['paused'])
 
     def test_managed_field_or_custom_title_pauses_without_mutating_task(self):
@@ -59,3 +59,34 @@ class TitleSyncTests(unittest.TestCase):
         updated, desired = title_sync.reconcile(saved, current, self.task('REVIEW'))
         self.assertTrue(updated['paused'])
         self.assertIsNone(desired)
+
+    def test_legacy_observations_keep_topic_edits_and_identity_during_update(self):
+        legacy = '▰▰▱▱▱ [W1] P · Thread naming · WORKING'
+        for topic in ('Thread naming', 'Owner topic'):
+            with self.subTest(topic=topic):
+                saved = self.saved() | dict(applied=legacy)
+                current = legacy.replace('Thread naming', topic)
+                updated, desired = title_sync.reconcile(saved, current, self.task('REVIEW'))
+                self.assertFalse(updated['paused'])
+                self.assertEqual((updated['family'], updated['member']), ('W1', 'P'))
+                self.assertEqual(updated['topic'], topic)
+                self.assertEqual(desired, f'▰▰▱▱▱ REVIEW · [W1] P · {topic}')
+
+    def test_manual_layout_change_pauses_in_both_directions(self):
+        legacy = '▰▰▱▱▱ [W1] P · Thread naming · WORKING'
+        current = '▰▰▱▱▱ WORKING · [W1] P · Thread naming'
+        for before, after in ((legacy, current), (current, legacy)):
+            with self.subTest(before=before):
+                updated, desired = title_sync.reconcile(self.saved() | dict(applied=before), after, self.task())
+                self.assertTrue(updated['paused'])
+                self.assertIsNone(desired)
+
+    def test_legacy_pending_acknowledgment_and_owner_topic_are_reconciled(self):
+        legacy = '▰▰▱▱▱ [W1] P · Thread naming · REVIEW'
+        for topic in ('Thread naming', 'Owner topic'):
+            with self.subTest(topic=topic):
+                updated, desired = title_sync.reconcile(self.saved() | dict(pending=legacy),
+                    legacy.replace('Thread naming', topic), self.task('REVIEW'))
+                self.assertFalse(updated['paused'])
+                self.assertIsNone(updated['pending'])
+                self.assertEqual(desired, f'▰▰▱▱▱ REVIEW · [W1] P · {topic}')

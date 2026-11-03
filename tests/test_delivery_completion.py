@@ -135,7 +135,7 @@ class CompletionTests(unittest.TestCase):
         conditions = result['task']['conditions']
         self.assertEqual([c['id'] for c in conditions if c['status'] == 'pending'], [])
         title = title_sync.format_title('W1', 'P', 'Feature', result['task']['state'], 4)
-        self.assertTrue(title.endswith('REVIEW'))
+        self.assertIn(' REVIEW · [W1] P · ', title)
         self.assertNotIn('▰▰▰▰▰', title)
         status = self.fixture.api.evidence_status(self.scope, 'codex', 'parent')
         self.assertFalse(status['evidence']['delivery_complete'])

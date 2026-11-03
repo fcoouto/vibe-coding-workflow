@@ -10,9 +10,11 @@ For task controls, read [task runtime](clients/runtime.md); for accepted checks,
 
 Use [Workstreams](skills/workstreams/SKILL.md) for suitable coordinated contexts,
 saved mode controls, resource admission, recovery and managed titles. New supported
-Codex runtime scopes start enabled; existing preferences remain. Native delegation
-adopts display naming automatically, independent of these features. Manual-title
-overrides remain protected. See the [main-runtime boundary](docs/workstreams-main-port.md).
+Codex runtime scopes start enabled; existing preferences remain.
+[Thread Naming](clients/workstreams-naming.md) starts automatically with
+implementation, including solo work, independently of delegation and these
+features. Question-only and planning chats stay untouched. Manual-title overrides
+remain protected. See the [main-runtime boundary](docs/workstreams-main-port.md).
 
 Use the separate [Manage Observability Integration](skills/manage-observability/SKILL.md) skill for optional observability requests. Langfuse is the first provider; exports are metrics-only and collection stays off. Connection controls use the current canonical checkout and private consent; local task preparation uses current task states. Required local evidence stays intact. Native collection and live execution remain separately qualified; see the [port boundary](docs/d9-observability-preparation.md#selective-port-to-current-main).
 

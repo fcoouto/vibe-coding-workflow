@@ -1,6 +1,6 @@
-# Workstreams title synchronization
+# Thread Naming title synchronization
 
-Load for automatic native delegation naming, adopting a managed title, recording
+Load for eligible implementation naming, adopting a managed title, recording
 task progress, resolving a manual rename, or diagnosing missed title updates.
 The [naming contract](workstreams-naming.md) owns the format and adoption trigger.
 For runtime-bound tasks, render canonical state verbatim; there is no separate
@@ -13,11 +13,12 @@ an adopted family/member mapping, reconcile manual edits before writing, and
 retain any manual-title pause. A known user-selected title is an override even
 before managed adoption; preserve it until the user explicitly requests adoption.
 If ownership is unknown for an existing title, report that limitation rather than
-treat the title as permission to replace it. A new child's observed default title
-or creation marker may be adopted without a separate naming request.
+treat the title as permission to replace it. An eligible parent or child's
+observed automatic/default title or native creation marker may be adopted without
+a separate naming request.
 
 When a workflow task is already bound, configure an eligible title once through
-the enrolled package, using the native naming rule as the workflow decision
+the enrolled package, using the naming rule as the workflow decision
 reference. Use the current task identity and revision:
 
 ```text
@@ -69,7 +70,7 @@ direct path does not acquire the runtime event-repair guarantees below.
 
 ## Record status and accepted progress
 
-For a runtime-bound thread, the coordinator records a task transition when the
+For an adopted runtime-bound thread, the coordinator records a task transition when the
 user's instruction, acceptance or next action changes. Discussion, design, investigation,
 implementation and fixes use `WORKING`. A concrete result awaiting acceptance uses
 `REVIEW`. Approval that starts another agreed phase returns to `WORKING`; it does
@@ -155,6 +156,12 @@ begin. Do not translate old titles into task state or rewrite old records/pins.
 Reconcile affected owners with their original runtime and use the existing
 [approved runtime update](runtime.md#change-a-pinned-runtime) procedure with a fresh
 state authority. Existing ownership and unresolved assignments remain binding.
+
+An authorized display-format update can reconcile a saved status-last title
+before rendering the current format. Preserve its family/member binding,
+topic-only edits and manual-title pauses. A user changing the layout remains a
+whole-format override. Do not bulk-rewrite titles, replace original runtime
+readers or silently repin active tasks for a format change.
 
 Formatting, state, command and hook-boundary tests qualify source behavior.
 Installed hook trust and callback delivery, rendering and literal title search

@@ -1,6 +1,6 @@
 {
   "name": "vibe-coding-workflow",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Prepare development environments with the Vibe Coding Toolkit.",
   "author": {"name": "fcoouto"},
   "hooks": "./hooks/claude-code.json"
