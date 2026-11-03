@@ -22,10 +22,15 @@ Setup still assesses the full pinned Toolkit catalog and every contract.
 
 ## Supported boundaries
 
-- Package compatibility requires exact current policy/runtime pins. The user
-  deferred automatic cross-version support before merge; records are never repinned.
-- Arbitrary subprocesses can detach writers. Successful exit does not release
-  ownership or capacity automatically. Independent phase proof is supported only after the helper durably records execution completion. The receipt does not establish stopped descendants.
+- Managed execution still requires its exact accepted policy/runtime pins; records
+  are never repinned. Basic guidance uses current client/index availability,
+  physical membership and accepted shared dependencies, with package hashes kept
+  as provenance rather than an update blocker.
+- Finite foreground completion releases cooperative capacity while preserving the
+  actual exit code. It never releases assignment or writer ownership or proves
+  stopped descendants. Known background services and timed-out commands retain
+  capacity; independent phase release requires its durable execution receipt and
+  existing reconciliation proof.
 - File recovery still discovers retained stores to protect historical dependencies.
   It narrows affected owners and ignores unrelated membership status, rather than
   assuming an unreadable store contains no writer. Runtime-bearing membership

@@ -221,8 +221,8 @@ class ResourceEfficiencyTests(unittest.TestCase):
         second = self.execution()
         second.directory = self.first.directory
         with self.telemetry(lambda: (_ for _ in ()).throw(OSError('unavailable'))) as (_, measured):
-            first = self.first.call()
-            other = second.call()
+            first = self.first.call(background=True)
+            other = second.call(background=True)
             full = self.first.call(phase_id='no-capacity')
         self.assertEqual(first['returncode'], 0)
         self.assertIsNotNone(first['warning'])

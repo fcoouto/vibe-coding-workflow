@@ -75,19 +75,67 @@ class ResourceExecutionTests(unittest.TestCase):
         api=importlib.import_module('runtime.resource_execution')
         return api.operate(self.fixture.scope, self.directory, action, self.request | updates)
 
-    def test_owned_command_runs_once_and_retains_until_reconciliation(self):
+    def test_finite_command_reuses_capacity_without_releasing_assignment_writer(self):
         result=self.call()
         self.assertEqual(result['returncode'],0)
         self.assertIn('verified',result['stdout'])
-        self.assertFalse(result['released'])
+        self.assertTrue(result['released'])
+        self.assertFalse(result['uncertain'])
+        self.assertEqual(result['state'], 'released')
+        self.assertFalse(result['admitted'])
+        saved = next(iter(self.call('status')['reservations'].values()))
+        self.assertIsNone(saved['proof'])
+        fixture = self.fixture.fixture
+        assignment = fixture.raw_assignment(self.prepared['attempt_id'])
+        self.assertNotEqual(assignment['status'], 'settled')
+        self.assertIsNone(assignment['reconciliation'])
+        conflicting = fixture.second_owner(2)
+        with self.assertRaisesRegex(ValueError, 'ownership conflicts'):
+            fixture.api.prepare_assignment(fixture.scope, conflicting)
         with self.assertRaises(ValueError):
             self.call()
-        self.fixture.observe(self.prepared)
-        fixture=self.fixture.fixture
-        proof=fixture.worker_reconciliation_request(self.prepared,outcome='failed')
-        fixture.api.reconcile_assignment(fixture.scope,proof)
-        released=self.call('release')
-        self.assertEqual(released['state'],'released')
+        with self.assertRaises(ValueError):
+            self.call(argv=[sys.executable, '-c', 'print("replay")'])
+        with self.assertRaises(ValueError):
+            self.call(background=True)
+        self.assertEqual(self.call(phase_id='next-phase', capacity_cpu=1)['returncode'], 0)
+
+    def test_failed_finite_command_releases_capacity_and_preserves_failure(self):
+        result = self.call(argv=[sys.executable, '-c', 'raise SystemExit(7)'], capacity_cpu=1)
+        self.assertEqual(result['returncode'], 7)
+        self.assertTrue(result['released'])
+        self.assertFalse(result['uncertain'])
+        self.assertEqual(next(iter(self.call('status')['reservations'].values()))['execution']['returncode'], 7)
+        self.assertEqual(self.call(phase_id='after-failure', capacity_cpu=1)['returncode'], 0)
+
+    def test_known_service_and_port_writers_retain_capacity(self):
+        from runtime import resource_execution
+        for kind, key in [('service', 'test-server'), ('port', 'tcp:43210')]:
+            with self.subTest(kind=kind):
+                fixture = test_workstreams.WorkstreamsTests('runTest')
+                fixture.setUp()
+                self.addCleanup(fixture.doCleanups)
+                fixture.enable()
+                owner = fixture.fixture
+                plan = owner.plan_value()
+                claims = plan['jobs'][0]['claims'] + [dict(kind=kind, key=key, mode='write', host='local')]
+                plan['jobs'][0]['claims'] = claims
+                owner.plan(plan)
+                brief = owner.prepare_request()['brief'] | dict(resources=claims)
+                prepared = owner.prepare(brief=brief)
+                request = owner.request(**{k:v for k,v in self.request.items() if k not in owner.identity})
+                request.update(attempt_id=prepared['attempt_id'], capacity_cpu=1)
+                directory = self.directory / kind
+                result = resource_execution.operate(fixture.scope, directory, 'run', request)
+                self.assertFalse(result['released'])
+                self.assertTrue(result['uncertain'])
+                waiting = resource_execution.operate(fixture.scope, directory, 'run', request | dict(phase_id='next'))
+                self.assertEqual(waiting['reason'], 'occupied-reservations')
+
+    def test_invalid_background_declaration_never_launches(self):
+        with self.assertRaises(ValueError):
+            self.call(background='yes')
+        self.assertFalse(self.directory.exists())
 
     def test_disabled_mode_never_launches(self):
         self.feature('disable')
@@ -97,7 +145,7 @@ class ResourceExecutionTests(unittest.TestCase):
     def test_independently_stopped_phase_reuses_capacity_before_assignment_finishes(self):
         import hashlib
         import json
-        self.request['capacity_cpu'] = 1
+        self.request.update(capacity_cpu=1, background=True)
         self.call()
         snapshot = self.call('status')['reservations']
         identity, row = next(iter(snapshot.items()))
@@ -141,18 +189,22 @@ class ResourceExecutionTests(unittest.TestCase):
             result = self.call()
         self.assertEqual(intercepted, [True])
         self.assertEqual(result['returncode'], 0)
-        self.assertEqual(next(iter(self.call('status')['reservations'].values()))['state'], 'active')
+        self.assertEqual(next(iter(self.call('status')['reservations'].values()))['state'], 'released')
 
     def test_timeout_retains_reservation(self):
-        result=self.call(argv=[sys.executable,'-c','import time;time.sleep(1)'], timeout_seconds=0.05)
+        result=self.call(argv=[sys.executable,'-c','import time;time.sleep(1)'], timeout_seconds=0.05, capacity_cpu=1)
         self.assertTrue(result['uncertain'])
         self.assertFalse(result['released'])
+        saved = next(iter(self.call('status')['reservations'].values()))
+        self.assertEqual(saved['state'], 'active')
+        self.assertNotIn('execution', saved)
+        self.assertEqual(self.call(phase_id='after-timeout', capacity_cpu=1)['reason'], 'occupied-reservations')
 
     def test_telemetry_failure_does_not_block_command(self):
         with patch('runtime.resource_admission.measure',side_effect=OSError('probe unavailable')):
             result=self.call()
         self.assertEqual(result['returncode'],0)
-        self.assertFalse(result['released'])
+        self.assertTrue(result['released'])
 
     def test_disk_shortage_still_blocks_when_memory_probe_fails(self):
         from types import SimpleNamespace
@@ -207,15 +259,16 @@ class ResourceExecutionTests(unittest.TestCase):
         self.assertEqual(code,0,output.getvalue())
         result=json.loads(output.getvalue())
         self.assertEqual(result['returncode'],0,result)
-        self.assertFalse(result['released'])
+        self.assertTrue(result['released'])
 
     def test_declared_persistent_service_retains_and_status_is_bound(self):
-        result=self.call()
+        result=self.call(background=True, capacity_cpu=1)
         self.assertFalse(result['released'])
         status=self.call('status')
         self.assertEqual(len(status['reservations']),1)
         self.assertEqual(next(iter(status['reservations'].values()))['state'],'active')
         with self.assertRaises(ValueError): self.call('release')
+        self.assertEqual(self.call(phase_id='next-phase', capacity_cpu=1)['reason'], 'occupied-reservations')
 
     def test_wait_can_be_cancelled_after_disable(self):
         import time
@@ -238,9 +291,9 @@ class ResourceExecutionTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.call(disk_bytes=-1)
         self.assertFalse(self.directory.exists())
 
-    def test_detached_descendant_does_not_release_capacity(self):
+    def test_declared_detached_descendant_does_not_release_capacity(self):
         command='import subprocess,sys; p=subprocess.Popen([sys.executable,"-c","import time; time.sleep(0.2)"], start_new_session=True); print(p.pid)'
-        result=self.call(argv=[sys.executable,'-c',command])
+        result=self.call(argv=[sys.executable,'-c',command], background=True)
         self.assertFalse(result['released'])
         self.assertTrue(result['uncertain'])
 
@@ -283,7 +336,7 @@ class ResourceExecutionTests(unittest.TestCase):
         self.assertEqual(len(self.call('status')['reservations']), 1)
 
     def test_disable_keeps_occupied_owner_and_cleanup_uses_original_identity(self):
-        self.call()
+        self.call(background=True)
         self.feature('disable')
         self.assertEqual(next(iter(self.call('status')['reservations'].values()))['state'], 'active')
         with self.assertRaises(ValueError):

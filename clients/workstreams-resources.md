@@ -1,7 +1,8 @@
 # Resource-aware heavy execution
 
-Load for a heavy build, test, browser/database workload or other resource-intensive
-local phase. Check `resource_admission` before a new helper-managed launch. This
+Load when resource-managed execution is selected for a heavy build, test,
+browser/database workload or other resource-intensive local phase. Check
+`resource_admission` before a new helper-managed launch. This
 feature is independent of capacity recovery and ordinary delegation. Admission is
 cooperative, not OS containment; task budgets and native/account limits still apply.
 
@@ -23,7 +24,9 @@ Smaller active declared allowances constrain the shared pool. Choose allowances
 honestly; these declarations are cooperative, not independent hardware enforcement.
 Optional fields: `wait_seconds` (0–60, default 0), `timeout_seconds` (positive,
 clamped to original task deadline), `disk_bytes` (required free disk headroom,
-default 0). Persistent services retain their owner reservation. For example, `argv:["python3","-B","-m","unittest"]`
+default 0). Set `background:true` for an intentional persistent service; it retains
+capacity until reconciliation. Existing service/port write claims also retain
+capacity. Omit `background` for a finite foreground command. For example, `argv:["python3","-B","-m","unittest"]`
 runs the selected checkout's test command within the reserved heavy phase.
 
 The private host registry is `$CODEX_HOME/workstreams-resources` (default
@@ -54,10 +57,16 @@ exit code and at most 16 KiB each of stdout/stderr. Timeouts leave the original
 command running and retain its reservation; returned PID is evidence for inspection,
 not permission to stop unrelated processes.
 
-Command exit alone does not release capacity: an arbitrary command can detach a
-service into another process group. Reservations remain active until
-`resource-release` verifies independent reconciliation of the owner or the exact
-phase. For a completed phase while its assignment continues, supply
+A completed finite foreground command releases cooperative host capacity after
+the helper observes its exit, including a nonzero exit. Its actual exit code still
+determines whether the command passed. This releases no assignment, writer claim,
+review or recovery authority and does not certify that unknown descendants stopped.
+The returned `released` and `uncertain` fields describe capacity only. The same
+phase cannot replay after completion; a new phase may use the freed capacity.
+
+Known background services and timed-out commands retain capacity. For retained
+capacity, `resource-release` verifies independent reconciliation of the owner or
+the exact phase. For a completed phase while its assignment continues, supply
 `host_proof:{path,sha256}` referring to private independently observed JSON with
 exactly `version:1`, `kind:"resource-phase-reconciliation"`, `reservation_id`,
 `owner` copied from resource status, original `phase_id`, `execution_digest` from the returned completed execution receipt, `stopped:true`,

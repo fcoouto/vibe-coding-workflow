@@ -63,8 +63,8 @@ def _validate(data):
         orders.add(row['order'])
         if row['proof'] is not None:
             _proof(row['proof'])
-        _require(row['state'] != 'released' or row['proof'] is not None,
-                 'Released reservation lacks stopped proof')
+        _require(row['state'] != 'released' or row['proof'] is not None or 'execution' in row,
+                 'Released reservation lacks completion receipt or stopped proof')
 
 
 def _proof(value):
@@ -189,14 +189,17 @@ def _operate(data, action, request, now, probe, probe_key=None, eligible=None, d
         if reason is None:
             row['state'] = 'active'
         return _reply(data, row, newly=reason is None, reason=reason, now=now, warning=warning)
-    state._fields(request, ('id', 'owner'), ('execution',) if action == 'complete' else ('stopped_proof',))
+    state._fields(request, ('id', 'owner'), ('execution', 'release') if action == 'complete' else ('stopped_proof',))
     state._text(request['id'], 'host reservation id', 128)
     row = data['reservations'].get(request['id'])
     _require(row is not None and row['request']['owner'] == request['owner'], 'Unknown resource owner')
     if action == 'complete':
         _require(row['state'] == 'active' and 'execution' not in row and 'execution' in request,
             'Execution receipt requires its unreleased active phase')
+        _require(type(request.get('release', False)) is bool, 'Invalid capacity release declaration')
         row['execution'] = request['execution']
+        if request.get('release', False):
+            row['state'] = 'released'
         return _reply(data, row, now=now, warning=row.get('last_status', {}).get('warning'))
     if row['state'] in {'released', 'cancelled'}:
         return _reply(data, row, now=now)
