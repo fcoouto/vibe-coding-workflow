@@ -23,7 +23,7 @@ repository protections.
 
 Select only applicable instruction files. Vibe paths are package-relative (`policies/02-task-planning.md`); external skills and their triggered Markdown references use absolute paths in a separate selection. Never run `--prepare` during routine tasks.
 
-With `functions.exec`, use this complete loader in one invocation for each selection. Set only `root`, `paths` and `external`; keep the loader body intact. It automatically drains continuations through separate `notify` outputs, including bounded small-page recovery. The helper is loaded only for continuation or recovery. Do not print/collect batch bodies into the direct result, run continuation calls manually, or evaluate instruction contents. If the cell yields as running, wait for its terminal result before proceeding. Only `complete: true` establishes delivery of the selected text; it does not establish applicability, semantic compliance or retention after compaction.
+With `functions.exec`, use this complete launcher in one invocation for each selection. Set only `root`, `paths` and `external`; keep the launcher body intact. It loads one fixed packaged runner per selection, which automatically drains continuations through separate `notify` outputs, including bounded small-page recovery. Do not print/collect batch bodies into the direct result, run continuation calls manually, or evaluate instruction contents. If the cell yields as running, wait for its terminal result before proceeding. Only `complete: true` establishes delivery of the selected text; it does not establish applicability, semantic compliance or retention after compaction.
 
 <!-- native-instruction-loader:start -->
 ```javascript
@@ -33,33 +33,15 @@ const paths = ["policies/02-task-planning.md"];
 const external = false;
 // Loader
 const quote = s => "'" + s.replace(/'/g, "'\\''") + "'";
-const reader = ["python3", "-I", "-B", root + "/scripts/read_instructions.py"].map(quote).join(" ");
-const selection = (external ? " --external" : "") + " -- " + paths.map(quote).join(" ");
-const run = cmd => tools.exec_command({cmd, max_output_tokens:10000, yield_time_ms:10000});
-const read = (page, revision, batch) => run(reader + " --json" + (batch ? " --batch" : "") +
-  " --page " + page + (revision ? " --revision " + revision : "") + selection);
-const decode = (r, kind) => {
-  if (r.session_id || r.exit_code !== 0) throw new Error("Instruction delivery incomplete: reader did not finish successfully");
-  let p; try { p = JSON.parse(r.output); } catch { return null; }
-  if (!p || p.version !== 1 || p.kind !== kind || typeof p.text !== "string" ||
-      !Number.isSafeInteger(p.characters) || p.characters < 1 || [...p.text].length !== p.characters) return null;
-  if (kind === "instructions" &&
-      (![p.page,p.last_page,p.pages].every(Number.isSafeInteger) || p.page < 1 ||
-       p.page > p.last_page || p.last_page > p.pages || !/^[a-f0-9]{64}$/.test(p.revision) ||
-       p.external !== external || typeof p.batch !== "boolean")) throw new Error("Invalid instruction metadata");
-  return p;
-};
-const first = decode(await read(1, null, true), "instructions");
-if (first && (first.page !== 1 || !first.batch)) throw new Error("Invalid first instruction batch");
-if (first && first.last_page === first.pages) {
-  await notify(first.text);
-  text({complete:true, pages:first.pages, batches:1, revision:first.revision});
-} else {
-  const helper = decode(await run(reader + " --helper"), "helper");
-  if (!helper) throw new Error("Instruction delivery incomplete: helper output was omitted");
-  const drain = (0,eval)("(" + helper.text + ")");
-  text(await drain({first, read, decode, emit:notify}));
-}
+const r = await tools.exec_command({cmd:"python3 -I -B " + quote(root + "/scripts/read_instructions.py") + " --helper",
+  max_output_tokens:10000, yield_time_ms:10000});
+if (r.session_id || r.exit_code !== 0) throw new Error("Instruction delivery incomplete: helper did not finish successfully");
+let helper; try { helper = JSON.parse(r.output); } catch {}
+if (!helper || helper.version !== 1 || helper.kind !== "helper" || typeof helper.text !== "string" ||
+    !Number.isSafeInteger(helper.characters) || helper.characters < 1 || [...helper.text].length !== helper.characters)
+  throw new Error("Instruction delivery incomplete: helper output was omitted");
+const drain = (0,eval)("(" + helper.text + ")");
+text(await drain({root, paths, external, exec:tools.exec_command, emit:notify}));
 ```
 <!-- native-instruction-loader:end -->
 

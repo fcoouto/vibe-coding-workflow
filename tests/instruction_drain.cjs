@@ -53,8 +53,21 @@ async function run(mode, original = large) {
     if (child.error) throw child.error;
     const result = {exit_code: child.status, output: child.stdout + child.stderr};
     if (helper && mode === 'helper') result.output = result.output.slice(0, 90);
+    if (helper && mode === 'helper-pending') return {session_id: 42, output: result.output};
+    if (helper && mode === 'helper-exit') result.exit_code = 1;
+    if (helper && ['helper-empty', 'helper-kind', 'helper-version', 'helper-count'].includes(mode)) {
+      const packet = JSON.parse(result.output);
+      if (mode === 'helper-empty') { packet.text = ''; packet.characters = 0; }
+      if (mode === 'helper-kind') packet.kind = 'instructions';
+      if (mode === 'helper-version') packet.version++;
+      if (mode === 'helper-count') packet.characters++;
+      result.output = JSON.stringify(packet);
+    }
     if (result.exit_code === 0 && !helper) {
       const packet = JSON.parse(result.output);
+      if (mode === 'first-page' && readers === 1) packet.page++;
+      if (mode === 'first-batch' && readers === 1) packet.batch = false;
+      if (['first-page', 'first-batch'].includes(mode)) result.output = JSON.stringify(packet);
       if (mode === 'empty') {
         packet.text = ''; packet.characters = 0;
         result.output = JSON.stringify(packet);
@@ -88,17 +101,23 @@ async function run(mode, original = large) {
   try { await bootstrap(root, [selected], true, tools, notify, value => receipts.push(value)); }
   catch (error) { failure = error; }
   assert(!fs.existsSync(path.join(directory, 'INJECTION')), 'Instruction paths must remain shell data');
-  const failed = ['stale', 'target', 'cancel', 'pending', 'metadata', 'revision', 'helper', 'always-clip', 'emit-error', 'empty'].includes(mode);
+  const failed = mode.startsWith('helper') || ['stale', 'target', 'cancel', 'pending', 'metadata', 'revision',
+    'always-clip', 'emit-error', 'empty', 'first-page', 'first-batch'].includes(mode);
   if (failed) {
     assert(failure, mode + ' must fail');
     assert.equal(receipts.length, 0, mode + ' must not report completion');
     if (mode === 'always-clip') assert.equal(readers, 2, 'One bounded small-page fallback, not a retry loop');
+    if (mode.startsWith('helper')) {
+      assert.equal(readers, 0, 'Invalid helper delivery must fail before any instruction read');
+      assert.equal(messages.length, 0);
+    }
   } else {
     assert.ifError(failure);
     assert.equal(receipts.length, 1);
     assert.equal(receipts[0].complete, true);
     verifyCoverage(messages, selected, original);
-    assert.equal(commands.filter(c => c.includes('--helper')).length, mode === 'small' ? 0 : 1);
+    assert.equal(commands.filter(c => c.includes('--helper')).length, 1);
+    assert(commands[0].includes('--helper'), 'Load the fixed runner before reading instructions');
     if (mode === 'small') assert.equal(readers, 1);
     if (mode.startsWith('clip-')) {
       assert(damaged);
@@ -109,10 +128,13 @@ async function run(mode, original = large) {
 
 (async () => {
   try {
-    for (const mode of ['small', 'large', 'clip-first', 'clip-later', 'always-clip', 'stale', 'target',
-                        'cancel', 'pending', 'metadata', 'revision', 'helper', 'emit-error', 'empty']) {
+    const modes = ['small', 'large', 'clip-first', 'clip-later', 'always-clip', 'stale', 'target',
+                   'cancel', 'pending', 'metadata', 'revision', 'helper', 'emit-error', 'empty',
+                   'helper-pending', 'helper-exit', 'helper-empty', 'helper-kind', 'helper-version',
+                   'helper-count', 'first-page', 'first-batch'];
+    for (const mode of modes) {
       await run(mode, ['small', 'empty'].includes(mode) ? '# Small\r\nPreserve 😀 and every rule.\r\n' : large);
     }
-    console.log('14 native drain cases passed');
+    console.log(modes.length + ' native drain cases passed');
   } finally { fs.rmSync(directory, {recursive: true, force: true}); }
 })().catch(error => { console.error(error); process.exitCode = 1; });
