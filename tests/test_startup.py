@@ -145,9 +145,12 @@ class StartupTests(unittest.TestCase):
         self.assertIn("read_instructions.py", context)
         command = shlex.split(context.split("`")[1])
         self.assertEqual(command[0:3], ["python3", "-I", "-B"])
+        self.assertEqual(command[-2:], ["--batch", "bootstrap"])
         result = subprocess.run(command, cwd=self.repo, capture_output=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertLessEqual(len(result.stdout), 9500)
+        self.assertLessEqual(len(result.stdout), 24000)
+        self.assertTrue(result.stdout.startswith(b"Vibe instructions: pages 1-"))
+        self.assertTrue(result.stdout.endswith(b"Selection complete.\n"))
         for path in ("clients/codex.md", "policies/00-index.md"):
             self.assertIn((PACKAGE / path).read_bytes(), result.stdout)
         self.assertFalse(any(self.base.rglob("runtime.sqlite3")))

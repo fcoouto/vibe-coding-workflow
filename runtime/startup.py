@@ -436,13 +436,13 @@ def orient(event, package, *, acquisition=None):
         "decisions. Startup supplies orientation only; it does not establish enforcement or readiness."
     )
     if event.client == "codex":
-        command = shlex.join(["python3", "-I", "-B", str(package / "scripts/read_instructions.py"), "bootstrap"])
+        command = shlex.join(["python3", "-I", "-B", str(package / "scripts/read_instructions.py"), "--batch", "bootstrap"])
         context = (
             "Vibe Coding Workflow applies to this enrolled checkout. Before task work, including independent review, "
             f"read the required client instructions and policy index through `{command}` unless their complete "
             "current text is already available in this context. Run each needed read alone: "
             "child max_output_tokens=10000; functions.exec max_output_tokens=12000. "
-            "Forward only its output; follow continuation pages. Sources: "
+            "Forward only its output; follow continuation batches. Sources: "
             f"{json.dumps(str(client_file))}, {json.dumps(str(package / 'policies/00-index.md'))}. "
             f"Read accepted project configuration at {json.dumps(str(authority_path))} and applicable "
             "project/directory instructions separately. Load only triggered policies. Reload after context loss. "
