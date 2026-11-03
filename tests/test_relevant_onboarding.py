@@ -32,6 +32,24 @@ class RelevantOnboardingTests(CanonicalBirthFixture):
         fixture.setUp()
         return fixture
 
+    def test_basic_inspection_leaves_prepared_screening_storage_untouched(self):
+        from runtime import review_storage
+        fixture = self.configuration()
+        machine = fixture.base / 'machine' / 'machine.json'
+        private = fixture.base / 'private'
+        with patch.object(review_storage, '_machine_config_path', return_value=machine):
+            self.assertTrue(review_storage.prepare_storage(private)['ok'])
+            before = {str(path.relative_to(private)): hashlib.sha256(path.read_bytes()).hexdigest()
+                      for path in private.rglob('*') if path.is_file()}
+            record = fixture.project_record(files=['README.md', 'config.json'])
+            record['project_scope']['inspection_scope'] = 'relevant'
+            for _ in range(2):
+                report = onboarding.inspect_project(fixture.repo, fixture.directory, record)
+                self.assertEqual({str(path.relative_to(private)): hashlib.sha256(path.read_bytes()).hexdigest()
+                                  for path in private.rglob('*') if path.is_file()}, before)
+                self.assertNotIn('screening', report)
+                self.assertTrue(all(row['scope'].endswith('/proposal') for row in report['blockers']), report)
+
     def test_large_unrelated_repository_inspect_record_apply_and_undo(self):
         fixture = self.configuration()
         unrelated = fixture.repo / 'unrelated'
