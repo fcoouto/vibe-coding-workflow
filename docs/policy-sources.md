@@ -26,6 +26,10 @@ Representative instruction paths for this slice: (1) basic enrollment loads the 
 
 The standalone basic file-authoring scope may inspect relevant inputs and exact planned effect/evidence paths without a whole-checkout snapshot. Preserve applicable instruction and target preimages, label the snapshot partial, and keep command checks native. This inspection choice changes neither the complete Toolkit component assessment nor permissions, managed authority or runtime requirements for operations that actually select them.
 
+### Onboarding integration and local guidance correction · 3 November 2026
+
+The user requested correction after Opus received documentation setup without startup registration, and its generated security guidance required an upstream prompt during routine review. [Client startup integration](../policies/10-project-onboarding.md#client-startup-integration) now connects basic onboarding to the selected client and shared startup contracts, preserving startup-only configuration, existing managed controls, trust and inspect-only limits. [Apply compatible changes](../policies/10-project-onboarding.md#apply-compatible-changes) routes generated guidance to complete installed local procedures; upstream links remain authoring provenance. [Completion checks](../policies/10-project-onboarding.md#verify-and-finish) separate documents, registration/trust, handler execution and native-session delivery, and exercise representative instruction paths. This corrects the minimal-default loading path without making managed activation or a maintainer campaign mandatory. The [validation record](workflow-simplification-validation.md#onboarding-regression-checks--3-november-2026) distinguishes behavioral checks from native client execution.
+
 ## Reviewed sources
 
 These contracts were checked against Toolkit revision `790a895304e0c08b70a5b215c9d334f1c86b816c`. This records the reviewed basis, not a claim that it is still the latest revision.
@@ -205,6 +209,31 @@ separates existing runtime-bound synchronization from ordinary supported display
 controls without requiring runtime activation. Both preserve manual pauses and
 immutable creation markers. This instruction change neither enables Workstreams
 features nor qualifies live title delivery.
+
+### Implementation Thread Naming and status placement · 3 November 2026
+
+The user clarified that automatic Thread Naming serves all implementation chats,
+including solo work, while question-only, exploratory and planning chats remain
+untouched even with native delegation. They selected Option 2: five meter cells,
+one space, the exact uppercase status, then family/member and stable topic.
+This supersedes the delegation-only activation above; it is a user-authorized
+presentation decision, not an added upstream Toolkit requirement.
+
+[Task Planning](../policies/02-task-planning.md) routes the implementation boundary
+to the canonical [naming contract](../clients/workstreams-naming.md).
+[Agent Delegation](../policies/03-agent-delegation.md) and the
+[native contract](../clients/delegation.md) apply that eligibility to supporting
+children. The [title procedure](../clients/workstreams-titles.md) preserves manual
+ownership, topic edits, explicit resumption, pending delivery and native identity
+for both runtime-bound and ordinary native work. Solo work acquires no managed
+task prerequisite. Original runtime readers and active pins remain intact;
+recognizing saved status-last presentation permits reconciliation during an
+authorized update, not a bulk rename or silent runtime migration.
+
+Instruction-path review covers solo implementation, questions, planning with and
+without workers, implementation review, follow-up questions after completion and
+manual overrides. Package checks, instruction observations and installed native
+execution remain separate evidence; this source map claims no live delivery.
 
 ## Workstreams main-runtime port · 1 November 2026
 

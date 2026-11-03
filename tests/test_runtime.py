@@ -406,23 +406,35 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("directory", output.get("systemMessage", "").lower())
         self.assertNotIn("permissionDecision", str(output))
 
-    def test_runtime_startup_never_emits_an_oversized_context(self):
+    def test_basic_startup_ignores_oversized_native_identity(self):
         self.canonical()
+        original = {str(p): p.read_bytes() for p in self.scope.runtime.state_dir.rglob("*") if p.is_file()}
         payload = {"hook_event_name": "SessionStart", "source": "startup", "cwd": str(self.repo),
-                   "session_id": "word " * 160}
+                   "session_id": "session-1"}
+        normal = self.invoke("SessionStart", payload)
+        payload["session_id"] = "word " * 160
         output = self.invoke("SessionStart", payload)
-        self.assertIn("context limit", output.get("systemMessage", ""))
-        self.assertNotIn("applies to this enrolled checkout", str(output))
+        self.assertEqual(output, normal)
+        context = output["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("applies to this enrolled checkout", context)
+        self.assertNotIn(payload["session_id"], context)
+        self.assertLessEqual(len(context.split()), 150)
+        from tests.fixture_canonical_birth import test_acquisition
+        with self.assertRaisesRegex(startup.StartupError, "context limit"):
+            startup.orient(codex.normalize(payload), PACKAGE, acquisition=test_acquisition(self.scope))
+        self.assertEqual(original, {str(p): p.read_bytes() for p in self.scope.runtime.state_dir.rglob("*") if p.is_file()})
 
-    def test_runtime_startup_adds_only_bounded_local_pointer_and_native_identity(self):
+    def test_enrolled_runtime_startup_keeps_basic_guidance_and_state_unchanged(self):
         self.canonical()
         original = {str(p): p.read_bytes() for p in self.scope.runtime.state_dir.rglob("*") if p.is_file()}
         payload = {"hook_event_name": "SessionStart", "source": "startup", "cwd": str(self.repo),
                    "session_id": "session-1"}
         output = self.invoke("SessionStart", payload)
         context = output["hookSpecificOutput"]["additionalContext"]
-        self.assertIn(str(self.scope.runtime.state_dir / "runtime.sqlite3"), context)
-        self.assertIn("session-1", context)
+        self.assertIn(str(PACKAGE / "scripts/read_instructions.py"), context)
+        self.assertIn(str(self.repo / startup.PROJECT_FILE), context)
+        self.assertNotIn(str(self.scope.runtime.state_dir / "runtime.sqlite3"), context)
+        self.assertNotIn("session-1", context)
         self.assertLessEqual(len(context.split()), 150)
         self.assertEqual(original, {str(p): p.read_bytes() for p in self.scope.runtime.state_dir.rglob("*") if p.is_file()})
 

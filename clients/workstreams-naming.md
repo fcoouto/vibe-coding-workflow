@@ -1,16 +1,26 @@
-# Names identify the parent and its children
+# Thread Naming
 
 For adoption, event repair and manual edits, read [title synchronization](workstreams-titles.md).
 
-## Automatic native delegation naming
+## Automatic implementation naming
 
-Apply this convention automatically to the coordinator and its native children,
-including independent reviewers, whenever native delegation is used. No separate
-naming request or enabled Workstreams feature is required. This is display
-metadata handling; it does not activate managed task controls.
+Activate title synchronization immediately before the first authorized
+implementation action, including a test-first change or implementation-worker
+dispatch. A request such as “Fix this bug” needs no later “Implement it” phrase.
+Apply this to solo work and delegated work, regardless of Workstreams preferences
+or runtime activation. Question-only, exploratory and planning chats do not
+activate naming, even when they delegate work.
 
-Before dispatch, reserve or reuse the parent's family code. Allocate the next
-unused child ordinal only for a new native context in the existing task plan.
+Once active, keep naming through tests, review, fixes, waits and integration.
+Native children supporting that implementation, including read-only investigators
+and independent reviewers, are eligible. A follow-up question alone does not
+reopen a completed task. Explicit naming-only requests remain supported without
+starting implementation. Naming changes display metadata only; it does not
+activate managed task controls.
+
+At activation, reserve or reuse the parent's family code even when no children
+exist. Before dispatch, allocate the next unused child ordinal only for a new
+eligible native context in the existing task plan.
 After the native tool returns the actual child identity, record that identity
 against its ordinal and adopt
 the display title through the title procedure. Keep the prepared native
@@ -21,24 +31,25 @@ Check existing title ownership before adoption or an update. Preserve known
 manual titles and paused synchronization; do not configure again or resume merely
 because another worker starts or a feature preference changes. The title
 procedure owns manual-edit reconciliation for both runtime-bound and ordinary
-native work. Touch only the current delegation family, not unrelated chats. If
+native work. Touch only the current implementation family or explicitly requested
+titles, not unrelated chats. If
 title controls or ownership observations are unavailable, report the naming
 limitation without guessing a title, identity or successful update.
 
 Use this display title, with exactly five meter cells and one ASCII space
-between the meter and family code:
+between the meter and status:
 
 ```text
-<meter> [W<number>] <P|C<number>> · <short_topic> · <STATUS>
+<meter> <STATUS> · [W<number>] <P|C<number>> · <short_topic>
 ```
 
 ```text
-▰▰▱▱▱ [W1] P · Thread naming · WORKING
-▰▰▰▰▰ [W1] C1 · Naming rules · DONE
-▰▰▰▰▱ [W1] C2 · Status tags · REVIEW
-▰▰▰▱▱ [W1] C3 · Search support · BLOCKED
-▰▰▰▱▱ [W1] C4 · Client check · WAITING
-▱▱▱▱▱ [W2] P · Another workstream · TRIAGE
+▰▰▱▱▱ WORKING · [W1] P · Thread naming
+▰▰▰▰▰ DONE · [W1] C1 · Naming rules
+▰▰▰▰▱ REVIEW · [W1] C2 · Status tags
+▰▰▰▱▱ BLOCKED · [W1] C3 · Search support
+▰▰▰▱▱ WAITING · [W1] C4 · Client check
+▱▱▱▱▱ WORKING · [W2] P · Solo fix
 ```
 
 The literal brackets enclose the shared family code. `P` identifies the parent;
@@ -76,7 +87,7 @@ claiming a shared namespace.
 The intended search keys are `[W1]` for a family and `[W1] C` for its children.
 Verify literal matching on the current client before promising those search results;
 search behavior and proportional fonts may prevent exact filtering or alignment.
-Keep topics short so trailing statuses remain visible. Shorten only standard
+Keep topics short and recognizable. Shorten only standard
 activity words: `Implementation` becomes `Impl.` and `Refactoring` becomes
 `Refactor`, regardless of original capitalization. Keep task-specific identifying
 words in full. Leave `Review`, `Test`, `Fix`, family/member codes and statuses
@@ -85,7 +96,7 @@ when needed. Reviewer topics start with `Review`.
 
 ## Status and accepted progress
 
-Use exactly one uppercase status at the end of every display title:
+Use exactly one uppercase status immediately after the meter:
 
 | Status | Use when |
 | --- | --- |
@@ -109,7 +120,8 @@ counting and may reduce the meter or reopen a `DONE` thread.
 
 Fill `▰` cells from the left and use `▱` for remaining cells. Each filled cell
 represents a completed 20% step; round down and cap unfinished work at four cells.
-Use `▱▱▱▱▱` until there is a measurable plan. Initial status is `TRIAGE`.
+Use `▱▱▱▱▱` until there is a measurable plan. At adoption, use the actual phase;
+newly started implementation uses `WORKING`, not an automatic `TRIAGE` reset.
 Reserve `▰▰▰▰▰` for verified `DONE`, keeping both the full meter and that label.
 Show no numeric percentage or `% done`. Status alone sets no intermediate progress:
 `REVIEW` is not automatically four cells. `BLOCKED`, `WAITING` and `PAUSED` retain

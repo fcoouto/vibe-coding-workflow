@@ -51,7 +51,7 @@
       ]
     },
     "clients/delegation.md": {
-      "sha256": "80410c0617134568963d9a22237edca4169d5843ca103c0bb6fb1627f9105a38",
+      "sha256": "5e11064b775155ce419a57a2b48e8b94087a9bc4b83716969d48cca6de9798ab",
       "ranges": [
         [
           1,
@@ -207,11 +207,15 @@
       ]
     },
     "clients/workstreams-naming.md": {
-      "sha256": "fefa5c86ade385b6ab2697378f701c5a30e52279242ec5ba23e9c151077a2418",
+      "sha256": "ac9defa94eb9dd0c20d7ff587dbaf4e77dc42880d422f1838b202c0584f6e1e3",
       "ranges": [
         [
           1,
-          131
+          142
+        ],
+        [
+          143,
+          143
         ]
       ]
     },
@@ -247,7 +251,7 @@
       ]
     },
     "clients/workstreams-titles.md": {
-      "sha256": "bafdcb4488cc84944cf61a818ea038bf163f446afc98a1f3006a4a9641120e07",
+      "sha256": "28f3f776b60115646bac2546bda907c8bcbcf9244afec30ecd711fe96b4ef028",
       "ranges": [
         [
           1,
@@ -255,7 +259,7 @@
         ],
         [
           143,
-          162
+          169
         ]
       ]
     },
@@ -287,23 +291,23 @@
       ]
     },
     "policies/02-task-planning.md": {
-      "sha256": "32baf4e0de299ee37880c200776f3fffc2f0828ffe209981b60d5a81988ae619",
+      "sha256": "155e375a5bd450743d7ee831a6759a2ad49506500b9275ca872197efc95e6f46",
       "ranges": [
         [
           1,
-          33
+          37
         ]
       ]
     },
     "policies/03-agent-delegation.md": {
-      "sha256": "f026e35796c15b5a77ae21643240edaaf46c34b6d10efebef2c68fb3220c4dbf",
+      "sha256": "369ce393a9de036e1001f292a87ac6eb32d51dc8bdfbc774869ba15e5a2d4af0",
       "ranges": [
         [
           1,
-          43
+          41
         ],
         [
-          44,
+          42,
           58
         ]
       ]
@@ -367,15 +371,15 @@
       ]
     },
     "policies/10-project-onboarding.md": {
-      "sha256": "eb44d2aeae50a77255cf425b08b06fb1879efa2ecf6d6f4c7eb829446e6abf13",
+      "sha256": "4ecd701b405870fe14b4864058ed2dab8a4b10b47b7d9664b32a0671fec1c4f5",
       "ranges": [
         [
           1,
-          55
+          52
         ],
         [
-          56,
-          56
+          53,
+          67
         ]
       ]
     },
@@ -477,7 +481,7 @@
       ]
     },
     "skills/onboard-my-project/references/procedure.md": {
-      "sha256": "4a742dff477641f402cce5463eda93de3db8c1e6776bea32c8dbd63b688dadfa",
+      "sha256": "a0628f8482d9fcc20a9a1eabf8076251fc58412e96be00efdde11002001813f8",
       "ranges": [
         [
           1,

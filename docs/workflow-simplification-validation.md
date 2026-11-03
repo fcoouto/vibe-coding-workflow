@@ -4,6 +4,44 @@ These checks describe local instruction routing and disposable package behavior.
 They do not establish native execution, installed plugin behavior, or production
 merge enforcement.
 
+## Onboarding regression checks · 3 November 2026
+
+The observed baseline completed documentation-only onboarding without the
+registration needed to supply startup context. Its generated quality guidance
+also directed routine work to upstream prompt blocks. The correction routes
+onboarding through the selected client/startup/integration contracts and routes
+generated project guidance to complete local policies.
+
+A fresh native worker, given the entry skill and scenario facts without the
+expected answer, followed these instruction paths:
+
+| Scenario | Observed interpretation | Unselected procedures |
+| --- | --- | --- |
+| Planning-only Codex project, trusted hooks, no registration | Require scoped startup-only membership and representative startup checks; documents alone do not complete integration | Managed runtime, delivery, external routes and qualification campaigns |
+| Author future security-review guidance | Resolve and load the complete installed local security procedure; upstream links are authoring provenance | Remote prompts and unrelated advanced procedures |
+| Inspect-only project with existing managed controls and unavailable trust | Make no changes, preserve active controls, report the affected integration evidence gap | Activation, runtime mutation, delivery and qualification campaigns |
+
+A focused follow-up resolved the corrected project security and maintenance
+triggers to the installed local contracts, and confirmed the explicit Tool
+Integrations route. Independent review closed the remaining maintenance-path
+finding. Review also clarified mandatory independent review and conditional
+improvement trials in the corrected project guidance.
+
+Validation: `python3 -B scripts/validate.py` and the skill-creator validator passed;
+the entry point remains 130 words. The frozen candidate passed all 92 tests in
+`tests.test_startup`, `tests.test_file_configuration` and
+`tests.test_relevant_onboarding`. An earlier in-place run had one fixture failure,
+`Scoped executing package changed`, while source files were changing; the frozen
+rerun removed that interference. Runtime code was not changed for this correction.
+All nine new local link targets/anchors and changed-file whitespace checks passed.
+The source map retains one unrelated pre-existing unresolved pilot-plan anchor;
+it is outside the changed instruction paths.
+
+These are instruction walkthroughs, local-path checks and disposable software
+tests. They do not establish fresh Desktop loading, native hook delivery or
+enforcement. Installation, hook approval and native execution require separate
+observations.
+
 ## Representative instruction paths
 
 | Task | Required local procedure | Material left unloaded | Acceptance boundary |

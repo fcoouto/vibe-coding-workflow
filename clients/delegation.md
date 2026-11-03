@@ -2,7 +2,7 @@
 
 Read this contract only when preparing, observing or recovering native delegated work. Apply [Agent Delegation](../policies/03-agent-delegation.md) for execution choice, authorization, worker selection, briefs, ownership, review and retry decisions. Use [task runtime](runtime.md#opt-in) for the approved shared state authority. Use [evidence](evidence.md) for native review admission, review quality, accepted checks and completion. Direct checks and coordinator resource claims do not need native guidance. Startup alone needs none of this procedure.
 
-Always load the [display naming rules](workstreams-naming.md) for native parent/child titles, including ordinary delegation and review. Follow their automatic adoption and [title synchronization](workstreams-titles.md) procedures without changing prepared creation markers or launch permissions.
+Load the [display naming rules](workstreams-naming.md) for native parent/child eligibility, including ordinary delegation and review. Follow their implementation trigger and applicable [title synchronization](workstreams-titles.md) procedure without changing prepared creation markers or launch permissions.
 
 ## Observe the route and select settings
 
