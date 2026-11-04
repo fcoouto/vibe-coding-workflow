@@ -46,6 +46,26 @@ def hook(*, text=CONTEXT, provenance=None):
 
 
 class NativeBehaviorRecordTests(unittest.TestCase):
+    def test_canary_rejects_a_path_codex_would_trim(self):
+        from runtime.setup_observation import _public_canary_patch
+        root = Path('/public/disposable')
+        for suffix in (' ', '\t', '\u00a0'):
+            with self.subTest(suffix=suffix), self.assertRaises(startup.StartupError):
+                _public_canary_patch(dict(canary=str(root / ('public-canary.txt' + suffix)),
+                    before_sha256='a'*64, patch=PATCH.replace('public-canary.txt', 'public-canary.txt' + suffix)), root)
+
+    def test_canary_readback_uses_the_first_native_line_ending(self):
+        from runtime.setup_observation import _public_canary_patch
+        root = Path('/public/disposable')
+        descriptor = dict(canary=str(root / 'public-canary.txt'), before_sha256='a'*64, patch=PATCH)
+        self.assertEqual(_public_canary_patch(descriptor, root, readback='keep\r\nbefore\nlast'),
+            'keep\r\nafter\r\nlast\r\n')
+        self.assertEqual(_public_canary_patch(descriptor, root, readback='before\r'),
+            'after\r')
+        context_patch = descriptor | dict(patch=PATCH.replace('+after\n', '+after\n context\n'))
+        self.assertEqual(_public_canary_patch(context_patch, root, readback='keep\r\nbefore\ncontext\n'),
+            'keep\r\nafter\r\ncontext\n')
+
     def api(self, module, name):
         value = getattr(module, name, None)
         self.assertIsNotNone(value, f'Native record API missing: {name}')
@@ -401,6 +421,7 @@ class NativeBehaviorOwnerTests(unittest.TestCase):
             '  else:\n'
             '   assert decision["permissionDecision"]=="deny"\n'
             '   text="Command blocked by PreToolUse hook: "+decision["permissionDecisionReason"]+". Command: "+command\n'
+            '  if data.get("child_patch"): text=[dict(type="input_text",text=text)]\n'
             '  records.extend([dict(timestamp="2026-11-02T10:00:00Z",type="response_item",payload=dict(type="custom_tool_call_output",call_id=payload["tool_use_id"],output=text)),dict(timestamp="2026-11-02T10:00:00Z",type="event_msg",payload=dict(type="task_complete",turn_id=payload["turn_id"]))])\n'
             '  with Path(data["rollout"]).open("ab") as stream: stream.write(b"".join(json.dumps(value).encode()+b"\\n" for value in records))\n'
             '  print(json.dumps(dict(type="thread.started",thread_id=data["thread_id"])),flush=True);sys.exit(0)\n'
@@ -782,11 +803,20 @@ class NativeBehaviorOwnerTests(unittest.TestCase):
             self.assertTrue(native['reconciliation']['descendants_stopped'])
 
     def test_real_parent_managed_pre_and_post_use_actual_owner_receipts(self):
-        import copy
+        self._managed_hook_receipts(child_guard=False)
+
+    def test_real_child_patch_requires_exact_observed_turn_and_claim(self):
+        self._managed_hook_receipts(child_guard=True)
+
+    def test_child_patch_receipt_rejects_a_different_tool_at_the_same_call(self):
+        self._managed_hook_receipts(child_guard=True, wrong_post_tool=True)
+
+    def _managed_hook_receipts(self, *, child_guard, wrong_post_tool=False):
         import inspect
         import os
         import subprocess
         import sys
+        import time
         from datetime import datetime, timezone
         from types import SimpleNamespace
         from unittest.mock import patch
@@ -810,6 +840,20 @@ class NativeBehaviorOwnerTests(unittest.TestCase):
         def fake_transport(name, *args, **kwargs):
             return str(original['executable']) if name=='codex' else which(name, *args, **kwargs)
         with patch.dict(os.environ, CODEX_HOME=str(original['home'])), patch.object(codex.shutil, 'which', side_effect=fake_transport):
+            workflow = [sys.executable, '-I', '-B', str(state.PACKAGE/'scripts/workflow.py'), 'codex']
+            if child_guard and not wrong_post_tool:
+                ordinary = dict(hook_event_name='PreToolUse', session_id='ordinary-session', cwd=str(self.fixture.repo),
+                    turn_id='ordinary-turn', tool_name='apply_patch', tool_use_id='ordinary-call',
+                    tool_input=dict(command=PATCH))
+                with state._database(scope) as db:
+                    generation = db.execute('select generation from checkouts').fetchone()[0]
+                for kind in ('PreToolUse', 'PostToolUse', 'PostToolUse'):
+                    event = ordinary if kind == 'PreToolUse' else ordinary | dict(hook_event_name=kind, tool_response='Done')
+                    result = subprocess.run([*workflow, kind], input=json.dumps(event), text=True, capture_output=True,
+                        check=True, timeout=5)
+                    self.assertEqual(result.stdout, '')
+                with state._database(scope) as db:
+                    self.assertEqual(db.execute('select generation from checkouts').fetchone()[0], generation + 1)
             state.start_task(scope, identity|dict(mode='editable', decision_ref='user:qualification',
                 attempt_ref=allocation['reference']))
             native = AdmissionTests('runTest')
@@ -835,22 +879,24 @@ class NativeBehaviorOwnerTests(unittest.TestCase):
                     limitations=['No actual native qualification'], source_ids=['official'])])
             delegation.record_guidance(scope, native.cache_request|dict(token=claim['token'], generation=claim['generation'],
                 coordinator_ref='fixture:independently-verified-software-guidance', guidance=guidance))
-            claims = [dict(kind='path', key=str(original['canary']), mode='read')]
+            claims = [dict(kind='path', key=str(original['canary']), mode='write' if child_guard else 'read')]
             plan = native.plan_value(jobs=[dict(id='edit', role='worker', claims=claims, dependencies=[], max_attempts=1)])
             plan['limits'].update(max_attempts=2, max_resource_units=1, max_parallel_workers=1, host_capacity=1,
                 deadline=int(allocation['limits']['deadline']))
             native.plan(plan)
-            request = native.prepare_request(brief=dict(objective='Observe canary without writing it', context='Parent owns qualification tools',
-                instructions=['Read only; preserve original ownership'], files=['public-canary.txt'], resources=claims, dependencies=[],
+            request = native.prepare_request(brief=dict(objective='Observe the approved public canary', context='Preserve original qualification ownership',
+                instructions=['Use only the assigned canary scope'], files=['public-canary.txt'], resources=claims, dependencies=[],
                 acceptance=['Report only observed facts'], checks=['unit'], self_review='Read assignment and stop conditions',
-                stop_conditions=['Do not write; retain lifecycle uncertainty']))
+                stop_conditions=['Retain lifecycle uncertainty']))
             request['selection'].update(model='fixture-model', effort='high')
             prepared = delegation.prepare_assignment(scope, request)
-            binding = delegation.prepared_native_assignment(scope, prepared['attempt_id'])
             child = 'fixture-child-'+prepared['attempt_id']
             spawn_turn, spawn_item, child_turn = 'actual-parent-spawn-turn', 'actual-spawn-item', 'actual-child-turn'
             data = json.loads(original['settings'].read_bytes())
-            data['threads'][child] = dict(id=child, cwd=str(self.fixture.repo), source=dict(subAgent=dict(thread_spawn=dict(parent_thread_id=parent))),
+            child_rollout = original['home']/'child-rollout.jsonl'
+            child_rollout.write_bytes(encoded([row('session_meta', dict(id=child, cwd=str(self.fixture.repo)))]))
+            child_rollout.chmod(0o600)
+            data['threads'][child] = dict(id=child, cwd=str(self.fixture.repo), path=str(child_rollout), source=dict(subAgent=dict(thread_spawn=dict(parent_thread_id=parent))),
                 parentThreadId=parent, originator='codex_exec', cliVersion='0.165.0', modelProvider='fixture-provider',
                 model='fixture-model', reasoningEffort='high')
             data['responses']['thread/items/read'] = dict(data=[dict(turnId=spawn_turn, item=dict(id=spawn_item,
@@ -858,6 +904,19 @@ class NativeBehaviorOwnerTests(unittest.TestCase):
                 receiverThreadIds=[child], prompt=prepared['prompt'], model='fixture-model', reasoningEffort='high'))])
             data['responses']['thread/turns/list'] = dict(data=[dict(id=child_turn, status='inProgress', error=None)])
             original['settings'].write_text(json.dumps(data))
+            payload = dict(hook_event_name='PreToolUse', session_id=child if child_guard else parent, cwd=str(self.fixture.repo),
+                turn_id=child_turn if child_guard else 'actual-parent-pre-turn',
+                tool_name='apply_patch', tool_use_id='actual-pre-call', tool_input=dict(command=PATCH),
+                model='fixture-model', permission_mode='default',
+                transcript_path=str(child_rollout if child_guard else original['rollout']))
+
+            def assert_denied(event):
+                result = subprocess.run([*workflow, 'PreToolUse'], input=json.dumps(event),
+                    text=True, capture_output=True, check=True, timeout=5)
+                self.assertEqual(json.loads(result.stdout)['hookSpecificOutput']['permissionDecision'], 'deny')
+
+            if child_guard:
+                assert_denied(payload)
             observed = delegation.observe_assignment(scope, native.request(attempt_id=prepared['attempt_id'],
                 parent_turn_id=spawn_turn, spawn_item_id=spawn_item))
             self.assertEqual(observed['attempt_id'], prepared['attempt_id'])
@@ -867,33 +926,61 @@ class NativeBehaviorOwnerTests(unittest.TestCase):
                 before = evidence._read(scope, assignment['body']['qualification_before'], db=db)
             self.assertEqual(before['identity']['session_id'], parent)
             before_bytes = original['rollout'].read_bytes()
-            workflow = [sys.executable, '-B', str(state.PACKAGE/'scripts/workflow.py'), 'codex']
-            payload = dict(hook_event_name='PreToolUse', session_id=parent, cwd=str(self.fixture.repo),
-                turn_id='actual-parent-pre-turn', tool_name='apply_patch', tool_use_id='actual-parent-pre-call',
-                tool_input=dict(command=PATCH))
-            data.update(tool_hook_command=[*workflow, 'PreToolUse'], tool_hook_payload=payload)
-            original['settings'].write_text(json.dumps(data))
-            subprocess.run([str(original['executable']), 'exec', '--json', 'software-parent-pre'], cwd=self.fixture.repo,
-                check=True, capture_output=True, timeout=10)
-            self.assertTrue(original['rollout'].read_bytes().startswith(before_bytes))
             def task_ref(event):
-                return native.request(attempt_id=prepared['attempt_id'], parent_turn_id=spawn_turn,
+                request = native.request(attempt_id=prepared['attempt_id'], parent_turn_id=spawn_turn,
                     spawn_item_id=spawn_item, turn_id=event['turn_id'], call_id=event['tool_use_id'])
-            pre = codex.observe_managed_case(scope, task_ref(payload), allocation['reference'], 'pre-tool-enforcement')
-            pre_content = doctor._native_witness_content(pre)
-            self.assertEqual(len(pre_content['observations']['pre-tool-enforcement']), 4)
-            self.assertEqual(original['canary'].read_text(), 'before\n')
-            state.update_task(scope, native.request(state='WORKING', reason='Observe successful parent tool completion',
-                reference='user:qualification'))
-            payload = dict(payload, turn_id='actual-parent-post-turn', tool_use_id='actual-parent-post-call')
+                return request | dict(stream='child') if child_guard else request
+
+            if child_guard:
+                state.update_task(scope, native.request(state='WORKING', reason='Run the claimed child canary patch',
+                    reference='user:qualification'))
+                for changes in (dict(session_id='foreign-child'), dict(turn_id='foreign-turn'),
+                        dict(tool_input=dict(command=PATCH.replace('public-canary.txt', 'unclaimed.txt'))),
+                        dict(tool_input=dict(command=PATCH.replace('+after', '+different'))),
+                        dict(tool_input=PATCH)):
+                    with self.subTest(changes=changes):
+                        assert_denied(payload | changes)
+                self.assertEqual(original['canary'].read_text(), 'before\n')
+
+                def expire_resolution(_scope, _db, _event, *, budget):
+                    time.sleep(max(0, budget['deadline'] - time.monotonic()))
+                    raise startup.StartupError('fixture ownership lookup expired')
+
+                with patch.object(delegation, '_qualified_child_patch', side_effect=expire_resolution) as resolver:
+                    result = state.process_event(scope, codex.normalize_runtime(payload), deadline=time.monotonic() + 2)
+                resolver.assert_called_once()
+                self.assertEqual(result.action, 'deny')
+                data.update(rollout=str(child_rollout), child_patch=True)
+            else:
+                data.update(tool_hook_command=[*workflow, 'PreToolUse'], tool_hook_payload=payload)
+                original['settings'].write_text(json.dumps(data))
+                subprocess.run([str(original['executable']), 'exec', '--json', 'software-parent-pre'], cwd=self.fixture.repo,
+                    check=True, capture_output=True, timeout=10)
+                self.assertTrue(original['rollout'].read_bytes().startswith(before_bytes))
+                pre = codex.observe_managed_case(scope, task_ref(payload), allocation['reference'], 'pre-tool-enforcement')
+                pre_content = doctor._native_witness_content(pre)
+                self.assertEqual(len(pre_content['observations']['pre-tool-enforcement']), 4)
+                self.assertEqual(original['canary'].read_text(), 'before\n')
+                state.update_task(scope, native.request(state='WORKING', reason='Observe successful parent tool completion',
+                    reference='user:qualification'))
+                payload = dict(payload, turn_id='actual-parent-post-turn', tool_use_id='actual-parent-post-call')
             post = dict(payload, hook_event_name='PostToolUse', tool_response='Success. Updated the following files: M public-canary.txt')
             other = dict(post, tool_name='fixture_read', tool_use_id='actual-unrelated-post-call', tool_input={}, tool_response='Public read completed')
-            data.update(tool_hook_payload=payload, post_tool_hook_command=[*workflow, 'PostToolUse'], post_tool_hook_payload=post,
+            if wrong_post_tool:
+                post.update(tool_name='fixture_read', tool_input={})
+            data.update(tool_hook_command=[*workflow, 'PreToolUse'], tool_hook_payload=payload, post_tool_hook_command=[*workflow, 'PostToolUse'], post_tool_hook_payload=post,
                 other_post_payload=other, approved_write=dict(path=str(original['canary']),
                     before_sha256=hashlib.sha256(original['canary'].read_bytes()).hexdigest(), after='after\n'))
             original['settings'].write_text(json.dumps(data))
-            subprocess.run([str(original['executable']), 'exec', '--json', 'software-parent-post'], cwd=self.fixture.repo,
-                check=True, capture_output=True, timeout=10)
+            completed = subprocess.run([str(original['executable']), 'exec', '--json', 'software-managed-post'],
+                cwd=self.fixture.repo, capture_output=True, text=True, timeout=10)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            if wrong_post_tool:
+                with self.assertRaises(startup.StartupError):
+                    source.managed_observation_readback(scope, task_ref(payload), allocation['reference'],
+                        case_id='post-tool-handling')
+                self.assertEqual(original['canary'].read_text(), 'after\n')
+                return
             witness = codex.observe_managed_case(scope, task_ref(payload), allocation['reference'], 'post-tool-handling')
             content = doctor._native_witness_content(witness)
             self.assertEqual(len(content['observations']['post-tool-handling']), 4)
@@ -903,6 +990,20 @@ class NativeBehaviorOwnerTests(unittest.TestCase):
             self.assertEqual(actual['generation']-before['generation'], 2)
             self.assertEqual(actual['receipt']['kind'], 'PostToolUse')
             self.assertFalse(actual['receipt']['conflicted'])
+            if child_guard:
+                self.assertEqual(actual['receipt']['session_id'], child)
+                self.assertEqual(actual['receipt']['turn_id'], child_turn)
+                self.assertEqual(actual['assignment_digest'], assignment['data']['assignment']['digest'])
+                with self.assertRaises(startup.StartupError):
+                    source.managed_observation_readback(scope, task_ref(payload) | dict(turn_id='foreign-turn'),
+                        allocation['reference'], case_id='post-tool-handling')
+                state.update_task(scope, native.request(state='PAUSED', reason='Hold after canary',
+                    reference='user:qualification'))
+                replay = subprocess.run([*workflow, 'PostToolUse'], input=json.dumps(post), text=True,
+                    capture_output=True, check=True, timeout=5)
+                self.assertEqual(replay.stdout, '')
+                with state._database(scope) as db:
+                    self.assertEqual(db.execute('select generation from checkouts').fetchone()[0], actual['generation'])
             self.assertEqual(original['canary'].read_text(), 'after\n')
             with state._database(scope) as db:
                 current = next(item for item in delegation._ledger(scope, db, assignment_id=prepared['attempt_id'])

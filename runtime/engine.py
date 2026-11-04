@@ -21,6 +21,7 @@ class RuntimeEvent:
     stop_hook_active: bool | None = None
     # Conflict detection only; never substitute this digest for native identity.
     receipt_fingerprint: str | None = None
+    patch_input_fingerprint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,12 @@ class HookResult:
     event_kind: EventKind
     action: Action = "pass"
     reason: str = ""
+
+
+def patch_blocked(task):
+    return task["state"] != "WORKING" or task["mode"] != "editable" or any(
+        condition["status"] == "pending" and condition["kind"] in {"blocker", "decision"}
+        for condition in task["conditions"])
 
 
 def evaluate(event, snapshot):
@@ -59,9 +66,7 @@ def evaluate(event, snapshot):
                 task["turn_id"] = event.turn_id
                 task["turn_uncertain"] = False
         if event.tool_name == "apply_patch":
-            if task and (task["state"] != "WORKING" or task["mode"] != "editable" or any(
-                    condition["status"] == "pending" and condition["kind"] in {"blocker", "decision"}
-                    for condition in task["conditions"])):
+            if task and patch_blocked(task):
                 result = HookResult(event.kind, "deny", "Patching requires a WORKING editable bound task without applicable blockers")
     if event.kind in {"PreToolUse", "PostToolUse"}:
         stable = event.turn_id is not None and event.tool_call_id is not None and event.receipt_fingerprint is not None

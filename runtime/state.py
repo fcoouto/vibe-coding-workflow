@@ -2,7 +2,7 @@
 
 from contextlib import ExitStack, closing, contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import os
@@ -2410,12 +2410,18 @@ def process_event(scope, event, *, deadline=None):
                 selected = db.execute('select 1 from bindings where scope_id=? and client=? and session_id=?',
                     (scope_id, event.client, event.session_id)).fetchone() is not None
             task = _task(db, scope_id, event.client, event.session_id)
+            child_patch = None
+            qualification = isinstance(scope, AcceptedScope) and scope.qualification is not None
             if guarded_mutation(event) and task is None:
-                from runtime import evidence
+                from runtime import delegation, evidence
                 conflict = _unbound_patch_conflict(db, scope.repository_root, evidence._evidence_context(scope), deadline=deadline)
                 if conflict:
                     selected = True
-                    return HookResult(event.kind, 'deny', conflict)
+                    if qualification:
+                        child_patch = delegation._qualified_child_patch(scope, db, event, budget=budget)
+                    if child_patch is None:
+                        return HookResult(event.kind, 'deny', conflict)
+                    event = replace(event, receipt_fingerprint=child_patch)
             if budget is not None: _entry_budget_check(budget)
             _compatible(scope, task, budget=budget)
             if budget is not None: _entry_budget_check(budget)
@@ -2434,8 +2440,35 @@ def process_event(scope, event, *, deadline=None):
                     db.execute('update receipts set conflicted=1 where scope_id=? and client=? and session_id=? and turn_id=? and tool_call_id=? and kind=?',receipt_identity)
                 return HookResult(event.kind,'context','Terminal task remains closed; external completion freshness was observed')
             if budget is not None: _entry_budget_check(budget)
+            child_post_unbound = False
+            if task is None and qualification and event.kind == 'PostToolUse' and event.receipt_fingerprint is not None:
+                pre = db.execute("select fingerprint,conflicted from receipts where scope_id=? and client=? "
+                    "and session_id=? and turn_id=? and tool_call_id=? and kind='PreToolUse'",
+                    (*identity, event.tool_call_id)).fetchone()
+                from runtime import delegation
+                if pre is not None and pre[0].startswith(delegation._CHILD_PATCH_PRE_PREFIX):
+                    post = delegation._child_patch_fingerprint(pre[0], event.receipt_fingerprint)
+                    # Exact replay retains its original binding even after the writer stops.
+                    admitted = pre[1] == 0 and event.tool_name == 'apply_patch' and receipt == (post, 0)
+                    if not admitted and pre[1] == 0 and event.tool_name == 'apply_patch':
+                        try:
+                            admitted = delegation._qualified_child_patch(scope, db, event, budget=budget) == pre[0]
+                        except (StartupError, KeyError, TypeError):
+                            pass
+                    if admitted:
+                        event = replace(event, receipt_fingerprint=post)
+                    else:
+                        child_post_unbound = True
             result, changes = evaluate(event, dict(task=task, turn={"task_id": row[0], "continuation_consumed": row[1]} if row else None,
                                                    receipt={"fingerprint": receipt[0], "conflicted": receipt[1]} if receipt else None))
+            if guarded_mutation(event) and child_patch is not None and changes.get('poison_receipt'):
+                result = HookResult(event.kind, 'deny', 'Child patch receipt conflicts with its original assignment')
+            if child_post_unbound:
+                if "receipt" in changes or receipt is not None:
+                    changes["poison_receipt"] = True
+                    if receipt is not None and not receipt[1]:
+                        changes["generation_delta"] = 1
+                result = HookResult(event.kind, 'context', 'Child patch completion has no exact admitted pre-tool receipt')
             if guarded_mutation(event) and task is not None and result.action != 'deny':
                 admission = _capability(scope, task, 'task-patch')
                 from runtime import delegation

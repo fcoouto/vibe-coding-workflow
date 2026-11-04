@@ -10,6 +10,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import stat
 import time
 import tomllib
@@ -756,7 +757,10 @@ def _merge_managed_witness(content,reference,identity,witness):
         d3._require(case in ('pre-tool-enforcement','post-tool-handling') and len(proofs)==4,
             'Unsupported managed behavior source')
         before_ref,after_ref=proofs[-2:]
-        path,separator,selector=after_ref['reference'].partition('#managed-observation:')
+        path,separator,selector=after_ref['reference'].partition('#managed-child-observation:')
+        child_stream=bool(separator)
+        if not child_stream:
+            path,separator,selector=after_ref['reference'].partition('#managed-observation:')
         assignment_id,split,call_id=selector.partition(':')
         d3._require(separator and split and path==str(state._path(scope)),'Managed readback belongs to another original authority')
         with state._database(scope) as db:
@@ -769,6 +773,8 @@ def _merge_managed_witness(content,reference,identity,witness):
             task_ref={key:task[key] for key in ('client','session_id','task_id','scope_ref')}
             task_ref.update(expected_revision=task['revision'],attempt_id=assignment_id,call_id=call_id,turn_id=task['turn_id'],
                 **{key:receipt[key] for key in ('parent_turn_id','spawn_item_id')})
+            if child_stream:
+                task_ref.update(stream='child',turn_id=receipt['worker_turn_id'])
         projection=managed_observation_projection(scope,task_ref,value['binding']['attempt_ref'],case_id=case)
         actual=managed_observation_readback(scope,task_ref,value['binding']['attempt_ref'],case_id=case)
         before=projection['probe']['before'];after=startup._canonical_plain(actual)
@@ -818,7 +824,8 @@ def _public_canary_patch(descriptor, repository_root, *, readback=None):
         and lines[1].startswith('*** Update File: ') and lines[2]=='@@',
         'Public canary patch requires one Update File hunk')
     relative=lines[1][len('*** Update File: '):]
-    d3._require(relative and not Path(relative).is_absolute() and '\\' not in relative
+    # Codex trims the update header before interpreting its path.
+    d3._require(relative and relative == relative.rstrip() and not Path(relative).is_absolute() and '\\' not in relative
         and all(part not in ('','.','..') for part in relative.split('/')) and root/relative==canary,
         'Public canary patch selected another file')
     hunk=lines[3:-1]
@@ -831,10 +838,26 @@ def _public_canary_patch(descriptor, repository_root, *, readback=None):
         'Public canary patch does not change original content')
     if readback is not None:
         d3._require(isinstance(readback,str) and len(readback.encode('utf-8'))<=65536,'Public canary readback exceeds its bound')
-        current='\n'+readback.removesuffix('\n')+'\n';needle='\n'+'\n'.join(original)+'\n'
+        parts=re.split(r'(\r\n|\r|\n)',readback)
+        current='\n'+'\n'.join(parts[::2]).removesuffix('\n')+'\n';needle='\n'+'\n'.join(original)+'\n'
         occurrence=current.find(needle)
         d3._require(occurrence>=0 and current.find(needle,occurrence+1)==-1,
             'Public canary patch does not match its original readback')
+        # Codex preserves existing endings and uses the first ending for changed lines.
+        ending=parts[1] if len(parts)>1 else '\n'
+        cursor=2*current.count('\n',0,occurrence)
+        updated=parts[:cursor]
+        for line in hunk:
+            if line[0]=='+':
+                updated.extend((line[1:],ending))
+            else:
+                if line[0]==' ':
+                    context_ending=parts[cursor+1] if cursor+1<len(parts) else ending
+                    updated.extend((parts[cursor],context_ending))
+                cursor+=2
+        updated.extend(parts[cursor:])
+        result=''.join(updated)
+        return result if result.endswith(('\r','\n')) else result+ending
 
 
 def _authorization_shape(value):
@@ -1165,7 +1188,10 @@ def setup_context_projection(decision, *, process):
 def _managed_source(scope,task_ref,attempt_ref,case_id):
     from runtime import state,delegation,evidence
     d3._require(isinstance(scope,startup.AcceptedScope) and case_id in BEHAVIOR_CASES,'Actual managed qualification scope is required')
-    d3._object(task_ref,('client','session_id','task_id','scope_ref','expected_revision','attempt_id','parent_turn_id','spawn_item_id','turn_id','call_id'))
+    d3._object(task_ref,('client','session_id','task_id','scope_ref','expected_revision','attempt_id','parent_turn_id','spawn_item_id','turn_id','call_id'),('stream',))
+    stream=task_ref.get('stream','parent')
+    d3._require(stream in ('parent','child') and (stream=='parent' or case_id=='post-tool-handling'),
+        'Unsupported managed tool observation stream')
     with state._database(scope) as db:
         d3._require(db is not None,'Managed source authority is unavailable')
         task=state._task(db,state._scope_id(scope),task_ref['client'],task_ref['session_id'],task_ref['task_id'])
@@ -1186,15 +1212,16 @@ def _managed_source(scope,task_ref,attempt_ref,case_id):
             and before['pins']==record['body']['pins']==state._pins(scope) and before['revision']+1==record['body']['revision']
             and before['candidate']==record['data']['candidate'] and before['plan']==record['body']['plan'],
             'Original managed before artifact changed')
-        history=delegation._worker_history(scope,record['data']['observation'],db=db)
-        observed=history[0][1] if history else None
-        d3._require(observed is not None and observed['status']=='observed' and not observed['error'] and observed['conflict'] is None,
-            'Actual native execution identity is not independently observed')
-        receipt=observed['receipt']
-        d3._require(all(receipt[key]==task_ref[key] for key in ('parent_turn_id','spawn_item_id'))
-            and receipt['parent_session_id']==record['data']['binding']['parent_session_id']==task['session_id']
-            and task_ref['turn_id']==task['turn_id'],
+        receipt=delegation._observed_worker_receipt(scope,db,record)
+        d3._require(receipt is not None and all(receipt[key]==task_ref[key] for key in ('parent_turn_id','spawn_item_id'))
+            and receipt['parent_session_id']==record['data']['binding']['parent_session_id']==task['session_id'],
             'Native selector differs from the original assignment observation')
+        if stream=='child':
+            d3._require(record['data']['role']=='worker' and receipt['worker_id']!=task['session_id']
+                and receipt['worker_turn_id'] is not None and task_ref['turn_id']==receipt['worker_turn_id'],
+                'Child selector differs from the observed worker turn')
+        else:
+            d3._require(task_ref['turn_id']==task['turn_id'], 'Parent selector differs from the managed task turn')
         binding=delegation._native_binding(record);binding.update(worker_id=receipt['worker_id'],worker_turn_id=receipt['worker_turn_id'])
         physical=evidence._managed_metadata(scope,reference,db=db)
         source=dict(reference=physical['managed']['path'],sha256=physical['managed']['sha256'])
@@ -1212,19 +1239,23 @@ def managed_observation_projection(scope,task_ref,attempt_ref, *, case_id):
     attempt=startup._canonical_plain(admission.original_attempt['attempt']);attempt.update(assignment_id=record['id'],before=before)
     return startup._canonical_freeze(dict(identity=state._accepted_identity(scope.accepted_identity),transaction_id=content['transaction_id'],
         attempt=attempt,binding=binding,
-        selectors=dict(stream='parent',**{key:task_ref[key] for key in ('parent_turn_id','spawn_item_id','turn_id','call_id')}),probe=probe,
+        selectors=dict(stream=task_ref.get('stream','parent'),**{key:task_ref[key] for key in
+            ('parent_turn_id','spawn_item_id','turn_id','call_id')}),probe=probe,
         setup_reference=startup._canonical_plain(scope.qualification['reference'])))
 
 
 def managed_observation_readback(scope,task_ref,attempt_ref, *, case_id):
-    from runtime import state
+    from runtime import state,delegation
     task,record,before,binding,_,_=_managed_source(scope,task_ref,attempt_ref,case_id)
+    child_stream=task_ref.get('stream')=='child'
+    session_id=binding['worker_id'] if child_stream else task['session_id']
+    event_identity=(state._scope_id(scope),task_ref['client'],session_id,task_ref['turn_id'],task_ref['call_id'])
     with state._database(scope) as db:
         current=state._task(db,state._scope_id(scope),task_ref['client'],task_ref['session_id'],task_ref['task_id'])
         d3._require(current==task,'Managed owner changed during independent readback')
         kind='PreToolUse' if case_id=='pre-tool-enforcement' else 'PostToolUse'
         row=db.execute('select rowid,fingerprint,conflicted from receipts where scope_id=? and client=? and session_id=? and turn_id=? and tool_call_id=? and kind=?',
-            (state._scope_id(scope),task_ref['client'],task['session_id'],task_ref['turn_id'],task_ref['call_id'],kind)).fetchone()
+            (*event_identity,kind)).fetchone()
         generation=db.execute('select generation from checkouts where scope_id=?',(state._scope_id(scope),)).fetchone()[0]
         receipt=None if row is None else dict(rowid=row[0],fingerprint=row[1],conflicted=bool(row[2]),kind=kind)
         post_count=None
@@ -1242,10 +1273,23 @@ def managed_observation_readback(scope,task_ref,attempt_ref, *, case_id):
             post_count=len(rows)
             d3._require(generation-before['generation']==post_count,'Post-tool generation includes unattributed effects')
         canary=None if before['probe'] is None else _probe_fact(startup._canonical_plain(scope.accepted_identity),before['probe']['descriptor']['canary'])
+        if child_stream:
+            from runtime.adapters.codex import patch_input_fingerprint
+            descriptor=before['probe']['descriptor']
+            pre=db.execute("select rowid,fingerprint,conflicted from receipts where scope_id=? and client=? "
+                "and session_id=? and turn_id=? and tool_call_id=? and kind='PreToolUse'",event_identity).fetchone()
+            expected=delegation._child_patch_pre_fingerprint(record['data']['assignment']['digest'],
+                patch_input_fingerprint(descriptor['patch']))
+            d3._require(pre is not None and receipt is not None and before['receipt_watermark']<pre[0]<receipt['rowid']
+                and pre[1:]==(expected,0) and not receipt['conflicted'], 'Child completion lacks its admitted pre-tool receipt')
+            d3._require(canary['readback']==_public_canary_patch(descriptor,scope.repository_root,
+                readback=before['probe']['before']['readback']), 'Child patch effect differs from the approved canary')
+            receipt.update(session_id=session_id,turn_id=task_ref['turn_id'])
         result=dict(identity=state._accepted_identity(scope.accepted_identity),attempt_ref=startup._canonical_plain(attempt_ref),
             assignment_digest=record['data']['assignment']['digest'],task_revision=current['revision'],generation=generation,receipt=receipt,canary=canary,
             post_receipts_count=post_count)
-    result['reference']=dict(reference=str(state._path(scope))+'#managed-observation:'+record['id']+':'+task_ref['call_id'],sha256=d3._digest(result))
+    fragment='#managed-child-observation:' if child_stream else '#managed-observation:'
+    result['reference']=dict(reference=str(state._path(scope))+fragment+record['id']+':'+task_ref['call_id'],sha256=d3._digest(result))
     return startup._canonical_freeze(result)
 
 

@@ -1480,6 +1480,16 @@ def _qualification_allocation(scope, task, admission, records, *, additional_att
         'Original qualification execution allocation is expired or exhausted')
 
 
+def _observed_worker_receipt(scope, db, record):
+    history = _worker_history(scope, record['data']['observation'], db=db)
+    latest = history[0][1] if history else None
+    if (latest is None or latest['status'] != 'observed' or latest['error'] is not None
+            or latest['conflict'] is not None or latest['receipt'] is None):
+        return None
+    return _worker_receipt(scope, record, latest['request'],
+        dict(receipt=latest['receipt'], result=latest['result']))
+
+
 def _qualification_event_allocation(scope, db, task, admission, event):
     if admission.mode == 'ordinary':
         return
@@ -1493,18 +1503,73 @@ def _qualification_event_allocation(scope, db, task, admission, event):
                 or data['role'] not in NATIVE_ROLES or data['status'] != 'observed'
                 or event.tool_name == 'apply_patch' and data['role'] != 'worker'):
             continue
-        history = _worker_history(scope, data['observation'], db=db)
-        latest = history[0][1] if history else None
-        if (latest is None or latest['status'] != 'observed' or latest['error'] is not None
-                or latest['conflict'] is not None or latest['receipt'] is None):
-            continue
-        receipt = _worker_receipt(scope, record, latest['request'],
-            dict(receipt=latest['receipt'], result=latest['result']))
-        if (receipt['worker_id'] == event.session_id and receipt['worker_turn_id'] == event.turn_id
-                and receipt['turn_status'] == 'inProgress'):
+        receipt = _observed_worker_receipt(scope, db, record)
+        if (receipt is not None and receipt['worker_id'] == event.session_id
+                and receipt['worker_turn_id'] == event.turn_id and receipt['turn_status'] == 'inProgress'):
             additional = 0
             break
     _qualification_allocation(scope, task, admission, records, additional_attempts=additional)
+
+
+_CHILD_PATCH_PRE_PREFIX = 'child-patch:'
+
+
+def _child_patch_fingerprint(binding, fingerprint):
+    return evidence._digest([binding, fingerprint])
+
+
+def _child_patch_pre_fingerprint(assignment_digest, patch_input):
+    return _CHILD_PATCH_PRE_PREFIX + _child_patch_fingerprint(assignment_digest, patch_input)
+
+
+def _qualified_child_patch(scope, db, event, *, budget):
+    """Resolve the original observed writer without rebinding the parent or child task."""
+    from runtime import setup_observation
+    from runtime.adapters.codex import patch_input_fingerprint
+    from runtime.engine import patch_blocked
+
+    if event.patch_input_fingerprint is None or event.cwd != scope.repository_root:
+        return None
+    scope_id = state._scope_id(scope)
+    matches = []
+    for record in _ledger(scope, db, current=True):
+        if budget is not None:
+            state._entry_budget_check(budget)
+        owner, data = record['owner'], record['data']
+        if (owner['scope_id'] != scope_id or owner['client'] != event.client
+                or owner['session_id'] == event.session_id or data['role'] != 'worker' or data['status'] != 'observed'):
+            continue
+        receipt = _observed_worker_receipt(scope, db, record)
+        if (receipt is not None and receipt['worker_id'] == event.session_id
+                and receipt['worker_turn_id'] == event.turn_id and receipt['turn_status'] == 'inProgress'):
+            matches.append(record)
+    if not matches:
+        return None
+    _require(len(matches) == 1, 'Child patch has ambiguous assignment ownership')
+    record = matches[0]
+    owner, data, body = record['owner'], record['data'], record['body']
+    task = state._task(db, scope_id, event.client, owner['session_id'])
+    _require(task is not None and task['task_id'] == owner['task_id'] and task.get('qualification_attempt')
+        and not task.get('retirement') and not patch_blocked(task), 'Child patch requires an editable working parent')
+    state._assert_open(task)
+    state._compatible(scope, task, budget=budget)
+    admission = state._capability(scope, task, 'task-patch')
+    _require(admission.mode == 'qualification', 'Child patch requires original qualification admission')
+    _qualification_allocation(scope, task, admission, _ledger(scope, db, task=task))
+    before = evidence._read(scope, body['qualification_before'], db=db)
+    probe = _qualification_before_data(before, record['id'], owner, body)['probe']
+    descriptor = state._canonical_plain(admission.original_attempt)['attempt'].get('probe')
+    _require(descriptor is not None and probe is not None and probe['descriptor'] == descriptor
+        and event.patch_input_fingerprint == patch_input_fingerprint(descriptor['patch']),
+        'Child patch differs from the approved public canary')
+    target = probe['before']['target']
+    _require(any(claim['kind'] == 'path' and claim['mode'] == 'write' and claim['path'] == target['path']
+        and claim['physical'] == [target['binding']['device'], target['binding']['inode']] for claim in data['claims']),
+        'Child patch requires the exact canary write claim')
+    if event.kind == 'PreToolUse':
+        _require(setup_observation._probe_fact(state._accepted_identity(scope.accepted_identity),
+            descriptor['canary']) == probe['before'], 'Original child canary changed before the patch')
+    return _child_patch_pre_fingerprint(data['assignment']['digest'], event.patch_input_fingerprint)
 
 
 def _admission(scope, db, task, plan, job, claims, records, request):
