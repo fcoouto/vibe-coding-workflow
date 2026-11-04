@@ -38,15 +38,15 @@
       ]
     },
     "clients/delegation-requests.md": {
-      "sha256": "622408d0630f1d87b4913f68fff9fef7320b8bb9266a02246b91a3abc8d3f57a",
+      "sha256": "38d71351577a79c072bdc0af3abf76a6f2c7d7977d38d0780fc3e477b1ec5222",
       "ranges": [
         [
           1,
-          209
+          208
         ],
         [
-          210,
-          267
+          209,
+          274
         ]
       ]
     },
@@ -140,11 +140,11 @@
       ]
     },
     "clients/evidence.md": {
-      "sha256": "f63978ee1ef375010a3a9d8b4df35849df31f5b78850bee866b2ce20a799c14f",
+      "sha256": "6aa7f74fdcc8fc1f35f58bd34139fa66041ca90d99e6390cdd92f677a16b7cf8",
       "ranges": [
         [
           1,
-          55
+          62
         ]
       ]
     },
@@ -158,11 +158,11 @@
       ]
     },
     "clients/habblaud-receiver.md": {
-      "sha256": "a38eb72df28cf9224d3c95f881d9a260a962aa8601faee38f15a5f4b9ae5609d",
+      "sha256": "4322d8b388a86f9f213efbc33433cd5bb162b05736b01f2ea9b6a9bbb728e1f8",
       "ranges": [
         [
           1,
-          86
+          90
         ]
       ]
     },
@@ -220,15 +220,15 @@
       ]
     },
     "clients/worker-visibility.md": {
-      "sha256": "a2816a6a2b0fee818f7d1ebe0482d494bf0e728ae32268f147cc507636845b89",
+      "sha256": "ebc2ac125d350f480136d604a66125daa027b489c44db7adcd3dcf99a26f5aa1",
       "ranges": [
         [
           1,
-          150
+          142
         ],
         [
-          151,
-          189
+          143,
+          222
         ]
       ]
     },
@@ -326,7 +326,7 @@
       ]
     },
     "policies/03-agent-delegation.md": {
-      "sha256": "207845786a19868fd0ebc581f7a12b4038b0e579e69e416c98cc3c388caef4c0",
+      "sha256": "ebaf470723f943689c09471e7c12138427f5dcad6efe8ca86cb6b0e2ef0fcaf2",
       "ranges": [
         [
           1,

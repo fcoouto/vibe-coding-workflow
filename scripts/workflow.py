@@ -230,6 +230,9 @@ def control_main():
                              "observe": delegation.observe_assignment, "reconcile": delegation.reconcile_assignment,
                              "coordinator": delegation.reserve_coordinator}
                 report = operation[args.delegation_action](scope, request)
+                if args.delegation_action == "prepare":
+                    from scripts.worker_visibility import prepare_managed
+                    report = prepare_managed(scope.repository_root, request.get("session_id"), report)
             if not (args.delegation_action == "status" and args.compact):
                 report = title_report(scope, client, request.get("session_id") if args.delegation_action != "status" else args.session, report)
             print(json.dumps(report))
@@ -240,6 +243,9 @@ def control_main():
                           "prepare": evidence.prepare_review, "collect": evidence.collect_review, "assess": evidence.assess_review}
             report = (evidence.evidence_status(scope, client, args.session) if args.action == "status" else
                       operations[args.review_action if args.action == "review" else args.action](scope, request))
+            if args.action == "review" and args.review_action == "prepare":
+                from scripts.worker_visibility import prepare_managed
+                report = prepare_managed(scope.repository_root, request.get("session_id"), report)
             report = title_report(scope, client, request.get("session_id") if args.action != "status" else args.session, report)
             print(json.dumps(report))
             return 0

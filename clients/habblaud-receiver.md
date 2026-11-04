@@ -72,6 +72,10 @@ matching subagent, account and parent. It must retain the original generic
 fallback for unassigned children, suppress the native parent role badge and
 reject mismatched or malformed declarations. The bundled tests cover native
 rollout and hook registration, including hook-only routed children.
+They also cover nested immediate-parent reconciliation, the bounded display
+grace for new generic children, preserved early activity and the original
+fallback when no start label arrives. Existing agents continue immediately;
+the grace never changes execution or renews on later tool events.
 
 Reconcile the existing hook after receiver deployment. Observe a real authorized
 fresh child and its first badge before claiming live delivery. Fixture tests,
