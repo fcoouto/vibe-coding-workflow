@@ -15,13 +15,13 @@ from runtime.adapters import codex
 from runtime.startup import StartupError
 
 
-def fixture_transport():
+def fixture_transport(provider='codex'):
     client = SimpleNamespace(agents=[], events=[], unavailable=False)
 
     def snapshot(account):
         if client.unavailable:
             raise OSError('offline')
-        return dict(accounts=[dict(id=account, provider='codex')],
+        return dict(accounts=[dict(id=account, provider=provider)],
                     agents=copy.deepcopy(client.agents), meta={})
 
     def event(account, value):
@@ -61,6 +61,125 @@ class VisibilityTests(unittest.TestCase):
     def publisher(self, binding=None, metadata=None):
         return self.api.publisher(self.transport, 'http://127.0.0.1:1', 'account',
             binding or self.binding, metadata or self.metadata, self.root / 'delivery.json')
+
+    def external_args(self):
+        return dict(module=self.transport, endpoint='http://127.0.0.1:1', account='account',
+                    parent='018e5cb4-73ab-7bed-ae5a-c912132405db', checkout=str(self.root),
+                    run_id='fixture-run', execution_route='openai-api',
+                    model_display_name='GPT-6.1 Sol', visibility=self.metadata | dict(role='Scout'),
+                    state_directory=self.root)
+
+    def test_external_registration_replays_exact_legacy_identity_and_canonical_label(self):
+        args = self.external_args()
+        external_id = 'e16ee46f-5dff-57a5-a771-6e5147660779'
+        receipt = self.root / f'habblaud-{external_id}.json'
+        for _ in range(2):
+            self.assertEqual(self.api.register_external(**args), dict(delivered=True))
+        self.assertEqual(self.client.events, [
+            dict(hook_event_name=name, session_id=args['parent'], agent_id=external_id,
+                 agent_type='Scout · GPT-6.1 Sol', cwd=str(self.root), **activity)
+            for name, activity in (
+                ('SubagentStart', {}),
+                ('PreToolUse', dict(tool_name='completed', tool_use_id='fixture-activity', tool_input={})),
+                ('SubagentStop', {}),
+            )
+        ])
+        saved = json.loads(receipt.read_text())
+        self.assertEqual(saved['visibility'], args['visibility'])
+        self.assertTrue(saved['stopped'])
+        self.client.agents.clear()
+        self.assertEqual(self.api.register_external(**args),
+                         dict(delivered=False, reason='visibility_unconfirmed'))
+        self.assertEqual(len(self.client.events), 3)
+
+    def test_external_registration_replays_flat_legacy_receipt_without_start(self):
+        args = self.external_args()
+        external_id = 'e16ee46f-5dff-57a5-a771-6e5147660779'
+        receipt = self.root / f'habblaud-{external_id}.json'
+        self.api.save(receipt, dict(delivered=True, agent_id=external_id, parent=args['parent'],
+                                    account=args['account'], phase='completed', observed_at=1))
+        self.assertEqual(self.api.register_external(**args),
+                         dict(delivered=False, reason='visibility_unconfirmed'))
+        self.assertEqual(self.client.events, [])
+        self.client.agents.append(dict(id='account:' + external_id, parentId='account:' + args['parent'],
+                                       role='Scout · GPT-6.1 Sol'))
+        self.assertEqual(self.api.register_external(**args), dict(delivered=True))
+        self.assertEqual([event['hook_event_name'] for event in self.client.events],
+                         ['PreToolUse', 'SubagentStop'])
+
+    def test_external_registration_preserves_conflicting_frozen_binding(self):
+        args = self.external_args()
+        external_id = 'e16ee46f-5dff-57a5-a771-6e5147660779'
+        receipt = self.root / f'habblaud-{external_id}.json'
+        binding = dict(parent=args['parent'], agent_id=external_id,
+                       label='Scout · GPT-6.1 Sol', cwd=str(self.root))
+        frozen = dict(version=1, binding=binding, visibility=args['visibility'], account=args['account'],
+                      delivered=True, started=True, stopped=True, phase='completed')
+        for change in (dict(label='Historical alias · GPT-6.1 Sol'), dict(parent=self.parent)):
+            with self.subTest(change=change):
+                self.api.save(receipt, frozen | dict(binding=binding | change))
+                before = receipt.read_bytes()
+                self.assertEqual(self.api.register_external(**args),
+                                 dict(delivered=False, reason='visibility_binding_changed'))
+                self.assertEqual(receipt.read_bytes(), before)
+        self.api.save(receipt, frozen | dict(account='other-account'))
+        before = receipt.read_bytes()
+        self.assertEqual(self.api.register_external(**args),
+                         dict(delivered=False, reason='visibility_binding_changed'))
+        self.assertEqual(receipt.read_bytes(), before)
+        self.assertEqual(self.client.events, [])
+
+    def test_external_registration_never_relabels_conflicting_receiver_binding(self):
+        args = self.external_args()
+        external_id = 'e16ee46f-5dff-57a5-a771-6e5147660779'
+        observed = dict(id='account:' + external_id, parentId='account:' + args['parent'],
+                        role='Scout · GPT-6.1 Sol')
+        for change in (dict(role='Historical alias · GPT-6.1 Sol'), dict(parentId='account:' + self.parent)):
+            with self.subTest(change=change):
+                self.client.agents = [observed | change]
+                self.assertEqual(self.api.register_external(**args),
+                                 dict(delivered=False, reason='habblaud_binding_mismatch'))
+                self.assertEqual(self.client.agents, [observed | change])
+        self.assertEqual(self.client.events, [])
+
+    def test_external_registration_is_independent_of_host_and_namespaces_actual_route(self):
+        client, module = fixture_transport(provider='second-host')
+        args = self.external_args()
+        account = 'second-account'
+        main = dict(id=account + ':' + args['parent'], kind='main', account=account, provider='second-host')
+        client.agents.append(main)
+        observed, = module.Client(args['endpoint']).snapshot(account)['agents']
+        self.assertEqual((observed['kind'], observed['account'], observed['provider']),
+                         ('main', account, 'second-host'))
+        args.update(module=module, account=account, parent=observed['id'].split(':', 1)[1])
+        for route in ('openai-api', 'second-api'):
+            self.assertEqual(self.api.register_external(**(args | dict(execution_route=route))),
+                             dict(delivered=True))
+        children = client.agents[1:]
+        self.assertEqual({agent['id'] for agent in children}, {
+            'second-account:e16ee46f-5dff-57a5-a771-6e5147660779',
+            'second-account:5e9ba79b-2747-5a01-a931-c2947ccff669',
+        })
+        self.assertTrue(all(agent['parentId'] == main['id'] for agent in children))
+
+    def test_external_registration_rejects_unsafe_inputs_without_delivery_or_receipt(self):
+        args = self.external_args()
+        unsafe = self.root / 'public'
+        unsafe.mkdir()
+        unsafe.chmod(0o755)
+        for change in (dict(parent=args['parent'] + ':other'), dict(parent=object()),
+                       dict(execution_route='openai-api:other'), dict(execution_route='../escape'),
+                       dict(execution_route='x' * 257), dict(run_id='x' * 257), dict(run_id='line\nbreak'),
+                       dict(run_id=' '), dict(model_display_name='x' * 161),
+                       dict(model_display_name='visible\nhidden'), dict(checkout='x\x00y'),
+                       dict(visibility=args['visibility'] | dict(source='private input')),
+                       dict(state_directory=unsafe)):
+            with self.subTest(change=change):
+                self.assertEqual(self.api.register_external(**(args | change)),
+                                 dict(delivered=False, reason='visibility_unavailable'))
+        self.assertEqual(self.client.events, [])
+        self.assertEqual(list(self.root.iterdir()), [unsafe])
+        self.assertEqual(list(unsafe.iterdir()), [])
 
     def test_explicit_roles_and_custom_names_are_model_independent(self):
         cases = [

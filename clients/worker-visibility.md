@@ -1,9 +1,10 @@
 # Worker roles in Habblaud
 
-Load this contract for an assignment using an already approved Habblaud
-connection. Visibility is optional and separate from task titles, resource
+Load the applicable section for native activity names or an assignment using
+an approved Habblaud connection. Visibility is optional and separate from task titles, resource
 admission, recovery and execution. Use the same declaration for ordinary and
-managed native workers, reviewers, supervisors and OpenRouter workers.
+managed native workers, reviewers, supervisors, OpenRouter workers and
+Usage Routing proposals.
 
 ## Declare before dispatch
 
@@ -19,7 +20,7 @@ specialty or D6 authority role. Supply `custom_role_name` only when explicitly
 declared. Specialty and custom name are nonblank printable text, each at most
 4,096 characters. Preserve Unicode and the exact custom name. A custom name
 appears on native workers as `Custom role name · Model Display Name`. New
-OpenRouter badges display `Role · Model Display Name`. Retain canonical role and
+external badges display `Role · Model Display Name`. Retain canonical role and
 specialty separately.
 The full label is sent in the existing display field without truncation. Report
 an unsupported label or receiver capability explicitly; the transport enforces
@@ -111,6 +112,40 @@ terminal display phase only when retiring that assignment. An authorized new
 attempt or native fallback with a real new child uses a new context with the
 same declaration and its own observed identity. A direct coordinator fallback
 has no new child to register.
+
+## External routes in chat and Habblaud
+
+When preparing the task name of a real native supervisor for an authorized
+external route, append the route suffix before recording the assignment or
+dispatching the supervisor. Codex Desktop renders underscores as spaces in
+native activity names.
+
+| Route | Native task name example | Activity label |
+| --- | --- | --- |
+| OpenRouter | `review_results_via_openrouter` | `Review results via openrouter` |
+| OpenAI API | `review_results_via_openai_api` | `Review results via openai api` |
+
+Use the prepared name for dispatch and any visibility declaration. Keep it
+fixed for that supervisor's lifetime. Apply the suffix only to a supervisor
+assigned to the route. The activity box covers the supervisor's native work.
+Report provider execution and review outcomes from their own evidence. Use the
+activity box for start and finish and omit standalone chat messages that repeat
+its label. The current foreground Usage Routing host runs in the coordinator
+and has no native supervisor activity box.
+
+For a completed Usage Routing generation, the trusted host verifies its
+execution evidence and Habblaud parent before calling the shared
+`register_external` helper. The helper uses the actual execution route,
+parent and run ID to preserve the external display identity across delivery
+attempts. It forwards the canonical role and verified model display name.
+The routing ledger owns execution and accounting, and native review owns
+acceptance. A display receipt establishes visibility only.
+
+The current Habblaud transport handles Codex accounts and hooks. A host for
+another client can reuse registration after verifying its own parent and
+execution evidence and supplying a qualified transport for that client.
+Observe the first rendered badge separately from delivery and later recovery.
+[Usage Routing host procedure](../skills/manage-usage-routing/references/codex-host.md)
 
 ## Binding and delivery
 

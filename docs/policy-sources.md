@@ -1,5 +1,29 @@
 # Policy source map
 
+## Usage Routing delegation registration — 4 November 2026
+
+The user approved the [implementation plan](superpowers/plans/2026-11-04-usage-routing-delegation-registration.md)
+and directed that the unresolved run and reservation stay on hold.
+[Delegation selection](../policies/03-agent-delegation.md#select-capability-and-dispatch)
+loads the existing [Usage Routing procedure](../skills/manage-usage-routing/references/delegation.md)
+for a selected and authorized proposal. The routing result supplies the
+actual execution route. Assignment context and the existing ledger retain
+task identity, admission and accounting.
+Native handoff and independent review retain their existing evidence and
+authority. The [Codex host](../skills/manage-usage-routing/references/codex-host.md)
+verifies settlement and the parent before using
+[shared external registration](../clients/worker-visibility.md#external-routes-in-chat-and-habblaud).
+The registrar reuses existing display identities, private receipts and readback.
+The [validation record](usage-routing-validation.md) separates offline tests
+from live qualification and preserves the pending recovery evidence.
+
+The user requested route suffixes on native activity boxes and removed the
+standalone chat label. The [native task naming rule](../clients/worker-visibility.md#external-routes-in-chat-and-habblaud)
+sets the suffix before dispatch for a real supervisor. On Codex Desktop
+26.1029.61003, `review_results_via_openrouter` rendered as
+`Review results via openrouter`. `api_display_investigation` identified the
+native investigator. Foreground Usage Routing runs in the coordinator.
+
 ## Shared worker roles — 3 November 2026
 
 The user approved explicit role and custom-name visibility for native and
@@ -34,7 +58,7 @@ The user adopted [setup-time behavioral qualification plus later observable conf
 
 ## Staged pilot qualification · 2 November 2026
 
-The user approved [staged qualification](pilot-readiness-plan.md#current-goal-qualify-the-pilot-before-activation): explicitly disposable scopes may perform basic guarded work and bounded qualification while onboarding remains incomplete. Pending capabilities block ordinary dependent use. This pilot retains its 44 mandatory requirements; other projects use the mandatory set applicable to their catalog and scope. Full-onboarding/READY/merge prerequisites and primary-activation evidence remain in force. Expiry or interruption does not release uncertain writers or grant readiness; recovery remains separately authorized. The [pilot coordination plan](pilot-readiness-plan.md) tracks implementation and observed native qualification separately. This extension authorizes no live campaign, credentials, protection changes, installation, or new registry, service or public bypass.
+The user approved [staged qualification](pilot-readiness-plan.md#completion-boundaries): explicitly disposable scopes may perform basic guarded work and bounded qualification while onboarding remains incomplete. Pending capabilities block ordinary dependent use. This pilot retains its 44 mandatory requirements; other projects use the mandatory set applicable to their catalog and scope. Full-onboarding/READY/merge prerequisites and primary-activation evidence remain in force. Expiry or interruption does not release uncertain writers or grant readiness; recovery remains separately authorized. The [pilot coordination plan](pilot-readiness-plan.md) tracks implementation and observed native qualification separately. This extension authorizes no live campaign, credentials, protection changes, installation, or new registry, service or public bypass.
 
 ## Native staged behavior evidence · 3 November 2026
 
