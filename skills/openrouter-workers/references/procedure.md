@@ -54,11 +54,12 @@ python3 -I -B <plugin-root>/scripts/openrouter_workers.py run
   --auth-data <saved-opencode-data-directory>
 ```
 
-The brief requires `task_id`, `role`, `specialty`, `coordinator_chat_id`,
-`model`, `model_display_name`, `provider`, `effort`, `objective`, `source_root`,
+The brief requires `task_id`, `coordinator_chat_id`,
+`model`, `provider`, `effort`, `objective`, `source_root`,
 `files`, `timeout_seconds`, `steps`, and `approval_ref`. Add optional
-`custom_role_name` only for an explicit native fallback declaration, using the
-shared bounds. New external badges display the declared role followed by the
+`role`, `specialty`, and `model_display_name` for the badge. Add `custom_role_name`
+only for an explicit native fallback declaration, using the shared bounds.
+New external badges display the declared role followed by the
 model display name, for example `Scout · GLM 5.3 Flash`. Existing receipts keep
 their original badge. The existing sized brief may also include `sizing`. Use the actual
 root coordinator chat UUID for the Habblaud parent; retain the genuine native

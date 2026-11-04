@@ -37,12 +37,19 @@ def declaration(value):
     return dict(value)
 
 
+def optional_declaration(value):
+    try:
+        return declaration(value)
+    except ValueError:
+        return None
+
+
 def display_label(value, model_display_name):
-    value = declaration(value)
+    value = declaration(value) if value is not None else {'role': 'Role not reported'}
     # Retain the existing model-display normalization; custom names remain exact.
     model = (' '.join(''.join(c for c in model_display_name if c.isprintable()).split())
-             if isinstance(model_display_name, str) else 'Model unknown')
-    return text(value.get('custom_role_name', value['role']) + ' · ' + text(model), LABEL_LIMIT)
+             if isinstance(model_display_name, str) else '')
+    return text(value.get('custom_role_name', value['role']) + ' · ' + text(model or 'Model unknown'), LABEL_LIMIT)
 
 
 def private_path(path):
@@ -123,7 +130,7 @@ def transport(plugin_root):
 
 def publisher(module, endpoint, account, binding, visibility, receipt):
     """Freeze before delivery; reuse actual native or explicitly external identity."""
-    visibility = declaration(visibility)
+    visibility = declaration(visibility) if visibility is not None else None
     binding = dict(binding)
     if set(binding) != {'parent', 'agent_id', 'label', 'cwd'}:
         raise ValueError('invalid_visibility_binding')
@@ -206,7 +213,7 @@ def publisher(module, endpoint, account, binding, visibility, receipt):
 
 def register_external(*, module, endpoint: str, account: str, parent: str, checkout: str,
                       run_id: str, execution_route: str, model_display_name: str,
-                      visibility: dict, state_directory: Path) -> dict:
+                      visibility: dict | None, state_directory: Path) -> dict:
     """Publish display metadata using the transport and identity verified by the host."""
     try:
         if (str(UUID(text(parent, 36))) != parent
@@ -214,8 +221,8 @@ def register_external(*, module, endpoint: str, account: str, parent: str, check
             raise ValueError('invalid_external_visibility_identity')
         text(run_id, 256)
         external_id = str(uuid5(NAMESPACE_URL, f'vcw:{execution_route}:{parent}:{run_id}'))
-        metadata = declaration(visibility)
-        badge_role = {key: metadata[key] for key in ('version', 'role', 'specialty')}
+        metadata = declaration(visibility) if visibility is not None else None
+        badge_role = {key: metadata[key] for key in ('version', 'role', 'specialty')} if metadata else None
         binding = dict(parent=parent, agent_id=external_id, cwd=checkout,
                        label=display_label(badge_role, text(model_display_name, 160)))
         receipt = state_directory / f'habblaud-{external_id}.json'

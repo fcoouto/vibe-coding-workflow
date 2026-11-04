@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare and publish optional native worker labels in the existing task context."""
+"""Prepare native role declarations and publish optional worker labels."""
 
 import argparse
 import hashlib
@@ -78,9 +78,22 @@ def hook_context_path(directory, parent, task_name):
     return Path(directory) / parent / (key + '.json')
 
 
+def default_context_directory(*, create=False):
+    home = Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex').resolve(strict=True)
+    directory = home / 'vibe-worker-visibility' / 'contexts'
+    if create:
+        directory.parent.mkdir(mode=0o700, exist_ok=True)
+        visibility.private_path(directory).mkdir(mode=0o700, exist_ok=True)
+    return directory
+
+
+def specific_native_role(value):
+    return isinstance(value, str) and value.strip().casefold() not in {'', 'default'}
+
+
 def enrich_start(event, directory, checkout, executable):
     if (event.get('hook_event_name') != 'SubagentStart' or event.get('cwd') != str(checkout)
-            or event.get('agent_role') is not None):
+            or specific_native_role(event.get('agent_role'))):
         return event
     try:
         parent, child = event['session_id'], event['agent_id']
@@ -94,7 +107,7 @@ def enrich_start(event, directory, checkout, executable):
         observed = codex.observe_worker_visibility(checkout, parent, child, deadline=time.monotonic() + 1,
                                                    executable=str(executable))
         task = observed['task_name']
-        if (not task or observed.get('native_role') is not None or observed['parent_session_id'] != parent
+        if (not task or specific_native_role(observed.get('native_role')) or observed['parent_session_id'] != parent
                 or observed['worker_id'] != child or observed['checkout'] != str(checkout)):
             return event
         path = context_path(hook_context_path(directory, parent, task), checkout)
@@ -191,7 +204,7 @@ def main():
         return forward_start(args.context_directory, args.checkout, args.codex_executable, command)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('prepare', 'publish'))
-    destination = parser.add_mutually_exclusive_group(required=True)
+    destination = parser.add_mutually_exclusive_group()
     destination.add_argument('--context', type=Path)
     destination.add_argument('--context-directory', type=Path)
     parser.add_argument('--visibility-plugin', type=Path)
@@ -202,12 +215,13 @@ def main():
         request = json_object(sys.stdin.buffer.read(visibility.LIMIT + 1), limit=visibility.LIMIT)
         if args.action == 'prepare':
             path = args.context
-            if args.context_directory is not None:
-                path = hook_context_path(args.context_directory, request['parent_session_id'], request['task_name'])
+            if path is None:
+                contexts = args.context_directory or default_context_directory(create=True)
+                path = hook_context_path(contexts, request['parent_session_id'], request['task_name'])
                 directory = context_path(path.parent, request['checkout'])
                 directory.mkdir(mode=0o700, exist_ok=True)
             result = prepare_native(path, request)
-            if args.context_directory is not None:
+            if args.context is None:
                 result['context'] = str(path)
         else:
             fields = {'worker_id', 'phase'}

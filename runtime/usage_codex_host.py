@@ -126,6 +126,11 @@ def _temporary_config(config, price, now, *, pilot_output_limit=None):
     return dict(config, profile=profile, revision=config['revision'] + 1, enabled=True, disabled=False)
 
 
+def _execution_proposal(proposal):
+    require(isinstance(proposal, dict), 'invalid_fields')
+    return {key: value for key, value in proposal.items() if key != 'visibility'}
+
+
 def _proposal(control, config, proposal, now):
     fields(proposal, _PROPOSAL_FIELDS)
     name(proposal['task_id'])
@@ -179,6 +184,7 @@ def freeze(cwd, proposals, *, thread_snapshot, native_limits, reviewer, maximum_
                 pilot_output_limit = max(integer(proposal['packet']['max_output_tokens']) for proposal in proposals)
             if one_shot:
                 config = _temporary_config(config, manual_price, now, pilot_output_limit=pilot_output_limit)
+            proposals = [_execution_proposal(proposal) for proposal in proposals]
             maximum = sum(_proposal(control, config, proposal, now) for proposal in proposals)
             if one_shot:
                 spent = control.ledger._total(state, config['binding']['organization'])
@@ -276,7 +282,7 @@ def _run_temporary_manual(plan, task, evidence, config, case_index, prior_review
                 failure.add_note('Manual test cleanup requires a status and disable check.')
 
 
-def _publish_generation(plan, task, evidence, result, habblaud):
+def _publish_generation(plan, task, evidence, result, habblaud, *, visibility):
     run_id = task['run_id']
     if (result.get('run_id') != run_id or result.get('simulation_only') is not False
             or result.get('accepted') is not False or result.get('requires_native_review') is not True
@@ -296,7 +302,9 @@ def _publish_generation(plan, task, evidence, result, habblaud):
                     and generation['cost'] == result['reported_cost_usd_micros'], 'generation_unconfirmed')
             state = control.ledger.path.parent
 
-        fields(habblaud, 'plugin_root endpoint account model model_display_name visibility')
+        # Older display callers supplied a role here. Prefer the assignment's role when available.
+        fields({key: value for key, value in habblaud.items() if key != 'visibility'},
+               'plugin_root endpoint account model model_display_name')
         plugin_root = Path(habblaud['plugin_root'])
         require(plugin_root.is_absolute() and plugin_root.resolve(strict=True) == plugin_root
                 and habblaud['model'] == plan.model, 'visibility_unavailable')
@@ -313,7 +321,8 @@ def _publish_generation(plan, task, evidence, result, habblaud):
         return worker_visibility.register_external(
             module=module, endpoint=endpoint, account=account, parent=parent, checkout=plan.checkout,
             run_id=run_id, execution_route=result['execution_route'],
-            model_display_name=habblaud['model_display_name'], visibility=habblaud['visibility'],
+            model_display_name=habblaud['model_display_name'],
+            visibility=visibility or worker_visibility.optional_declaration(habblaud.get('visibility')),
             state_directory=state)
     except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError, ImportError) as error:
         reason = str(error) if str(error) in ('generation_unconfirmed', 'visibility_parent_unavailable') else 'visibility_unavailable'
@@ -329,8 +338,12 @@ def execute(plan, proposal, *, thread_snapshot, approval_snapshot=None, reviewer
     try:
         require(_reviewer(reviewer, plan.thread_id) == plan.reviewer, 'independent_review_unavailable')
         require(package_digest() == plan.package_digest, 'codex_package_changed')
-        proposal = deepcopy(proposal)
+        supplied = deepcopy(proposal)
+        proposal = _execution_proposal(supplied)
         proposal_digest = usage_admission.digest(proposal)
+        if proposal_digest not in plan.proposal_digests and 'visibility' in supplied:
+            # Preserve the identity of previously frozen plans that included display metadata.
+            proposal_digest = usage_admission.digest(supplied)
         require(proposal_digest in plan.proposal_digests, 'codex_proposal_changed')
         case_index = plan.proposal_digests.index(proposal_digest)
         approved_at = _approved_at(plan, thread_snapshot, approval_snapshot, now, case_index=case_index)
@@ -354,6 +367,7 @@ def execute(plan, proposal, *, thread_snapshot, approval_snapshot=None, reviewer
                 record = usage_admission.smart_qualification(config, now)
                 qualification = usage_admission.digest([config['qualification_revision'], record])
             approval_id = usage_admission.digest(asdict(plan))
+            visibility = worker_visibility.optional_declaration(supplied.get('visibility'))
             task = dict(proposal, run_id=_run_id(plan, proposal_digest),
                         reviewer_available=True, native=dict(native, task=proposal['task_id']))
             evidence = usage_admission.Admission(
@@ -377,5 +391,6 @@ def execute(plan, proposal, *, thread_snapshot, approval_snapshot=None, reviewer
     if habblaud is not None:
         if generation_ready is not None:
             generation_ready(result)
-        result = result | dict(visibility=_publish_generation(plan, task, evidence, result, habblaud))
+        result = result | dict(visibility=_publish_generation(plan, task, evidence, result, habblaud,
+                                                              visibility=visibility))
     return result

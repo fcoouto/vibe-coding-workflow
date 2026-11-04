@@ -1,5 +1,15 @@
 # Policy source map
 
+## Subagent role badges
+
+The user requested role badges for subagents and independent dispatch.
+[Agent Delegation](../policies/03-agent-delegation.md#select-capability-and-dispatch)
+loads the [shared contract](../clients/worker-visibility.md#declare-before-dispatch).
+Native badges use a bound declaration or the reported native role. OpenRouter and
+Usage Routing consume optional display metadata independently of execution
+admission. Habblaud shows an explicit unknown-role badge when neither source
+supplies a role and leaves native thread owners without a role badge.
+
 ## Usage Routing delegation registration — 4 November 2026
 
 The user approved the [implementation plan](superpowers/plans/2026-11-04-usage-routing-delegation-registration.md)

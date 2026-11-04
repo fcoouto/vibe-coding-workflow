@@ -14,9 +14,10 @@ Balance task class.
    supported native delegation controls. Keep that reviewer available for the
    exact proposal. The adapter verifies the binding to the coordinator, while
    native evidence remains the authority for reviewer identity and completion.
-2. Prepare bounded tool-free proposals with exactly `task_id`, `class_name`,
-   `packet`, `provider`, `local_preferred`, `api_only` and `snapshots`. Use the
-   original stable task ID. Follow the [packet schema](procedure.md#read-only-status-quoting-and-selection)
+2. Prepare bounded tool-free proposals with `task_id`, `class_name`,
+   `packet`, `provider`, `local_preferred`, `api_only` and `snapshots`.
+   The assignment's [role declaration](../../../clients/worker-visibility.md#declare-before-dispatch)
+   can be supplied in `visibility` for display. Use the original stable task ID. Follow the [packet schema](procedure.md#read-only-status-quoting-and-selection)
    and [proposal procedure](delegation.md). Manual requires one `openai-api`
    proposal. Smart Balance may select `auto` for up to twelve exact, distinct
    proposals in one qualified class. Keep one task outstanding through native
@@ -94,10 +95,9 @@ For approved Habblaud visibility, the trusted coordinator may supply
 `habblaud` to `execute`. Set `plugin_root` to the reviewed installed transport,
 `endpoint` to its literal loopback HTTP endpoint, and `account` to the observed
 Habblaud Codex account. Use the approved API model identifier in `model` and
-its verified display name in `model_display_name`. Supply the assignment's
-[role declaration](../../../clients/worker-visibility.md) in `visibility`.
-Take these values from the existing integration and assignment, never from
-proposal text. The Codex host verifies the actual execution route and the
+its verified display name in `model_display_name`. The host uses the assignment's
+role when available. Take the transport and model values from the existing
+integration and assignment, never from proposal text. The Codex host verifies the actual execution route and the
 completed generation against the ledger's run, task, scope, admission and cost.
 It verifies the Codex account and parent, then calls shared external
 registration with the approved display values and trusted transport. The

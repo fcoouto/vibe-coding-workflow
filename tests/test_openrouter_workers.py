@@ -155,6 +155,21 @@ print(json.dumps({{'type':'step_finish','part':{{'reason':'stop','cost':0,'token
         self.assertEqual(saved['provider'], 'provider')
         self.assertEqual(self.api.configuration(saved), self.api.configuration(self.brief))
 
+    def test_worker_without_role_gets_a_badge_and_can_execute(self):
+        from runtime import worker_visibility
+        from tests.test_worker_visibility import fixture_transport
+        client, transport = fixture_transport()
+        brief = {key: value for key, value in self.brief.items() if key not in {'role', 'specialty'}}
+        run = self.api.prepare(self.runs, brief)
+        exe = self.fixture("sys.stdin.read()\n"
+                           "print(json.dumps({'type':'text','part':{'text':'Fixture answer'}}))\n"
+                           "print(json.dumps({'type':'step_finish','part':{'reason':'stop','cost':0,'tokens':{}}}))\n")
+        with patch.object(worker_visibility, 'transport', return_value=transport):
+            publisher = self.api.habblaud_publisher(self.root, run, 'http://127.0.0.1:1', 'account')
+            result = self.api.execute(run, exe, self.root / 'auth', publisher)
+        self.assertEqual(result['state'], 'awaiting_verification')
+        self.assertEqual(client.events[0]['agent_type'], 'Role not reported · Model')
+
     def test_openrouter_reuses_external_display_identity_through_verification(self):
         from runtime import worker_visibility
         from tests.test_worker_visibility import fixture_transport

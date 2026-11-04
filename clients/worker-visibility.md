@@ -1,14 +1,12 @@
-# Worker roles in Habblaud
+# Worker declarations and visibility
 
-Load the applicable section for native activity names or an assignment using
-an approved Habblaud connection. Visibility is optional and separate from task titles, resource
-admission, recovery and execution. Use the same declaration for ordinary and
-managed native workers, reviewers, supervisors, OpenRouter workers and
-Usage Routing proposals.
+Use this contract to label subagents. A native thread owner needs no role badge.
+Role metadata and Habblaud delivery are optional and independent of execution.
 
 ## Declare before dispatch
 
-Record this versioned object in the existing assignment context:
+When the assignment has a role, record it once in the worker's existing context
+before dispatch. Use this versioned object or the route's equivalent fields:
 
 ```json
 {"version":1,"role":"Reviewer","specialty":"Security assessment","custom_role_name":"Threat reviewer"}
@@ -24,43 +22,46 @@ external badges display `Role · Model Display Name`. Retain canonical role and
 specialty separately.
 The full label is sent in the existing display field without truncation. Report
 an unsupported label or receiver capability explicitly; the transport enforces
-its wire byte limit separately from the declared text lengths. Never substitute a
-generic role. Legacy assignments without a declaration stay unknown.
+its wire byte limit separately from the declared text lengths. Habblaud displays
+`Role not reported` when it has neither a declaration nor a specific native role.
+
+Validate the declaration for display and reuse it for recovery. A native supervisor
+or reviewer has its own assignment and role. Dispatch follows the route's existing
+execution requirements independently of the badge.
 
 ## Native workers and reviewers
 
-For managed D6 worker preparation or D5 review preparation, include the object
-as optional `visibility`. Use the original declaration returned by preparation.
-It is part of the immutable request and its digest, separate from authority
-roles and review report digests. It grants no launch, review or reconciliation
-permission. Ordinary native work uses the same metadata without an enrollment,
-runtime task or database.
+To label a managed D6 worker or D5 reviewer, supply the optional `visibility`
+field and reuse the returned declaration. When supplied, it is part of the
+immutable request and its digest, separate from authority roles and review
+report digests. Ordinary native work can use the same display metadata without
+an enrollment, runtime task or database.
 
-Before native dispatch, use the following helper in the existing private task
-context. The context path is an unused absolute file in a canonical, owner-only
-directory outside repositories and installed package trees. The helper rejects
-the selected checkout, Git worktrees and the package roots it uses:
+To attach a declared badge at native launch, prepare its private display context
+with the workflow package used by the chat:
 
 ```text
-python3 -I -B <package>/scripts/worker_visibility.py prepare --context <private-context-file>
+python3 -I -B <package>/scripts/worker_visibility.py prepare
 ```
 
-Supply `parent_session_id` (actual native UUID), `checkout` (canonical absolute
-working directory), `task_name` (the existing immutable creation name), and
+Supply `parent_session_id` (actual native UUID), `checkout` (the chat's current
+canonical absolute working directory), `task_name` (the existing immutable creation name), and
 `visibility` (the object above) on stdin. For managed workers also supply
 `ledger_assignment_digest`: the prepared worker's `assignment_digest` or the
 reviewer's distinct `ledger_assignment_digest`. Preserve the exact managed
 prompt. For ordinary native work, place the returned `prompt_marker` on the
 first line of the brief. This binds visibility when native history omits the
 agent path. Preparation reserves display metadata only; preserve the native
-tool's original `task_name` and attempt marker.
+tool's original `task_name` and attempt marker. Read the returned context path
+and use a distinct task name for each child. The default path is `vibe-worker-visibility/contexts`
+under the active Codex home, shared with the reconciled Habblaud start hook.
 
 ### Forward the original Desktop start event
 
 When the existing Habblaud `SubagentStart` command is configured to use this
-adapter, prepare with `--context-directory <private-directory>` instead of
-`--context`. Use the exact directory configured in the hook and retain the
-returned context path. Allocate a distinct task name for each new child.
+adapter, it reads the prepared context and supplies the badge. If the hook uses
+a custom context directory, pass the same directory with `--context-directory`
+when preparing the declaration.
 
 Wrap the existing command with the reviewed package:
 

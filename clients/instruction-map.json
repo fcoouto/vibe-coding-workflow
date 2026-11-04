@@ -211,7 +211,7 @@
       ]
     },
     "clients/worker-visibility.md": {
-      "sha256": "c836e1c079634435b3f61332afb6b97f757ee7d4b2b5f543a64ab282cb570820",
+      "sha256": "0dc332fb54ebfade499358106fdc2a8ead8d3f18be53313dc38ce74a758c90e7",
       "ranges": [
         [
           1,
@@ -219,7 +219,7 @@
         ],
         [
           153,
-          165
+          166
         ]
       ]
     },
@@ -317,7 +317,7 @@
       ]
     },
     "policies/03-agent-delegation.md": {
-      "sha256": "8e9a3a3d82b0c3d2ab94fb8c797c2a80eb31dfa915555c5bb2f6f4790511df5b",
+      "sha256": "3601f705ac2f406420219d13da0f1d3461ef961a4a7cce0198758b40d98002fc",
       "ranges": [
         [
           1,
@@ -476,7 +476,7 @@
       ]
     },
     "skills/manage-usage-routing/references/codex-host.md": {
-      "sha256": "1f57d3a0fe9b548886824c6989e17a64ce9b9f8b4b88662269a104e155e32243",
+      "sha256": "2f891a521a103fe999cd1b99f2f938218936e56958d7f49a4c4b27ba53d8163c",
       "ranges": [
         [
           1,
@@ -596,7 +596,7 @@
       ]
     },
     "skills/openrouter-proposals/references/procedure.md": {
-      "sha256": "7e99baf3331c280d29341cf12aa3897a5ffb32aad269fd05a440427f369f7932",
+      "sha256": "c0f6e90a0da711282a926eae317121c4c9ffe3640e830c3b10aa167e4f92b5b8",
       "ranges": [
         [
           1,
@@ -604,10 +604,10 @@
         ],
         [
           91,
-          156
+          154
         ],
         [
-          157,
+          155,
           190
         ]
       ]
@@ -622,15 +622,15 @@
       ]
     },
     "skills/openrouter-workers/references/procedure.md": {
-      "sha256": "6317021c64a3dd9b0c3b3945f685232631414bc03cb21955dfa71e6dd619d95d",
+      "sha256": "61dca21eed3760f0f6aeaf32d38a0fbdabeba5b8278ef10c2da3c75f550ab4dd",
       "ranges": [
         [
           1,
-          122
+          123
         ],
         [
-          123,
-          182
+          124,
+          183
         ]
       ]
     },

@@ -358,7 +358,7 @@ class NativeVisibilityTests(unittest.TestCase):
         event = dict(hook_event_name='SubagentStart', session_id=self.parent,
                      agent_id=self.child, cwd=str(self.root), agent_type='default', extra='preserve')
         with patch.object(codex, 'observe_worker_visibility', return_value=self.observe()):
-            actual = helper.enrich_start(event, self.task_context, self.root, executable)
+            actual = helper.enrich_start(event | dict(agent_role='Default'), self.task_context, self.root, executable)
             self.assertEqual(actual, event | dict(agent_role='Audit lead · Native model',
                                                    agent_type='Audit lead · Native model'))
             self.assertEqual(event['agent_type'], 'default')

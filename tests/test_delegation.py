@@ -536,11 +536,15 @@ class AdmissionTests(unittest.TestCase):
     def prepare(self, **updates):
         return self.api.prepare_assignment(self.scope, self.prepare_request(**updates))
 
+    def test_invalid_visibility_does_not_prevent_managed_worker_admission(self):
+        self.plan()
+        prepared = self.prepare(visibility=dict(version=1, role='Default', specialty='Parser fixes'))
+        self.assertTrue(prepared['launch_admitted'])
+        self.assertNotIn('visibility', prepared)
+
     def test_visibility_is_bound_to_worker_replay_without_granting_authority(self):
         self.plan()
         visibility = dict(version=1, role='Builder', specialty='Parser fixes', custom_role_name='Parser owner')
-        with self.assertRaises(state.StateError):
-            self.prepare(visibility=visibility | dict(role='Unknown'))
         request = self.prepare_request(visibility=visibility)
         try:
             prepared = self.api.prepare_assignment(self.scope, request)
