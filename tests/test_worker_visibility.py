@@ -742,7 +742,8 @@ class NativeVisibilityTests(unittest.TestCase):
         path = self.task_context / 'legacy.json'
         worker_visibility.prepare_native(path, self.native_request())
         saved = worker_visibility.read_context(path)
-        label = 'Audit lead · Legacy name'
+        label = 'Audit lead · ' + 'Legacy model name ' * 12 + 'edition'
+        self.assertGreater(len(label.encode('utf-16-le')), 400)
         observed = self.observe() | dict(model_display_name='Catalog Name', forwarded_label=label)
         worker_visibility.save(path, saved | dict(observed=observed))
         client, transport = fixture_transport()

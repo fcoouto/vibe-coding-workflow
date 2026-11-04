@@ -340,7 +340,7 @@ def restore_badge(path, plugin_root, endpoint, account):
         label, _ = native_label(metadata, observed)
         prefix = metadata.get('custom_role_name', metadata['role']) + ' · '
         if (not label.startswith(prefix) or not label[len(prefix):].strip()
-                or len(label.encode('utf-16-le')) > 400 or 'guardian' in label.casefold()):
+                or 'guardian' in label.casefold()):
             return dict(delivered=False, reason='unsupported_display_label')
         client = transport(plugin_root).Client(endpoint)
         client.event(text(account, 200), dict(hook_event_name='SubagentBadge',
