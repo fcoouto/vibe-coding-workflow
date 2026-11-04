@@ -1,5 +1,11 @@
 # Release notes
 
+## 0.1.18
+
+- Capture each subagent's role once while preparing its assignment. Reuse existing native, OpenRouter and Usage Routing metadata without blocking execution when display preparation fails. [PR #90](https://github.com/fcoouto/vibe-coding-workflow/pull/90)
+- Bundle the Habblaud receiver fix for onboarding and upgrades: preserve nested child identity and immediate parents, retain early activity, and keep the original fallback when no role is available.
+- Verified first observed badges in a fresh native check: `Coordinator · GPT-6-Astra` and nested `Reviewer · GPT-6-Astra`. No new external-provider or Claude Code live execution was performed. Native cache activation remains a separate client refresh; preserve active chats using older package paths.
+
 ## 0.1.17
 
 - Enable live Manual and Smart Balance after the user connects an OpenAI project key and activates a regular routing policy. Comparisons and smoke tests are optional.
