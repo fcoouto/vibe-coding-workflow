@@ -1303,6 +1303,187 @@ class AdmissionTests(unittest.TestCase):
         self.assertEqual(task['evidence']['attempts'], [])
         self.assertNotEqual(task['state'], 'DONE')
 
+    def cooperative_worker(self, prepared, *, version=3, activity=None):
+        from runtime import evidence
+        if activity is None:
+            activity = dict(source_digest='a' * 64, calls=[dict(id='patch-1', tool='apply_patch', input_digest='b' * 64)])
+            (self.repo / 'app.py').write_text('changed by fixture worker\n')
+        observed = self.lifecycle_observation(prepared) | dict(activity=activity)
+        self.observe_worker(prepared, observed, self.request(attempt_id=prepared['attempt_id'],
+            parent_turn_id='parent-turn', spawn_item_id='spawn-item', cooperative=True))
+        request = self.worker_reconciliation_request(prepared)
+        path = Path(request['host_proof']['path'])
+        proof = json.loads(path.read_bytes())
+        for key in ('stopped', 'descendants_stopped'):
+            del proof[key]
+        proof.update(version=version, kind='native-cooperative-completion', activity_digest=evidence._digest(activity),
+                     coordinator_ref=request['assessment']['coordinator_ref'],
+                     observation_ref=request['assessment']['evidence'][0])
+        if version == 2:
+            proof['no_pending_continuation'] = True
+        else:
+            proof.update(no_outstanding_coordinator_followups=True, coordinator_submissions_paused=True)
+        raw = evidence._raw(proof)
+        path.write_bytes(raw)
+        request['host_proof']['sha256'] = hashlib.sha256(raw).hexdigest()
+        return request, observed
+
+    def test_foreground_wait_is_bound_to_prepared_worker_and_replay(self):
+        import sys
+        directory = self.root / 'observer'
+        directory.mkdir(mode=0o700)
+        marker = directory / 'ready'
+        wait = dict(marker=str(marker), python=str(Path(sys.executable).resolve()), seconds=15)
+        plan = self.plan_value()
+        claims = plan['jobs'][0]['claims']
+        claims.append(dict(kind='path', key=str(marker), mode='read'))
+        self.plan(plan)
+        request = self.prepare_request()
+        request['brief'].update(resources=claims, foreground_wait=wait)
+        prepared = self.api.prepare_assignment(self.scope, request)
+        self.assertEqual(self.api.prepared_native_assignment(self.scope, prepared['attempt_id'])['foreground_wait'], wait)
+        self.assertEqual(json.loads(prepared['prompt'])['assignment']['request']['brief']['foreground_wait'], wait)
+        self.assertFalse(self.api.prepare_assignment(self.scope, request)['launch_admitted'])
+        another = request | dict(dispatch_id='other-wait', expected_revision=self.request()['expected_revision'])
+        with self.assertRaisesRegex(state.StateError, 'already belongs'):
+            self.api.prepare_assignment(self.scope, another)
+        request['brief']['foreground_wait'] = wait | dict(seconds=16)
+        with self.assertRaisesRegex(state.StateError, 'changed payload'):
+            self.api.prepare_assignment(self.scope, request)
+
+    def test_foreground_wait_rejects_unreserved_or_preexisting_marker(self):
+        import sys
+        directory = self.root / 'observer'
+        directory.mkdir(mode=0o700)
+        marker = directory / 'ready'
+        wait = dict(marker=str(marker), python=str(Path(sys.executable).resolve()), seconds=15)
+        plan = self.plan_value()
+        claims = plan['jobs'][0]['claims']
+        claims.append(dict(kind='path', key=str(marker), mode='read'))
+        self.plan(plan)
+        request = self.prepare_request()
+        request['brief'].update(resources=claims, foreground_wait=wait | dict(marker=str(directory / 'other')))
+        with self.assertRaisesRegex(state.StateError, 'exact read claim'):
+            self.api.prepare_assignment(self.scope, request)
+        request['brief']['foreground_wait'] = wait
+        marker.write_text('stale marker')
+        with self.assertRaisesRegex(state.StateError, 'fresh marker'):
+            self.api.prepare_assignment(self.scope, request)
+        self.assertEqual(self.api.delegation_status(self.scope, 'codex', 'parent')['budgets']['attempts_consumed'], 0)
+
+    def test_cooperative_completion_releases_scoped_claims_and_preserves_strict_blockers(self):
+        from runtime import evidence
+        plan = self.plan_value()
+        plan['limits']['max_parallel_workers'] = 1
+        plan['jobs'].append(dict(plan['jobs'][0], id='followup', dependencies=['edit']))
+        self.plan(plan)
+        prepared = self.prepare()
+        request, observed = self.cooperative_worker(prepared)
+        with patch('runtime.adapters.codex.observe_native_worker', return_value=observed) as observer:
+            result = self.api.reconcile_assignment(self.scope, request)
+            observer.assert_called_once_with(self.scope, prepared['attempt_id'], 'parent-turn', 'spawn-item', cooperative=True)
+        self.assertEqual(result['status'], 'cooperative-completed')
+        self.assertTrue(self.api.reconcile_assignment(self.scope, request)['replayed'])
+        with self.assertRaises(state.StateError):
+            self.api.reconcile_assignment(self.scope, request | dict(assessment=request['assessment'] |
+                dict(result_assessment='Different assessment for the completed assignment')))
+        self.assertEqual(self.api.delegation_status(self.scope, 'codex', 'parent')['budgets']['attempts_consumed'], 1)
+        with state._database(self.scope) as db:
+            task = state._task(db, state._scope_id(self.scope), 'codex', 'parent', 'task')
+            records = self.api._ledger(self.scope, db, task=task)
+            claims = records[0]['data']['claims']
+            self.api._resources_available(self.scope, db, claims, records, cooperative_task=task)
+            with self.assertRaisesRegex(state.StateError, 'unresolved assignment'):
+                self.api._resources_available(self.scope, db, claims, records)
+            self.assertTrue(evidence._ledger_blockers(self.scope, db, claims, records=records))
+            artifact = evidence._read(self.scope, records[0]['data']['reconciliation'])
+            self.assertNotIn('no_pending_continuation', artifact['proof'])
+            self.assertNotIn('descendants_stopped', artifact['proof'])
+        self.assertEqual(self.fixture.checked()['attempt']['status'], 'passed')
+        later = self.prepare_request(dispatch_id='followup-request', job_id='followup')
+        later['brief']['dependencies'] = ['edit']
+        self.assertTrue(self.api.prepare_assignment(self.scope, later)['launch_admitted'])
+
+    def test_cooperative_completion_can_be_upgraded_only_with_original_strict_proof(self):
+        from runtime import evidence
+        self.plan()
+        prepared = self.prepare()
+        request, observed = self.cooperative_worker(prepared, version=2)
+        with patch('runtime.adapters.codex.observe_native_worker', return_value=observed):
+            self.api.reconcile_assignment(self.scope, request)
+        before = self.raw_assignment(prepared['attempt_id'])
+        for proof_delta in (dict(descendants_stopped=False), dict(version=3)):
+            with self.assertRaises(state.StateError):
+                self.api.reconcile_assignment(self.scope, self.worker_reconciliation_request(prepared, proof_delta=proof_delta))
+        self.assertEqual(self.raw_assignment(prepared['attempt_id']), before)
+        with state._database(self.scope) as db:
+            continuation = self.request(attempt_id=prepared['attempt_id'])
+            records = self.api._ledger(self.scope, db, task=continuation)
+            with self.assertRaisesRegex(state.StateError, 'new admission'):
+                self.api._continuation_owned(self.scope, db, continuation, records, allow_settled=True)
+        strict = self.worker_reconciliation_request(prepared)
+        self.assertEqual(self.api.reconcile_assignment(self.scope, strict)['status'], 'settled')
+        after = self.raw_assignment(prepared['attempt_id'])
+        self.assertEqual(evidence._read(self.scope, after['reconciliation'])['prior_cooperative'], before['reconciliation'])
+        self.assertTrue(self.api.reconcile_assignment(self.scope, request)['replayed'])
+
+    def test_cooperative_completion_rejects_pending_or_unbound_coordinator_assessment(self):
+        self.plan()
+        prepared = self.prepare()
+        request, observed = self.cooperative_worker(prepared)
+        path = Path(request['host_proof']['path'])
+        proof = json.loads(path.read_bytes())
+        before = self.raw_assignment(prepared['attempt_id'])
+        invalid = {
+            'follow-up outstanding': proof | dict(no_outstanding_coordinator_followups=False),
+            'submissions still open': proof | dict(coordinator_submissions_paused=False),
+            'missing pause attestation': {key: value for key, value in proof.items() if key != 'coordinator_submissions_paused'},
+            'non-boolean pause attestation': proof | dict(coordinator_submissions_paused=1),
+            'legacy attestation mixed in': proof | dict(no_pending_continuation=True),
+            'legacy version with new attestations': proof | dict(version=2),
+            'wrong native identity': proof | dict(native_identity=proof['native_identity'] | dict(worker_id='another-child')),
+            'different assessment': proof | dict(coordinator_ref='fixture:unbound-coordinator'),
+            'different observation': proof | dict(observation_ref='fixture:unbound-observation'),
+        }
+        with patch('runtime.adapters.codex.observe_native_worker', return_value=observed):
+            for case, candidate in invalid.items():
+                with self.subTest(case=case):
+                    raw = evidence._raw(candidate)
+                    path.write_bytes(raw)
+                    request['host_proof']['sha256'] = hashlib.sha256(raw).hexdigest()
+                    with self.assertRaises(state.StateError):
+                        self.api.reconcile_assignment(self.scope, request)
+                    self.assertEqual(self.raw_assignment(prepared['attempt_id']), before)
+        status = self.api.delegation_status(self.scope, 'codex', 'parent')
+        self.assertEqual(status['capacity']['unresolved_managed_workers'], 1)
+        self.assertEqual(status['budgets']['attempts_consumed'], 1)
+        self.assertEqual(status['budgets']['resource_units_consumed'], 1)
+        self.assertTrue(status['conflicts'])
+
+    def test_cooperative_completion_rejects_fresh_activity_or_candidate_changes(self):
+        from runtime.startup import StartupError
+        self.plan()
+        prepared = self.prepare()
+        request, observed = self.cooperative_worker(prepared)
+        for changed in (observed | dict(activity=observed['activity'] | dict(source_digest='c' * 64)),
+                        observed | dict(receipt=observed['receipt'] | dict(will_retry=True)),
+                        observed | dict(receipt=observed['receipt'] | dict(turn_status='interrupted'), result=None)):
+            with patch('runtime.adapters.codex.observe_native_worker', return_value=changed):
+                with self.assertRaises(state.StateError):
+                    self.api.reconcile_assignment(self.scope, request)
+        with patch('runtime.adapters.codex.observe_native_worker', side_effect=StartupError('Missing foreground result')):
+            with self.assertRaises(state.StateError):
+                self.api.reconcile_assignment(self.scope, request)
+        (self.repo / 'app.py').write_text('unreviewed change\n')
+        with patch('runtime.adapters.codex.observe_native_worker', return_value=observed):
+            with self.assertRaises(state.StateError):
+                self.api.reconcile_assignment(self.scope, request)
+        self.assertEqual(self.raw_assignment(prepared['attempt_id'])['status'], 'observed')
+        status = self.api.delegation_status(self.scope, 'codex', 'parent')
+        self.assertEqual(status['capacity']['unresolved_managed_workers'], 1)
+        self.assertEqual(status['budgets']['attempts_consumed'], 1)
+        self.assertTrue(status['conflicts'])
+
     def test_never_started_worker_requires_exact_proof_and_cancellation_retains_budget(self):
         self.plan()
         prepared = self.prepare()
@@ -2830,6 +3011,18 @@ class Stage4NativeReviewTests(unittest.TestCase):
         prepared = self.prepared()
         self.assertTrue(prepared['launch_admitted'])
         self.assertEqual(self.api.delegation_status(self.scope, 'codex', 'parent')['budgets']['attempts_consumed'], 1)
+
+    def test_planned_check_requires_its_worker_before_reservation(self):
+        plan = self.plan_value()
+        plan['jobs'].append(dict(id='unit', role='check', claims=[self.path_claim(mode='read')],
+            dependencies=['edit'], max_attempts=1))
+        self.plan(plan)
+        with patch.object(evidence, '_execute', side_effect=AssertionError('check ran without its planned worker')):
+            with self.assertRaisesRegex(state.StateError, 'dependency prerequisite'):
+                self.fixture.check()
+        task = state.task_status(self.scope, 'codex', 'parent')['task']
+        self.assertEqual(task['evidence']['attempts'], [])
+        self.assertEqual(self.api.delegation_status(self.scope, 'codex', 'parent')['assignments'], [])
 
     def test_review_preserves_plain_assignment_limit_without_relaxing_external_request_cap(self):
         self.plan(self.review_plan())

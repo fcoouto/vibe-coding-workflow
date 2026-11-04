@@ -2,19 +2,34 @@
 
 ## Cooperative D6 scope — 4 November 2026
 
-The user approved simplifying D6 around cooperative native delegation, keeping
-uncertain ownership reserved and deferring automatic takeover. The
+The user approved cooperative native delegation, retained uncertain ownership
+and deferred automatic takeover. The subsequent whole-plan review with Astra
+separates useful delegation from stronger enforcement qualification. The
 [canonical D6 scope](d6-native-delegation-plan.md#approved-cooperative-scope)
-records the native trust assumption, independent result verification, normal
-completion boundary and pending runtime alignment. The
-[held pilot](superpowers/plans/2026-11-03-d6-managed-lifecycle-pilot.md#3-required-gono-go-checks-before-any-managed-child-launch)
-and [successor packet](superpowers/plans/2026-11-04-d6-successor-release-packet.md#cooperative-completion-and-held-ownership)
-apply that decision with zero live allowance. Enforced patch-only isolation and
-universal descendant proof are deferred guarantees for normal native completion.
-Current runtime and stronger downstream evidence contracts retain their existing
-meaning until their own reviewed alignment. This planning update preserves
-Toolkit's delegation, ownership and review requirements under the stated trust
-assumption. It adds no runtime activation, installation or qualification evidence.
+now targets reservation, once-only native dispatch, applicable checks,
+independent review and cooperative handoff. Normal completion relies on actual
+native activity, inspected effects and coordinator control of follow-ups, not
+independent access to hidden host queues or retry internals.
+
+The [short successor packet](superpowers/plans/2026-11-04-d6-successor-release-packet.md)
+is the core pilot plan, with zero live allowance. The
+[held managed-hook record](superpowers/plans/2026-11-03-d6-managed-lifecycle-pilot.md)
+preserves the exact canary, marker, D4 bootstrap and original finite limits only
+for that selected stronger route. Enforced patch-only isolation, universal
+descendant proof and other surfaces are not core D6 acceptance gates. Existing
+selected protections, historical claims and original proof meanings remain.
+
+The [native procedure](../clients/delegation.md#observe-and-reconcile-independently)
+and [proof reference](../clients/delegation-proofs.md#cooperative-native-completion)
+define version-3 cooperative evidence for coordinator-owned follow-ups while
+retaining version-2 semantics. Offline coverage exercises a selected guarded
+worker, dependency-ordered registered check, and independent reviewer of the
+same candidate. Reviewer admission preserves the worker's pre-edit witness.
+The check's external lifecycle evidence remains synthetic in that fixture;
+actual execution needs its own independently established proof. Strict recovery,
+registered checks, ordinary D5 readiness and merge evidence retain their requirements. The earlier construction and schema-transition instructions
+are superseded as active work, not a mandate for another migration. This retains
+Toolkit's delegation, ownership and review outcomes under the stated trust model.
 
 ## Subagent role badges
 
@@ -173,8 +188,8 @@ On 26 October 2026, rechecked orchestration Parts B/C and the parallel execution
 | [Agent Delegation: select capability](../policies/03-agent-delegation.md#select-capability-and-dispatch) | Preserve coordinator settings; task-based worker selection using official guidance and actual controls; local guidance with refresh provenance; observed/requested settings; native authorization; bounded briefs; test-first new behavior/fixes, refactor baselines and self-review | Orchestration Parts A/B/C; user-approved authorization and local-cache extension below |
 | [Agent Delegation: ownership](../policies/03-agent-delegation.md#ownership-and-parallel-work) | Exact file/resource/dependency isolation, uncertainty, concurrency limits, coordinator tracking and serialized authorized Git operations | Orchestration parallel-wave guidance and [parallel execution rule][parallel] |
 | [Agent Delegation: integration](../policies/03-agent-delegation.md#review-integration-and-recovery) | Fixed task targets, read-only independent review before the next wave, bounded rounds, verified findings, reassessed dependencies, escalation and stopped-worker recovery | Orchestration review/recovery guidance and [parallel execution rule][parallel] |
-| [D6 native implementation plan](d6-native-delegation-plan.md) | Slices 1–2: worker selection, bounded JSON guidance, refresh evidence, observations, ownership and budgets; slices 3–4: integration, review, recovery and safe state transitions; slice 5: exact task files/dependencies/resources, test-first checks with paused package writers, wave reviews, selective loading and separate native qualification | Agent Delegation and Context/Handoff contracts; accepted design, with package implementation and native qualification reported separately |
-| [Native delegation](../clients/delegation.md) | Selective native loading; compatible official guidance/cache and actual control evidence; exact jobs/claims/dependencies and budgets; once-only launch admission/replay distinct from observation; requested/configured/spawn/per-turn settings; retained partial effects and uncertainty until independent exact stop/descendant reconciliation | Agent Delegation; accepted D6 implementation and worker-control design; package controls do not qualify native execution |
+| [D6 native implementation plan](d6-native-delegation-plan.md) | Useful cooperative flow; suitable worker selection and existing guidance; bounded briefs, once-only dispatch, shared ownership, current results, checks and independent review; retained uncertainty; two narrow runtime corrections with affected offline checks and one held surface-specific pilot; historical state and stronger selected guarantees preserved | Agent Delegation and Context/Handoff; user-approved cooperative simplification and whole-plan review with Astra on 4 November 2026; package implementation and native qualification remain distinct |
+| [Native delegation](../clients/delegation.md) | Ordinary delegation distinguished from selected managed controls; compatible guidance and actual capabilities; exact claims/dependencies/budgets and once-only launch; requested/configured/observed settings; cooperative completion scoped to coordinator submissions and inspected activity; historical proof semantics preserved; strict stop proof only for its actual consumers | Agent Delegation; version-3 cooperative D6 contract and retained historical proofs; no proof reinterpretation, automatic takeover or implied native qualification |
 | [Workstreams controls and routing](../skills/workstreams/SKILL.md), [management controls](../skills/workstreams/references/procedure.md), [execution](../clients/workstreams.md) | Separate feature preferences and revisions; defaults only for new supported scopes with no saved choices; read-only preference status; ordinary delegation and shared safety in all four settings combinations; selective loading for heavy resource phases and parent recovery; no status-side worker/schedule creation | Approved Workstreams separation design; Batch 1 shared settings/delegation handoff; exact operational command examples remain tied to the final CLI implementation |
 | [Resource admission](../clients/workstreams-resources.md) | Current resource revision gates heavy coordinator, worker and reviewer phases; common task/dependency/ownership checks, host reservations, bounded rechecks, fresh disk checks, degraded telemetry and safe cleanup remain independent of recovery | Approved Workstreams separation design; Batch 2A resource implementation handoff; cooperative admission is not OS containment or native qualification |
 | [Capacity recovery](../clients/workstreams-recovery.md) | Recovery revision gates registration independently of resource leases; preflight precedes preference mutation; original records and consumed delivery state remain; acknowledged preference changes reconcile registrations and the existing shared schedule; unresolved recovery alone does not block ordinary/resource work | Approved Workstreams separation design; Batch 2B recovery implementation handoff; schedule state requires existing native observation and acknowledged lifecycle recording |

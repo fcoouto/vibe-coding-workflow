@@ -639,6 +639,9 @@ def record_guidance(scope, request):
 
 # Admission coordinates participating owners; it cannot restrict native tools or external writers.
 ADMISSION_VERSION = 1
+COOPERATIVE_COMPLETED = 'cooperative-completed'
+COOPERATIVE_PROOF = 'native-cooperative-completion'
+TERMINAL_ASSIGNMENTS = {'settled', COOPERATIVE_COMPLETED}
 VERSION_PROVENANCE_FIELDS = ('current_observer_version', 'parent_creation_version', 'worker_creation_version')
 MAX_ASSIGNMENTS = 4096
 MAX_CLAIMS = 64
@@ -1106,7 +1109,7 @@ def _record_data(scope, row, data, *, db=None, context=None, artifact_refs=None)
     _require(type(data['version']) is int and data['version'] == ADMISSION_VERSION and
              isinstance(identity, str) and re.fullmatch(r'[0-9a-f]{32}', identity) and
              data['role'] in NATIVE_ROLES | {'coordinator', 'check'} and
-             data['status'] in {'prepared', 'observed', 'uncertain', 'settled'}, 'Invalid assignment ledger record')
+             data['status'] in {'prepared', 'observed', 'uncertain'} | TERMINAL_ASSIGNMENTS, 'Invalid assignment ledger record')
     _require(_hex(data['request_digest']), 'Invalid assignment request digest')
     state._integer(data['revision'], 'stored assignment revision', 1)
     _reference(data['assignment'])
@@ -1221,11 +1224,21 @@ def _record_data(scope, row, data, *, db=None, context=None, artifact_refs=None)
             _require(body['d5_plan']['digest'] == data['plan_digest'] and
                 candidate['definitions_digest'] == data['plan_digest'] and candidate['pins'] == body['pins'] and
                 any(check['id'] == operation['id'] for check in plan['checks']), 'Check bindings do not match actual D5 evidence')
-    if data['status'] == 'settled':
+    if data['status'] in TERMINAL_ASSIGNMENTS:
         _reference(data['reconciliation'])
-        read(data['reconciliation'])
+        reconciliation = read(data['reconciliation'])
         _require(isinstance(data['result'], dict) and data['result'].get('outcome') in
                  {'completed', 'failed', 'cancelled'}, 'Settled assignment has no reconciled result')
+        if data['status'] == COOPERATIVE_COMPLETED:
+            proof = reconciliation.get('proof', {})
+            _require(data['role'] in NATIVE_ROLES and data['result'] == {'outcome': 'completed'} and
+                     proof.get('kind') == COOPERATIVE_PROOF and proof.get('attempt_id') == identity and
+                     proof.get('assignment_digest') == data['assignment']['digest'] and
+                     data['observation'] is not None and proof.get('observation_digest') == data['observation']['digest'],
+                     'Cooperative completion differs from retained assignment evidence')
+        else:
+            _require(reconciliation.get('proof', {}).get('kind') != COOPERATIVE_PROOF,
+                     'Cooperative completion cannot establish strict settlement')
     validate_record(data, read)
     return dict(id=identity, owner=owner, data=data, body=body)
 
@@ -1391,7 +1404,7 @@ def _replay(scope, records, request):
 
 def _brief(scope, job, brief, proof_plan):
     state._fields(brief, ('objective', 'context', 'instructions', 'files', 'resources', 'dependencies',
-                         'acceptance', 'checks', 'self_review', 'stop_conditions'))
+                         'acceptance', 'checks', 'self_review', 'stop_conditions'), ('foreground_wait',))
     for field in ('objective', 'context', 'self_review'):
         state._text(brief[field], 'worker brief ' + field, 8192)
     for field in ('instructions', 'files', 'dependencies', 'acceptance', 'checks', 'stop_conditions'):
@@ -1400,6 +1413,8 @@ def _brief(scope, job, brief, proof_plan):
     _require(brief['resources'] == job['claims'] and brief['dependencies'] == job['dependencies'],
              'Worker brief differs from its exact planned resources/dependencies')
     claims = _claims(brief['resources'])
+    if 'foreground_wait' in brief:
+        _validate_foreground_wait(scope, brief['foreground_wait'], claims)
     for name in brief['files']:
         evidence._relative(name)
         _require(name != '.', 'Worker files must name exact scoped files')
@@ -1413,6 +1428,29 @@ def _brief(scope, job, brief, proof_plan):
             dict(kind='path', key=str(scope.repository_root / name), mode='read') for name in check['dependencies']]))}
     _require(applicable <= set(brief['checks']), 'Worker brief cannot omit an applicable accepted check')
     return claims
+
+
+def _validate_foreground_wait(scope, wait, claims):
+    from runtime.onboarding import _no_links, _private
+
+    state._fields(wait, ('marker', 'python', 'seconds'))
+    _require(type(wait['seconds']) is int and 1 <= wait['seconds'] <= 20,
+             'Foreground wait must use a deadline from 1 to 20 seconds')
+    try:
+        marker = state._canonical_path(wait['marker'])
+        interpreter = state._canonical_path(wait['python'])
+        _no_links(marker)
+        _no_links(interpreter)
+        _private(marker.parent.stat(), directory=True)
+    except (StartupError, OSError):
+        raise state.StateError('Foreground wait requires canonical paths and a private observer directory') from None
+    _require(not marker.is_relative_to(scope.repository_root) and not os.path.lexists(marker),
+             'Foreground wait requires a fresh marker outside the checkout')
+    _require(not interpreter.is_relative_to(scope.repository_root) and interpreter.is_file() and
+             os.access(interpreter, os.X_OK), 'Foreground wait requires an executable interpreter outside the checkout')
+    marker_claim = _claims([dict(kind='path', key=str(marker), mode='read')])[0]
+    _require(marker_claim in claims and not _held_conflict([marker_claim], claims),
+             'Foreground wait marker needs its exact read claim and exclusive observer publication')
 
 
 def _discovery(scope, plan, request):
@@ -1578,6 +1616,13 @@ def _admission(scope, db, task, plan, job, claims, records, request):
         resource_units=request['resource_units'])
     if job['role'] == 'worker':
         _worker_scope(scope, job['claims'], request['brief']['files'])
+        if 'foreground_wait' in request['brief']:
+            _require(plan['route']['client_surface'] == 'codex-cli' and
+                     not {'workstream_revision', 'workstream_context_id', 'continuation_limits'} & request.keys(),
+                     'Foreground wait requires a standalone Codex CLI worker')
+            marker = request['brief']['foreground_wait']['marker']
+            _require(not any(r['body']['request'].get('brief', {}).get('foreground_wait', {}).get('marker') == marker
+                             for r in records), 'Foreground wait marker already belongs to a prepared assignment')
     if 'workstream_revision' in request or 'workstream_limits' in request:
         from runtime.workstreams import validate_admission
         validate_admission(scope, request)
@@ -1596,7 +1641,8 @@ def _admission(scope, db, task, plan, job, claims, records, request):
     _require(counters['attempts_consumed'] < limits['max_attempts'] and
              counters['resource_units_consumed'] + request['resource_units'] <= limits['max_resource_units'],
              'Original finite delegation budget is exhausted')
-    validate_dependencies(scope, task, plan, job, records)
+    cooperative_task = task if not {'workstream_revision', 'continuation_limits', 'workstream_context_id'} & request.keys() else None
+    validate_dependencies(scope, task, plan, job, records, cooperative=cooperative_task is not None)
     previous = [r for r in own if r['data']['job_id'] == job['id']]
     _require(len(previous) < job['max_attempts'], 'Original job attempt budget is exhausted')
     if previous:
@@ -1614,12 +1660,12 @@ def _admission(scope, db, task, plan, job, claims, records, request):
         _require(set(diagnostic['evidence']) - prior_evidence, 'An unchanged retry needs new diagnostic evidence')
     else:
         _require('retry_of' not in request and 'diagnostic' not in request, 'First admission cannot invent a retry predecessor')
-    unresolved = [r for r in records if r['data']['status'] != 'settled']
+    unresolved = [r for r in records if r['data']['status'] != 'settled' and not _cooperative_for(scope, r, cooperative_task)]
     managed = [r for r in unresolved if r['data']['role'] in {'worker', 'review'}]
     _require(sum(r in own for r in managed) < limits['max_parallel_workers'] and
              len(managed) < min([limits['host_capacity']] + [r['data']['host_capacity'] for r in managed]),
              'Managed worker capacity is exhausted, including uncertain historical admissions')
-    _resources_available(scope, db, claims, records)
+    _resources_available(scope, db, claims, records, cooperative_task=cooperative_task)
     return admission
 
 
@@ -1678,7 +1724,7 @@ def _linked_review(scope, scope_id, task, attempt, records, *, context=None, db=
         all(review[key] == attempt[key] for key in ('coverage', 'criteria')) and
         data['binding']['task_name'] == attempt['task_name'] == _native_name(attempt['id'], 'review', record['body']['request']), 'Review D5/D6 immutable link changed')
     if attempt.get('ownership_reconciliation') is not None:
-        _require(data['status'] == 'settled' and attempt['ownership_reconciliation'] == data['reconciliation'],
+        _require(data['status'] in TERMINAL_ASSIGNMENTS and attempt['ownership_reconciliation'] == data['reconciliation'],
                  'Review ownership reconciliation link changed')
     return record
 
@@ -1687,9 +1733,17 @@ def _linked_attempt(scope, scope_id, task, attempt, records, *, context=None, db
     return (_linked_review if attempt.get('kind') == 'review' else _linked_check)(scope, scope_id, task, attempt, records, context=context, db=db, artifact_refs=artifact_refs)
 
 
-def _resources_available(scope, db, claims, records):
+def _cooperative_for(scope, record, task):
+    """Recognize release for participating operations of this exact task."""
+    return (task is not None and record['data']['status'] == COOPERATIVE_COMPLETED and
+            record['owner']['scope_id'] == state._scope_id(scope) and
+            all(record['owner'][key] == task[key] for key in ('client', 'session_id', 'task_id')) and
+            record['body']['pins'] == task['pins'])
+
+
+def _resources_available(scope, db, claims, records, *, cooperative_task=None):
     for record in records:
-        if record['data']['status'] == 'settled':
+        if record['data']['status'] == 'settled' or _cooperative_for(scope, record, cooperative_task):
             continue
         _require(not _held_conflict(claims, record['data']['claims']),
                  'Canonical resource ownership conflicts with an unresolved assignment')
@@ -1772,7 +1826,7 @@ def _coordinator_job(scope, task, request, claims, records):
     return selected['id']
 
 
-def _reserve_operation(scope, request, *, role, _verification=False):
+def _reserve_operation(scope, request, *, role, _verification=False, _cooperative=False):
     """Private model-free kernel; callers later attach actual D5 execution/operation lifecycles."""
     _require(role in {'coordinator', 'check'}, 'Unsupported model-free role')
     byte_limit = evidence.MAX_ARTIFACT if _verification else MAX_INPUT
@@ -1791,6 +1845,17 @@ def _reserve_operation(scope, request, *, role, _verification=False):
     if _verification:
         _require(role == 'coordinator' and all(c['mode'] == 'read' for c in claims), 'Verifier barrier must be read-only')
         state._fields(request['verification'], ('purpose', 'git_directory', 'git_routing'))
+    _require(not _cooperative or _verification and request['verification']['purpose'] == 'completion',
+             'Cooperative verifier reservation requires local qualification completion')
+
+    def cooperative_task(task, admission):
+        if not _cooperative:
+            return None
+        _require(admission.mode == 'qualification' and 'qualification_attempt' in task and
+                 evidence._read(scope, task['evidence']['plan'])['version'] == 1,
+                 'Cooperative verifier reservation requires the exact qualification task')
+        return task
+
     with state._database(scope) as db:
         _require(db is not None, 'Runtime task state is missing')
         _retired_dispatch(scope, db, request)
@@ -1807,7 +1872,7 @@ def _reserve_operation(scope, request, *, role, _verification=False):
         _qualification_allocation(scope, task, admission, records, additional_attempts=0 if _verification else 1)
         _require((_verification or task['state'] not in {'BLOCKED', 'WAITING', 'PAUSED'}) and
                  (task['mode'] == 'editable' or all(c['mode'] == 'read' for c in claims)), 'Task cannot reserve this operation')
-        _resources_available(scope, db, claims, records)
+        _resources_available(scope, db, claims, records, cooperative_task=cooperative_task(task, admission))
         d5_plan = task.get('evidence', {}).get('plan')
         candidate = task.get('evidence', {}).get('candidate')
         d6_plan = task.get('delegation', {}).get('plan')
@@ -1839,7 +1904,7 @@ def _reserve_operation(scope, request, *, role, _verification=False):
         _require(task.get('evidence', {}).get('plan') == d5_plan and
             task.get('evidence', {}).get('candidate') == candidate and task.get('delegation', {}).get('plan') == d6_plan,
             'Accepted operation context changed')
-        _resources_available(scope, db, claims, records)
+        _resources_available(scope, db, claims, records, cooperative_task=cooperative_task(task, admission))
         if role == 'coordinator' and not _verification:
             _require(_coordinator_job(scope, task, request, claims, records) == job_id, 'Coordinator job binding changed')
         _insert_assignment(db, scope, task, record)
@@ -1852,20 +1917,27 @@ def reserve_coordinator(scope, request):
     return _reserve_operation(scope, request, role='coordinator')
 
 
-def _validate_operation_proof(scope, record, task, proof, *, current_candidate_digest=None):
+def _validate_operation_proof(scope, record, task, proof, *, current_candidate_digest=None, cooperative=False):
     return _validate_role_proof(record, task, proof, scope_id=state._scope_id(scope), revision=task['revision'],
         read=lambda reference: evidence._read(scope, reference),
         linked_review=lambda attempt: _linked_review(scope, state._scope_id(scope), task, attempt, [record]),
-        current_candidate_digest=current_candidate_digest)
+        current_candidate_digest=current_candidate_digest, cooperative=cooperative)
 
 
-def _validate_role_proof(record, task, proof, *, scope_id, revision, read, linked_review, current_candidate_digest=None):
+def _validate_role_proof(record, task, proof, *, scope_id, revision, read, linked_review, current_candidate_digest=None,
+                         cooperative=False):
     """Validate exact role bindings only; never authenticate host authority or release ownership."""
     evidence._bounded(proof)
     data, body, owner = record['data'], record['body'], record['owner']
     common = ('version', 'kind', 'identity', 'expected_pins', 'expected_revision', 'scope_id', 'attempt_id',
               'dispatch_id', 'assignment_digest', 'claims_digest', 'observation_ref', 'coordinator_ref')
     role = data['role']
+    _require(not cooperative or role in NATIVE_ROLES, 'Cooperative completion requires a native worker or reviewer')
+    version = proof.get('version') if isinstance(proof, dict) else None
+    _require(type(version) is int and (version == 2 or cooperative and version == 3), 'Unsupported role proof version')
+    # Version 3 attests to coordinator submissions only. Version 2 retains its host-wide meaning.
+    followup_fields = (('no_pending_continuation',) if version == 2 else
+                       ('no_outstanding_coordinator_followups', 'coordinator_submissions_paused'))
     if role == 'coordinator':
         required = (*common, 'decision_ref', 'operation_id', 'operation_digest', 'operation_evidence',
                     'resource_observations', 'operation_stopped', 'operation_descendants_stopped')
@@ -1878,15 +1950,16 @@ def _validate_role_proof(record, task, proof, *, scope_id, revision, read, linke
         kind = 'check-writer-reconciliation'
     else:
         required = (*common, 'candidate_digest', 'current_candidate_digest', 'd6_plan_digest', 'observation_digest',
-                    'result_digest', 'native_identity', 'launch_state', 'stopped', 'descendants_stopped')
-        kind = 'assignment-writer-reconciliation'
+                    'result_digest', 'native_identity', 'launch_state')
+        required += ('activity_digest', *followup_fields) if cooperative else ('stopped', 'descendants_stopped')
+        kind = COOPERATIVE_PROOF if cooperative else 'assignment-writer-reconciliation'
     state._fields(proof, required)
     state._integer(proof['expected_revision'], 'proof task revision', 1)
     state._validate_pins(proof['expected_pins'])
     state._integer(proof['expected_pins']['schema_version'], 'proof schema version', 1)
     _require(all(task[key] == owner[key] == body['request'][key] for key in ('client', 'session_id', 'task_id')) and
         task['scope_ref'] == body['request']['scope_ref'], 'Proof task differs from the original reservation')
-    _require(type(proof['version']) is int and proof['version'] == 2 and proof['kind'] == kind and
+    _require(proof['kind'] == kind and
         proof['identity'] == {key: task[key] for key in evidence.IDENTITY[:4]} and
         proof['expected_pins'] == task['pins'] == body['pins'] and proof['expected_revision'] == revision and
         proof['scope_id'] == owner['scope_id'] == scope_id and proof['attempt_id'] == record['id'] and
@@ -1913,8 +1986,13 @@ def _validate_role_proof(record, task, proof, *, scope_id, revision, read, linke
                      'Independent evidence belongs to different operation resources')
     else:
         _require(_hex(current_candidate_digest) and proof['current_candidate_digest'] == current_candidate_digest and
-            proof['candidate_digest'] == data['candidate']['digest'] and proof['stopped'] is True and
-            proof['descendants_stopped'] is True, 'Exact candidate and stopped-descendant proof is required')
+            proof['candidate_digest'] == data['candidate']['digest'], 'Proof requires exact original and current candidates')
+        if cooperative:
+            _require(_hex(proof['activity_digest']) and all(proof[key] is True for key in followup_fields),
+                     'Cooperative completion requires independent activity and follow-up assessment')
+        else:
+            _require(proof['stopped'] is True and proof['descendants_stopped'] is True,
+                     'Exact candidate and stopped-descendant proof is required')
         if role == 'check':
             execution = data['observation']['digest'] if data['observation'] else None
             _require(proof['plan_digest'] == data['plan_digest'] and proof['execution_digest'] == execution,
@@ -2056,6 +2134,19 @@ def _prepare_native(scope, request, *, role):
             descriptor = state._canonical_plain(admission.original_attempt)['attempt'].get('probe')
             probe = None if descriptor is None else dict(descriptor=descriptor, before=setup_observation._probe_fact(
                 state._accepted_identity(scope.accepted_identity), descriptor['canary']))
+            if role == 'review' and probe is not None:
+                canary = str(Path(descriptor['canary']).relative_to(scope.repository_root))
+                sha256 = probe['before']['target']['fingerprint']['sha256']
+                if sha256 != descriptor['before_sha256'] and candidate['fingerprints'].get(canary, {}).get('sha256') == sha256:
+                    # Keep the writer's preimage witness on its original assignment.
+                    for prior in records:
+                        if prior['data']['role'] != 'worker' or not _cooperative_for(scope, prior, task):
+                            continue
+                        completed = evidence._read(scope, prior['data']['reconciliation'], db=db)
+                        if (completed['current_candidate']['digest'] == candidate_ref['digest']
+                                and canary in completed['assessment']['changed_paths']):
+                            probe = None
+                            break
             before = _qualification_before_data(dict(version=1, kind='qualification-native-before',
                 assignment_id=attempt_id, identity=owner, pins=task['pins'], revision=task['revision'],
                 generation=db.execute('select generation from checkouts where scope_id=?', (state._scope_id(scope),)).fetchone()[0],
@@ -2155,7 +2246,8 @@ def _worker_history(scope, reference, *, context=None, db=None):
         _require(reference['digest'] not in seen and len(history) < MAX_OBSERVATIONS, 'Worker observation history bound reached')
         seen.add(reference['digest'])
         value = evidence._read(None if context is not None else scope, reference, context=context, db=db)
-        state._fields(value, ('version', 'receipt', 'result', 'report', 'error', 'previous', 'conflict', 'revision', 'status', 'request', 'incoming'))
+        state._fields(value, ('version', 'receipt', 'result', 'report', 'error', 'previous', 'conflict', 'revision', 'status', 'request', 'incoming'),
+                      ('activity',))
         _reference(value['incoming'])
         evidence._read(None if context is not None else scope, value['incoming'], context=context, db=db)
         _require(type(value['version']) is int and value['version'] == 1 and value['status'] in {'observed', 'uncertain'},
@@ -2381,13 +2473,35 @@ def _worker_receipt(scope, record, request, observed):
 
 def _observation_reply(record, reference, value, replayed=False):
     return dict(ok=True, attempt_id=record['id'], status=value['status'], revision=value['revision'],
-                observation_digest=reference['digest'], replayed=replayed, limitations=list(ADMISSION_LIMITATIONS))
+                observation_digest=reference['digest'], replayed=replayed, limitations=list(ADMISSION_LIMITATIONS),
+                **({'activity': value['activity']} if 'activity' in value else {}))
+
+
+def _native_observer(record):
+    from runtime.adapters.codex import observe_native_worker, observe_native_review_assignment
+    return observe_native_worker if record['data']['role'] == 'worker' else observe_native_review_assignment
+
+
+def _cooperative_activity(activity):
+    state._fields(activity, ('source_digest', 'calls'))
+    _require(_hex(activity['source_digest']) and isinstance(activity['calls'], list) and len(activity['calls']) <= 64,
+             'Invalid bounded native activity')
+    ids = set()
+    for call in activity['calls']:
+        state._fields(call, ('id', 'tool', 'input_digest'))
+        state._text(call['id'], 'native tool call', 256)
+        state._text(call['tool'], 'native tool name', 128)
+        _require(call['id'] not in ids and _hex(call['input_digest']), 'Ambiguous native tool activity')
+        ids.add(call['id'])
+    return activity
 
 
 def observe_assignment(scope, request):
     """Observe a prepared worker; reported completion never releases its ownership."""
-    evidence._request(request, ('attempt_id', 'parent_turn_id', 'spawn_item_id'))
+    evidence._request(request, ('attempt_id', 'parent_turn_id', 'spawn_item_id'), ('cooperative',))
     request = json_object(evidence._raw(request))
+    cooperative = request.get('cooperative', False)
+    _require(type(cooperative) is bool, 'Invalid cooperative observation option')
     for key in ('attempt_id', 'parent_turn_id', 'spawn_item_id'):
         state._text(request[key], key, 256)
     with state._database(scope) as db:
@@ -2399,19 +2513,23 @@ def observe_assignment(scope, request):
             _require(attempt is not None and _linked_review(scope, state._scope_id(scope), task, attempt, [record]) is not None,
                      'Review observation requires the exact retained D5 attempt')
         history = _worker_history(scope, record['data']['observation'])
-        if record['data']['status'] == 'settled':
+        if record['data']['status'] in TERMINAL_ASSIGNMENTS:
             prior = next(((ref, item) for ref, item in history if item['request'] == _semantic(request)), None)
             _require(prior is not None, 'Settled assignment cannot collect a new observation')
             return _observation_reply(record, *prior, replayed=True)
-    from runtime.adapters.codex import observe_native_worker, observe_native_review_assignment
-    observer = observe_native_worker if record['data']['role'] == 'worker' else observe_native_review_assignment
     receipt = report = result = None
     error = None
     raw_observed = None
+    activity = None
     try:
-        observed = observer(scope, record['id'], request['parent_turn_id'], request['spawn_item_id'])
+        observed = _native_observer(record)(scope, record['id'], request['parent_turn_id'], request['spawn_item_id'],
+                                           **({'cooperative': True} if cooperative else {}))
         evidence._bounded(observed, evidence.MAX_ARTIFACT)
         raw_observed = observed
+        if cooperative:
+            state._fields(observed, ('receipt', 'result', 'activity'))
+            activity = _cooperative_activity(observed['activity'])
+            observed = {key: observed[key] for key in ('receipt', 'result')}
         receipt = _worker_receipt(scope, record, request, observed)
         result = observed['result']
         if result is not None and record['data']['role'] == 'worker':
@@ -2451,12 +2569,15 @@ def observe_assignment(scope, request):
     value = dict(version=1, receipt=receipt, result=result, report=report, error=error,
         request=_semantic(request), incoming=incoming_ref, previous=record['data']['observation'], conflict=conflict,
         revision=request['expected_revision'] + 1, status='uncertain' if error or conflict else 'observed')
+    if cooperative and value['status'] == 'observed':
+        value['activity'] = activity
     reference = evidence._artifact(scope, value, owner=evidence._artifact_owner(scope, task))
     with _reservation_write(scope) as db:
         current = _assignment(scope, db, request, roles=('worker', 'review'))
         duplicate = _observation_replay(scope, _worker_history(scope, current['data']['observation']), incoming)
         if duplicate:
             return _observation_reply(current, *duplicate, replayed=True)
+        _require(current['data']['status'] not in TERMINAL_ASSIGNMENTS, 'Terminal assignment cannot collect new activity')
         task = _assignment_task(scope, db, request)
         _require(current['data'] == record['data'] and task['pins'] == record['body']['pins'], 'Assignment changed during observation')
         current['data'].update(status=value['status'], observation=reference)
@@ -2475,8 +2596,50 @@ def _assignment_plan(scope, record, task):
 
 
 def _reconciliation_reply(record, artifact, replayed=False):
-    return dict(ok=True, attempt_id=record['id'], status='settled', revision=artifact['revision'],
+    status = COOPERATIVE_COMPLETED if artifact['proof']['kind'] == COOPERATIVE_PROOF else 'settled'
+    return dict(ok=True, attempt_id=record['id'], status=status, revision=artifact['revision'],
         outcome=artifact['assessment']['outcome'], replayed=replayed, limitations=list(ADMISSION_LIMITATIONS))
+
+
+def _confirm_cooperative_completion(scope, record, task, history, proof, assessment, original, candidate, changed):
+    data = record['data']
+    _require(data['status'] == 'observed' and data['binding']['client_surface'] == 'codex-cli' and
+             assessment['outcome'] == 'completed' and task['state'] not in {'BLOCKED', 'WAITING', 'PAUSED', 'CANCELLED'} and
+             not (task['turn_uncertain'] and task['turn_id'] is not None) and
+             not {'workstream_dispatch', 'workstream_continuation'} & data.keys() and
+             'workstream_revision' not in record['body']['request'] and all(c['kind'] == 'path' for c in data['claims']),
+             'Cooperative completion requires a successful standalone native assignment with file claims')
+    _require(history and all(item['status'] == 'observed' and not item['error'] and not item['conflict'] and
+             item['receipt']['turn_status'] in {'inProgress', 'completed'} for _, item in history),
+             'Incomplete or uncertain native history retains ownership')
+    observed = history[0][1]
+    receipt = observed['receipt']
+    _require(receipt['turn_status'] == 'completed' and receipt.get('will_retry') is not True and
+             all(item['receipt']['worker_turn_id'] == receipt['worker_turn_id'] for _, item in history) and
+             'activity' in observed and proof['activity_digest'] == evidence._digest(observed['activity']),
+             'Cooperative proof requires the exact completed turn and its observed activity')
+    _require(proof['coordinator_ref'] == assessment['coordinator_ref'] and proof['observation_ref'] in assessment['evidence'],
+             'Cooperative completion requires the bound independent activity and effects assessment')
+    if data['role'] == 'review':
+        _require(original == candidate and not assessment['changed_paths'], 'Cooperative reviewer changed its candidate')
+    else:
+        variable = {'fingerprints', 'dirty_inventory', 'paths'}
+        _require({k: v for k, v in original.items() if k not in variable} ==
+                 {k: v for k, v in candidate.items() if k not in variable} and
+                 not any(name.startswith('instruction:') and original['fingerprints'].get(name) != value
+                         for name, value in candidate['fingerprints'].items()),
+                 'Cooperative worker changed fixed candidate metadata or instructions')
+        files = record['body']['request']['brief']['files']
+        dirty = set(original['dirty_inventory']) ^ set(candidate['dirty_inventory'])
+        _require(changed == set(assessment['changed_paths']) and changed <= set(files) and
+                 all(entry[3:] in changed for entry in dirty), 'Cooperative worker has unassessed or undeclared effects')
+        _worker_scope(scope, record['body']['request']['brief']['resources'], files)
+    try:
+        fresh = _native_observer(record)(scope, record['id'], receipt['parent_turn_id'], receipt['spawn_item_id'], cooperative=True)
+    except (StartupError, ValueError, TypeError, KeyError, RecursionError):
+        raise state.StateError('Fresh cooperative activity unavailable; ownership retained') from None
+    _require(fresh == dict(receipt=receipt, result=observed['result'], activity=observed['activity']),
+             'Native activity changed after assessment; ownership retained')
 
 
 def reconcile_assignment(scope, request):
@@ -2488,10 +2651,18 @@ def reconcile_assignment(scope, request):
         _require(db is not None, 'Missing native assignment state')
         records = _ledger(scope, db, task=request)
         record = _assignment(scope, db, request, roles=('worker', 'review', 'coordinator'), records=records)
-        if record['data']['status'] == 'settled':
+        prior_cooperative = None
+        if record['data']['status'] in TERMINAL_ASSIGNMENTS:
             artifact = evidence._read(scope, record['data']['reconciliation'])
-            _require(artifact.get('request_digest') == evidence._digest(_semantic(request)), 'Settled assignment replay payload changed')
-            return _reconciliation_reply(record, artifact, replayed=True)
+            request_digest = evidence._digest(_semantic(request))
+            if artifact.get('request_digest') == request_digest:
+                return _reconciliation_reply(record, artifact, replayed=True)
+            if 'prior_cooperative' in artifact:
+                prior = evidence._read(scope, artifact['prior_cooperative'])
+                if prior.get('request_digest') == request_digest:
+                    return _reconciliation_reply(record, prior, replayed=True)
+            _require(record['data']['status'] == COOPERATIVE_COMPLETED, 'Settled assignment replay payload changed')
+            prior_cooperative = record['data']['reconciliation']
         task = _assignment_task(scope, db, request)
         generation = db.execute('select generation from checkouts where scope_id=?', (state._scope_id(scope),)).fetchone()[0]
         plan = _assignment_plan(scope, record, task) if record['data']['candidate'] is not None else None
@@ -2507,8 +2678,13 @@ def reconcile_assignment(scope, request):
         evidence._relative(name)
         _require(name != '.', 'Assessment must name exact changed paths')
     proof = evidence._read_host_proof(scope, request['host_proof'])
+    cooperative = proof.get('kind') == COOPERATIVE_PROOF
+    if prior_cooperative is not None:
+        _require(not cooperative and assessment['outcome'] == 'completed',
+                 'Cooperative completion can advance only with independent strict stop proof')
     candidate = evidence.capture_candidate(scope, plan) if plan is not None else None
-    _validate_operation_proof(scope, record, task, proof, current_candidate_digest=evidence._digest(candidate) if candidate is not None else None)
+    _validate_operation_proof(scope, record, task, proof,
+        current_candidate_digest=evidence._digest(candidate) if candidate is not None else None, cooperative=cooperative)
     if candidate is not None:
         original = evidence._read(scope, record['data']['candidate'])
         changed = {name for name in original['fingerprints'].keys() | candidate['fingerprints'].keys()
@@ -2516,7 +2692,7 @@ def reconcile_assignment(scope, request):
         _require(changed <= set(assessment['changed_paths']), 'Partial-change assessment omits actual candidate paths')
     if 'workstream_continuation' in record['data']:
         validate_settlement(scope, record, assessment['outcome'])
-    latest = _worker_history(scope, record['data']['observation']) if record['data']['role'] == 'worker' else []
+    latest = _worker_history(scope, record['data']['observation']) if cooperative or record['data']['role'] == 'worker' else []
     if assessment['outcome'] == 'completed' and record['data']['role'] == 'worker':
         observed = latest[0][1] if latest else None
         _require(observed is not None and observed['status'] == 'observed' and observed['error'] is None and
@@ -2527,10 +2703,14 @@ def reconcile_assignment(scope, request):
         attempt = next(a for a in task['evidence']['attempts'] if a['id'] == record['id'])
         _require(attempt['status'] in {'collected', 'assessed'} and evidence._review_quality_matches(scope, attempt, record),
             'Completed review requires the exact latest collected D5 report and uncontradicted native completion')
+    if cooperative:
+        _confirm_cooperative_completion(scope, record, task, latest, proof, assessment, original, candidate, changed)
     artifact = dict(version=2, request_digest=evidence._digest(_semantic(request)), proof=proof,
         source_digest=request['host_proof']['sha256'], assessment=assessment,
         current_candidate=evidence._artifact(scope, candidate, owner=evidence._artifact_owner(scope, task)) if candidate is not None else None, reservation_snapshot_digest=evidence._digest(reservations),
         revision=request['expected_revision'] + 1)
+    if prior_cooperative is not None:
+        artifact['prior_cooperative'] = prior_cooperative
     reference = evidence._artifact(scope, artifact, owner=evidence._artifact_owner(scope, task))
     with _reservation_write(scope) as db:
         _require(db is not None, 'Missing native assignment state')
@@ -2542,13 +2722,17 @@ def reconcile_assignment(scope, request):
         _require(current['data'] == record['data'] and task['pins'] == record['body']['pins'] and
             db.execute('select generation from checkouts where scope_id=?', (state._scope_id(scope),)).fetchone()[0] == generation,
             'Assignment observation/pins/candidate generation changed during reconciliation')
+        if cooperative:
+            _require(evidence.capture_candidate(scope, plan) == candidate,
+                     'Candidate changed before cooperative release; ownership retained')
         if current['data']['role'] == 'review':
             attempt = next(a for a in task['evidence']['attempts'] if a['id'] == current['id'])
             _linked_review(scope, state._scope_id(scope), task, attempt, [current])
             attempt['ownership_reconciliation'] = reference
             if attempt['status'] in {'reserved', 'running', 'uncertain'}:
                 attempt['status'] = 'cancelled' if assessment['outcome'] == 'cancelled' else 'failed'
-        current['data'].update(status='settled', reconciliation=reference, result=dict(outcome=assessment['outcome']))
+        current['data'].update(status=COOPERATIVE_COMPLETED if cooperative else 'settled',
+                               reconciliation=reference, result=dict(outcome=assessment['outcome']))
         db.execute('update assignments set data=? where id=?', (evidence._raw(current['data']).decode(), record['id']))
         task['revision'] += 1
         state._save(db, state._scope_id(scope), task)
@@ -2559,6 +2743,9 @@ def reconcile_assignment(scope, request):
 def _native_binding(record):
     binding = dict(record['data']['binding'], assignment_digest=record['data']['assignment']['digest'],
         **_visibility(record['body']['request']))
+    brief = record['body']['request'].get('brief', {})
+    if 'foreground_wait' in brief:
+        binding['foreground_wait'] = brief['foreground_wait']
     context_id = _assignment_context(record['body']['request'], record['data']['role'])
     if context_id is not None:
         binding['workstream_context_id'] = context_id
@@ -2600,9 +2787,9 @@ def prepared_native_review_assignment(scope, attempt_id):
 def _compact_delegation_status(report: dict) -> dict:
     """Project recorded ownership only; never refresh native or completion evidence."""
     assignments = report['assignments']
-    rows = sorted(assignments, key=lambda row: (row['status'] == 'settled', row['attempt_id']))
+    rows = sorted(assignments, key=lambda row: (row['status'] in TERMINAL_ASSIGNMENTS, row['attempt_id']))
     result = dict(ok=report['ok'], view='compact', observation_only=True,
-        assignment_count=len(rows), unsettled_count=sum(row['status'] != 'settled' for row in rows),
+        assignment_count=len(rows), unsettled_count=sum(row['status'] not in TERMINAL_ASSIGNMENTS for row in rows),
         conflict_count=len(report['conflicts']), blockers=list(dict.fromkeys(report['blockers'])),
         limitations=list(report['limitations']), details_required=len(rows) > 20 or bool(report['conflicts']),
         assignments=[dict(attempt_id=row['attempt_id'], task_id=row['owner']['task_id'], role=row['role'],
@@ -2631,7 +2818,7 @@ def delegation_status(scope, client, session_id, *, compact=False):
         budgets = dict(delegation, attempts_remaining=plan['limits']['max_attempts'] - delegation['attempts_consumed'],
             resource_units_remaining=plan['limits']['max_resource_units'] - delegation['resource_units_consumed'],
             deadline=plan['limits']['deadline']) if plan else None
-        unresolved = [r for r in records if r['data']['status'] != 'settled']
+        unresolved = [r for r in records if r['data']['status'] != 'settled' and not _cooperative_for(scope, r, task)]
         conflicts = []
         for job in plan['jobs'] if plan else []:
             claims = _claims(job['claims'])
@@ -2644,7 +2831,7 @@ def delegation_status(scope, client, session_id, *, compact=False):
             capacity=dict(unresolved_managed_workers=sum(r['data']['role'] in {'worker', 'review'} for r in unresolved),
                 max_parallel_workers=plan['limits']['max_parallel_workers'] if plan else None,
                 observed_host_capacity=plan['limits']['host_capacity'] if plan else None),
-            blockers=['Unreconciled assignment retains resource claims' for r in selected if r['data']['status'] != 'settled'],
+            blockers=['Unreconciled assignment retains resource claims' for r in selected if r in unresolved],
             limitations=list(ADMISSION_LIMITATIONS))
 
         return _compact_delegation_status(report) if compact else report
@@ -2699,6 +2886,8 @@ def _continuation_owned(scope, db, request, records, *, allow_settled=False):
     task = _assignment_task(scope, db, request)
     _require(record['body']['pins'] == task['pins'],
         'Continuation requires the original owner and pins')
+    _require(record['data']['status'] != COOPERATIVE_COMPLETED,
+             'Cooperatively completed child requires new admission before further work')
     _require(allow_settled or record['data']['status'] != 'settled', 'Reconciled ownership cannot resume without reacquisition')
     _require(task['state'] not in {'BLOCKED', 'WAITING', 'PAUSED', 'CANCELLED'} and not any(
         c['kind'] in {'blocker', 'decision'} and c['status'] == 'pending' for c in task['conditions']),
@@ -2914,7 +3103,7 @@ def record_continuation(scope, request):
         return _continuation_reply(record, task, value)
 
 
-def validate_dependencies(scope, task, plan, job, records):
+def validate_dependencies(scope, task, plan, job, records, *, cooperative=False):
     """A reopened prerequisite invalidates old direct and transitive acceptance."""
     own = [r for r in records if r['owner']['scope_id'] == state._scope_id(scope) and
         all(r['owner'][key] == task[key] for key in ('client', 'session_id', 'task_id'))]
@@ -2935,7 +3124,9 @@ def validate_dependencies(scope, task, plan, job, records):
             pending.extend((parent,False) for parent in jobs[identity]['dependencies'] if parent not in checked)
             continue
         row=latest.get(identity)
-        _require(row is not None and row['data']['role']==jobs[identity]['role'] and row['data']['status']=='settled' and
+        _require(row is not None and row['data']['role']==jobs[identity]['role'] and
+            (row['data']['status']=='settled' or cooperative and _cooperative_for(scope, row, task) and
+             row['data']['plan_digest'] == task['delegation']['plan']['digest']) and
             row['data']['result']['outcome']=='completed','Required delegation dependency prerequisite is not reconciled and complete')
         retained = evidence._read(scope, row['data']['reconciliation'])
         revision = retained.get('revision')

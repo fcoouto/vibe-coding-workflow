@@ -29,16 +29,16 @@
       ]
     },
     "clients/delegation-proofs.md": {
-      "sha256": "07e883df6e752378807301cddb04a7749e17ea974ba0521bb39aa0e8f6ac52e7",
+      "sha256": "e28e35fc3ae75eefb0accce08c623effbf22367b77658ec04f4c3c19b718152a",
       "ranges": [
         [
           1,
-          78
+          114
         ]
       ]
     },
     "clients/delegation-requests.md": {
-      "sha256": "38d71351577a79c072bdc0af3abf76a6f2c7d7977d38d0780fc3e477b1ec5222",
+      "sha256": "f2c6977880241e3e20f392be7254128f6d931c22ba79d451aef417803a40ffd8",
       "ranges": [
         [
           1,
@@ -46,12 +46,12 @@
         ],
         [
           209,
-          274
+          295
         ]
       ]
     },
     "clients/delegation.md": {
-      "sha256": "3f81a213a9e6455fe14ae37cfd3086d68399c8f8ccb736070dbe863293615c3a",
+      "sha256": "aa71e3106809ebda7461153645f633ca8b6c3e4fba444296c7a0ca6dffbd0703",
       "ranges": [
         [
           1,
@@ -59,7 +59,7 @@
         ],
         [
           55,
-          67
+          75
         ]
       ]
     },
@@ -77,11 +77,11 @@
       ]
     },
     "clients/evidence-checks.md": {
-      "sha256": "6db5b7cbe4d70cb6547d9804dbc58720b35ea0fe0480976911f478e5fa447273",
+      "sha256": "25798dd9b972b70d4a9cd9d26fd8815fff91e5dca71199a772441c452602609a",
       "ranges": [
         [
           1,
-          14
+          16
         ]
       ]
     },

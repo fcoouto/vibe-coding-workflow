@@ -1,32 +1,33 @@
-# Bounded D6 managed-lifecycle pilot plan
+# Held D6 managed-hook qualification record
 
-**Status: on hold.** The user authorized this plan, including role-mapping
-planning. Installation, trust changes, runtime preparation/activation and live
-qualification are not authorized. Current live execution allowance is **zero**.
-The limits below are proposed ceilings for a later, explicitly released packet;
-neither this document nor a passing fixture supplies that release.
-The Lima/Docker preflight is retired. The user approved
-[cooperative native delegation](../../d6-native-delegation-plan.md#approved-cooperative-scope)
-on 4 November 2026. Runtime alignment, offline acceptance and a reviewed release
-packet remain pending. Uncertain ownership stays reserved and automatic takeover
-is deferred.
+**Historical stronger track; on hold. Live execution allowance is zero.**
+This record preserves the managed setup and child-hook qualification design.
+It is not the acceptance checklist for cooperative native delegation. Use the
+[canonical D6 plan](../../d6-native-delegation-plan.md) and the short
+[successor packet](2026-11-04-d6-successor-release-packet.md) for the core flow.
+No boot, Docker tests, VM/Colima launch, live qualification or plugin installation
+is authorized. The Lima/Docker preflight remains retired.
 
-**Goal:** observe one managed Codex CLI coordinator, one leaf worker and one
-independent reviewer, with admission before launch and independently verified
-ownership reconciliation. Report a bounded result without claiming full D6 release.
+Load this record only when selecting managed setup or qualifying its child-hook
+protection. Its marker wait, exact canary and witness ordering serve that guard.
+They must not become default requirements for ordinary native delegation.
+Conversely, do not remove the barrier and claim the existing guarded child path
+works: that path still requires its actual supported admission and observation.
 
-**Architecture:** reuse D4 setup/birth/recovery, the D6 assignment ledger and native
-observer, and D5 checks/review/verification. The coordinator uses its actual native
-delegation tool. Add no launcher, scheduler, state registry or substitute proof.
+## Current disposition
 
-**Tech stack:** Python 3.11+, existing package controls and the selected native
-Codex account. CLI and Desktop are separate qualification targets.
-
-**Spec:** [D6 requirements](../../d6-native-delegation-plan.md),
-[current runtime](../../../clients/runtime.md),
-[native delegation](../../../clients/delegation.md) and
-[staged qualification](../../../skills/onboard-my-project/references/qualification.md).
-The historical D6 implementation sequence does not override current schemas.
+- Reuse existing D4 setup and original authority only where the selected managed
+  route requires them. Do not repeat the full setup campaign to certify basic
+  delegation or manufacture fresh state to escape a retained claim.
+- Preserve this record's exact canary and original ceilings for any later attempt
+  using this stronger design. A new core pilot has its own bounded scope and
+  does not reset an older attempt's limits.
+- Version-3 [cooperative completion](../../d6-native-delegation-plan.md#normal-completion-and-uncertain-ownership)
+  now has offline coverage. Retained version-2 proofs keep their original stronger
+  observation requirement. Neither this update nor a fixture retroactively
+  settles an admission or qualifies native execution.
+- D5 registered-check reconciliation, strict readiness and D7 merge acceptance
+  retain their own requirements. A child-hook observation cannot grant them.
 
 ## 1. Source and preservation boundary
 
@@ -84,115 +85,93 @@ Preserve primary WIP, all other worktrees, installed packages, native homes and
 existing authority/evidence. Do not hide or move machine history to force absence;
 D4 must use genuine ready history or its genuine version-2 absence witness.
 
-## 2. Role mapping: existing contract and next source slice
+## Optional role display
 
-The [OpenRouter procedure](../../../skills/openrouter-workers/references/procedure.md#prepare)
-already requires the supervisor assignment's explicit role and specialty. Its
-[brief](../../../skills/openrouter-workers/references/procedure.md#run) carries
-`role`, `specialty`, `model_display_name` and the actual coordinator UUID. Current
-Habblaud presentation is `Role · Model Display Name`; specialty is separate metadata.
-The earlier OpenRouter implementation plan is retained in the primary checkout,
-outside this main baseline; do not import that older branch or superseded controls.
+The shared [worker visibility contract](../../../clients/worker-visibility.md)
+now owns role, specialty, custom-name and actual native/external identity rules.
+[PR #70's retained observations](2026-11-03-shared-worker-roles.md) cover its
+bounded delivered behavior. Preserve declared labels, first-binding order,
+continuations, unsupported-name reporting and existing privacy constraints.
+Do not recreate a separate D6 display policy or registry. Habblaud verification
+is optional and needs its own selected route; missing display evidence does not
+block delegation. OpenRouter execution, credentials and spending remain outside
+this native pilot. No new display implementation or activation is authorized.
 
-Current OpenRouter worker roles are `Scout`, `Builder`, `Tester`, `Reviewer`,
-`Scribe` and `Investigator`. These are validated roles, not arbitrary custom names.
-The installed local-delegation visibility contract also has `Coordinator` and
-requires explicit assignment labels rather than inference from names or models.
-At the original planning baseline, the review found no separate
-`custom_role_name` contract or native D6-to-Habblaud binding. Shared worker
-roles subsequently landed in [PR #70](https://github.com/fcoouto/vibe-coding-workflow/pull/70).
-Its [retained observations](2026-11-03-shared-worker-roles.md) cover bounded
-Desktop and OpenRouter receiver behavior. Managed CLI display still needs its
-own evidence if selected.
+## Deferred exact guard fixture
 
-**Original source requirement for the optional Habblaud check.** Carry the declared
-workflow role and specialty through native D6 admission and observer binding,
-reusing the existing visibility transport. Keep D6 authority roles (`worker`,
-`review`, `coordinator`, `check`) distinct from presentation responsibility:
+The following fixture and checks belong only to the stronger guarded route.
+They remain historical planning inputs, not an executable release packet.
 
-| Assignment | Declared presentation role for this pilot |
+### Proposed public fixture
+
+Freeze these UTF-8, LF-only bytes in the private effect manifest. File contents
+end in one LF. The patch command ends immediately after `*** End Patch`.
+
+`canary.py` before the worker runs
+
+```python
+def value():
+    return 0
+```
+
+`test_canary.py` remains read-only
+
+```python
+from canary import value
+
+assert value() == 42
+```
+
+```text
+*** Begin Patch
+*** Update File: canary.py
+@@
+-    return 0
++    return 42
+*** End Patch
+```
+
+| Artifact | SHA-256 |
 | --- | --- |
-| Coordinator | `Coordinator` |
-| Canary implementation worker | `Builder` |
-| Independent review | `Reviewer` |
+| Canary before | `4480052910accecafe6f206dbd8be95b8447320ff6d2332761858fd6399c1255` |
+| Canary after (`return 42`) | `2f8974f06364c943a202b6a6971a24e891683fa2dc6233ad2a5c478dce8fd0b3` |
+| Read-only test | `1b06d7b982eed8cb250c2037c2c7fbfaf4aa1ece3d106cba880d980da4ae8497` |
+| Admitted patch | `c36d9a0b62214238eb4c98765c2f8bae25dd674cb9883a3569fae81e712683a2` |
+| Denial patch (`+    return 41` in place of `+    return 42`) | `819c28ebe7290add2c91ae98839dd94ec74413b0d2b2a232f01a750bd804d14f` |
 
-Other assignments must declare their actual responsibility; do not label every
-worker Builder. Record any task-specific custom role name separately from the
-canonical role and specialty. Decide its supported field and visible presentation
-with the adapter contract before implementation: current badges do not display
-specialty, and current validators do not accept arbitrary role names. Do not
-silently substitute or discard a user-declared custom name.
-Use versioned, compatible metadata without rewriting existing admissions or
-sticky observer bindings; this does not promise retroactive relabeling.
+Use the pinned Python executable with `-I -B -c` and the exact
+argument `import sys; sys.path.insert(0, "."); import test_canary` from the
+canonical checkout. The baseline must fail on the assertion with the exact
+preimage. Both registered post-edit executions must exit zero on the reviewed
+postimage. Freeze the interpreter path, timeout of at most 10 seconds, minimal
+environment and read-only effects in the D5 plan.
 
-### Shared mechanism for every worker path
+## Staged child guard checks
 
-The user's requirement covers **all native and OpenRouter workers**, not only the
-three roles in this canary. Use one semantic declaration contract and reuse each
-route's existing adapter; do not build separate naming policies or a new registry.
-
-| Path | Required source coverage |
+| Stage | Required observation and decision |
 | --- | --- |
-| Ordinary native delegation | Declare metadata in its existing task/assignment context; bind the real native child without requiring enrollment or a managed runtime database. |
-| Managed D6 workers and D5 reviewers | Preserve native admission, actual identity and D5/D6 digest domains; presentation cannot change their authority role. |
-| OpenRouter/OpenCode workers | Carry the same declared role, specialty and custom name from the frozen external brief to Habblaud; retain the actual external model/provider and genuine supervisor identity. |
-| Native supervisors, continuations and approved fallback | Keep each real assignment's labels and lineage through handoff/recovery. Preserve existing identities for continuation/recovery; bind a new actual identity only when a genuine new attempt or fallback creates one. Never fabricate a native replacement. |
-| Other already-approved worker adapters | Preserve the same contract before claiming display parity; this requirement enables no additional execution route. |
+| D4 bootstrap | Under the separately released setup effects, capture genuine CLI provenance, restricted SessionStart context, bootstrap policy rejection, hook trust and registration, and independent canary facts. Use the exact disposable qualification-purpose task and original allocations. `task-start` and `task-patch` require the pre-tool key. Worker admission requires post-tool, Stop and Interrupt keys. Reviewer admission adds review-readiness. An allocation permits the listed bounded probe with pending cases. It does not mark those cases verified. |
+| Observe the child before allowing mutation | Accept the D5 plan, then the D6 plan. Prepare one worker with the exact `foreground_wait` descriptor, marker read claim and generated command in its brief. Pin the interpreter and the native route. Use the permit once. Capture the actual parent turn and spawn item. Observe the exact child and first turn as `inProgress`. The observer publishes the fresh private marker only after the exact receipt and working parent are confirmed. The bounded command must complete successfully before patches, without a resumable tool session. If the frontend cannot complete the wait and patch in the same turn, hold. |
+| Parent pre-tool reference, when required | While the original parent is still editable and `TRIAGE`, after assignment observation and before mutation, use the exact approved canary patch to obtain a native parent-hook denial. Capture the current parent task turn and unchanged canary while that evidence is current. This is the existing formal parent `pre-tool-enforcement` case. Then confirm `WORKING` before releasing the child barrier. |
+| Child denial | After exact binding, use one separately listed, syntactically valid patch to the same disposable file with a different postimage. Use its own native call ID. Require a genuine workflow PreToolUse denial, unchanged canary and no successful patch completion. Stop on missing callback or unexpected effect. Keep foreign session, mismatched turn, malformed payload, timeout and Post collision cases in offline fixtures. |
+| Child success and paired witness | In the same admitted turn, invoke canonical `apply_patch` once with the exact approved command. Keep the observed child turn and working parent current until PostToolUse persists. Record actual hook session, turn, call and command plus the result. Require the expected one-file effect. Use `observe_managed_case` with `stream='child'` and `case_id='post-tool-handling'`. Independently read the exact native rollout, ordered fresh pre/post receipts, assignment-bound fingerprint and final canary. The generation delta must match all fresh unconflicted Post receipts in the observation window. Collect during a quiet window and account for all tool completions. |
 
-New visibility-enabled assignments must declare their canonical `role`,
-`specialty` and `custom_role_name` when explicitly supplied. Use the
-[versioned assignment metadata](../../../clients/worker-visibility.md). The
-custom name must reach visible role text and full accessible text when the UI
-clips it. Keep the canonical role and specialty separate. Without a custom name, preserve
-the existing `Role · Model Display Name` convention. Unsupported display
-capabilities or missing labels stay explicit; do not guess a role or silently
-substitute a generic Worker badge.
+Use direct `apply_patch` with `tool_input.command` and native session, turn and
+call IDs. A code-mode or sandbox rejection alone does not establish hook
+delivery. The formal pre-tool witness is parent-scoped. The child witness binds
+a successful Post to its admitted Pre. Retain child denial evidence separately
+with native rollout, actual hook result and unchanged bytes. Current source
+does not issue a formal child denial witness. Resolve any requirement for one
+before release. [Pinned Codex patch handler](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/core/src/tools/handlers/apply_patch.rs)
 
-Required source tests must cover the complete path matrix; different declared
-roles on the same model; the same role on different models; custom-name
-round-tripping, Unicode/length/rejection cases; first-binding ordering; replay
-without duplicate characters; preserved labels through approved fallback and
-continuation; truthful supervisor/external identities; and legacy unknown labels.
-Visibility failure must leave execution, permissions, saved route choices,
-provider/model settings and acceptance unchanged. A missing required display
-observation blocks that display claim, not unrelated ordinary work. Test external
-forwarding with offline fixtures; no OpenRouter call is authorized by this plan.
-
-Source acceptance must cover declared role/specialty/custom-name preservation for
-native and already-approved OpenRouter assignments; immutable task markers and
-actual parent/child identities; unsupported-name diagnostics; and unchanged model,
-provider, permissions, budgets and acceptance. Declare labels before dispatch and
-bind them before the first observer registration, because first visible labels
-are sticky. Prove that ordering; renaming a title afterward is not a substitute.
-Emit nothing for a proposed or failed-to-launch child and create no synthetic
-native log. Use only sanitized existing transport metadata, never prompts or code.
-
-This plan authorizes neither that implementation nor Habblaud/OpenRouter activation.
-Habblaud verification is an optional, separately selected display check; its
-failure cannot become false execution failure or success. OpenRouter inference,
-credentials, spending and live qualification remain outside the native D6 pilot.
-A release that selects display must pin the actual role binding and verify
-first managed CLI display. The base lifecycle pilot does not require Habblaud.
-
-## 3. Required go/no-go checks before any managed child launch
-
-| Gate | Required evidence; otherwise hold dependent work |
-| --- | --- |
-| Exact target and authority | Frozen canary/package/journal paths and original D4 effects; fresh schema-3 state through supported D4 birth; current pins and physical membership. Birth alone grants no qualification. |
-| Native frontend and authentication | Actual CLI executable/surface, account route, creation provenance, supported native spawn/catalog/observation controls and compatible guidance. Preserve the user's coordinator model, reasoning, provider and authentication. No credential copying, proxy, billing or global configuration change. |
-| Staged admission and guards | Genuine setup witnesses and an exact qualification-purpose attempt; current startup/pre-tool and, for editing, post-tool evidence for the selected path. PR #78 provides offline child-guard coverage. The release packet must identify the staged path to genuine child PreToolUse and PostToolUse evidence. A stored label or fixture cannot supply it. |
-| Completion and uncertainty | The reviewed runtime must support the approved cooperative completion contract for the exact worker and reviewer. Account for observed tool work, completed foreground operations and independently inspected effects. Incomplete or contradictory evidence retains ownership. Registered checks and coordinator operations retain their applicable D5 proof requirements. |
-| Cooperative ownership | One known shared authority, exact file/Git/resource claims and no conflicting or uncertain owners. Brief the leaf worker to use the approved patch and bounded foreground self-checks, with no background jobs or nested delegation. Record the native trust assumptions. Enforced patch-only availability is outside this pilot's prerequisites. |
-| Capacity and settings | Observe available capacity and suitable native selection/inheritance. Keep requested, configured, spawn-observed and execution settings separate; unknown stays unknown. No non-native fallback. |
-| Display, only if selected | Reviewed native role binding and an explicitly approved existing Habblaud connection. Custom-name support must be demonstrated, not assumed from the badge. |
-
-**Current implementation gap.** The adapter reports `descendants_stopped=False`.
-[Version-2 reconciliation](../../../clients/delegation-proofs.md) still requires
-stronger shutdown proof for native assignments. Implement and independently
-review the [planned contract alignment](../../d6-native-delegation-plan.md#pending-implementation-and-offline-acceptance)
-before releasing this pilot. Cooperative completion evidence must carry its own
-meaning through dependency and readiness consumers. Historical claims retain
-their original proof requirements. The setup closure cannot clear those claims.
+The [setup owner](../../../runtime/setup_observation.py) accepts one managed
+witness per successor collection. Parent pre promotion rechecks the unchanged
+canary. If formal promotion of both cases is required, prove a supported
+publication order offline before release. Preserve original task pins and
+predecessor receipts. The held lifecycle pilot can retain separate scoped
+observations without granting ordinary activation. Reconcile the qualification
+guide's parent-only wording with the current child Post path in the reviewed
+packet.
 
 ## 4. Proposed finite ceilings for one future CLI release
 
@@ -207,7 +186,7 @@ their original proof requirements. The setup closure cannot clear those claims.
 | Original qualification allocation | At most eight unique admitted ledger operations and two resource units, including applicable check/coordinator history; verifier-barrier accounting follows current source |
 | Child windows | Worker 5 min; reviewer 7 min, both inside the managed-scenario window |
 | Review | One independent review round; blocking findings end this pilot rather than start a fix/retry campaign |
-| Checks | At most three D5 check executions and two worker self-check commands; each exact canary command has a 10-second timeout |
+| Checks | At most three registered D5 check executions. Each canary command has a 10-second timeout. |
 | Control traffic | At most 32 D5/D6 control requests, including at most 12 status/observation acquisitions; denied probes and replays count as requests |
 | Replay/negative cases | Two prepare replays, one blocked check-conflict request and one incomplete-completion-evidence reconciliation request; no extra native send |
 | Retries and replacements | Zero; no child continuation, replacement, nested agent, fallback route or automatic Stop continuation |
@@ -227,127 +206,24 @@ more capacity. At expiry stop new effects; preserve unresolved claims, consumed
 budgets and evidence. Further recovery needs its own existing or separately scoped
 authority, not a new run ID, state directory or reset deadline.
 
-## 5. Future sequence and acceptance
+## Evidence and resumption of this stronger track
 
-Every step below is **not run**. The owner is the coordinator unless stated.
+Retain original source pins, native identities, candidate/claim bindings, receipts,
+consumed limits and partial effects in the existing private artifacts. Preserve
+historical proof meanings and pending claims under their original authority.
+Do not delete uncertainty to fit a limit, fabricate stopped flags, or treat an
+empty queue, elapsed time or cancellation acknowledgement as stop evidence.
+Use supported file-only undo only for owned matching outputs and authorized
+recovery effects; preserve later edits and runtime history.
 
-1. **Freeze the release packet.** Record current source/pins, actual client and
-   guidance, explicit allowed effects, target/native identities, operation
-   schedule, deadlines, checks and recovery. Keep catalog/behavior requirements
-   verified, pending or evidenced inapplicable; do not invent a fixed requirement
-   count. Review actual native-home and hook-trust effects before any release.
-2. **Prepare one disposable scope.** Only after release, perform its exact D4
-   setup/birth and genuine staged bootstrap. Do not copy credentials or historical
-   successful receipts. Use qualification-purpose admission, not ordinary
-   activation. A required restart, login, trust intervention or unavailable source
-   remains pending until genuinely observed within the approved effects.
-3. **Freeze the public canary.** `canary.py` initially returns `0`; the immutable
-   `test_canary.py` requires `42`. The worker may change only `canary.py`; the test,
-   instructions, configuration, Git and evidence are coordinator-owned. Accept
-   the D5 plan before the immutable D6 plan. Record the real failing baseline as
-   baseline evidence, never as a passing acceptance check.
-4. **Reserve once and test exclusion.** Prepare `worker-edit` with one stable
-   dispatch ID and exact claims. Replay that preparation before and after the
-   actual launch: same admission/identity, no renewed launch permit or counters.
-   While its write claim is held, request the already-planned read-only D5 canary
-   check. Require a resource-conflict refusal before command execution; do not
-   attribute a native-capacity refusal to path exclusion. No second child is sent.
-5. **Run one worker.** Use only the actual once-only native launch permit, exact
-   `worker_<attempt_id>` marker and prompt. The worker observes the failing check,
-   makes the one-file fix, runs its passing self-check and returns the required
-   bounded report. Parent/turn/spawn/child/origin/candidate identities must bind
-   to the admission. Encrypted native prompt delivery remains unverified.
-6. **Prove uncertainty and reconcile.** An incomplete-evidence reconciliation
-   request must retain ownership and grant no new permission. Then assess the
-   successful worker through the approved cooperative completion contract,
-   binding its actual identity, complete observed foreground activity and
-   independently inspected current candidate. Any uncertainty ends dependent
-   work with claims retained. Automatic takeover remains deferred. Preserve the
-   original admission and never manufacture `not-started` from missing history.
-7. **Run the accepted check and independent reviewer.** After worker reconciliation,
-   execute the planned D5 canary check. Use only D5 `evidence review prepare` for
-   the read-only `review` job, dependent on `worker-edit`. Preserve the D5 plaintext
-   assignment digest separately from the D6 ledger digest. The reviewer covers
-   general/behavior/security impact, changes nothing, and runs one bounded turn.
-   Observe, collect, assess and reconcile its normal completion and effects under
-   the same cooperative contract. Unknown activity retains its claims.
-8. **Verify the final candidate.** Run the final planned check, compare the exact
-   candidate, policy, review and all relevant settled claims, and use D5's verifier.
-   A qualification-purpose result remains qualification evidence: ordinary
-   `verified`, `implementation_verified`, READY, DONE, publication/merge and primary
-   activation do not become available. Record explicit partial results if blocked.
-9. **Reconcile and report.** Keep any partial canary edits and original receipts.
-   Use supported file-only undo only for owned matching outputs and authorized
-   recovery effects; preserve later edits and runtime history. Do not delete the
-   fixture/native home or clear uncertain owners to make cleanup look complete.
+A future selected guard qualification must review its exact source/client,
+existing setup effects, original ownership, actual callback sequence and finite
+schedule. Account for guarded worker/reviewer admission, registered check and
+coordinator proof requirements before that separate release. Retain independently
+verifiable child denial, admitted Pre/Post pairing and unchanged unrelated files.
+Optional display has its own acceptance. Unsupported transitions stay pending.
 
-| Acceptance ID | Required independent observation |
-| --- | --- |
-| A1 — source/scope | Exact source, installed contents, current schemas, identities and genuine qualified admission match the frozen release. |
-| A2 — once-only | One worker and one reviewer native start; prepare replays supply no additional permit, budget or context. |
-| A3 — exclusion | The planned check conflicts with the held writer, starts no command and changes no accepted evidence/ownership counters. |
-| A4 — result | Real initial failure, exact one-file fix and independently accepted final passing canary command; no unexplained effects. |
-| A5 — reconciliation | Incomplete completion evidence retains ownership and consumed limits. A fully observed successful attempt may release claims through the reviewed cooperative path. Interrupted, failed or ambiguous work grants no automatic takeover. Stronger consumers reject insufficient evidence. |
-| A6 — independent review | Genuine different child, D5/D6 digest domains preserved, reviewed bytes unchanged, findings independently assessed. |
-| A7 — preservation | Primary/unrelated work, native settings/auth, old pins/history and saved optional feature choices unchanged. |
-| A8 — bounds | Every effect fits its original wall, model-turn, admission, command and review limits; no resets or hidden replacement. |
-| A9 — visibility, if selected | Actual CLI children receive declared role/custom-name metadata through the approved native adapter before first display binding; no guessed roles or fake native agents. OpenRouter forwarding is assessed offline in its source slice, not natively qualified by this pilot. |
-| A10 — honest outcome | Separate software checks, native source observations, scoped pilot coverage, pending requirements and unresolved ownership; no full-D6/other-surface claim. |
-
-## 6. Evidence, exclusions and completion
-
-Use existing private D4/D5 artifacts outside repositories and plugin/cache trees.
-Retain source/command/check identities, original and current candidate digests,
-admission/replay/conflict receipts, actual native identities/settings, per-attempt
-completion evidence and its trust assumptions, reviewed bytes, findings, counters
-and supported recovery records. Preserve stronger stop evidence where applicable.
-No raw transcript, prompt, source dump, credential or private accounting enters
-public docs or Habblaud. Existing Project caps/retention remain; uncertainty is not
-deleted to fit a limit. The final public summary belongs in `docs/d6-validation.md`
-only after actual observations exist, with source/surface-specific limits.
-
-This first pilot excludes Desktop/Claude qualification, parallel native children,
-crash/ambiguous-native-send fault injection, cross-authority/shared-service races,
-legacy migration/repinning, D7 enforcement, D9 campaigns/usage collection, external
-models, telemetry, automatic takeover, enforced per-worker containment, automatic
-cleanup and release publication. Existing software
-tests do not become native evidence for those cases. Full D6 completion retains
-its full-suite and broader native requirements; this bounded attempt cannot waive
-an applicable mandatory prerequisite or certify complete onboarding.
-
-### What remains before resumption
-
-The 3 November probes remain historical observations for their original
-environment. Preserve the earlier failed D4 claim for reconciliation under
-its original authority.
-
-1. **Align the cooperative contract offline.** Complete the bounded implementation
-   and acceptance work in the [D6 plan](../../d6-native-delegation-plan.md#pending-implementation-and-offline-acceptance).
-   Verify normal completion, uncertainty retention, freshness and strict-consumer
-   compatibility. Current runtime requirements continue until that work is reviewed.
-2. **Freeze and independently review a supported successor packet.**
-   Bind the current package and selected CLI to one disposable checkout, one
-   private D4 journal and authority, the actual hook trust and supported account route, exact
-   claims and the original finite limits. Confirm that authentication, ownership,
-   capacity and the operation schedule meet the gate in §3.
-3. **Bind completion observations before managed dispatch.** Identify the native
-   lifecycle/tool observations and independent candidate inspection needed for
-   the worker and reviewer. Account for D5 check/coordinator proof requirements.
-   Missing evidence keeps the affected phase blocked with ownership retained.
-4. **Define the staged native guard proof.** Use the exact supported CLI and
-   tool route to observe D4 bootstrap, same-parent managed continuation, the
-   admitted and denied child patch calls, and the successful assignment-bound
-   PostToolUse receipt. Observe the canonical `apply_patch` callback. A
-   code-mode or sandbox rejection alone cannot establish managed guard
-   delivery. The current reader uses the parent
-   stream for the pre-tool enforcement witness and the child stream for the
-   paired post-tool witness. Specify how to retain independently verifiable
-   child denial evidence. Resolve any missing reader or callback capability
-   before relying on it. If Habblaud is selected, add its separate first
-   managed CLI display check.
-5. **Obtain explicit release for the exact packet before any live effect.**
-   Until release, the live allowance is zero. After release, run only the
-   authorized staged qualification. Stop at the first unresolved go/no-go
-   condition and retain original claims, evidence and consumed limits.
-
-No live pilot step has run. The pilot remains on hold.
+Report offline checks, native guard observations, cooperative handoff and strict
+readiness separately. No fixture or this document establishes live execution,
+full onboarding readiness, repository enforcement or another client surface.
+No live step was run in this review. The stronger track remains on hold.

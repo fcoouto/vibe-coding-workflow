@@ -1,10 +1,10 @@
 # Reconciliation proof fields
 
 Load only for independently reconciling an admitted operation. These schemas
-describe bindings; they do not establish that a process or its descendants stopped.
-Retain the actual independent host observation. Write its JSON to a private,
+bind independently observed facts to the original admission.
+Retain the actual observation required by the chosen proof kind. Write its JSON to a private,
 absolute, nonsymlink path outside repositories and installed package/cache trees;
-submit its exact SHA-256 through `host_proof`. Never infer stopping from elapsed
+submit its exact SHA-256 through `host_proof`. Strict stopping proofs must never infer stopping from elapsed
 time, a report, a parent exit, or an empty process group.
 
 Every version-2 proof has exactly these common fields:
@@ -53,6 +53,42 @@ Collection and assessment retain ownership until the exact independent stop proo
 Fixture compatibility does not qualify native execution, read-only enforcement or
 successful close. Close, archive, interrupt, a completed turn and parent exit alone
 do not prove that native, tool, background or resource descendants stopped.
+
+## Cooperative native completion
+
+For a successful standalone Codex CLI worker or reviewer, use proof `version:3`
+and `kind:"native-cooperative-completion"`. Use the common and native identity
+fields above, with version 3 in place of version 2. Supply `activity_digest`,
+`no_outstanding_coordinator_followups:true` and
+`coordinator_submissions_paused:true` instead of the two stop flags.
+Use `launch_state:"observed"` and the exact completed observation. Hash the
+returned `activity` object as UTF-8 JSON with sorted keys, ASCII escapes and
+separators `(',', ':')`, then SHA-256.
+
+The coordinator must have no admitted or issued follow-up outstanding for this
+assignment and must pause new submissions through reconciliation. These are
+coordinator-trusted statements about its own actions. Independently inspect the
+exact tool inputs, completed foreground activity and current candidate. Use the
+same `coordinator_ref` as the assessment and include `observation_ref` in its
+evidence list. Trust ordinary native completion; do not claim observation of
+hidden host queues or retries. Missing required results, known pending work,
+contradictory activity or unexplained effects retain ownership.
+
+The result is `cooperative-completed`. The runtime rereads the exact native
+activity, verifies effects and rechecks the candidate, ownership and pins before
+release. This permits compatible dependent work, not final acceptance by itself.
+Applicable checks and independent review still decide result acceptance. Stronger
+consumers require their strict proof. A later strict reconciliation of the same
+admission retains its cooperative evidence. Native qualification remains held.
+
+**Retained version 2:** the same cooperative kind uses `activity_digest` and
+`no_pending_continuation:true`. Its original stronger contract requires observing
+the owning host through completion, checking loaded/idle status, the submission
+queue and pending retry or continuation, with no new submissions through
+reconciliation. A fresh history reader or empty queue alone cannot establish
+that statement. Keep those records and requirements unchanged; never substitute
+version-3 attestations or infer the old boolean from weaker evidence. Mixed
+version fields reject. Strict proof kinds elsewhere remain version 2.
 
 ## Check
 

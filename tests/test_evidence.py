@@ -184,7 +184,7 @@ class EvidenceTests(unittest.TestCase):
                 evidence=['fixture:diagnosis-' + previous['id']]))
         return request
 
-    def reconcile_review(self, prepared):
+    def reconcile_review(self, prepared, activity=None):
         from runtime import delegation
         task = state.task_status(self.scope, 'codex', 'parent')['task']
         with state._database(self.scope) as db:
@@ -201,13 +201,19 @@ class EvidenceTests(unittest.TestCase):
             observation_digest=data['observation']['digest'], result_digest=receipt['result_digest'], native_identity=native,
             launch_state='observed', stopped=True, descendants_stopped=True, observation_ref='fixture:host-lifecycle-checked',
             coordinator_ref='fixture:independent-host-inspection')
+        if activity is not None:
+            del proof['stopped'], proof['descendants_stopped']
+            proof.update(version=3, kind='native-cooperative-completion', activity_digest=self.api._digest(activity),
+                         no_outstanding_coordinator_followups=True, coordinator_submissions_paused=True,
+                         observation_ref='fixture:effect-inspection',
+                         coordinator_ref='fixture:independent-assessment')
         raw=json.dumps(proof).encode(); path=self.root/('review-proof-'+row['id']+'.json');path.write_bytes(raw);path.chmod(0o400)
         return delegation.reconcile_assignment(self.scope, self.request(attempt_id=row['id'], host_proof=dict(path=str(path),
             sha256=hashlib.sha256(raw).hexdigest()), assessment=dict(outcome='completed', changed_paths=[],
             result_assessment='Fixture report independently checked', partial_change_assessment='No candidate/shared-resource effects',
             evidence=['fixture:effect-inspection'], coordinator_ref='fixture:independent-assessment')))
 
-    def review(self, findings=None, coverage=None):
+    def review(self, findings=None, coverage=None, *, cooperative=False):
         from runtime import delegation
         coverage = coverage or ['general', 'security']
         request = self.native_review_request(coverage=coverage, criteria=['works'],
@@ -224,8 +230,14 @@ class EvidenceTests(unittest.TestCase):
             configured_model='fixture-review-model', configured_effort='high', spawn_observed_model='fixture-review-model',
             spawn_observed_effort='high', execution_model=None, execution_effort=None, descendants_stopped=False,
             prompt_delivery='unverified', result_digest=hashlib.sha256(raw.encode()).hexdigest())
-        with patch('runtime.adapters.codex.observe_native_review_assignment', return_value=dict(receipt=actual,result=raw)):
-            observed=delegation.observe_assignment(self.scope, self.request(attempt_id=attempt,parent_turn_id='turn',spawn_item_id='spawn'))
+        activity = dict(source_digest='a' * 64, calls=[]) if cooperative else None
+        observation = dict(receipt=actual, result=raw)
+        observation_request = self.request(attempt_id=attempt, parent_turn_id='turn', spawn_item_id='spawn')
+        if cooperative:
+            observation['activity'] = activity
+            observation_request['cooperative'] = True
+        with patch('runtime.adapters.codex.observe_native_review_assignment', return_value=observation):
+            observed = delegation.observe_assignment(self.scope, observation_request)
             self.assertEqual(observed['status'],'observed',observed)
         receipt = dict(version=1, mechanism='codex-native-agent-path', native_version='0.163.0', parent_session_id='parent',
             parent_turn_id='turn', spawn_item_id='spawn', reviewer_id='reviewer', review_turn_id='child-turn',
@@ -237,7 +249,8 @@ class EvidenceTests(unittest.TestCase):
         assessed = self.api.assess_review(self.scope, self.request(attempt_id=attempt, assessment=dict(coverage=coverage,
             criteria=['works'], qualification='Qualified in runtime/security review', independence='Different observed native child',
             semantic_coverage='Inspected requirements, code and failure paths', dispositions=[], decision_refs=['user:accepted'])))
-        self.reconcile_review(prepared)
+        with patch('runtime.adapters.codex.observe_native_review_assignment', return_value=observation):
+            self.reconcile_review(prepared, activity)
         return assessed
 
     def verify(self, **fields):
@@ -1046,6 +1059,145 @@ class EvidenceTests(unittest.TestCase):
         self.assertTrue(result['verified'], result)
         self.assertFalse(result['merge_authority'])
         self.assertNotEqual(result['task']['state'], 'DONE')
+
+    def test_cooperative_review_cannot_issue_ordinary_readiness_or_merge_evidence(self):
+        self.plan()
+        self.checked()
+        self.review(cooperative=True)
+        for purpose in ('completion', 'merge-evidence'):
+            with self.subTest(purpose=purpose):
+                result = self.api.verify_completion(self.scope, self.request(purpose=purpose))
+                self.assertFalse(result['verified'])
+                self.assertFalse(result['merge_authority'])
+                self.assertNotEqual(result['task']['state'], 'DONE')
+                self.assertTrue(any('ownership remains unresolved' in blocker for blocker in result['blockers']))
+
+
+class CooperativeQualificationTests(unittest.TestCase):
+    def test_guarded_worker_check_and_review_complete_only_the_qualification(self):
+        from runtime import delegation, evidence, setup_readiness
+        from runtime.adapters import codex
+        from tests.test_delegation import AdmissionTests
+        from tests.test_staged_admission import GenuineStagedAdmissionTests
+
+        owner = GenuineStagedAdmissionTests('runTest')
+        self.addCleanup(owner.doCleanups)
+        owner.setUp()
+        owner.identity.update(session_id='parent', task_id='task')
+        attempt = owner.journal['qualification_scope']['attempts'][0]
+        attempt['task'].update(session_id='parent', task_id='task')
+        attempt['native_sessions'] = ['parent', 'child', 'reviewer']
+        d5 = EvidenceTests('runTest')
+        self.addCleanup(d5.doCleanups)
+        d5.root, d5.repo = owner.fixture.base, owner.fixture.repo
+        d5.identity, d5.api = owner.identity, evidence
+        d5.git('config', 'user.email', 'fixture@example.invalid')
+        d5.git('config', 'user.name', 'Fixture')
+        canary = d5.repo / 'app.py'
+        canary.write_text('value = 1\n')
+        d5.git('add', 'app.py')
+        d5.git('commit', '-qm', 'public fixture')
+        command = '*** Begin Patch\n*** Update File: app.py\n@@\n-value = 1\n+value = 42\n*** End Patch'
+        attempt['probe'] = dict(canary=str(canary), patch=command, before_sha256=hashlib.sha256(canary.read_bytes()).hexdigest())
+        d5.scope = scope = owner.acquire(
+            operations=('task-start', 'task-patch', 'native-worker', 'check-run', 'native-review', 'verify-completion'),
+            keys=('pre-tool-enforcement', 'post-tool-handling', 'stop-ownership',
+                  'interrupt-ownership', 'review-readiness'),
+            max_attempts=3, max_resource_units=2,
+        )
+        owner.start(decision_ref='user:accepted')
+        state.update_task(scope, d5.request(state='WORKING', reason='Edit the approved public fixture', reference='user:accepted'))
+        d5.plan()
+        definition = evidence._load_plan(scope, d5.identity)
+        # Noninteractive shell builtins read the fixture as data and start no commands.
+        definition['checks'][0]['argv'] = ['/bin/sh', '-c',
+            'IFS= read -r line < app.py || exit 1\ncase "$line" in "value = 42") exit 0;; *) exit 1;; esac']
+        evidence.plan_evidence(scope, d5.request(plan=definition, change_decision_ref='user:fixture-command'))
+
+        native = AdmissionTests('runTest')
+        native.api, native.scope, native.identity = delegation, scope, d5.identity
+        native.root, native.repo = d5.root, d5.repo
+        private = d5.root / 'observer'
+        private.mkdir(mode=0o700)
+        marker = private / 'ready'
+        wait = dict(marker=str(marker), python=str(Path(sys.executable).resolve()), seconds=15)
+        claims = [native.path_claim(), dict(kind='path', key=str(marker), mode='read')]
+        plan = native.plan_value(jobs=[
+            dict(id='edit', role='worker', claims=claims, dependencies=[], max_attempts=1),
+            dict(id='unit', role='check', claims=[native.path_claim(mode='read')], dependencies=['edit'], max_attempts=1),
+            dict(id='review', role='review', claims=[native.path_claim(mode='read')], dependencies=['unit'], max_attempts=1)])
+        plan['limits'].update(max_attempts=2, max_resource_units=2, max_parallel_workers=1, host_capacity=1)
+        native.plan(plan)
+        review_request = d5.native_review_request(coverage=['general', 'security'], criteria=['works'],
+            assignment='Inspect the approved candidate and retained check read-only.')
+        native.catalog, native.cache_request = d5.native_review_catalog, d5.native_review_cache
+        request = native.prepare_request(selection=review_request['selection'])
+        request['brief'].update(resources=claims, foreground_wait=wait)
+        prepared = delegation.prepare_assignment(scope, request)
+        self.assertTrue(prepared['launch_admitted'])
+        self.assertFalse(delegation.prepare_assignment(scope, request)['launch_admitted'])
+        payload = dict(hook_event_name='PreToolUse', session_id='child', cwd=str(d5.repo), turn_id='child-turn',
+            tool_use_id='patch-1', tool_name='apply_patch', tool_input=dict(command=command))
+        self.assertEqual(state.process_event(scope, codex.normalize_runtime(payload)).action, 'deny')
+        self.assertEqual(native.observe_worker(prepared, native.lifecycle_observation(prepared,
+            turn_status='inProgress'))['status'], 'observed')
+        marker.touch()
+        self.assertEqual(state.process_event(scope, codex.normalize_runtime(payload)).action, 'pass')
+        canary.write_text('value = 42\n')
+        post = payload | dict(hook_event_name='PostToolUse', tool_response='Success. Updated the following files: M app.py')
+        self.assertEqual(state.process_event(scope, codex.normalize_runtime(post)).action, 'pass')
+        activity = dict(source_digest='a' * 64, calls=[
+            dict(id='wait-1', tool='exec_command', input_digest=evidence._digest(
+                dict(tool_name='exec_command', tool_input=codex.foreground_wait_args(wait, d5.repo)))),
+            dict(id='patch-1', tool='apply_patch', input_digest=codex.patch_input_fingerprint(command))])
+        proof, observed = native.cooperative_worker(prepared, activity=activity)
+        with patch.object(codex, 'observe_native_worker', return_value=observed):
+            result = delegation.reconcile_assignment(scope, proof)
+        self.assertEqual(result['status'], 'cooperative-completed')
+
+        check_request = d5.request(check_id='unit', dispatch_id='canary-check')
+        check = evidence.run_check(scope, check_request)
+        self.assertEqual(check['attempt']['status'], 'uncertain')
+        self.assertEqual(check['attempt']['exit_code'], 0)
+        self.assertTrue(check['attempt']['process_started'])
+        with self.assertRaisesRegex(state.StateError, 'dependency prerequisite'):
+            evidence.prepare_review(scope, review_request | d5.request())
+        with self.assertRaisesRegex(state.StateError, 'independent stopped-descendant evidence'):
+            evidence.reconcile_check(scope, d5.request(attempt_id=check['attempt_id']))
+        # The command ran locally. The independent external lifecycle proof is a fixture.
+        check = d5.reconcile(check, observation_ref='fixture:synthetic-inspection-of-exact-builtin-check-and-exit')
+        self.assertEqual(check['attempt']['status'], 'passed')
+        replay = evidence.run_check(scope, check_request)
+        self.assertTrue(replay['replayed'])
+        self.assertEqual(replay['attempt_id'], check['attempt_id'])
+        canary.write_text('value = 43\n')
+        with self.assertRaisesRegex(state.StateError, 'Original qualification public probe changed'):
+            evidence.prepare_review(scope, review_request | d5.request())
+        canary.write_text('value = 42\n')
+        review = d5.review(cooperative=True)
+        candidate = check['attempt']['candidate_digest']
+        self.assertEqual(review['attempt']['candidate_digest'], candidate)
+        with state._database(scope) as db:
+            records = {record['id']: record for record in delegation._ledger(scope, db, task=d5.identity)}
+            worker_before = evidence._read(scope, records[prepared['attempt_id']]['body']['qualification_before'], db=db)
+            review_before = evidence._read(scope, records[review['attempt']['id']]['body']['qualification_before'], db=db)
+        self.assertEqual(worker_before['probe']['descriptor'], attempt['probe'])
+        self.assertIsNone(review_before['probe'])
+        self.assertEqual(review_before['candidate']['digest'], candidate)
+        result = d5.verify(security_impact=dict(status='assessed', reason='Inspected unchanged fixture candidate',
+            reference='fixture:security-impact'))
+        self.assertEqual(result['candidate_digest'], candidate)
+        self.assertTrue(result['qualification_verified'], result['blockers'])
+        self.assertFalse(result['verified'])
+        self.assertFalse(result['implementation_verified'])
+        self.assertFalse(result['merge_authority'])
+        self.assertNotEqual(result['task']['state'], 'DONE')
+        status = evidence.evidence_status(scope, 'codex', 'parent')['evidence']
+        self.assertTrue(status['qualification_verified'], status['blockers'])
+        self.assertFalse(status['implementation_verified'])
+        with self.assertRaises(state.StateError):
+            setup_readiness.observe(scope, owner.request(check_attempt_id=check['attempt_id'],
+                review_attempt_id=review['attempt']['id']))
 
 
 if __name__ == '__main__':

@@ -1,6 +1,8 @@
 # Native delegation
 
-Read this contract only when preparing, observing or recovering native delegated work. Apply [Agent Delegation](../policies/03-agent-delegation.md) for execution choice, authorization, worker selection, briefs, ownership, review and retry decisions. Use [task runtime](runtime.md#runtime-authority) for the approved shared state authority. Use [evidence](evidence.md) for native review admission, review quality, accepted checks and completion. Direct checks and coordinator resource claims do not need native guidance. Startup alone needs none of this procedure.
+Ordinary native delegation follows [Agent Delegation](../policies/03-agent-delegation.md) for execution choice, worker selection, briefs, ownership and review. It does not require managed runtime enrollment. Load the controls below only for a selected managed assignment route. Use [task runtime](runtime.md#runtime-authority) for its shared state authority and [evidence](evidence.md) for its review, checks and completion. Direct checks and coordinator resource claims do not need native guidance. Startup alone needs none of this procedure.
+
+The [cooperative D6 contract](../docs/d6-native-delegation-plan.md#normal-completion-and-uncertain-ownership) uses normal native completion and independent result inspection, without hidden-host access. Version-3 completion and the selected guarded-canary handoff have offline coverage. Preserve selected protections and historical proof meanings. The D6 pilot remains held; offline coverage does not qualify a native route.
 
 The launch and observation controls below apply to native children. For an authorized Usage Routing proposal, use the [Usage Routing delegation procedure](../skills/manage-usage-routing/references/delegation.md).
 
@@ -26,7 +28,7 @@ When policy's refresh triggers apply, call `claim_guidance` before fetching and 
 
 ## Prepare and launch once
 
-Ordinary launch and continuation require their applicable qualified capabilities. For a [qualification task](runtime.md#staged-qualification), admission covers only the retained attempt's exact operations and original allocations. Recheck before a new effect; an expired attempt, later receipt or reacquired reservation cannot renew its deadline or budget. Readback and exact reconciliation remain available without granting another launch.
+Managed launch and continuation require their applicable qualified capabilities. For a [qualification task](runtime.md#staged-qualification), admission covers only the retained attempt's exact operations and original allocations. Recheck before a new effect; an expired attempt, later receipt or reacquired reservation cannot renew its deadline or budget. Readback and exact reconciliation remain available without granting another launch.
 
 Run the installed package's `scripts/workflow.py` with the enrolled checkout as `--cwd`. The following controls read bounded JSON on stdin, except assignment status:
 
@@ -41,7 +43,7 @@ Run the installed package's `scripts/workflow.py` with the enrolled checkout as 
 
 Use the [common envelope](delegation-requests.md#common-envelope) and current response
 revision for mutations. The action references include validator-checked examples.
-For stop-proof construction, read [reconciliation fields](delegation-proofs.md).
+For the applicable proof kind, read [reconciliation fields](delegation-proofs.md).
 For cache refresh publication, read [guidance publication](guidance-publication.md).
 Implementation reads are needed only for diagnosis or implementation work. The runtime
 does not choose jobs, budgets, settings or authorization.
@@ -50,7 +52,7 @@ Accept the D5 evidence plan, then an immutable D6 plan with exact jobs, claims, 
 
 For a worker, supply a stable dispatch ID, exact planned worker job, selection/control/discovery/guidance evidence, resource units and bounded brief. `_brief` binds files, resources and dependencies to that job and checks to accepted D5 definitions. Include applicable instructions, acceptance, self-review and stop conditions. Native review preparation instead uses the single [D5 review path](evidence.md#request-fields); worker preparation cannot admit a reviewer.
 
-For ordinary delegation, only a newly committed response with `launch_admitted:true` permits one coordinator spawn, using its exact task name and prompt, with the accepted supported worker settings. Returned `requested_model`/`requested_effort` are null for inheritance; preserve the recorded inheritance rather than inventing overrides. Replay returns the same assignment without another permit. This is protocol admission, not native spawn idempotency. A lost response requires inspection of the same admission and native identity; never blindly respawn. Reservations coordinate participating owners without enforcing native tools, paths or external writers. Deadlines/resource units bound admission, not measured execution or usage.
+For managed native assignments outside Workstreams dispatch, only a newly committed response with `launch_admitted:true` permits one coordinator spawn, using its exact task name and prompt, with the accepted supported worker settings. Returned `requested_model`/`requested_effort` are null for inheritance; preserve the recorded inheritance rather than inventing overrides. Replay returns the same assignment without another permit. This is protocol admission, not native spawn idempotency. A lost response requires inspection of the same admission and native identity; never blindly respawn. Reservations coordinate participating owners without enforcing native tools, paths or external writers. Deadlines/resource units bound admission, not measured execution or usage.
 
 Managed Workstreams preparation returns no launch permission. Use its [dispatch protocol](workstreams-protocol.md) to consume the one-use permission before native sending; disable/re-enable invalidates stale preparation.
 
@@ -62,6 +64,12 @@ The prepared report contract and `_worker_report` define worker result fields: v
 
 Review lifecycle observation may retain incomplete or mutated work; it does not accept review quality or release ownership. Perform collection and independent assessment through D5 separately.
 
-Inspect the diff, actual checks and partial repository/shared-resource effects, including failed or interrupted work. Reconcile with an independent coordinator assessment and private digest-checked host proof using `reconcile_assignment`. Its version-2 native proof binds the exact admission, canonical claims, original/current candidate, original plan/pins, revision, latest observation/result and native identity. Establish that the exact worker and all writable descendants stopped; JSON flags and references do not authenticate host authority.
+Inspect the diff, actual checks and partial repository/shared-resource effects, including failed or interrupted work. Reconcile with an independent coordinator assessment and private digest-checked host proof. The [strict native proof](delegation-proofs.md#worker-or-reviewer) establishes that the exact worker and all writable descendants stopped. JSON flags and references do not authenticate host authority.
+
+For successful standalone Codex CLI completion, use the version-3 [cooperative proof](delegation-proofs.md#cooperative-native-completion). The reader accounts for a bounded one-turn rollout with direct synchronous `apply_patch`, the [prepared marker wait](delegation-requests.md#prepare-worker) when declared, and tool-free review of supplied candidate material. Independently inspect inputs and effects and account for coordinator-issued follow-ups. Missing required evidence retains ownership. The optional wait serves the selected child-hook witness, not every native handoff. Native qualification remains pending.
+
+On the selected qualification-canary path, a read-only reviewer may inspect the exact candidate already reconciled from its same-task cooperative worker. The worker retains its original preimage witness. The reviewer's own before record binds the current candidate, revision, generation and receipt watermark; it cannot become a pre-edit guard witness. Unexplained candidate changes still block admission. Registered checks retain their strict reconciliation requirements.
+
+`cooperative-completed` releases claims and capacity for compatible operations of the same task. It allows accepted read-only checks, planned native dependencies and local qualification completion. Existing D4 recovery, ordinary D5 readiness and merge evidence require strict settlement. Supply genuine strict proof separately when those operations need it. Uncertain attempts retain claims and consumed budgets. Further work requires new admission. Automatic takeover is deferred.
 
 A genuinely never-started admission requires independently inspected exact-parent/task-marker host evidence and no contrary observation. Missing history or an elapsed deadline cannot establish that branch. Recapture proof after intervening candidate, ownership or observation changes. Cancellation or interrupt acknowledgement does not release claims or restore consumed budgets. Failed/cancelled reconciliation does not complete dependencies. Apply policy's diagnosis and retry rules within original limits, then use [D5 verification](evidence.md#completion-and-limits) for readiness.

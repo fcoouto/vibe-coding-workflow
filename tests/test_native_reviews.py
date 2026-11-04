@@ -4,6 +4,7 @@ from contextlib import contextmanager
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 import subprocess
@@ -71,6 +72,9 @@ for line in sys.stdin:
     elif method == "model/list": result = responses.get("catalog_second", responses["catalog"]) if params.get("cursor") else responses["catalog"]
     elif method == "thread/turns/list":
         turn_reads += 1
+        if mode == "changed-rollout" and turn_reads == 2:
+            with open(responses["child"]["thread"]["path"], "ab") as source:
+                source.write(b"\\n")
         result = responses.get("turns_second", responses["turns"]) if turn_reads > 1 else responses["turns"]
     elif method == "thread/items/list":
         if "history" in responses:
@@ -454,11 +458,12 @@ for line in sys.stdin:
         with patch.dict(sys.modules, {"runtime.delegation": module}):
             yield
 
-    def observe_worker(self, responses=None, binding=None, changed=None, mode="normal", version="0.163.0"):
+    def observe_worker(self, responses=None, binding=None, changed=None, mode="normal", version="0.163.0", **options):
         defaults, prepared = self.worker_fixture()
         executable = self.executable(responses or defaults, mode, version)
-        with self.prepared_worker(binding or prepared, changed), patch.object(codex.shutil, "which", return_value=executable):
-            return codex.observe_native_worker(self.scope, "attempt", "parent-turn", "spawn")
+        with self.prepared_worker(binding or prepared, changed), patch.object(codex.shutil, "which", return_value=executable), \
+                patch.dict(os.environ, {"CODEX_HOME": str(self.root)}):
+            return codex.observe_native_worker(self.scope, "attempt", "parent-turn", "spawn", **options)
 
     def review_assignment_fixture(self):
         responses, binding = self.worker_fixture()
@@ -475,11 +480,152 @@ for line in sys.stdin:
         with patch.dict(sys.modules, {"runtime.delegation": module}):
             yield
 
-    def observe_review_assignment(self, responses=None, binding=None, changed=None):
+    def observe_review_assignment(self, responses=None, binding=None, changed=None, **options):
         defaults, prepared = self.review_assignment_fixture()
         executable = self.executable(responses or defaults)
-        with self.prepared_review_assignment(binding or prepared, changed), patch.object(codex.shutil, "which", return_value=executable):
-            return codex.observe_native_review_assignment(self.scope, attempt_id="attempt", parent_turn_id="parent-turn", spawn_item_id="spawn")
+        with self.prepared_review_assignment(binding or prepared, changed), patch.object(codex.shutil, "which", return_value=executable), \
+                patch.dict(os.environ, {"CODEX_HOME": str(self.root)}):
+            return codex.observe_native_review_assignment(self.scope, attempt_id="attempt", parent_turn_id="parent-turn", spawn_item_id="spawn", **options)
+
+    def cooperative_rollout(self, responses, activity, *, terminal=True):
+        path = self.root / 'rollout.jsonl'
+        responses['child']['thread']['path'] = str(path)
+        responses['initialize'] = dict(codexHome=str(self.root), platformFamily='unix', platformOs='macos', userAgent='fixture')
+        result = responses['items']['data'][0]['item']['text']
+        rows = [('session_meta', dict(id='child')), ('event_msg', dict(type='task_started', turn_id='child-turn'))]
+        rows.extend(('event_msg' if item['type'] == 'item_completed' else 'response_item', item) for item in activity)
+        if terminal:
+            rows.append(('event_msg', dict(type='task_complete', turn_id='child-turn', last_agent_message=result)))
+        raw = ''.join(json.dumps(dict(timestamp='fixture', type=kind, payload=payload)) + '\n' for kind, payload in rows).encode()
+        path.write_bytes(raw)
+        return raw
+
+    def test_cooperative_observation_accounts_for_the_exact_patch_and_read_only_reviewer(self):
+        responses, binding = self.worker_fixture()
+        command = '*** Begin Patch\n*** Update File: canary.py\n@@\n-return 0\n+return 42\n*** End Patch'
+        raw = self.cooperative_rollout(responses, [dict(type='custom_tool_call', call_id='patch', name='apply_patch', input=command),
+            dict(type='custom_tool_call_output', call_id='patch', output='Success')])
+        observed = self.observe_worker(responses, binding, cooperative=True)
+        self.assertEqual(observed['activity'], dict(source_digest=hashlib.sha256(raw).hexdigest(),
+            calls=[dict(id='patch', tool='apply_patch', input_digest=codex.patch_input_fingerprint(command))]))
+        self.assertFalse(observed['receipt']['descendants_stopped'])
+        self.assertNotIn('activity', self.observe_worker(responses, binding))
+        responses, binding = self.review_assignment_fixture()
+        self.cooperative_rollout(responses, [])
+        self.assertEqual(self.observe_review_assignment(responses, binding, cooperative=True)['activity']['calls'], [])
+
+    def test_cooperative_observation_rejects_unknown_or_unfinished_activity(self):
+        call = dict(type='custom_tool_call', call_id='patch', name='apply_patch', input='patch')
+        output = dict(type='custom_tool_call_output', call_id='patch', output='Success')
+        cases = [([call], True), ([output, call], True), ([call, output, output], True),
+                 ([call, output], False), ([dict(call, name='exec'), output], True),
+                 ([dict(type='function_call', call_id='shell', name='exec_command', arguments='{}')], True)]
+        for activity, terminal in cases:
+            responses, binding = self.worker_fixture()
+            self.cooperative_rollout(responses, activity, terminal=terminal)
+            with self.subTest(activity=activity, terminal=terminal), self.assertRaises(StartupError):
+                self.observe_worker(responses, binding, cooperative=True)
+
+    def test_cooperative_observation_accounts_for_the_pinned_wait_before_patching(self):
+        responses, binding = self.worker_fixture()
+        wait = dict(marker=str(self.root / 'ready'), python=str(Path(sys.executable).resolve()), seconds=5)
+        binding['foreground_wait'] = wait
+        args = codex.foreground_wait_args(wait, self.scope.repository_root)
+        self.assertEqual(args['yield_time_ms'], 10000)
+        self.assertIs(args['login'], False)
+        self.assertIs(args['tty'], False)
+        call = dict(type='function_call', call_id='wait', name='exec_command', arguments=json.dumps(args))
+        result = dict(type='function_call_output', call_id='wait', output=(
+            'Chunk ID: 1234ab\nWall time: 0.0500 seconds\nProcess exited with code 0\n'
+            'Original token count: 3\nOutput:\nD6_READY\n'))
+        terminal = dict(type='CommandExecution', id='wait', status='completed', exit_code=0,
+                        source='unified_exec_startup', aggregated_output='D6_READY\n',
+                        command=['/bin/sh', '-c', args['cmd']], cwd=Path(args['workdir']).as_uri())
+        projection = dict(type='commandExecution', id='wait', status='completed', exitCode=0,
+                          source='unifiedExecStartup', aggregatedOutput='D6_READY\n', cwd=args['workdir'])
+        responses['history'] = [dict(turnId='child-turn', item=projection), *responses['items']['data']]
+        command = '*** Begin Patch\n*** Update File: canary.py\n@@\n-return 0\n+return 42\n*** End Patch'
+        patch_call = dict(type='custom_tool_call', call_id='patch', name='apply_patch', input=command)
+        patch_result = dict(type='custom_tool_call_output', call_id='patch', output='Success')
+        completed = dict(type='item_completed', thread_id='child', turn_id='child-turn', item=terminal)
+        for wait_records in ([call, completed, result], [call, result, completed]):
+            self.cooperative_rollout(responses, [*wait_records, patch_call, patch_result])
+            observed = self.observe_worker(responses, binding, cooperative=True)
+            self.assertEqual([(item['id'], item['tool']) for item in observed['activity']['calls']],
+                             [('wait', 'exec_command'), ('patch', 'apply_patch')])
+            self.assertEqual(observed['activity']['calls'][0]['input_digest'],
+                             evidence._digest(dict(tool_name='exec_command', tool_input=args)))
+        cases = {
+            'changed arguments': ([dict(call, arguments=json.dumps(dict(args, login=True))), completed, result], projection),
+            'resumable result': ([call, completed, dict(result, output=result['output'].replace(
+                'Original token count:', 'Process running with session ID 42\nOriginal token count:'))], projection),
+            'missing terminal event': ([call, result], projection),
+            'terminal before call': ([completed, call, result], projection),
+            'terminal after patch': ([call, result, patch_call, patch_result, completed], projection),
+            'early patch': ([call, completed, patch_call, patch_result, result], projection),
+            'inconsistent raw command': ([call, dict(completed, item=dict(terminal, command=['/bin/sh', '-c', 'true'])), result],
+                                         projection),
+            'prefixed shell command': ([call, dict(completed, item=dict(terminal,
+                command=['/bin/sh', '-c', 'true', '-c', args['cmd']])), result], projection),
+            'changed shell': ([call, dict(completed, item=dict(terminal,
+                command=['/bin/zsh', '-c', args['cmd']])), result], projection),
+            'changed raw cwd': ([call, dict(completed, item=dict(terminal, cwd='file:///other')), result], projection),
+            'duplicate wait': ([call, completed, result, dict(call, call_id='other')], projection),
+            'missing projection': ([call, completed, result], None),
+            'failed projection': ([call, completed, result], dict(projection, status='failed', exitCode=1)),
+        }
+        for name, (activity, projected) in cases.items():
+            with self.subTest(name=name), self.assertRaises(StartupError):
+                responses['history'] = list(responses['items']['data'])
+                if projected is not None:
+                    responses['history'].insert(0, dict(turnId='child-turn', item=projected))
+                self.cooperative_rollout(responses, activity)
+                self.observe_worker(responses, binding, cooperative=True)
+
+    def test_foreground_wait_command_requires_a_regular_marker(self):
+        marker = self.root / "private ' marker"
+        wait = dict(marker=str(marker), python=str(Path(sys.executable).resolve()), seconds=1)
+        args = codex.foreground_wait_args(wait, self.scope.repository_root)
+
+        def run_wait():
+            return subprocess.run([args['shell'], '-c', args['cmd']], cwd=args['workdir'],
+                                  capture_output=True, text=True, timeout=3)
+
+        absent = run_wait()
+        self.assertEqual((absent.returncode, absent.stdout), (1, ''))
+        marker.touch()
+        ready = run_wait()
+        self.assertEqual((ready.returncode, ready.stdout), (0, 'D6_READY\n'))
+        marker.rename(self.root / 'old')
+        marker.symlink_to(self.root / 'old')
+        linked = run_wait()
+        self.assertEqual((linked.returncode, linked.stdout), (1, ''))
+
+    def test_cooperative_observation_rejects_retry_and_replaced_turn(self):
+        for retry, changed in ((True, False), (False, True), ('unknown', False)):
+            responses, binding = self.worker_fixture()
+            self.cooperative_rollout(responses, [])
+            responses['turns']['data'][0]['willRetry'] = retry
+            if changed:
+                responses['turns_second'] = dict(data=[dict(id='later', status='completed', error=None)])
+            with self.subTest(retry=retry, changed=changed), self.assertRaises(StartupError):
+                self.observe_worker(responses, binding, cooperative=True)
+
+    def test_cooperative_observation_rejects_projected_activity_missing_from_rollout(self):
+        for item in (dict(type='commandExecution', status='completed', exitCode=0),
+                     dict(type='fileChange', status='completed')):
+            responses, binding = self.worker_fixture()
+            self.cooperative_rollout(responses, [])
+            responses['history'] = [dict(turnId='child-turn', item=dict(id='unaccounted', **item)),
+                                    *responses['items']['data']]
+            with self.subTest(item=item), self.assertRaises(StartupError):
+                self.observe_worker(responses, binding, cooperative=True)
+
+    def test_cooperative_observation_rechecks_the_same_raw_source(self):
+        responses, binding = self.worker_fixture()
+        self.cooperative_rollout(responses, [])
+        with self.assertRaises(StartupError):
+            self.observe_worker(responses, binding, mode='changed-rollout', cooperative=True)
 
     def test_review_assignment_observation_preserves_unknown_and_incomplete_lifecycle(self):
         self.assertTrue(callable(getattr(codex, "observe_native_review_assignment", None)), "Review assignment lifecycle observation is unavailable")
