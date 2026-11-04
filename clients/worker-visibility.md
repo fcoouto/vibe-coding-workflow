@@ -169,9 +169,12 @@ Observe the first rendered badge separately from delivery and later recovery.
 
 ## Binding and delivery
 
-Supply labels before this adapter's first registration. The first observed
-binding is sticky: if another observer has already registered a conflicting
-label or parent, report the conflict. The transport has no supported override.
+Supply labels before this adapter's first registration. The publisher freezes
+the declaration and child, account and parent binding before delivery. Report
+conflicting receiver labels or parents; publication cannot overwrite them.
+The bundled receiver can replace a generic fallback with a declared label from
+a native start event bound to the same account, child and parent. This recovery
+does not replace a frozen publisher receipt or qualify the first visible badge.
 Repeated publication uses the same child identity; it cannot create a synthetic
 replacement. An active display lost after receiver reset can be restored with
 the same observed identity and original label. OpenRouter retains its separate external display ID and genuine
@@ -179,7 +182,8 @@ native parent association. Preserve its frozen declaration when taking over
 through an approved native fallback.
 
 The existing transport sends only bounded display metadata, never source,
-prompts, raw outputs, credentials or reasoning. Readback checks the full label
-and parent binding; actual rendering and accessibility need client observation.
+prompts, raw outputs, credentials or reasoning. Readback checks the exact assigned
+label, or an accepted localized standard fallback when no declaration exists,
+and the parent binding. Actual rendering and accessibility need client observation.
 Delivery, failure and display retirement never change execution, ownership,
 acceptance or evidence. Continue ordinary work when optional visibility fails.
