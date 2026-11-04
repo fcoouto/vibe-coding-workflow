@@ -41,7 +41,6 @@ class SmartBalanceTests(unittest.TestCase):
                             class_name='investigation', mode='smart')
         self.controller.configure(self.request)
         self.ledger.observe('org', 800, 100)
-        self.controller.record_qualification(qualification())
 
     def tearDown(self):
         self.ledger.close(); self.temp.cleanup()
@@ -58,7 +57,7 @@ class SmartBalanceTests(unittest.TestCase):
         self.assertTrue(enabled['warnings'])
         self.assertEqual(enabled['funding_policy'],'best_effort_grant')
 
-    def test_smart_shadow_selects_qualified_work_without_writes_or_calls(self):
+    def test_smart_shadow_selects_unmeasured_work_without_writes_or_calls(self):
         before = self.ledger.snapshot()
         decision = self.controller.evaluate(task())
         self.assertEqual(decision['decision'], 'eligible')
@@ -71,19 +70,15 @@ class SmartBalanceTests(unittest.TestCase):
             self.assertEqual(self.controller.evaluate(task(**change))['decision'], 'native')
         self.assertEqual(self.controller.evaluate(task(provider='openrouter',api_only=True))['decision'], 'paused')
 
-    def test_missing_review_qualification_or_capacity_pauses(self):
+    def test_missing_review_matching_class_or_capacity_pauses(self):
         for change in (dict(reviewer_available=False), dict(class_name='new'), dict(native=native(remaining=25))):
             self.assertEqual(self.controller.evaluate(task(**change))['decision'], 'paused')
-        q = qualification(); q['net_native_saved'] = q['uncertainty']
-        self.controller.record_qualification(q)
-        self.assertEqual(self.controller.evaluate(task())['reason'], 'savings_unqualified')
 
-    def test_changed_profile_or_proxy_only_measurement_cannot_qualify_smart(self):
+    def test_report_measurements_do_not_block_smart_selection(self):
         q = qualification(); q['profile_digest'] = '0'*64
         with self.assertRaises(budget.BudgetError): self.controller.record_qualification(q)
-        q = qualification(); q['unit'] = 'tokens'
-        self.controller.record_qualification(q)
-        self.assertEqual(self.controller.evaluate(task())['reason'], 'savings_unqualified')
+        self.controller.record_qualification(dict(qualification(), unit='tokens', quality_passed=False))
+        self.assertEqual(self.controller.evaluate(task())['decision'], 'eligible')
 
     def test_disable_revisions_invalidate_prepared_decisions(self):
         self.controller.disable(1)

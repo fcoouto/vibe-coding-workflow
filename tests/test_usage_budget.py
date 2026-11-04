@@ -308,6 +308,21 @@ class BudgetTests(unittest.TestCase):
         self.ledger.release_native('account', 'task', evidence, 106)
         self.assertEqual(self.ledger.snapshot()['native'], {})
 
+    def test_fixed_live_reserve_releases_with_fresh_capacity_after_account_usage(self):
+        self.observe()
+        with self.ledger.transaction() as data:
+            data.setdefault('routing', {})['scope'] = dict(revision=1, disabled=False, qualification_revision=0)
+        evidence = native()
+        consent = dict(scope='scope', revision=1, qualification_revision=None)
+        self.ledger.begin('org', 'task', 'run', 'digest', 1, 1, 101, evidence, consent=consent,
+                          live_gate=lambda *_: dict(pin='live', maximum=100))
+        self.ledger.close_run('run')
+        evidence['windows'][0].update(remaining_pp=10, observed_at=105)
+        self.ledger.release_native('account', 'task', evidence, 106)
+        self.assertEqual(self.ledger.snapshot()['native'], {})
+        with self.assertRaisesRegex(budget.BudgetError, 'native_capacity_reserved'):
+            self.begin('next', 'next', evidence=native('next', remaining=10))
+
     def test_native_window_changes_cannot_hide_retained_review_reserves(self):
         self.observe()
         first = native(); first['windows'][0]['allowance_pp'] = 40

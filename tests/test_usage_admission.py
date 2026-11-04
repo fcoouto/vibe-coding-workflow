@@ -82,6 +82,16 @@ class UsageAdmissionTests(unittest.TestCase):
             with self.subTest(approval=change), self.assertRaises(BudgetError):
                 self.validate(self.evidence(**change))
 
+    def test_live_smart_requires_fixed_native_review_allowance(self):
+        self.config.update(requested_mode='smart', live_consent=True)
+        self.task['provider'] = 'auto'
+        for allowance in (0, 4, 6, 5.0):
+            self.task['native']['windows'][0]['allowance_pp'] = allowance
+            with self.subTest(allowance=allowance), self.assertRaises(BudgetError):
+                self.validate(self.evidence())
+        self.task['native']['windows'][0]['allowance_pp'] = 5
+        self.assertEqual(self.validate(self.evidence()), 1750)
+
     def test_grant_must_match_platform_row_and_selected_pool(self):
         self.policy.update(ceiling='subscription_benefit', amount=None)
         for change in (dict(organization='other'), dict(project='other'), dict(expiry=9999),

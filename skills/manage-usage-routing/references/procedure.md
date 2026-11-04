@@ -1,11 +1,10 @@
 # Usage Routing local management
 
-Manual and Smart Balance share one runner and budget. Setup starts OFF. Local
-enablement saves the selected mode and returns a best-effort funding warning.
-The public controls return `live_dispatch:false`. A live request needs a trusted
-Codex host, current admission evidence and the required qualification. The
-[foreground host adapter](codex-host.md) has offline coverage. The existing
-live canary qualified only its fixed request.
+Manual and Smart Balance share one runner and budget. Saving settings leaves
+routing Off. A Keychain connection and explicit activation make either mode
+available for the first eligible task. Other Codex work can continue. The public
+CLI records and shows consent. Only the trusted Codex host can send requests
+after live admission.
 
 Warn at enablement/status that the provider may consume other credits or trigger
 auto-reload despite local controls. Routine decisions use a compact warning code.
@@ -15,26 +14,25 @@ when permitted. Never initiate a purchase or silently switch to a paid API pool.
 
 ## Set up and select a mode
 
-1. Use `status` in the selected enrolled Codex checkout. Show the requested mode
-   and whether local consent is enabled. Keep status read-only.
-2. For a requested new connection, use [Keychain setup](keychain-setup.md).
-   Confirm the selected organization, project, billing cycle and one monthly
-   ceiling: **No ceiling**, **Monthly subscription benefit only**, or **Specify
-   an amount**. Confirm the approved profile and proposal scope. Save settings
-   with `configure`. Use verified values for pricing, expiry and limits, and
-   report any prerequisite that is missing. Saving settings leaves routing OFF.
-3. Only on an explicit enable request, pass the current `revision` as
-   `expected_revision` and `mode: manual` or `mode: smart` to `enable`. Other Codex
-   activity does not delay enablement. Do not ask the user to pause other work.
-   Warn about account funding and explain the current live or shadow limit. Reuse
-   the existing connection and shared allowance when changing modes. Do not create
-   a second key.
-4. In Manual, use the API only for explicitly selected tasks within the approved
-   scope. Smart Balance evaluates suitable assignments at the task boundary.
-   It stays in shadow while live host or class qualification is missing. Read
-   [delegation](delegation.md) for proposal and review handling.
-5. Use `disable` on an explicit stop request. Recheck status and report OFF. On a
-   stale revision, show current status before applying a changed selection.
+1. Read `status` in the selected enrolled Codex checkout. Show the configured
+   mode and whether live consent is saved.
+2. For a requested connection, use [Keychain setup](keychain-setup.md). Confirm
+   the selected organization, project and key, approved profile, task and data
+   scope, expiry, billing cycle and spending limit. Reuse accepted settings and
+   the existing connection when applicable. Save configuration with `configure`
+   if needed.
+3. On the user's explicit enable request, pass the current `revision` as
+   `expected_revision` and select `mode: manual` or `mode: smart`. This
+   records live consent for the approved configuration. Use the existing
+   approved regular-routing budget and expiry. Use `live_enabled` to verify
+   saved live consent. If status reports `routing_budget_required`, follow
+   [regular-routing budget setup](#regular-routing-budget).
+4. In Manual, route only tasks explicitly selected by the user. In Smart
+   Balance, use the standing consent for eligible tasks within the approved
+   scope and budget. Load [delegation](delegation.md) for either mode. Previews,
+   comparisons and canaries are optional.
+5. Use `disable` on an explicit stop request. Recheck status and report Off.
+   On a stale revision, show current status before applying a changed selection.
 
 ## Read-only status, quoting and selection
 
@@ -46,10 +44,11 @@ python3 -I -B scripts/usage_routing.py quote < synthetic-quote.json
 python3 -I -B scripts/usage_routing.py evaluate --cwd /absolute/project/path < task.json
 ```
 
-Status creates no state or credentials. It reports enrollment separately from
-qualification. A suspended/uncertain source package does not undo existing
-onboarding; resolve it through the user's accepted workflow instead of silently
-changing enrollment. Evaluate is a read-only shadow decision; `eligible` plus
+Status creates no state or credentials. It distinguishes enrollment and saved
+live consent (`live_enabled`). `live_dispatch:false` describes the public CLI
+boundary. If the source package is unavailable or untrusted, resolve that
+through the accepted workflow and preserve enrollment. Evaluate is an optional
+read-only preview. `eligible` plus
 `simulation_only:true` never authorizes a send. A paused/unknown decision is not a
 reason to start another provider after an API attempt.
 
@@ -75,13 +74,14 @@ counts/prices or granting spending permission. Use synthetic inputs for tests.
 - `policy`: `cycle`, `start`, `end`, `expiry`, `stop_at`, `ceiling`, `amount`,
   `grant_amount`, `pilot_limit`, `task_limit`;
 - `profile` as above; `class_name`; `mode` (`manual` or `smart`).
+- Optional `production_budget: true` for an existing smoke-test configuration
+  in the same organization and accounting cycle.
 
 All money values are exact integer USD micro-units. Ceiling is `none` (No ceiling),
 `subscription_benefit` (Monthly subscription benefit only), or `custom` (Specify
 it). Amount is positive for custom and null otherwise. Benefit-only requires
-actual authorized grant coverage before live activation; a numerical setting is
-not proof. Stop time precedes cycle end/expiry. No ceiling still respects credits,
-request/task/pilot bounds and retained uncertainty.
+actual authorized grant coverage before a live request; a numerical setting is
+not proof. Stop time precedes cycle end/expiry.
 
 Configuration requires the supported enrolled Codex scope. It explicitly creates
 owner-only feature state under `~/.local/state/vibe-coding-workflow/usage/` and
@@ -92,68 +92,58 @@ state is separate from optional managed task runtime activation.
 
 `disable` takes `expected_revision`. `enable` takes `expected_revision` and an
 optional `mode` (`manual` or `smart`). Omit `mode` to keep the saved choice. Disable
-blocks new admissions. Enable saves local consent and returns the funding warning.
+blocks new admissions. Explicit enable on a Keychain configuration sets
+`live_consent` and returns the funding warning.
 The public `run` path remains unavailable.
 Live evidence belongs to the trusted host. `reconcile` takes `{}` and reports
 `manual_recovery_required`, not guessed settlement or cleared deductions.
 
-## Qualification and observations
+### Regular-routing budget
 
-The coordinator's local `Controller.observe` validates organization/project,
-USD, selected pool, expiry and source/age before retaining a conservative balance.
-`record_qualification` binds class/profile, quality, capacity, sample count and
-native savings versus uncertainty. Qualification fields are exactly `class_name`, `profile_digest`, `samples`,
-`quality_passed`, `net_native_saved`, `uncertainty`, `unit`, `native_calibrated`,
-`observed_at`, `valid_until`. Only attributable `allowance_pp` savings qualify
-shadow automatic selection; tokens remain proxies. Native evidence contains
-`account`, `task`, `windows`; each window has `id`, `remaining_pp`, `resolution_pp`,
-`allowance_pp`, `observed_at`, `reset_at`. Values are integer percentage points;
-unknown precision or rounding remains unqualified.
+Manual and Smart Balance use the same configured budget. The monthly ceiling
+limits total routing spend in a billing cycle. `pilot_limit` is the separate
+cumulative routing cap and `task_limit` bounds spend on one task. These caps
+limit exposure if calls are repeated or their charges remain uncertain. No
+monthly ceiling still leaves the cumulative and per-task caps in effect.
+Reserve each request's maximum cost before sending against the applicable
+limits and available approved credits.
 
-Smart Balance live admission also requires `native_allowance_pp` from the
-measured qualification. A legacy shadow record can still inform a shadow
-decision. Live requests reserve the measured allowance through independent review.
+An optional smoke test uses its own budget, token limits and expiry. If its
+accounting cycle is still active, obtain the user's regular-routing budget
+choice and call `configure` with `production_budget: true`. Supply the approved
+limits, current price profile, and stop time. Keep the cycle ID and billing
+boundaries so costs and reservations still count. Then use the requested
+mode's normal enable procedure.
 
-Both store **non-authoritative shadow data**;
-source labels or booleans cannot establish verified funding or activate execution.
-The internal gate requires an exact host-issued `Admission` object.
-The host verifies the selected grant row, price bounds including counting,
-explicit task approval and distinct native reviewer. The gate pins those facts
-to the current checkout, credential binding, profile, policy and exact task
-through both calls. Manual requires explicit API task selection. Smart Balance
-also pins the trusted qualification revision and record through both calls and
-stops at its expiry. The host must verify provenance before creating the object.
+## Optional preview and evaluation
 
-Actual grant, price and Codex host source qualification remain live dependencies.
-Provider-side grant isolation is a residual risk, not an enablement condition.
+The coordinator's local `Controller.observe` retains a conservative balance
+after checking organization/project, USD, selected pool, expiry and source/age.
+For a comparative evaluation, `record_qualification` accepts `class_name`,
+`profile_digest`, `samples`, `quality_passed`, `net_native_saved`,
+`uncertainty`, `unit`, `native_calibrated`, `observed_at`, and
+`valid_until`. Use attributable `allowance_pp` deltas to report measured
+allowance savings. Mark unknown rounding or unrelated account
+activity that prevents attribution. Neither preview records nor their inputs
+authorize transmission.
 
-A shadow task contains exactly `task_id`, `run_id`, `class_name`, `packet`,
-`provider` (`auto`, `openai-api`, or explicit other provider), `local_preferred`,
-`api_only`, `reviewer_available`, `native`, `snapshots`. Native quota uses the
-existing account/task and complete window/reset records. Missing evidence pauses
-selection. Snapshots contain `path`/`sha256` and must be unchanged files within the
-selected checkout. Other-provider/local choices retain priority.
+A preview task contains exactly `task_id`, `run_id`, `class_name`, `packet`,
+`provider` (`auto`, `openai-api`, or explicit other provider),
+`local_preferred`, `api_only`, `reviewer_available`, `native`, and
+`snapshots`. Native evidence contains `account`, `task`, and `windows`;
+each window has `id`, `remaining_pp`, `resolution_pp`, `allowance_pp`,
+`observed_at`, and `reset_at`. Capacity values are integer percentage
+points. Snapshots contain `path` and `sha256` for unchanged files within
+the selected checkout. Other-provider/local choices retain priority.
 
-Smart Balance requires a matching qualified profile/class, positive measured
-native allowance savings beyond uncertainty, calibrated native capacity, current
-credits/prices/expiry and an available independent reviewer. Account for unrelated
-Codex activity when judging whether pilot allowance measurements are attributable.
-Proxy token counts alone cannot qualify savings. Unqualified work stays
-Manual/shadow. Do not add exploratory inference or stronger reasoning to spend
-credits. Expiry can break ties
-among equally important ready work, not manufacture tasks.
-
-## Tests and live boundary
+## Optional local checks
 
 ```sh
 python3 -B -m unittest tests.test_usage_budget tests.test_usage_routing tests.test_usage_settings tests.test_smart_balance tests.test_openai_api tests.test_usage_admission tests.test_usage_live
 ```
 
-These checks use disposable SQLite and fake connections. The default public
-transport cannot connect. Usable grant, price and capacity evidence and a bounded
-live pilot still require qualification and explicit request authorization.
-Auto-reload OFF or a
-provider-enforced grant-only guarantee is not required.
+These checks use disposable SQLite and fake connections. Use the
+[Codex host](codex-host.md) for live admission.
 
 ## Native handoff
 

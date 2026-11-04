@@ -275,6 +275,8 @@ class CodexUsageHostTests(unittest.TestCase):
 
     def test_smart_uses_same_thread_older_approval_and_only_frozen_proposals(self):
         self.configure('smart')
+        with self.ledger.transaction() as data:
+            data['routing']['scope'].pop('live_consent', None)
         first = self.proposal(provider='auto')
         second = self.proposal(task_id='second', provider='auto')
         plan = self.freeze(first, second)
@@ -299,6 +301,62 @@ class CodexUsageHostTests(unittest.TestCase):
         with self.assertRaises(BudgetError):
             self.execute(plan, first, thread_snapshot=current, approval_snapshot=wrong_host)
         self.dispatch.assert_not_called()
+
+    def test_standing_smart_first_task_uses_saved_consent_without_benchmark_or_approval(self):
+        self.configure('smart')
+        with self.ledger.transaction() as data:
+            config = data['routing']['scope']
+            config.update(qualification=None, qualification_revision=0, live_consent=True)
+        proposal = self.proposal(provider='auto')
+        first_plan = self.freeze(proposal, standing_consent=True)
+        self.execute(first_plan, proposal, thread_snapshot=self.receipt('Investigate the issue.', started=105))
+        _, task, evidence = self.dispatch.call_args.args
+        self.assertEqual(task['native']['windows'][0]['allowance_pp'], 5)
+        self.assertIsNone(evidence.qualification_digest)
+        self.now = 107
+        second_plan = self.freeze(proposal, standing_consent=True,
+                                  thread_snapshot=self.receipt('Continue.', started=107))
+        self.execute(second_plan, proposal, when=108,
+                     thread_snapshot=self.receipt('Continue.', started=107))
+        self.assertEqual(self.dispatch.call_args.args[1]['run_id'], task['run_id'])
+
+    def test_standing_smart_rejects_old_consent_and_repository_snapshots(self):
+        self.configure('smart')
+        proposal = self.proposal(provider='auto')
+        with self.ledger.transaction() as data:
+            data['routing']['scope'].pop('live_consent', None)
+        with self.assertRaisesRegex(BudgetError, 'standing_consent_required'):
+            self.freeze(proposal, standing_consent=True)
+        self.control.enable(2)
+        source = self.root / 'source.py'
+        source.write_bytes(b'private source')
+        snapshot = dict(path=str(source), sha256='a' * 64)
+        with self.assertRaisesRegex(BudgetError, 'standing_source_scope_exceeded'):
+            self.freeze(dict(proposal, snapshots=[snapshot]), standing_consent=True)
+        self.dispatch.assert_not_called()
+
+    def test_manual_task_selection_uses_active_direct_message_without_second_approval(self):
+        self.configure()
+        with self.ledger.transaction() as data:
+            data['routing']['scope']['live_consent'] = True
+        selection = 'Use the OpenAI API for this test.'
+        receipt = self.receipt(selection)
+        plan = self.freeze(thread_snapshot=receipt)
+        self.execute(plan, thread_snapshot=receipt, manual_selection=selection)
+        _, task, evidence = self.dispatch.call_args.args
+        self.assertEqual(evidence.approved_at, 101)
+        self.dispatch.reset_mock()
+        for invalid in (self.receipt(selection, role='agentMessage'),
+                        self.receipt(selection, turn='later'),
+                        self.receipt('Continue with native Codex.')):
+            with self.assertRaisesRegex(BudgetError, 'codex_approval_missing'):
+                self.execute(plan, thread_snapshot=invalid, manual_selection=selection)
+        self.dispatch.assert_not_called()
+        second = self.proposal(task_id='second')
+        self.now = 106
+        second_plan = self.freeze(second, thread_snapshot=receipt)
+        self.execute(second_plan, second, thread_snapshot=receipt, manual_selection=selection)
+        self.assertEqual(self.dispatch.call_args.args[1]['run_id'], task['run_id'])
 
     def habblaud_context(self):
         self.reviewer = self.host.Reviewer('e98f7dd1-70f7-44e3-98de-d6307c2fa04b', 'independent-reviewer')

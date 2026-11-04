@@ -381,19 +381,24 @@ class Ledger:
         overrun = False
         with self.transaction() as data:
             key = json.dumps([account, task])
-            require(not any(r['native'] == key and not r['closed'] for r in data['runs'].values()), 'native_task_active')
+            runs = [run for run in data['runs'].values() if run['native'] == key]
+            require(all(run['closed'] for run in runs), 'native_task_active')
             require(evidence['account'] == account and evidence['task'] == task, 'native_task_mismatch')
             require(key in data['native'] and all(w['observed_at'] > data['native'][key]['latest_at']
                     for w in evidence['windows']), 'native_observation_precedes_work')
             self._native(data, evidence, now, reserve=False)
             record = data['native'][key]
-            for window in evidence['windows']:
-                base = record['baseline'][window['id']]
-                # Reporting uncertainty is not evidence of zero consumption.
-                measured = max(0, base['remaining'] - window['remaining_pp'])
-                if measured > record['windows'][window['id']]:
-                    data.setdefault('native_paused', {})[account] = 'native_allowance_overrun'
-                    overrun = True
+            fixed_live = runs and all(run.get('live_admission') and run.get('consent')
+                                      and run['consent']['qualification_revision'] is None for run in runs)
+            # Account-wide changes cannot measure consumption for a fixed live task.
+            if not fixed_live:
+                for window in evidence['windows']:
+                    base = record['baseline'][window['id']]
+                    # Reporting uncertainty is not evidence of zero consumption.
+                    measured = max(0, base['remaining'] - window['remaining_pp'])
+                    if measured > record['windows'][window['id']]:
+                        data.setdefault('native_paused', {})[account] = 'native_allowance_overrun'
+                        overrun = True
             if not overrun:
                 data['native'].pop(key)
                 data['finished_native'].append(key)
@@ -413,7 +418,8 @@ class Ledger:
         fields(pin, 'scope revision qualification_revision')
         config = data.get('routing', {}).get(pin['scope'])
         require(config is not None and config['revision'] == pin['revision']
-                and not config['disabled'] and config['qualification_revision'] == pin['qualification_revision'], 'consent_changed')
+                and not config['disabled'] and (pin['qualification_revision'] is None
+                or config['qualification_revision'] == pin['qualification_revision']), 'consent_changed')
 
     def reconcile(self, *, scope=None):
         """Report scoped recovery evidence without altering reservations."""

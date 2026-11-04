@@ -74,6 +74,18 @@ class LiveAdmissionTests(unittest.TestCase):
         resolver.assert_not_called()
         self.assertEqual(self.ledger.snapshot(), before)
 
+    def test_legacy_enabled_canary_budget_cannot_admit_regular_live_task(self):
+        self.controller.enable(1)
+        policy = dict(POLICY, cycle='canary-old')
+        with self.ledger.transaction() as state:
+            state['organizations']['org']['policy'] = policy
+        proof = replace(self.proof, policy_digest=admission.digest(policy))
+        with self.assertRaisesRegex(budget.BudgetError, 'routing_budget_required'):
+            self.run_candidate(proof)
+        self.resolver.assert_not_called()
+        self.factory.assert_not_called()
+        self.assertEqual(self.ledger.snapshot()['runs'], {})
+
     def test_two_sends_share_review_reserve_and_cannot_replay(self):
         self.controller.enable(1)
         counted = Connection(Response(dict(object='response.input_tokens', input_tokens=1200)))
@@ -144,12 +156,17 @@ class LiveAdmissionTests(unittest.TestCase):
                         task_digest=admission.digest(self.task), qualification_digest=admission.digest([1, record]))
         return record, proof
 
+    def enable_legacy_smart(self):
+        self.controller.enable(2)
+        with self.ledger.transaction() as state:
+            self.controller._config(state).pop('live_consent')
+
     def test_smart_host_dispatch_requires_enabled_mode_and_pinned_qualification(self):
         _, proof = self.smart_candidate()
         with self.assertRaisesRegex(budget.BudgetError, 'live_mode_unqualified'):
             self.run_candidate(proof)
-        self.controller.enable(2)
-        with self.assertRaisesRegex(budget.BudgetError, 'qualification_changed'):
+        self.enable_legacy_smart()
+        with self.assertRaisesRegex(budget.BudgetError, 'live_consent_required'):
             self.run_candidate(replace(proof, qualification_digest=None))
         self.factory.assert_not_called()
         self.resolver.assert_not_called()
@@ -164,11 +181,52 @@ class LiveAdmissionTests(unittest.TestCase):
         self.assert_generation_route(result, (counted, generated))
         self.assertEqual([conn.requests[0][1] for conn in (counted, generated)],
                          ['/v1/responses/input_tokens', '/v1/responses'])
-        self.assertEqual(len(self.ledger.snapshot()['native']), 1)
+        state = self.ledger.snapshot()
+        self.assertEqual(len(state['native']), 1)
+        self.assertEqual(state['runs']['run']['consent']['qualification_revision'], 1)
+
+    def test_first_smart_task_runs_without_qualification_and_survives_measurement(self):
+        self.controller.enable(1, mode='smart')
+        self.task = task()
+        self.task['native']['windows'][0]['allowance_pp'] = 5
+        proof = replace(self.proof, task_digest=admission.digest(self.task))
+        counted = Connection(Response(dict(object='response.input_tokens', input_tokens=1200)))
+        reply = completed()
+        reply['model'] = self.profile['model']
+        reply['usage'].update(input_tokens=1200, total_tokens=1217)
+        generated = Connection(Response(reply))
+        respond = counted.getresponse
+
+        def receive():
+            record = dict(qualification(), profile_digest=routing.profile_digest(self.profile),
+                          quality_passed=False, valid_until=102)
+            self.controller.record_qualification(record)
+            self.clock = 102
+            return respond()
+
+        counted.getresponse = receive
+        self.factory.side_effect = [counted, generated]
+        result = self.run_candidate(proof)
+        self.assert_generation_route(result, (counted, generated))
+        state = self.ledger.snapshot()
+        self.assertEqual(len(state['native']), 1)
+        self.assertIsNone(state['runs']['run']['consent']['qualification_revision'])
+
+    def test_legacy_smart_enable_is_not_standing_consent(self):
+        self.controller.enable(1, mode='smart')
+        with self.ledger.transaction() as state:
+            self.controller._config(state).pop('live_consent', None)
+        self.task = task()
+        self.task['native']['windows'][0]['allowance_pp'] = 5
+        proof = replace(self.proof, task_digest=admission.digest(self.task))
+        with self.assertRaisesRegex(budget.BudgetError, 'live_consent_required'):
+            self.run_candidate(proof)
+        self.factory.assert_not_called()
+        self.resolver.assert_not_called()
 
     def test_smart_qualification_change_after_count_prevents_generation(self):
         record, proof = self.smart_candidate()
-        self.controller.enable(2)
+        self.enable_legacy_smart()
         counted = Connection(Response(dict(object='response.input_tokens', input_tokens=1200)))
         respond = counted.getresponse
 
@@ -186,7 +244,7 @@ class LiveAdmissionTests(unittest.TestCase):
 
     def test_smart_live_rejects_missing_calibration_without_transport(self):
         _, proof = self.smart_candidate(calibrated=False)
-        self.controller.enable(2)
+        self.enable_legacy_smart()
         with self.assertRaisesRegex(budget.BudgetError, 'native_calibration_unqualified'):
             self.run_candidate(proof)
         self.factory.assert_not_called()
