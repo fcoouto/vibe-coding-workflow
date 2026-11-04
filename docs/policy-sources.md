@@ -1,5 +1,22 @@
 # Policy source map
 
+## Subagent role badges
+
+The user requested role badges for subagents and independent dispatch.
+[Agent Delegation](../policies/03-agent-delegation.md#select-capability-and-dispatch)
+loads the [shared contract](../clients/worker-visibility.md#declare-before-dispatch).
+Native badges use a bound declaration or the reported native role. OpenRouter and
+Usage Routing consume optional display metadata independently of execution
+admission. Habblaud shows its standard subagent fallback when neither source
+supplies a role and leaves native thread owners without a role badge.
+
+Workspace preparation and integration discovery load the existing-hook
+[reconciliation procedure](../clients/worker-visibility.md#reconcile-on-discovery-and-upgrade)
+during onboarding and authorized upgrades. Native presentation reuses the
+verified child's model display metadata and formats its actual identifier when
+catalog lookup is unavailable, following Vibe Setup's
+[consumer display guidance](https://github.com/fcoouto/vibe-setup/blob/main/skills/vibe-setup/native-display.md).
+
 ## Usage Routing delegation registration — 4 November 2026
 
 The user approved the [implementation plan](superpowers/plans/2026-11-04-usage-routing-delegation-registration.md)

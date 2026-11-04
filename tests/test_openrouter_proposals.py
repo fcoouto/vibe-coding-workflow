@@ -97,7 +97,20 @@ with settings.admission(Path(sys.argv[2]), 'proposals', store=Path(sys.argv[3]))
         return dict(task_id=task, profile=PROFILE, model='model/v1', provider='p', effort=None,
                     snapshot_digest=self.call('status')['snapshot_digest'], approval_ref='approval/1', base_ref='git:abc',
                     output_tokens=500, timeout_seconds=60,
+                    visibility=dict(version=1, role='Scout', specialty='Proposal analysis'),
                     requirements=dict(context_tokens=100, output_tokens=500, modalities=['text'], parameters=[]))
+
+    def test_begin_keeps_valid_roles_and_ignores_missing_or_invalid_metadata(self):
+        self.publish()
+        request = self.begin_request()
+        missing = {key: value for key, value in request.items() if key != 'visibility'}
+        for index, item in enumerate((missing, dict(request, visibility=dict(request['visibility'], role='Default')))):
+            result = self.call('begin', dict(item, task_id=f'optional-{index}'))
+            self.call('record', dict(attempt_token=result['attempt_token'], disposition='unresolved'))
+        self.assertIn('attempt_token', self.call('begin', request))
+        records = self.call('history')['records']
+        self.assertTrue(all('visibility' not in row for row in records[:2]))
+        self.assertEqual(records[2]['visibility'], request['visibility'])
 
     def test_cache_reuse_expiry_and_failed_refresh_preserve_original_snapshot(self):
         self.publish()

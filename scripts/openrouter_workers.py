@@ -67,7 +67,10 @@ def save(path, value):
 
 
 def visibility_declaration(brief):
-    return worker_visibility.declaration(dict(version=1, role=brief['role'], specialty=brief['specialty'],
+    role = brief.get('role')
+    if not isinstance(role, str) or role not in ROLES:
+        return None
+    return worker_visibility.optional_declaration(dict(version=1, role=role, specialty=brief.get('specialty'),
         **({'custom_role_name': brief['custom_role_name']} if 'custom_role_name' in brief else {})))
 
 
@@ -75,17 +78,15 @@ def prepare(root, brief, now=None):
     if not isinstance(brief, dict): raise ValueError('invalid_brief_fields')
     # Older callers supplied credit observations; they no longer gate or persist.
     brief = {key: value for key, value in brief.items() if key != 'credit'}
-    required = {'task_id', 'role', 'specialty', 'coordinator_chat_id', 'model',
-                'model_display_name', 'provider', 'objective', 'source_root', 'files',
+    required = {'task_id', 'coordinator_chat_id', 'model', 'provider', 'objective', 'source_root', 'files',
                 'timeout_seconds', 'steps', 'approval_ref', 'effort'}
-    if not required <= set(brief) <= required | {'sizing', 'custom_role_name'}: raise ValueError('invalid_brief_fields')
+    optional = {'sizing', 'role', 'specialty', 'custom_role_name', 'model_display_name'}
+    if not required <= set(brief) <= required | optional: raise ValueError('invalid_brief_fields')
     if len(json.dumps(brief, ensure_ascii=True, allow_nan=False).encode()) > MAX_INPUT: raise ValueError('input_limit')
     for key in required - {'files', 'timeout_seconds', 'steps'}:
         if not isinstance(brief[key], str) or not brief[key].strip() or len(brief[key]) > 16000:
             raise ValueError('invalid_brief_value')
     if not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,63}', brief['task_id']): raise ValueError('invalid_task_id')
-    if brief['role'] not in ROLES: raise ValueError('invalid_role')
-    if 'custom_role_name' in brief: visibility_declaration(brief)
     if brief['effort'] not in ('low', 'medium', 'high', 'max'): raise ValueError('invalid_effort')
     uuid.UUID(brief['coordinator_chat_id'])
     if not re.fullmatch(r'[\w.-]+/[\w./:-]+', brief['model']): raise ValueError('invalid_model')
@@ -175,15 +176,16 @@ def habblaud_publisher(plugin_root, run, endpoint, account):
     brief = json.loads((run / 'brief.json').read_text())
     metadata = visibility_declaration(brief)
     receipt = run / 'visibility.json'
-    display_role = {key: value for key, value in metadata.items() if key != 'custom_role_name'}
+    display_role = {key: value for key, value in metadata.items() if key != 'custom_role_name'} if metadata else None
+    model = brief.get('model_display_name') or brief['model']
     previous = worker_visibility.read(receipt)
     if previous and 'binding' in previous:
         # A published run keeps its original label when verification resumes.
-        legacy_label = worker_visibility.display_label(metadata, brief['model_display_name'])
+        legacy_label = worker_visibility.display_label(metadata, model)
         if previous['binding'].get('label') == legacy_label:
             display_role = metadata
     binding = {'parent': brief['coordinator_chat_id'], 'agent_id': str(uuid.uuid5(uuid.NAMESPACE_URL, str(run))),
-               'label': worker_visibility.display_label(display_role, brief['model_display_name']), 'cwd': brief['source_root']}
+               'label': worker_visibility.display_label(display_role, model), 'cwd': brief['source_root']}
     return worker_visibility.publisher(worker_visibility.transport(plugin_root), endpoint, account, binding,
                                        metadata, receipt)
 

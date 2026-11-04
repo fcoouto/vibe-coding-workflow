@@ -19,7 +19,7 @@ import time
 
 PACKAGE = Path(__file__).resolve().parents[1]
 if str(PACKAGE) not in sys.path: sys.path.insert(0, str(PACKAGE))
-from runtime import openrouter_settings as settings
+from runtime import openrouter_settings as settings, worker_visibility
 
 MAX_INPUT = 1024 * 1024
 MAX_STATE = 8 * 1024 * 1024
@@ -247,6 +247,7 @@ def act(action, state, request, now):
             return dict(fallback='pending_attempt')
         if len(state['attempts']) >= MAX_ATTEMPTS:
             return dict(fallback='capacity')
+        visibility = worker_visibility.optional_declaration(request.get('visibility'))
         profile(request.get('profile'))
         for key in ('model', 'provider', 'approval_ref', 'base_ref'):
             text(request.get(key), key)
@@ -269,6 +270,8 @@ def act(action, state, request, now):
         token = secrets.token_urlsafe(24)
         row = {key: request.get(key) for key in ('task_id', 'profile', 'model', 'provider', 'effort', 'snapshot_digest', 'approval_ref', 'base_ref', 'output_tokens', 'timeout_seconds', 'requirements')}
         row['discovery_evidence'] = dict(model=model, endpoint=endpoint, benchmarks=[b for b in metadata['benchmarks'] if b.get('model') == request['model']])
+        if visibility is not None:
+            row['visibility'] = visibility
         row.update(attempt_token=token, begun_at=now, snapshot_fetched_at=current['fetched_at'])
         state['attempts'].append(row)
         return dict(attempt_token=token, advisory=True)

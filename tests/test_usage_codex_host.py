@@ -69,7 +69,8 @@ class CodexUsageHostTests(unittest.TestCase):
 
     def proposal(self, **changes):
         return dict(task_id='task', class_name='investigation', packet=dict(PACKET), provider='openai-api',
-                    local_preferred=False, api_only=False, snapshots=[]) | changes
+                    local_preferred=False, api_only=False, snapshots=[],
+                    visibility=dict(version=1, role='Scout', specialty='Investigate')) | changes
 
     def receipt(self, text='Prepare the bounded work.', *, turn='prepare', status='inProgress',
                 started=101, role='userMessage', host='desktop', item=None):
@@ -103,6 +104,18 @@ class CodexUsageHostTests(unittest.TestCase):
             self.freeze(self.proposal(), self.proposal(task_id='second'))
         self.dispatch.assert_not_called()
 
+    def test_role_metadata_does_not_gate_or_change_dispatch_identity(self):
+        self.configure()
+        proposal = self.proposal()
+        missing = {key: value for key, value in proposal.items() if key != 'visibility'}
+        plan = self.freeze(proposal)
+        variants = (missing, self.proposal(visibility={'role': 'Default'}), proposal)
+        for item in variants:
+            self.assertEqual(self.freeze(item), plan)
+        for item in variants:
+            self.execute(plan, item)
+        self.assertEqual(len({call.args[1]['run_id'] for call in self.dispatch.call_args_list}), 1)
+
     def test_manual_exact_native_approval_binds_task_and_stable_attempt(self):
         self.configure()
         proposal = self.proposal()
@@ -111,7 +124,9 @@ class CodexUsageHostTests(unittest.TestCase):
         self.assertEqual(self.execute(plan, proposal, thread_snapshot=receipt), {'accepted': False})
         cwd, task, evidence = self.dispatch.call_args.args
         self.assertEqual(Path(cwd), self.root)
-        self.assertEqual({key: task[key] for key in proposal}, proposal)
+        self.assertEqual({key: task[key] for key in proposal if key != 'visibility'},
+                         {key: value for key, value in proposal.items() if key != 'visibility'})
+        self.assertNotIn('visibility', task)
         self.assertTrue(task['reviewer_available'])
         self.assertEqual(task['native']['account'], 'account')
         self.assertEqual(task['native']['task'], 'task')
@@ -288,11 +303,11 @@ class CodexUsageHostTests(unittest.TestCase):
     def habblaud_context(self):
         self.reviewer = self.host.Reviewer('e98f7dd1-70f7-44e3-98de-d6307c2fa04b', 'independent-reviewer')
         return dict(plugin_root=str(self.root), endpoint='http://127.0.0.1:4747', account='.codex',
-                    model=PROFILE['model'], model_display_name='GPT-6.1 Sol',
-                    visibility=dict(version=1, role='Scout', specialty='Investigate', custom_role_name='Private alias'))
+                    model=PROFILE['model'], model_display_name='GPT-6.1 Sol')
 
     def test_habblaud_uses_completed_generation_and_keeps_native_review_pending(self):
-        context = self.habblaud_context()
+        context = self.habblaud_context() | dict(visibility={'role': 'Reviewer'})
+        declaration = self.proposal()['visibility']
         self.configure()
         plan = self.freeze()
         counted = Connection(Response(dict(object='response.input_tokens', input_tokens=1200)))
@@ -346,7 +361,8 @@ class CodexUsageHostTests(unittest.TestCase):
             ('reported_cost_usd_micros', result['reported_cost_usd_micros'] + 1),
         ):
             with self.subTest(result_field=field), patch.object(worker_visibility, 'transport') as load_transport:
-                outcome = self.host._publish_generation(plan, task, evidence, result | {field: value}, context)
+                outcome = self.host._publish_generation(plan, task, evidence, result | {field: value}, context,
+                                                        visibility=declaration)
                 self.assertEqual(outcome, dict(delivered=False, reason='generation_unconfirmed'))
                 load_transport.assert_not_called()
 
@@ -369,13 +385,14 @@ class CodexUsageHostTests(unittest.TestCase):
                 else:
                     run['calls']['generation']['state'] = 'unresolved'
                 with patch.object(self.ledger, 'snapshot', return_value=modified):
-                    outcome = self.host._publish_generation(plan, task, evidence, result, context)
+                    outcome = self.host._publish_generation(plan, task, evidence, result, context,
+                                                            visibility=declaration)
                 self.assertEqual(outcome, dict(delivered=False, reason='generation_unconfirmed'))
                 load_transport.assert_not_called()
 
         agents[0]['provider'] = 'claude'
         with patch.object(worker_visibility, 'transport', return_value=transport):
-            outcome = self.host._publish_generation(plan, task, evidence, result, context)
+            outcome = self.host._publish_generation(plan, task, evidence, result, context, visibility=declaration)
         self.assertEqual(outcome, dict(delivered=False, reason='visibility_parent_unavailable'))
         self.assertEqual(len(events), 3)
         self.assertEqual(self.ledger.snapshot(), baseline)

@@ -1948,7 +1948,10 @@ def _prepare_native(scope, request, *, role):
         'discovery_expectation', 'guidance', 'resource_units', *(('brief',) if role == 'worker' else
         ('coverage', 'criteria', 'assignment'))), ('retry_of', 'diagnostic', 'workstream_revision', 'workstream_limits', 'workstream_context_id', 'continuation_limits', 'visibility'))
     request = json_object(evidence._raw(request))
-    _visibility(request)
+    if 'visibility' in request:
+        from runtime.worker_visibility import optional_declaration
+        if optional_declaration(request['visibility']) is None:
+            request.pop('visibility')
     if 'continuation_limits' in request:
         _continuation_limits(request)
     if 'workstream_context_id' in request:

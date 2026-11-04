@@ -453,6 +453,33 @@ def _visibility_spawn_task(request, parent, child, binding):
     return _review_id(binding['task_name'])
 
 
+def _visibility_model_name(request, model):
+    if model is None:
+        return None
+    try:
+        cursor = None
+        for _ in range(4):
+            params = {"limit": 100, "includeHidden": True}
+            if cursor is not None:
+                params["cursor"] = cursor
+            page = request("model/list", params)
+            rows = page.get("data")
+            if not isinstance(rows, list) or len(rows) > 100:
+                return None
+            names = [row.get("displayName") for row in rows
+                     if isinstance(row, dict) and row.get("model") == model]
+            if len(names) == 1:
+                name = _review_id(names[0])
+                # The bundled catalog also spells this display name GPT-6.1-Sol.
+                return "GPT-6.1 Sol" if model == "gpt-6.1-sol" and name == "GPT-6.1-Sol" else name
+            cursor = page.get("nextCursor")
+            if names or not isinstance(cursor, str) or not cursor or len(cursor) > 4096:
+                break
+    except (ObservationError, StartupError, OSError, ValueError, TypeError, AttributeError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
 def observe_worker_visibility(checkout, parent_session_id, worker_id, *, spawn_binding=None, deadline=None, executable=None):
     """Read actual native lineage for display only; no runtime enrollment or stop proof."""
     from types import SimpleNamespace
@@ -467,7 +494,7 @@ def observe_worker_visibility(checkout, parent_session_id, worker_id, *, spawn_b
         if not checkout.is_absolute() or checkout.resolve(strict=True) != checkout or not checkout.is_dir():
             raise ObservationError('checkout_unverified')
         scope = SimpleNamespace(repository_root=checkout)
-        methods = {'initialize', 'thread/read'}
+        methods = {'initialize', 'thread/read', 'model/list'}
         if spawn_binding is not None:
             methods.add('thread/items/read')
         options = {} if deadline is None else {'deadline': deadline}
@@ -494,9 +521,11 @@ def observe_worker_visibility(checkout, parent_session_id, worker_id, *, spawn_b
                 if _visibility_spawn_task(request, parent_session_id, worker_id, spawn_binding) != (task_name or spawn_binding['task_name']):
                     raise ObservationError('assignment_unverified')
                 task_name = spawn_binding['task_name']
+            model = _native_setting(child.get('model'))
             return dict(version=1, parent_session_id=parent_session_id, worker_id=worker_id,
                 checkout=str(checkout), client_surface=surface, native_version=observed_version,
-                agent_path=agent_path, task_name=task_name, configured_model=_native_setting(child.get('model')),
+                agent_path=agent_path, task_name=task_name, configured_model=model,
+                model_display_name=_visibility_model_name(request, model),
                 configured_provider=_native_setting(child.get('modelProvider')),
                 execution_model=None, execution_effort=None,
                 **({'native_role': origin['agent_role']} if origin.get('agent_role') is not None else {}))

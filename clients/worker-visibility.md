@@ -1,14 +1,12 @@
-# Worker roles in Habblaud
+# Worker declarations and visibility
 
-Load the applicable section for native activity names or an assignment using
-an approved Habblaud connection. Visibility is optional and separate from task titles, resource
-admission, recovery and execution. Use the same declaration for ordinary and
-managed native workers, reviewers, supervisors, OpenRouter workers and
-Usage Routing proposals.
+Use this contract to label subagents. A native thread owner needs no role badge.
+Role metadata and Habblaud delivery are optional and independent of execution.
 
 ## Declare before dispatch
 
-Record this versioned object in the existing assignment context:
+When the assignment has a role, record it once in the worker's existing context
+before dispatch. Use this versioned object or the route's equivalent fields:
 
 ```json
 {"version":1,"role":"Reviewer","specialty":"Security assessment","custom_role_name":"Threat reviewer"}
@@ -24,49 +22,65 @@ external badges display `Role · Model Display Name`. Retain canonical role and
 specialty separately.
 The full label is sent in the existing display field without truncation. Report
 an unsupported label or receiver capability explicitly; the transport enforces
-its wire byte limit separately from the declared text lengths. Never substitute a
-generic role. Legacy assignments without a declaration stay unknown.
+its wire byte limit separately from the declared text lengths. Habblaud uses its
+standard `Subagente (Codex)` fallback when it has neither a declaration nor a
+specific native role.
+
+Validate the declaration for display and reuse it for recovery. A native supervisor
+or reviewer has its own assignment and role. Dispatch follows the route's existing
+execution requirements independently of the badge.
+
+## Reconcile on discovery and upgrade
+
+When onboarding, workspace preparation or an authorized upgrade discovers an
+existing Habblaud integration, inspect its current start hook and reviewed
+adapter. Reuse the existing command and reconcile its owned wrapper with this
+package when needed. Preserve other hooks, arguments, customizations and a
+recoverable copy of the configuration. Keep one wrapper for this contract.
+Use the client's supported trust flow for changed commands and qualify the
+first badge of a future authorized worker. Record pending trust or refresh
+steps explicitly. Active workers continue under their loaded configuration.
+This procedure adds no execution requirement to delegation.
 
 ## Native workers and reviewers
 
-For managed D6 worker preparation or D5 review preparation, include the object
-as optional `visibility`. Use the original declaration returned by preparation.
-It is part of the immutable request and its digest, separate from authority
-roles and review report digests. It grants no launch, review or reconciliation
-permission. Ordinary native work uses the same metadata without an enrollment,
-runtime task or database.
+To label a managed D6 worker or D5 reviewer, supply the optional `visibility`
+field and reuse the returned declaration. When supplied, it is part of the
+immutable request and its digest, separate from authority roles and review
+report digests. Ordinary native work can use the same display metadata without
+an enrollment, runtime task or database.
 
-Before native dispatch, use the following helper in the existing private task
-context. The context path is an unused absolute file in a canonical, owner-only
-directory outside repositories and installed package trees. The helper rejects
-the selected checkout, Git worktrees and the package roots it uses:
+To attach a declared badge at native launch, prepare its private display context
+with the workflow package used by the chat:
 
 ```text
-python3 -I -B <package>/scripts/worker_visibility.py prepare --context <private-context-file>
+python3 -I -B <package>/scripts/worker_visibility.py prepare
 ```
 
-Supply `parent_session_id` (actual native UUID), `checkout` (canonical absolute
-working directory), `task_name` (the existing immutable creation name), and
+Supply `parent_session_id` (actual native UUID), `checkout` (the chat's current
+canonical absolute working directory), `task_name` (the existing immutable creation name), and
 `visibility` (the object above) on stdin. For managed workers also supply
 `ledger_assignment_digest`: the prepared worker's `assignment_digest` or the
 reviewer's distinct `ledger_assignment_digest`. Preserve the exact managed
 prompt. For ordinary native work, place the returned `prompt_marker` on the
 first line of the brief. This binds visibility when native history omits the
 agent path. Preparation reserves display metadata only; preserve the native
-tool's original `task_name` and attempt marker.
+tool's original `task_name` and attempt marker. Read the returned context path
+and use a distinct task name for each child. The default path is `vibe-worker-visibility/contexts`
+under the active Codex home, shared with the reconciled Habblaud start hook.
 
 ### Forward the original Desktop start event
 
 When the existing Habblaud `SubagentStart` command is configured to use this
-adapter, prepare with `--context-directory <private-directory>` instead of
-`--context`. Use the exact directory configured in the hook and retain the
-returned context path. Allocate a distinct task name for each new child.
+adapter, it reads the prepared context and supplies the badge. If the hook uses
+a custom context directory, pass the same directory with `--context-directory`
+when preparing the declaration.
 
 Wrap the existing command with the reviewed package:
 
 ```text
 python3 -I -B <package>/scripts/worker_visibility.py forward-start
-  --context-directory <private-directory> --checkout <canonical-checkout>
+  --context-directory <private-directory>
   --codex-executable <absolute-reviewed-Codex-executable>
   -- <original-command-and-arguments>
 ```
@@ -75,12 +89,17 @@ Preserve the original hook configuration for recovery. Review the changed
 command through Codex's supported hook trust flow and use a Desktop session
 that has loaded it. Project hooks run alongside user hooks. Adding a second
 hook does not replace the original Habblaud command.
+The shared hook verifies each event's canonical working directory. Supply
+`--checkout` only for a deliberately checkout-scoped hook.
 
 The wrapper checks the genuine child, parent, checkout and creation name with
-the native observer. It preserves a native role and forwards the original
-event if the private declaration or live identity is unavailable. When the
-declaration matches, it adds the label to the event copy and calls the existing
-command. Habblaud 1.0.3 may capitalize or clip labels. This route forwards
+the native observer. It preserves the incoming native role separately and forwards
+the original event if the private declaration or live identity is unavailable.
+For a matching declaration, the display label uses the native model catalog's
+`displayName`, formatting the actual configured model identifier for display
+if the catalog is unavailable. The stored model identity stays exact.
+The wrapper sends `vcw_display_label` on the event copy
+and calls the existing command. Previously forwarded labels remain unchanged. Habblaud 1.0.3 may capitalize or clip labels. This route forwards
 labels that fit 200 UTF-16 units and survive that normalization. Qualify the
 first visible badge using a fresh worker. Rollout discovery can still register
 the child before the hook.

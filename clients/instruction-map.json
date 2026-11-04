@@ -211,15 +211,15 @@
       ]
     },
     "clients/worker-visibility.md": {
-      "sha256": "c836e1c079634435b3f61332afb6b97f757ee7d4b2b5f543a64ab282cb570820",
+      "sha256": "3999bd85b5cac78a778a685f15790a5318508b48e4a30957baeab4e61d83cd89",
       "ranges": [
         [
           1,
-          152
+          150
         ],
         [
-          153,
-          165
+          151,
+          184
         ]
       ]
     },
@@ -317,7 +317,7 @@
       ]
     },
     "policies/03-agent-delegation.md": {
-      "sha256": "8e9a3a3d82b0c3d2ab94fb8c797c2a80eb31dfa915555c5bb2f6f4790511df5b",
+      "sha256": "207845786a19868fd0ebc581f7a12b4038b0e579e69e416c98cc3c388caef4c0",
       "ranges": [
         [
           1,
@@ -401,11 +401,11 @@
       ]
     },
     "policies/11-tool-integrations.md": {
-      "sha256": "216e7fb96c30f00f88f3bf47161ac3961de5c8b4bbac515522fdcada66af4115",
+      "sha256": "6ba1cfcd8f40389a3ac1ea2b1c42e036bd403314d4b7db35fe7f6beb4bb843fd",
       "ranges": [
         [
           1,
-          35
+          38
         ]
       ]
     },
@@ -476,7 +476,7 @@
       ]
     },
     "skills/manage-usage-routing/references/codex-host.md": {
-      "sha256": "1f57d3a0fe9b548886824c6989e17a64ce9b9f8b4b88662269a104e155e32243",
+      "sha256": "2f891a521a103fe999cd1b99f2f938218936e56958d7f49a4c4b27ba53d8163c",
       "ranges": [
         [
           1,
@@ -596,7 +596,7 @@
       ]
     },
     "skills/openrouter-proposals/references/procedure.md": {
-      "sha256": "7e99baf3331c280d29341cf12aa3897a5ffb32aad269fd05a440427f369f7932",
+      "sha256": "c0f6e90a0da711282a926eae317121c4c9ffe3640e830c3b10aa167e4f92b5b8",
       "ranges": [
         [
           1,
@@ -604,10 +604,10 @@
         ],
         [
           91,
-          156
+          154
         ],
         [
-          157,
+          155,
           190
         ]
       ]
@@ -622,20 +622,20 @@
       ]
     },
     "skills/openrouter-workers/references/procedure.md": {
-      "sha256": "6317021c64a3dd9b0c3b3945f685232631414bc03cb21955dfa71e6dd619d95d",
+      "sha256": "61dca21eed3760f0f6aeaf32d38a0fbdabeba5b8278ef10c2da3c75f550ab4dd",
       "ranges": [
         [
           1,
-          122
+          123
         ],
         [
-          123,
-          182
+          124,
+          183
         ]
       ]
     },
     "skills/prepare-my-workspace/SKILL.md": {
-      "sha256": "96fb69acdd34bbd3e1705b21b003fc2a2f33bb951c7f6ec895fb0c15b16cbe6a",
+      "sha256": "a141fb870db622d80441f907af04b09115140af48fb2421dd3029b2baa9f8174",
       "ranges": [
         [
           1,
