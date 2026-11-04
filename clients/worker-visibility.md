@@ -1,12 +1,14 @@
 # Worker declarations and visibility
 
 Use this contract to label subagents. A native thread owner needs no role badge.
-Role metadata and Habblaud delivery are optional and independent of execution.
+Assign each subagent's role when preparing its task. Missing display metadata or
+failed Habblaud delivery never prevents execution.
 
 ## Declare before dispatch
 
-When the assignment has a role, record it once in the worker's existing context
-before dispatch. Use this versioned object or the route's equivalent fields:
+Choose the role once while writing this assignment, just before delegation.
+Record it in the existing brief or preparation request; display integration
+reuses it. Use this versioned object or the route's equivalent fields:
 
 ```json
 {"version":1,"role":"Reviewer","specialty":"Security assessment","custom_role_name":"Threat reviewer"}
@@ -45,37 +47,57 @@ This procedure adds no execution requirement to delegation.
 
 ## Native workers and reviewers
 
-To label a managed D6 worker or D5 reviewer, supply the optional `visibility`
-field and reuse the returned declaration. When supplied, it is part of the
-immutable request and its digest, separate from authority roles and review
-report digests. Ordinary native work can use the same display metadata without
-an enrollment, runtime task or database.
+For a managed D6 worker or D5 reviewer, include `visibility` in the existing
+`workflow.py delegation prepare` or `workflow.py evidence review prepare`
+request. The CLI captures the returned declaration and ledger assignment digest
+in a private display context after the runtime operation, outside its transaction.
+The response adds `visibility_preparation`; its failure changes neither the
+immutable prompt nor the launch result. The declaration remains optional in
+the request schema and, when supplied, part of its immutable digest, separate
+from authority roles and review report digests. Do not prepare it again.
 
-To attach a declared badge at native launch, prepare its private display context
-with the workflow package used by the chat:
+For ordinary native workers, reviewers and supervisors, prepare the full
+assignment in one operation with the workflow package used by the chat. This
+requires no enrollment, runtime task or database:
 
 ```text
 python3 -I -B <package>/scripts/worker_visibility.py prepare
 ```
 
 Supply `parent_session_id` (actual native UUID), `checkout` (the chat's current
-canonical absolute working directory), `task_name` (the existing immutable creation name), and
-`visibility` (the object above) on stdin. For managed workers also supply
-`ledger_assignment_digest`: the prepared worker's `assignment_digest` or the
-reviewer's distinct `ledger_assignment_digest`. Preserve the exact managed
-prompt. For ordinary native work, place the returned `prompt_marker` on the
-first line of the brief. This binds visibility when native history omits the
-agent path. Preparation reserves display metadata only; preserve the native
-tool's original `task_name` and attempt marker. Read the returned context path
-and use a distinct task name for each child. The default path is `vibe-worker-visibility/contexts`
-under the active Codex home, shared with the reconciled Habblaud start hook.
+canonical absolute working directory), `task_name` (the immutable creation name),
+`message` (the full assignment brief), and `visibility` (the object above) on
+stdin; the entire JSON request must fit 128 KiB. Retain the original `task_name`,
+`message`, model, effort, fork settings and permissions before invoking the
+helper. On success, copy the returned `task_name` and `message` into the native
+spawn tool and preserve those execution controls. Preparation automatically
+adds the existing correlation marker to the message and returns the context
+path. A `prepared:false` result returns the original name and message. If the
+helper cannot run or returns invalid or error output, use the retained original
+inputs instead. In either failure case, report display unavailable and continue
+already-authorized dispatch under the route's existing execution requirements.
+Do not make another role-only preparation call or add the marker yourself.
+
+Use a distinct task name for each child. The default context path is
+`vibe-worker-visibility/contexts` under the active Codex home, shared with the
+reconciled Habblaud start hook. The legacy role-only `prepare` request remains
+available for compatibility and recovery. Managed recovery uses the worker's
+`assignment_digest` or reviewer's distinct `ledger_assignment_digest` and
+preserves the exact immutable prompt.
+
+A native CLI probe received encrypted spawn text in `PreToolUse`, so this
+workflow uses assignment preparation and adds no pre-spawn hook. The exposed
+native spawn tool has no role argument: a direct call that bypasses
+assignment preparation can still omit role metadata and use the original
+fallback. Qualification must observe the first badge; preparation alone does
+not prove rendering.
 
 ### Forward the original Desktop start event
 
 When the existing Habblaud `SubagentStart` command is configured to use this
 adapter, it reads the prepared context and supplies the badge. If the hook uses
 a custom context directory, pass the same directory with `--context-directory`
-when preparing the declaration.
+when preparing the ordinary assignment or recovering its context.
 
 Wrap the existing command with the reviewed package:
 
@@ -94,7 +116,9 @@ The shared hook verifies each event's canonical working directory. Supply
 `--checkout` only for a deliberately checkout-scoped hook.
 
 The wrapper checks the genuine child, parent, checkout and creation name with
-the native observer. It preserves the incoming native role separately and forwards
+the native observer. For nested delegation, it verifies the native ancestry to
+the originating client while retaining the child's immediate parent binding.
+It preserves the incoming native role separately and forwards
 the original event if the private declaration or live identity is unavailable.
 For a matching declaration, the display label uses the native model catalog's
 `displayName`, formatting the actual configured model identifier for display
@@ -134,6 +158,10 @@ same declaration and its own observed identity. A direct coordinator fallback
 has no new child to register.
 
 ## External routes in chat and Habblaud
+
+Capture the assigned role once in the existing OpenRouter brief or proposal,
+or Usage Routing proposal. Their display adapters reuse those fields; no
+separate role declaration or preparation call is needed.
 
 When preparing the task name of a real native supervisor for an authorized
 external route, append the route suffix before recording the assignment or

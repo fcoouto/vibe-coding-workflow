@@ -39,6 +39,13 @@ Load only the guide for the current operation after this common contract.
 | Verify completion or merge evidence | [Verify completion or merge evidence](evidence-completion.md) |
 | Retire a task | [Retire a task](evidence-retirement.md) |
 
+For native review preparation, choose the reviewer's role while writing its
+assignment and include the [`visibility` declaration](worker-visibility.md#native-workers-and-reviewers)
+in that same request. The CLI prepares display context automatically and adds
+`visibility_preparation`, preserving the exact prompt, distinct review and
+ledger digests, and launch result. No separate role-only preparation call is
+needed; display failure does not prevent an otherwise admitted review.
+
 ## Completion and limits
 
 For completion, freshness and local merge limits, load [completion evidence](evidence-completion.md). For an authorized runtime transition, load [task retirement](evidence-retirement.md).

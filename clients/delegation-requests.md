@@ -101,6 +101,13 @@ Instructions, acceptance, checks and stop conditions must be nonempty. File path
 are checkout-relative exact files covered by claims. Only dependency IDs may grow
 with the plan. Resource units are positive and spend the original finite budget.
 
+Choose the worker's role while preparing this brief and include its
+[`visibility` declaration](worker-visibility.md#native-workers-and-reviewers)
+in the same request. The CLI prepares display context automatically and returns
+`visibility_preparation` without changing the immutable prompt or launch result.
+No separate role-only preparation call is needed; display failure does not
+prevent an otherwise admitted launch.
+
 `control_observation` comes from exposed native controls. `discovery_expectation`
 comes from current compatible discovery; it binds the fresh dispatch reader, not
 a version allowlist. `guidance` copies snapshot reference/digest/time/freshness from

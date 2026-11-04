@@ -330,6 +330,7 @@ class NativeVisibilityTests(unittest.TestCase):
             source={'subAgent': {'thread_spawn': {'parent_thread_id': self.parent, 'agent_path': '/root/review_original'}}})
         self.spawn_prompt = None
         self.model_pages = {None: dict(data=[], nextCursor=None)}
+        self.ancestors = {}
 
     def reader(self, methods):
         from contextlib import contextmanager
@@ -349,7 +350,8 @@ class NativeVisibilityTests(unittest.TestCase):
                         tool='spawnAgent', status='completed', senderThreadId=self.parent,
                         receiverThreadIds=[self.child], prompt=self.spawn_prompt))])
                 self.assertEqual(method, 'thread/read')
-                return dict(thread=copy.deepcopy(self.parent_thread if params['threadId'] == self.parent else self.child_thread))
+                threads = self.ancestors | {self.parent: self.parent_thread, self.child: self.child_thread}
+                return dict(thread=copy.deepcopy(threads[params['threadId']]))
             yield '0.163.0', request
         return reader()
 
@@ -376,6 +378,32 @@ class NativeVisibilityTests(unittest.TestCase):
         value = self.observe()
         self.assertEqual(value['configured_model'], 'gpt-6-astra')
         self.assertEqual(value['model_display_name'], 'GPT-6-Astra')
+
+    def test_nested_native_observation_preserves_immediate_parent(self):
+        root = str(uuid.uuid4())
+        self.ancestors[root] = self.parent_thread | dict(id=root)
+        self.parent_thread.update(parentThreadId=root,
+            source={'subAgent': {'thread_spawn': {'parent_thread_id': root,
+                                                  'agent_path': '/root/coordinator'}}})
+        self.child_thread['source']['subAgent']['thread_spawn']['agent_path'] = '/root/coordinator/review_original'
+        value = self.observe()
+        self.assertEqual(value['parent_session_id'], self.parent)
+        self.assertEqual(value['task_name'], 'review_original')
+        self.assertEqual(value['client_surface'], 'codex-cli')
+        for changes in (dict(originator='unqualified'), dict(cwd='/other'),
+                        dict(source={'subAgent': {'thread_spawn': {'parent_thread_id': root}}})):
+            original = copy.deepcopy(self.ancestors[root])
+            self.ancestors[root].update(changes)
+            with self.subTest(changes=changes), self.assertRaises(StartupError):
+                self.observe()
+            self.ancestors[root] = original
+
+    def test_nested_native_observation_rejects_cycle_and_mismatched_parent(self):
+        for ancestor in (self.parent, self.child):
+            self.parent_thread.update(parentThreadId=ancestor,
+                source={'subAgent': {'thread_spawn': {'parent_thread_id': ancestor}}})
+            with self.subTest(ancestor=ancestor), self.assertRaises(StartupError):
+                self.observe()
 
     def test_catalog_failure_or_ambiguity_preserves_native_identity(self):
         for page in (dict(data=None), dict(data=[dict(model='Native model', displayName='First'),
@@ -570,6 +598,155 @@ class NativeVisibilityTests(unittest.TestCase):
     def native_request(self):
         return dict(parent_session_id=self.parent, checkout=str(self.root), task_name='review_original',
                     visibility=dict(version=1, role='Reviewer', specialty='Read only', custom_role_name='Audit lead'))
+
+    def test_assignment_preparation_returns_bound_brief_and_first_badge(self):
+        helper = self.native_helper()
+        self.assertTrue(hasattr(helper, 'prepare_assignment'), 'Assignment preparation must capture its role')
+        request = self.native_request() | dict(message='Review the changed permission check.\nDo not edit.')
+        original = copy.deepcopy(request)
+        result = helper.prepare_assignment(request, context_directory=self.task_context)
+        self.assertTrue(result['prepared'])
+        self.assertEqual(result['task_name'], 'review_original')
+        self.assertEqual(result['message'], result['prompt_marker'] + '\n' + request['message'])
+        self.assertEqual(request, original)
+        context = helper.read_context(Path(result['context']))
+        self.assertEqual(context['visibility'], request['visibility'])
+        self.assertNotIn('message', context)
+        event = dict(hook_event_name='SubagentStart', session_id=self.parent,
+                     agent_id=self.child, cwd=str(self.root), agent_type='default')
+        with patch.object(codex, 'observe_worker_visibility', return_value=self.observe()):
+            actual = helper.enrich_start(event, self.task_context, self.root, Path(sys.executable).resolve())
+        self.assertEqual(actual['vcw_display_label'], 'Audit lead · Native model')
+
+    def test_assignment_display_failure_returns_original_spawn_inputs(self):
+        helper = self.native_helper()
+        self.assertTrue(hasattr(helper, 'prepare_assignment'), 'Assignment preparation must remain nonblocking')
+        request = self.native_request() | dict(message='Review this file without editing it.')
+        for metadata in (None, {}, dict(version=1, role='Guess', specialty='Read only')):
+            with self.subTest(metadata=metadata):
+                result = helper.prepare_assignment(request | dict(visibility=metadata), context_directory=self.task_context)
+                self.assertFalse(result['prepared'])
+                self.assertEqual(result['task_name'], request['task_name'])
+                self.assertEqual(result['message'], request['message'])
+        with patch.object(helper, 'prepare_native', side_effect=OSError('private storage unavailable')):
+            result = helper.prepare_assignment(request, context_directory=self.task_context)
+        self.assertFalse(result['prepared'])
+        self.assertEqual(result['message'], request['message'])
+        self.assertNotIn('permissionDecision', result)
+
+    def test_assignment_preparation_preserves_existing_bound_context(self):
+        helper = self.native_helper()
+        self.assertTrue(hasattr(helper, 'prepare_assignment'))
+        request = self.native_request() | dict(message='Review the original change.')
+        first = helper.prepare_assignment(request, context_directory=self.task_context)
+        path = Path(first['context'])
+        original = path.read_bytes()
+        second = helper.prepare_assignment(request | dict(visibility=dict(version=1, role='Builder', specialty='Edit')),
+                                           context_directory=self.task_context)
+        self.assertFalse(second['prepared'])
+        self.assertEqual(second['message'], request['message'])
+        self.assertEqual(path.read_bytes(), original)
+        replay = helper.prepare_assignment(request, context_directory=self.task_context)
+        self.assertTrue(replay['prepared'])
+        self.assertEqual(replay['message'], first['message'])
+        self.assertEqual(path.read_bytes(), original)
+        malformed = helper.prepare_assignment(request | dict(unexpected=None), context_directory=self.task_context)
+        self.assertFalse(malformed['prepared'])
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_assignment_cli_keeps_missing_role_nonblocking(self):
+        helper = self.native_helper()
+        request = self.native_request() | dict(message='Inspect one file.')
+        request.pop('visibility')
+        result = subprocess.run([sys.executable, '-I', '-B', helper.__file__, 'prepare',
+            '--context-directory', str(self.task_context)], input=json.dumps(request),
+            capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertFalse(output['prepared'])
+        self.assertEqual(output['task_name'], request['task_name'])
+        self.assertEqual(output['message'], request['message'])
+        self.assertEqual(list(self.task_context.iterdir()), [])
+
+    def test_managed_preparation_reuses_role_without_changing_frozen_prompt(self):
+        helper = self.native_helper()
+        self.assertTrue(hasattr(helper, 'prepare_managed'), 'Managed assignment should register its existing role')
+        request = self.native_request()
+        body = dict(binding=dict(task_name=request['task_name']), request=dict(visibility=request['visibility']))
+        for reviewer in (False, True):
+            with self.subTest(reviewer=reviewer):
+                directory = self.task_context / str(reviewer)
+                directory.mkdir(mode=0o700)
+                digest = hashlib.sha256(json.dumps(body, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+                report = dict(ok=True, launch_admitted=True, task_name=request['task_name'],
+                              assignment_digest=digest, visibility=request['visibility'])
+                envelope = dict(assignment=body, assignment_digest=digest)
+                if reviewer:
+                    report.update(assignment_digest='a' * 64, ledger_assignment_digest=digest)
+                    envelope = dict(ownership=body, ledger_assignment_digest=digest, assignment='Read only.')
+                report['prompt'] = json.dumps(envelope)
+                original = copy.deepcopy(report)
+                actual = helper.prepare_managed(self.root, self.parent, report, context_directory=directory)
+                self.assertEqual({key: actual[key] for key in original}, original)
+                self.assertEqual(report, original)
+                preparation = actual['visibility_preparation']
+                self.assertTrue(preparation['prepared'])
+                context = helper.read_context(Path(preparation['context']))
+                self.assertEqual(context['ledger_assignment_digest'], digest)
+                self.assertNotIn('prompt_marker', context)
+                self.assertEqual(context['visibility'], request['visibility'])
+
+    def test_managed_replay_or_missing_role_does_not_change_launch_result(self):
+        helper = self.native_helper()
+        self.assertTrue(hasattr(helper, 'prepare_managed'))
+        report = dict(ok=True, launch_admitted=False, replayed=True, task_name='review_original',
+                      prompt='Keep this immutable prompt.', assignment_digest='a' * 64)
+        actual = helper.prepare_managed(self.root, self.parent, report, context_directory=self.task_context)
+        self.assertEqual({key: actual[key] for key in report}, report)
+        self.assertFalse(actual['visibility_preparation']['prepared'])
+        self.assertEqual(list(self.task_context.iterdir()), [])
+
+    def test_managed_cli_captures_both_routes_after_admission_and_keeps_display_failure_optional(self):
+        import io
+        import os
+        from contextlib import redirect_stdout
+        from scripts import workflow, worker_visibility
+        from runtime import delegation, evidence
+        scope = SimpleNamespace(repository_root=self.root, runtime=object())
+        metadata = self.native_request()['visibility']
+        for review in (False, True):
+            for unavailable in (False, True):
+                with self.subTest(review=review, unavailable=unavailable):
+                    task_name = f'review_{review}_{unavailable}'
+                    report = dict(ok=True, task_name=task_name, prompt='Frozen native envelope',
+                                  launch_admitted=True, assignment_digest='a' * 64, visibility=metadata)
+                    if review:
+                        report['ledger_assignment_digest'] = 'b' * 64
+                    operation = (evidence, 'prepare_review') if review else (delegation, 'prepare_assignment')
+                    argv = ['workflow.py', *(['evidence', 'review'] if review else ['delegation']),
+                            'prepare', '--cwd', str(self.root)]
+                    output = io.StringIO()
+                    request = dict(client='codex', session_id=self.parent)
+                    with patch('sys.argv', argv), \
+                            patch('sys.stdin', SimpleNamespace(buffer=io.BytesIO(json.dumps(request).encode()))), \
+                            patch.dict(os.environ, {'CODEX_HOME': str(self.task_context)}), \
+                            patch('runtime.startup.acquire_project_entry', return_value=object()), \
+                            patch('runtime.startup._entry_scope', return_value=scope), \
+                            patch.object(*operation, return_value=report), \
+                            patch.object(workflow, 'title_report', side_effect=lambda s, c, p, value: value), \
+                            patch.object(worker_visibility, 'prepare_native',
+                                         side_effect=OSError('unavailable') if unavailable else worker_visibility.prepare_native), \
+                            redirect_stdout(output):
+                        code = workflow.control_main()
+                    actual = json.loads(output.getvalue())
+                    self.assertEqual(code, 0, actual)
+                    self.assertEqual({key: actual[key] for key in report}, report)
+                    preparation = actual['visibility_preparation']
+                    self.assertEqual(preparation['prepared'], not unavailable)
+                    if not unavailable:
+                        context = worker_visibility.read_context(Path(preparation['context']))
+                        self.assertEqual(context['visibility'], metadata)
+                        self.assertEqual(context['ledger_assignment_digest'], ('b' if review else 'a') * 64)
 
     def test_checkout_context_is_rejected_before_any_file_or_lock_write(self):
         helper = self.native_helper()

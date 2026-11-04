@@ -502,8 +502,25 @@ def observe_worker_visibility(checkout, parent_session_id, worker_id, *, spawn_b
             options['executable'] = executable
         with _native_reader(methods, **options) as (observed_version, request):
             parent = _native_metadata(scope, request, parent_session_id, observed_version)
-            surface = 'codex-cli' if parent.get('source') == 'exec' else 'codex-desktop'
-            _native_surface(parent, surface, observed_version)
+            root, seen = parent, {worker_id}
+            for _ in range(16):
+                if root['id'] in seen:
+                    raise ObservationError('child_mismatch')
+                seen.add(root['id'])
+                source = root.get('source')
+                if not isinstance(source, dict):
+                    surface = 'codex-cli' if source == 'exec' else 'codex-desktop'
+                    _native_surface(root, surface, observed_version)
+                    break
+                subagent = source.get('subAgent')
+                origin = subagent.get('thread_spawn') if isinstance(subagent, dict) else None
+                ancestor = root.get('parentThreadId')
+                if (not isinstance(origin, dict) or not isinstance(ancestor, str)
+                        or str(uuid.UUID(ancestor)) != ancestor or origin.get('parent_thread_id') != ancestor):
+                    raise ObservationError('child_mismatch')
+                root = _native_metadata(scope, request, ancestor, observed_version)
+            else:
+                raise ObservationError('surface_unverified')
             child = _native_metadata(scope, request, worker_id, observed_version)
             source = child.get('source')
             subagent = source.get('subAgent') if isinstance(source, dict) else None
