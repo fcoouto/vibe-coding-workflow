@@ -157,6 +157,15 @@
         ]
       ]
     },
+    "clients/habblaud-receiver.md": {
+      "sha256": "a38eb72df28cf9224d3c95f881d9a260a962aa8601faee38f15a5f4b9ae5609d",
+      "ranges": [
+        [
+          1,
+          86
+        ]
+      ]
+    },
     "clients/index.md": {
       "sha256": "dd8da23ef85970da7f40a047738b6a2bc9f33389b848bc95e766deab3f0c36e9",
       "ranges": [
@@ -211,7 +220,7 @@
       ]
     },
     "clients/worker-visibility.md": {
-      "sha256": "3999bd85b5cac78a778a685f15790a5318508b48e4a30957baeab4e61d83cd89",
+      "sha256": "5b6414c1df5cc3208f756d8b7396fffda789e14c0399811a0590da6ef9302000",
       "ranges": [
         [
           1,
@@ -219,7 +228,7 @@
         ],
         [
           151,
-          184
+          185
         ]
       ]
     },
@@ -401,7 +410,7 @@
       ]
     },
     "policies/11-tool-integrations.md": {
-      "sha256": "6ba1cfcd8f40389a3ac1ea2b1c42e036bd403314d4b7db35fe7f6beb4bb843fd",
+      "sha256": "54464355ec44a14255aa2db8119dd0200d4348d6db97e9f038405c1251016f63",
       "ranges": [
         [
           1,
@@ -635,7 +644,7 @@
       ]
     },
     "skills/prepare-my-workspace/SKILL.md": {
-      "sha256": "a141fb870db622d80441f907af04b09115140af48fb2421dd3029b2baa9f8174",
+      "sha256": "85d62781f5ed2e02ee58a591b6dace85e069eae0bcbfe208758cf53c60f58b50",
       "ranges": [
         [
           1,

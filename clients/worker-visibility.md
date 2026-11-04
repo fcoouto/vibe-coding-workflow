@@ -32,9 +32,10 @@ execution requirements independently of the badge.
 
 ## Reconcile on discovery and upgrade
 
-When onboarding, workspace preparation or an authorized upgrade discovers an
-existing Habblaud integration, inspect its current start hook and reviewed
-adapter. Reuse the existing command and reconcile its owned wrapper with this
+For a selected fresh Habblaud installation, a discovered existing installation,
+or an authorized upgrade, first follow the packaged
+[receiver setup procedure](habblaud-receiver.md). Then inspect the current
+start hook and reviewed adapter. Reuse the existing command and reconcile its owned wrapper with this
 package when needed. Preserve other hooks, arguments, customizations and a
 recoverable copy of the configuration. Keep one wrapper for this contract.
 Use the client's supported trust flow for changed commands and qualify the

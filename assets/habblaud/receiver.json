@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "upstream": "https://github.com/marmottajr/habblaud",
+  "upstream_version": "1.0.3",
+  "upstream_commit": "faa1a012b5fbf632c66dc6801c5383e53a542406",
+  "license": "MIT",
+  "patch_sha256": "07a1cafe3a2b65acae2a3a3b4e106ffae13c079ac88133458ca4813d9aa252c2",
+  "files": [
+    "CHANGELOG.md",
+    "client/src/ui/drawer.ts",
+    "client/src/ui/model.test.ts",
+    "client/src/ui/model.ts",
+    "client/src/ui/rows.ts",
+    "client/src/ui/terminal.ts",
+    "client/src/ui/widgets.ts",
+    "server/model/office.ts",
+    "server/sources/codex/source.test.ts",
+    "server/sources/codex/source.ts",
+    "shared/codex-role.ts"
+  ]
+}
