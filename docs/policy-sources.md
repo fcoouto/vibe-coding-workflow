@@ -29,6 +29,11 @@ outside the runtime transaction, preserving immutable prompts and launch results
 OpenRouter and Usage Routing reuse their existing brief or proposal fields.
 Display preparation failure never blocks dispatch. Legacy role-only preparation
 remains a compatibility and recovery path, not an extra routine step.
+For a reused native child, the same assignment preparation preserves the
+original prompt and reuses its declaration or captures a missing role once.
+The dedicated Habblaud adapter owns delivery, including replay of previously
+observed contexts; the receiver retains badges across restarts for matching
+native children. Replay never creates presence or changes activity.
 
 Native badges use a bound declaration or the reported native role. Habblaud
 shows its standard subagent fallback when neither source supplies a role and

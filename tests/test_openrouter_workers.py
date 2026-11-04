@@ -156,7 +156,7 @@ print(json.dumps({{'type':'step_finish','part':{{'reason':'stop','cost':0,'token
         self.assertEqual(self.api.configuration(saved), self.api.configuration(self.brief))
 
     def test_worker_without_role_gets_a_badge_and_can_execute(self):
-        from runtime import worker_visibility
+        from runtime import habblaud, worker_visibility
         from tests.test_worker_visibility import fixture_transport
         client, transport = fixture_transport()
         brief = {key: value for key, value in self.brief.items() if key not in {'role', 'specialty'}}
@@ -164,21 +164,21 @@ print(json.dumps({{'type':'step_finish','part':{{'reason':'stop','cost':0,'token
         exe = self.fixture("sys.stdin.read()\n"
                            "print(json.dumps({'type':'text','part':{'text':'Fixture answer'}}))\n"
                            "print(json.dumps({'type':'step_finish','part':{'reason':'stop','cost':0,'tokens':{}}}))\n")
-        with patch.object(worker_visibility, 'transport', return_value=transport):
+        with patch.object(habblaud, 'transport', return_value=transport):
             publisher = self.api.habblaud_publisher(self.root, run, 'http://127.0.0.1:1', 'account')
             result = self.api.execute(run, exe, self.root / 'auth', publisher)
         self.assertEqual(result['state'], 'awaiting_verification')
         self.assertEqual(client.events[0]['agent_type'], 'Subagente (Codex)')
 
     def test_openrouter_reuses_external_display_identity_through_verification(self):
-        from runtime import worker_visibility
+        from runtime import habblaud, worker_visibility
         from tests.test_worker_visibility import fixture_transport
         client, transport = fixture_transport()
         run = self.api.prepare(self.runs, dict(self.brief, custom_role_name='Evidence scout'))
         exe = self.fixture("sys.stdin.read()\n"
                            "print(json.dumps({'type':'text','part':{'text':'Fixture answer'}}))\n"
                            "print(json.dumps({'type':'step_finish','part':{'reason':'stop','cost':0,'tokens':{}}}))\n")
-        with patch.object(worker_visibility, 'transport', return_value=transport):
+        with patch.object(habblaud, 'transport', return_value=transport):
             args = (self.root, run, 'http://127.0.0.1:1', 'account')
             publisher = self.api.habblaud_publisher(*args)
             self.assertEqual(client.events, [])
@@ -195,7 +195,7 @@ print(json.dumps({{'type':'step_finish','part':{{'reason':'stop','cost':0,'token
         self.assertEqual([event['hook_event_name'] for event in client.events].count('SubagentStop'), 1)
 
     def test_existing_openrouter_receipt_keeps_its_original_badge(self):
-        from runtime import worker_visibility
+        from runtime import habblaud, worker_visibility
         from tests.test_worker_visibility import fixture_transport
         client, transport = fixture_transport()
         run = self.api.prepare(self.runs, dict(self.brief, custom_role_name='Evidence scout'))
@@ -204,15 +204,15 @@ print(json.dumps({{'type':'step_finish','part':{{'reason':'stop','cost':0,'token
         external = str(uuid.uuid5(uuid.NAMESPACE_URL, str(run)))
         binding = dict(parent=self.brief['coordinator_chat_id'], agent_id=external,
             label='Evidence scout · Model', cwd=self.brief['source_root'])
-        legacy = worker_visibility.publisher(transport, endpoint, account, binding, metadata, run / 'visibility.json')
+        legacy = habblaud.publisher(transport, endpoint, account, binding, metadata, run / 'visibility.json')
         self.assertTrue(legacy('Working')['delivered'])
-        with patch.object(worker_visibility, 'transport', return_value=transport):
+        with patch.object(habblaud, 'transport', return_value=transport):
             publish = self.api.habblaud_publisher(self.root, run, endpoint, account)
             self.assertTrue(publish('accepted')['delivered'])
         self.assertEqual({event['agent_type'] for event in client.events}, {'Evidence scout · Model'})
 
     def test_approved_native_fallback_preserves_frozen_name_with_a_real_child_id(self):
-        from runtime import worker_visibility
+        from runtime import habblaud, worker_visibility
         from runtime.adapters import codex
         from scripts import worker_visibility as native_helper
         from tests.test_worker_visibility import fixture_transport
@@ -223,7 +223,7 @@ print(json.dumps({{'type':'step_finish','part':{{'reason':'stop','cost':0,'token
         endpoint, account = 'http://127.0.0.1:1', 'account'
         plugin = self.root / 'transport'
         plugin.mkdir(mode=0o700)
-        with patch.object(worker_visibility, 'transport', return_value=transport):
+        with patch.object(habblaud, 'transport', return_value=transport):
             result = self.api.execute(run, exe, self.root / 'auth',
                 self.api.habblaud_publisher(plugin, run, endpoint, account))
             self.assertTrue(result['native_fallback_ready'])

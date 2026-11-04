@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from runtime import usage_admission, usage_budget, usage_routing, usage_settings, worker_visibility
+from runtime import habblaud, usage_admission, usage_budget, usage_routing, usage_settings
 from runtime.usage_budget import BudgetError
 from tests.test_openai_api import Connection, Response, completed
 from tests.test_usage_budget import native
@@ -464,7 +464,7 @@ class CodexUsageHostTests(unittest.TestCase):
         client = SimpleNamespace(snapshot=lambda _: dict(agents=agents), event=event)
         transport = SimpleNamespace(Client=lambda _: client, _event=wire)
         self.dispatch.side_effect = dispatch
-        with patch.object(worker_visibility, 'transport', return_value=transport):
+        with patch.object(habblaud, 'transport', return_value=transport):
             result = self.execute(plan, habblaud=context)
         self.assertFalse(result['accepted'])
         self.assertTrue(result['requires_native_review'])
@@ -487,14 +487,14 @@ class CodexUsageHostTests(unittest.TestCase):
             ('requires_native_review', False), ('execution_route', 'auto'),
             ('reported_cost_usd_micros', result['reported_cost_usd_micros'] + 1),
         ):
-            with self.subTest(result_field=field), patch.object(worker_visibility, 'transport') as load_transport:
+            with self.subTest(result_field=field), patch.object(habblaud, 'transport') as load_transport:
                 outcome = self.host._publish_generation(plan, task, evidence, result | {field: value}, context,
                                                         visibility=declaration)
                 self.assertEqual(outcome, dict(delivered=False, reason='generation_unconfirmed'))
                 load_transport.assert_not_called()
 
         for change in ('missing_run', 'count_only', 'task', 'scope', 'admission', 'closed', 'unresolved'):
-            with self.subTest(ledger_change=change), patch.object(worker_visibility, 'transport') as load_transport:
+            with self.subTest(ledger_change=change), patch.object(habblaud, 'transport') as load_transport:
                 modified = deepcopy(baseline)
                 run = modified['runs'][run_id]
                 if change == 'missing_run':
@@ -518,7 +518,7 @@ class CodexUsageHostTests(unittest.TestCase):
                 load_transport.assert_not_called()
 
         agents[0]['provider'] = 'claude'
-        with patch.object(worker_visibility, 'transport', return_value=transport):
+        with patch.object(habblaud, 'transport', return_value=transport):
             outcome = self.host._publish_generation(plan, task, evidence, result, context, visibility=declaration)
         self.assertEqual(outcome, dict(delivered=False, reason='visibility_parent_unavailable'))
         self.assertEqual(len(events), 3)
@@ -534,7 +534,7 @@ class CodexUsageHostTests(unittest.TestCase):
                 run_id=task['run_id'], simulation_only=simulated, accepted=False,
                 requires_native_review=True, reported_cost_usd_micros=0, execution_route='openai-api',
                 text='unrecorded response')
-            with patch.object(worker_visibility, 'transport', side_effect=AssertionError('unexpected display')):
+            with patch.object(habblaud, 'transport', side_effect=AssertionError('unexpected display')):
                 result = self.execute(plan, habblaud=context)
                 self.assertFalse(result['accepted'])
                 self.assertEqual(result['visibility'], dict(delivered=False, reason='generation_unconfirmed'))
