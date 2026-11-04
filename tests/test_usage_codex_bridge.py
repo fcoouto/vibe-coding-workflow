@@ -58,6 +58,13 @@ const request = {root:'/installed', python:'/python', threadId:'parent', hostId:
   assert.ok(!checks.includes('python'));
 
   const fresh = {...request, approvalTurnId:undefined};
+  for (const cap of [undefined, null]) {
+    await run({...fresh, action:'freeze', maximumUsdMicros:cap}, {...tools, exec_command: async args => {
+      if (cap === null) assert.match(args.cmd, /"maximum_usd_micros":null/);
+      else assert.doesNotMatch(args.cmd, /"maximum_usd_micros"/);
+      return {exit_code:0,output:'{"ok":true}'};
+    }});
+  }
   const manual = {...fresh, plan:{...fresh.plan, mode:'manual'}, manualSelection:'Native receipt'};
   await run(manual, {...tools, exec_command: async args => {
     assert.match(args.cmd, /"manual_selection":"Native receipt"/);

@@ -15,7 +15,7 @@ for the scope of tested behavior.
 
 Save a project-bound OpenAI credential in macOS Keychain. Explicit activation
 records consent for the selected organization, project, key, mode, allowed task
-and data scope, spending cap and expiry. Saving configuration leaves routing
+and data scope, funding policy, any selected spending caps and expiry. Saving configuration leaves routing
 Off. A saved legacy enablement needs explicit activation to record live consent.
 Other Codex work can continue throughout setup and activation.
 
@@ -102,13 +102,28 @@ Store the ceiling policy, cycle basis and monotonic policy revision under the sh
 
 | Choice | User-facing explanation | Admission semantics |
 | --- | --- | --- |
-| **No ceiling** | Use available authorized API credits without an additional monthly workflow cap. The workflow never purchases credits; provider-side charges remain possible. | No finite monthly policy cap; verified available credits, uncertainty buffers, request and task bounds still apply. Never represent infinity as a large money value. |
+| **No ceiling** | Use available authorized API credits without an additional monthly workflow cap. The workflow never purchases credits; provider-side charges remain possible. | No finite monthly policy cap; verified available credits, uncertainty buffers, request bounds and any configured cumulative or per-task caps still apply. Never represent infinity as a large money value. |
 | **Monthly subscription benefit only** | Use only verified API credits granted for the current monthly subscription period. Exclude separately purchased credits. | Funding restriction plus a cycle allowance bounded by confirmed benefit grants. A prorated first grant gives a prorated allowance. The full-period amount from preview is not spendable credit. |
 | **Specify it: $___ per month** | Limit Usage Routing to this amount each month, using authorized existing credits. | Positive USD amount stored exactly in integer units; the lower of remaining monthly allowance and safe credit headroom wins. Reject invalid amounts; use Off to stop spending. |
 
 The second choice deliberately means actual benefit credits only, not a numerical ceiling equal to a plan's advertised allowance. Use the matching grant row's remaining balance and accepted expiry for local budgeting; a separate grant identifier is not required. Aggregate balance alone remains insufficient. Local reservations do not select the provider's funding source. Present that limitation as a warning, not a requirement to disable auto-reload or prove grant isolation. Missing/stale grant coverage stops API admission and requests native handoff. If no monthly benefit or adequate evidence is available, show the reason, pause grant-backed API requests and offer native handoff; the feature may remain enabled, but never substitute purchased API credits. Annual benefits are outside this particular choice until separately designed. The other choices remain generic to explicitly approved existing API credits. They do not permit a grant-only assignment to spill intentionally into purchased credits.
 
 Choosing No ceiling or a custom amount authorizes existing credits of the approved funding types in the selected organization, including verified prepaid credits when covered by setup consent. A recurring policy can cover subsequently confirmed grants of those same types without another prompt; it never initiates purchases. Unknown increases, changes of organization or funding type, and automatic recharge evidence require reconciliation before new allocation. No ceiling is not authorization for an unlimited bill.
+
+### Optional cumulative and per-task caps
+
+A positive `pilot_limit` bounds cumulative routing exposure. A positive
+`task_limit` bounds exposure for one task. Set either independently to JSON
+`null` to omit that cap. The monthly ceiling and approved funding pool are
+separate choices. Removing an extra cap does not change the funding pool,
+grant, cycle or accounting. A benefit-only policy still requires verified
+coverage by the selected benefit.
+
+Each request has a full cost quote and reservation, even when both extra caps
+are omitted. For an ordinary request with no cumulative cap and no explicit
+bound, the [Codex host](../../../skills/manage-usage-routing/references/codex-host.md)
+derives the exact exposure limit from retained organization exposure plus the
+full quote. Explicit request and test caps still apply.
 
 ### Cycle and reservation rules
 
@@ -118,7 +133,7 @@ Choosing No ceiling or a custom amount authorizes existing credits of the approv
 - A cap or mode change never clears consumed cost, reservations or cycle history. Lowering below consumed-plus-reserved work pauses new admissions; already-dispatched work remains accounted for. Raising the cap or selecting No ceiling requires an explicit user setting change. No prompt is needed for normal operations within an accepted recurring policy.
 - A changed billing anchor, plan or currency cannot create a second allowance during overlapping time. Block transition until the old and new periods and unresolved charges are reconciled. Do not recompute boundaries from today's date or apply an assumed fixed day-of-month.
 
-For a finite ceiling, monthly headroom is `max(0, cycle_ceiling - managed_cycle_cost - cycle_reservations)`. Admit against the minimum of monthly headroom, verified pool headroom, and remaining task and configured routing limits. Grant restrictions apply independently. Each attempt is counted once within each limit; all limits are checked atomically. Keep a conservative reservation while funding attribution is uncertain, with no duplicate dispatch. For example, a request admitted in cycle A and funded from a cycle-B grant remains workflow cost in A, while reducing B's available grant balance. Release its credit reservation only when trusted reconciliation establishes the actual charge and inclusion in the observed provider balance; calendar rollover alone never releases it. Do not also deduct that old request from B's workflow ceiling.
+For a finite ceiling, monthly headroom is `max(0, cycle_ceiling - managed_cycle_cost - cycle_reservations)`. Admit against verified pool headroom and the remaining headroom under each applicable limit. Grant restrictions apply independently. Each attempt is counted once within each limit; all limits are checked atomically. Keep a conservative reservation while funding attribution is uncertain, with no duplicate dispatch. For example, a request admitted in cycle A and funded from a cycle-B grant remains workflow cost in A, while reducing B's available grant balance. Release its credit reservation only when trusted reconciliation establishes the actual charge and inclusion in the observed provider balance; calendar rollover alone never releases it. Do not also deduct that old request from B's workflow ceiling.
 
 ## Reservation and recovery
 
@@ -130,7 +145,7 @@ Use exact integer USD micro-units and conservative rounding. A local
 reservation cannot isolate funds at the provider or constrain outside consumers.
 ### Conservative accounting without settlement watermarks
 
-Establish a private accounting baseline from verified pool evidence, carrying any prior unresolved exposure. Let B be the lowest accepted authorized-pool balance observed since that baseline; D be all retained managed costs since the baseline plus outstanding worst-case reservations, counted once per attempt; F is the fixed protected floor of 20% of the first accepted balance, rounded up in USD micro-units. Admit against `max(0, B - D - F)`, further bounded by monthly, task and configured routing ceilings. An increase in displayed balance cannot increase B automatically. Continue requiring fresh evidence; retaining an old low balance does not extend evidence validity.
+Establish a private accounting baseline from verified pool evidence, carrying any prior unresolved exposure. Let B be the lowest accepted authorized-pool balance observed since that baseline; D be all retained managed costs since the baseline plus outstanding worst-case reservations, counted once per attempt; F is the fixed protected floor of 20% of the first accepted balance, rounded up in USD micro-units. Admit against `max(0, B - D - F)`, further bounded by applicable spending limits. An increase in displayed balance cannot increase B automatically. Continue requiring fresh evidence; retaining an old low balance does not extend evidence validity.
 
 Validated response usage may replace that attempt's worst-case reservation with its conservatively priced local cost in D. This settles local workflow accounting only; the cost stays deducted even if it might already be included in B. Unknown usage retains the maximum. A proven unsent attempt contributes zero. No balance refresh, elapsed time or calendar reset retires retained deductions. This can pause earlier than actual credit exhaustion; accept that conservative stop.
 
@@ -138,9 +153,9 @@ If headroom becomes insufficient, expiry arrives, or evidence conflicts, pause w
 
 Before each generation, freeze the full text request and model/reasoning/price profile. Obtain a qualified input-token count for the same request shape. Reserve all input at the highest applicable input rate, including any separately billed cache-write rate, plus maximum total generated tokens, including reasoning, at the applicable output rate, plus any applicable charges. Do not assume cache discounts, free helper endpoints, fixed context-tier pricing, or unverified token estimates. Verify counting-endpoint costs and semantics before dispatch and include any known maximum charge. Unknown cost bounds block generation.
 
-The counting call itself needs admission before transmission: either qualified evidence establishes no charge, or a separate known worst-case preflight charge is reserved against the same task, routing and grant limits. Claim the shared active-request slot before counting, including a zero-charge count, and retain it through the sequential generation. If its cost cannot be bounded without an unadmitted network call, pause before counting. Freeze the transmitted source scope before either call. Counting never grants permission to generate.
+The counting call itself needs admission before transmission: either qualified evidence establishes no charge, or a separate known worst-case preflight charge is reserved against the same applicable caps and grant limits. Claim the shared active-request slot before counting, including a zero-charge count, and retain it through the sequential generation. If its cost cannot be bounded without an unadmitted network call, pause before counting. Freeze the transmitted source scope before either call. Counting never grants permission to generate.
 
-Admit only when the maximum request cost fits the minimum of credit headroom, remaining monthly allowance, task allowance and configured routing allowance. Atomically reserve that cost and claim the single active request slot before sending. Use a unique attempt ID, immutable request digest, configuration revision and funding/pricing evidence references. One shared organization ledger prevents two checkouts allocating the same headroom; do not hold database locks across network calls.
+Admit only when the maximum request cost fits verified credit headroom and every applicable cap. Atomically reserve that cost and claim the single active request slot before sending. Use a unique attempt ID, immutable request digest, configuration revision and funding/pricing evidence references. One shared organization ledger prevents two checkouts allocating the same headroom; do not hold database locks across network calls.
 
 Attempt states: reserved, dispatching, completed, rejected-before-send, unresolved, reconciled. Record dispatching before network transmission. A crash or ambiguous timeout retains the full reservation. Replaying an attempt ID returns its record, never another inference. Release only with trusted evidence of no dispatch, or settle with observed usage and qualified reconciliation. Known provider completion can free the active slot while unsettled credit exposure remains deducted; an unknown in-flight request keeps the slot blocked. Time elapsed, process exit or a response's claimed success never proves zero billing.
 
@@ -158,9 +173,9 @@ One immutable `run_id` owns the active API slot and references the original task
 | Either dispatch is ambiguous | Keep that attempt's maximum and the slot; require trusted recovery |
 | Any run or attempt ID is replayed | Return its stored state only; never transmit again |
 
-A correction is a new explicitly selected run within the original task and configured routing bounds, reusing the original task's native reserve and remaining repair allowance. Each call records `dispatching` before transmission; recovery cannot infer no dispatch from process death. A slot released before generation does not by itself release native capacity; the native-capacity rule still applies.
+A correction is a new explicitly selected run within the original task scope and applicable spending limits, reusing the original task's native reserve and remaining repair allowance. Each call records `dispatching` before transmission; recovery cannot infer no dispatch from process death. A slot released before generation does not by itself release native capacity; the native-capacity rule still applies.
 
-The runner does not retry inference automatically. A known rate-limit rejection pauses; credit/spend-limit errors are terminal for the route until conditions change. No automatic model escalation is included. A reasoned correction or profile escalation requires explicit selection within the approved task and routing budget and attempt bounds, preserving all outstanding reservations. No automatic fallback to OpenRouter, unapproved API credits or new paid funding is permitted. Conservative grant/budget/expiry stops may hand remaining work to the authorized native route; retain independent review and do not replay the API attempt.
+The runner does not retry inference automatically. A known rate-limit rejection pauses; credit/spend-limit errors are terminal for the route until conditions change. No automatic model escalation is included. A reasoned correction or profile escalation requires explicit selection within the approved task scope, applicable spending limits and attempt bounds, preserving all outstanding reservations. No automatic fallback to OpenRouter, unapproved API credits or new paid funding is permitted. Conservative grant/budget/expiry stops may hand remaining work to the authorized native route; retain independent review and do not replay the API attempt.
 
 ### Native handoff on conservative API stops
 

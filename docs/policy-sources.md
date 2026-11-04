@@ -60,6 +60,11 @@ checks, full reservations, fixed native review capacity, and independent
 verification. Measurements, previews and bounded canaries are optional.
 The user directed that smoke-test limits stay isolated from the
 [regular-routing budget](../skills/manage-usage-routing/references/procedure.md#regular-routing-budget).
+The user approved independently optional cumulative and per-task caps for
+regular routing and kept verified subscription-benefit funding for the
+selected project. The [monthly policy and reservation design](superpowers/specs/2026-10-31-usage-routing-design.md#monthly-ceiling-choices)
+preserves the funding choice, grant, cycle, retained exposure and per-request
+quote and reservation requirements when either cap is omitted.
 [Observed validation](usage-routing-validation.md) records its tested scope
 separately from current admission rules.
 

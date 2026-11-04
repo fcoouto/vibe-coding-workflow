@@ -18,9 +18,9 @@ when permitted. Never initiate a purchase or silently switch to a paid API pool.
    mode and whether live consent is saved.
 2. For a requested connection, use [Keychain setup](keychain-setup.md). Confirm
    the selected organization, project and key, approved profile, task and data
-   scope, expiry, billing cycle and spending limit. Reuse accepted settings and
-   the existing connection when applicable. Save configuration with `configure`
-   if needed.
+   scope, expiry, billing cycle, funding choice and any spending caps. Reuse
+   accepted settings and the existing connection when applicable. Save
+   configuration with `configure` if needed.
 3. On the user's explicit enable request, pass the current `revision` as
    `expected_revision` and select `mode: manual` or `mode: smart`. This
    records live consent for the approved configuration. Use the existing
@@ -77,7 +77,7 @@ counts/prices or granting spending permission. Use synthetic inputs for tests.
 - Optional `production_budget: true` for an existing smoke-test configuration
   in the same organization and accounting cycle.
 
-All money values are exact integer USD micro-units. Ceiling is `none` (No ceiling),
+Express money amounts as exact integer USD micro-units. Ceiling is `none` (No ceiling),
 `subscription_benefit` (Monthly subscription benefit only), or `custom` (Specify
 it). Amount is positive for custom and null otherwise. Benefit-only requires
 actual authorized grant coverage before a live request; a numerical setting is
@@ -100,20 +100,23 @@ Live evidence belongs to the trusted host. `reconcile` takes `{}` and reports
 
 ### Regular-routing budget
 
-Manual and Smart Balance use the same configured budget. The monthly ceiling
-limits total routing spend in a billing cycle. `pilot_limit` is the separate
-cumulative routing cap and `task_limit` bounds spend on one task. These caps
-limit exposure if calls are repeated or their charges remain uncertain. No
-monthly ceiling still leaves the cumulative and per-task caps in effect.
-Reserve each request's maximum cost before sending against the applicable
-limits and available approved credits.
+Manual and Smart Balance share the monthly ceiling and funding choice. Set
+`pilot_limit` to a positive amount for a cumulative routing cap or JSON
+`null` to omit it. Set `task_limit` the same way for a cap on one task.
+These choices are independent of each other and of the monthly ceiling.
+No monthly ceiling leaves any configured cumulative or per-task caps in effect.
+Changing these caps preserves the selected funding policy, grant, cycle,
+retained charges and outstanding reservations. With Monthly subscription
+benefit only, live requests still require verified coverage from that benefit.
+Quote and reserve the maximum cost of every request against approved credits,
+the applicable caps and any explicit request bound before sending.
 
 An optional smoke test uses its own budget, token limits and expiry. If its
 accounting cycle is still active, obtain the user's regular-routing budget
 choice and call `configure` with `production_budget: true`. Supply the approved
-limits, current price profile, and stop time. Keep the cycle ID and billing
-boundaries so costs and reservations still count. Then use the requested
-mode's normal enable procedure.
+policy, including `null` for any omitted extra cap, current price profile, and
+stop time. Keep the cycle ID and billing boundaries so costs and reservations
+still count. Then use the requested mode's normal enable procedure.
 
 ## Optional preview and evaluation
 
