@@ -1,5 +1,11 @@
 # Release notes
 
+## 0.1.22
+
+- Reopen the Thread Naming meter before substantive work resumes. Keep accepted milestones that still apply to the current objective.
+- Switch automatically to a clear new objective in the same chat. Keep the family and member, reset progress, and rename only a workflow-owned topic.
+- Preserve the full meter for questions about completed work and acknowledgments. Keep user-edited topics and title synchronization pauses. [PR #94](https://github.com/fcoouto/vibe-coding-workflow/pull/94)
+
 ## 0.1.20
 
 - Restore saved Habblaud badges after a receiver restart. The bundled upgrade patch preserves the receiver's existing data and supports restoring previously observed declarations.
