@@ -148,7 +148,7 @@ def prepare(root, brief, now=None):
     return run
 
 
-def configuration(brief, workspace=None):
+def configuration(brief):
     # OpenCode 1.19.5 matches read permission against worktree-relative paths.
     read = {'*': 'deny', **{name: 'allow' for name in brief['files']}}
     return {'$schema': 'https://opencode.ai/config.json', 'share': 'disabled',
@@ -315,7 +315,7 @@ def execute(run, executable, auth_data, publish=None):
 
 def _execute(run, brief, executable, auth_data, publish):
     workspace = run / 'workspace'
-    config = configuration(brief, workspace)
+    config = configuration(brief)
     env = {k: v for k, v in os.environ.items() if k in ('PATH', 'HOME', 'TMPDIR', 'LANG', 'OPENROUTER_API_KEY')}
     for name in ('config', 'cache', 'state'):
         (run / name).mkdir(mode=0o700)

@@ -1,6 +1,6 @@
 # D6: Native delegation and ownership
 
-Implementation plan · 26 October 2026 · Package controls implemented; native lifecycle qualification remains pending.
+Implementation plan · 26 October 2026 · Cooperative scope approved 4 November 2026. Runtime alignment and native lifecycle qualification remain pending. D6 is on hold.
 
 **Goal:** select native subagents, reserve their work before dispatch, and verify results before integration. D6 is the canonical owner of duplicate-dispatch, resource-conflict and uncertain-interruption controls. Native Codex is the first adapter target; qualify CLI and Desktop separately. Initial onboarding stays unchanged.
 
@@ -10,12 +10,86 @@ Any non-native model or execution route requires explicit approval; local models
 
 **Basis:** the [D6 deliverable](onboard-my-project-plan.md#5-small-deliverables), [Agent Delegation](../policies/03-agent-delegation.md), [Context and Handoff](../policies/07-context-and-handoff.md) and [D5 evidence controls](d5-checks-and-reviews-plan.md). These contracts retain every requirement. Use Python 3.11+, the standard library and OpenAI's `skill-creator` authoring standard.
 
+## Approved cooperative scope
+
+The user approved cooperative native delegation on 4 November 2026. Use the
+native client's existing trust boundary. Reserve each worker's files and shared
+resources, dispatch once, observe its actual identity and independently verify
+its result. Worker briefs define allowed edits and bounded foreground commands.
+The first pilot uses one leaf worker and one read-only reviewer sequentially.
+
+Enforced patch-only tools, per-worker filesystem containment and universal
+descendant shutdown proof are deferred guarantees. The canary still uses an
+exact patch to exercise its existing hook. Instructions and reservations rely
+on participating workers respecting their scope. Unexpected background writers
+and uncontrolled external edits remain explicit limitations.
+
+### Normal completion and uncertain ownership
+
+A future cooperative completion path must bind the reserved assignment to the
+exact native child and successfully completed turn, account for all observed
+tool activity and completed foreground work, and independently inspect the
+resulting candidate and effects. Require complete history and no pending host
+retry or continuation. Applicable checks and independent review still decide
+acceptance. A worker report or a terminal status alone cannot release claims.
+This observation supports cooperative completion under the stated trust
+assumption. Keep its evidence distinct from proof that every descendant stopped.
+
+Ambiguous launch, missing or contradictory observations, interruption, timeout,
+failed attempts, unfinished commands, undeclared activity, unexpected background
+work or unexplained effects retain the assignment's ownership, capacity and
+consumed budgets. Dependent work stays
+blocked. Defer automatic takeover, replacement and recovery from those states.
+Separate resolution must establish what happened before any later handoff.
+Elapsed time, a cancellation acknowledgement or a fresh run ID cannot clear
+uncertainty. Further work by a previously completed child needs new admission
+and conflict checks before another turn can write. Before releasing ownership,
+recheck the exact assignment, observations, pins, checkout generation, current
+candidate and competing reservations in the release transaction. New activity
+invalidates the prior assessment.
+
+### Pending implementation and offline acceptance
+
+Current `reconcile_assignment()` and version-2 host proofs require stopped
+descendants even for successful native assignments. The adapter deliberately
+reports `descendants_stopped=False`. These existing controls continue to apply
+until a reviewed implementation supports the cooperative contract. Historical
+proofs, failed claims and pinned authorities retain their original meaning.
+
+- [ ] Align native worker and reviewer completion in `runtime/delegation.py`
+  and `runtime/adapters/codex.py`, with the dependent consumers in
+  `runtime/evidence.py`, `runtime/state.py`, `runtime/changes.py` and
+  `runtime/repository_gate.py` identified before edits. Reuse existing identities,
+  ledger and observations. Represent
+  cooperative completion explicitly without setting stopped-descendant proof
+  flags to true. D4 recovery, D5 checks/coordinator operations and D7 consumers
+  retain any stronger evidence requirements until separately aligned and reviewed.
+  Audit every consumer of `settled` before using that status for cooperative
+  release. Dependency admission and readiness must preserve their evidence rules.
+- [ ] Add focused offline acceptance cases in `tests/test_delegation.py` and
+  affected native/evidence tests. Cover a fully observed normal worker and
+  reviewer, wrong identity, missing command completion, stale candidate,
+  interruption, timeout, lost dispatch response, unexpected background activity,
+  replay and resumed-child conflict. Uncertain cases retain claims and budgets
+  and grant no replacement or takeover. Older strict consumers must reject
+  cooperative evidence where stronger proof is required.
+- [ ] Align `clients/delegation.md`, `clients/delegation-proofs.md` and affected
+  runtime/evidence guidance with that implementation, preserving source coverage.
+  Independently review the change and run affected offline checks plus package
+  validation. Freeze a new [held pilot packet](superpowers/plans/2026-11-04-d6-successor-release-packet.md)
+  only after its complete worker, reviewer and check sequence is supported.
+
+The immediate work is this bounded contract alignment. D6's live allowance
+remains zero. The sections below retain the implemented foundation and historical
+delivery sequence. This approved scope supersedes their universal descendant
+proof requirement for the future normal native worker/reviewer path only.
+
 ## Existing capabilities and boundaries
 
 - Reuse `runtime/state.py` for identities, pins, revisions and short SQLite transactions; `runtime/evidence.py` for immutable artifacts, candidate capture, review and host reconciliation; and `runtime/adapters/codex.py` for bounded native observation.
 - The coordinator already has native delegation tools. It calls `collaboration.spawn_agent` after reservation. Python validates and records the assignment; it does not create another launcher, scheduler or generic backend layer. The inspected app-server schema exposes no native subagent spawn RPC.
 - Read-only inspection of CLI 0.163.0 confirmed `model/list` availability and supported efforts. Combine the current surface's available models and dispatch controls with cached official guidance; CLI results do not qualify Desktop. Native explicit worker model/effort overrides require `fork_turns="none"`. Do not alter coordinator settings or global defaults.
-- Native tools expose no per-worker working directory, sandbox, writable paths, tool allowlist or descendant limit. Reservations coordinate participating agents; briefs do not enforce filesystem isolation. Required unavailable restrictions block dependent dispatch.
+- The inspected native tools expose no per-worker working directory, sandbox, writable paths, tool allowlist or descendant limit. Reservations coordinate participating agents. Cooperative scope uses explicit briefs within the native trust boundary. Work that separately requires enforced isolation stays blocked when that capability is unavailable.
 - Native spawn records report settings resolved at creation. Thread metadata reports current configuration, not per-turn execution. Keep requested worker settings, configured settings and observed-at-creation settings distinct; unknown execution settings stay unknown. Existing D5 receipts need version-aware interpretation, not rewritten history.
 
 **Approved follow-up, not accepted package proof:** D6 owns the [single-repository worker and linked-job seam](onboard-my-project-plan.md#cross-repository-tasks-and-delivery) in `runtime/delegation.py`, `runtime/state.py` and report/recovery integration in `runtime/evidence.py`. One Repository/worktree limits editable software scope; separately declared shared build/service resources remain possible only when actual effects are covered. Absolute claims/current-scope Git protection do not prove cross-root write/report/recovery coverage, including foreign Git metadata. Reuse the shared ledger, serialize unknown aliases/resources and retain uncontrolled-writer limits. Under policy 03, update `clients/delegation.md`/`clients/runtime.md` with implementation; prove linked jobs, shared effects, hook/path ownership, out-of-scope rejection and preserved pins. With D2/D5 owners, [retirement](onboard-my-project-plan.md#evidence-retention) must cover task/assignment history beyond shared-state-authority-wide 4096 bounds, preserving relevant live/dependency owners and compact replay/reference identity without restored passing evidence. If all remain needed, block dependent admission and allow bounded truthful read-only status/recovery; never truncate uncertainty or switch database/authority. These future obligations do not change accepted D6 scope or native qualification.
@@ -80,7 +154,7 @@ The coordinator owns lockfiles, shared configuration, tracking and Git operation
 
 **Owner: runtime worker.** Connect delegation to `runtime/evidence.py`, existing task controls and focused evidence/state/dispatcher tests.
 
-Keep execution outcome separate from ownership release. A prepared attempt reserves capacity before spawn. Ambiguous launch, crash, interrupted observation or uncertain descendants retain claims and consumed budgets; inspect native status before considering another launch. Reconcile the original admission even if its response was lost; never mint another admission merely by replaying the request. Native completion, an interrupt acknowledgment or elapsed deadline does not prove all writers stopped. Reuse D5's independently verified host-proof boundary, bound to exact assignment, native identity, pins and original/current candidate. Preserve and inspect partial changes before retry or takeover. Diagnose failures before retrying; an unchanged attempt needs new evidence. Independent authorized work may continue. Qualify this participating-coordinator protocol; do not claim the native spawn tool itself enforces idempotency.
+Keep execution outcome separate from ownership release. A prepared attempt reserves capacity before spawn. Reconcile the original admission even if its response was lost. Request replay retains the same admission. Apply the [approved completion and uncertainty rules](#normal-completion-and-uncertain-ownership) to the planned cooperative path. Current source still uses D5's strict host-proof boundary, bound to the exact assignment, native identity, pins and original/current candidate. Preserve partial changes and uncertain owners during the transition. Independent authorized work may continue. Qualify the participating-coordinator protocol with its stated native trust assumptions.
 
 Reuse D5's review preparation, collection and coordinator assessment. Link the review attempt to one reservation and retain its `review_<attempt_id>` native marker; do not launch a second reviewer or count the same round twice. Fix the candidate/base, include dirty layers and require independent review where applicable. Set scope, rounds and stop conditions before dispatch; fixes do not reset rounds. Further rounds require new risk, an evidence gap or a user request. Reviewers inspect relevant callers/contracts/tests and remain read-only. Native read-only briefs are cooperative; required enforced isolation remains unavailable until qualified.
 
@@ -127,7 +201,7 @@ For each wave: wait for writers, freeze each task's exact diff/snapshot, verify 
 
 Run focused adapter/delegation/state/evidence/onboarding tests, the complete unit suite, `python3 -B scripts/validate.py` and `git diff --check`. Record a disposable native coordinator/worker/reviewer lifecycle, including cached guidance, supported worker model/effort selection, reservation before launch, verified integration and recovery. Qualify CLI and Desktop separately, verify unchanged coordinator settings and record exposed worker settings. Package checks and simulated races do not establish native behavior.
 
-**Completion:** the qualified native path selects authorized workers, excludes conflicting managed assignments, retains uncertain ownership and accepts only independently checked results. Unsupported enforcement remains explicit. Claude lifecycle qualification and D7 repository enforcement remain separate deliverables.
+**Completion:** the qualified cooperative native path selects authorized workers, excludes conflicting managed assignments, retains uncertain ownership and accepts only independently checked results. Automatic takeover and enforced containment remain deferred. Claude lifecycle qualification and D7 repository enforcement retain their separate requirements.
 
 **Parallel delivery:** [D7's ownership plan](d7-repository-gate-plan.md#4-parallel-delivery-with-d6) permits independent verifier work after agreeing evidence fields. D6 retains its shared runtime/state/CLI and guidance files until reviewed handoff; pause all package writers for shared checks. Select implementation and independent review workers through the [delegation contract](../policies/03-agent-delegation.md#select-capability-and-dispatch), using applicable cached platform guidance, task risk and available controls. No model or reasoning tier is mandatory for every review. Preserve coordinator settings and existing sessions.
 

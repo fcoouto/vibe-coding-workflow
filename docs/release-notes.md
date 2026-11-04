@@ -1,5 +1,9 @@
 # Release notes
 
+## 0.1.14
+
+- Include the delegation configuration and visibility changes from [PR #87](https://github.com/fcoouto/vibe-coding-workflow/pull/87) in the Git-backed marketplace release.
+
 ## 0.1.13
 
 - Publish the Codex marketplace from a Git release branch so Codex can upgrade it while preserving the existing marketplace and plugin IDs.
