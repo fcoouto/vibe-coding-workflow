@@ -158,19 +158,17 @@ def enrich_start(event, directory, checkout, executable):
             return event
         checkout = cwd
         parent, child = event['session_id'], event['agent_id']
-        parent_dir = hook_context_path(directory, parent, 'probe').parent
-        if not parent_dir.is_dir() or parent_dir.is_symlink():
-            return event
         executable = Path(executable)
         if (not executable.is_absolute() or executable.resolve(strict=True) != executable
                 or not executable.is_file() or executable.stat().st_mode & 0o022):
             return event
         observed = codex.observe_worker_visibility(checkout, parent, child, deadline=time.monotonic() + 1,
-                                                   executable=str(executable))
+                                                   executable=str(executable), resolve_hook_parent=True)
         task = observed['task_name']
-        if (not task or observed['parent_session_id'] != parent
+        if (not task or observed.get('hook_session_id', observed['parent_session_id']) != parent
                 or observed['worker_id'] != child or observed['checkout'] != str(checkout)):
             return event
+        parent = observed['parent_session_id']
         path = context_path(hook_context_path(directory, parent, task), checkout)
         if not path.is_file():
             return event
@@ -190,7 +188,7 @@ def enrich_start(event, directory, checkout, executable):
             if prior is None:
                 visibility.save(path, context | dict(observed=observed | dict(forwarded_label=label)))
             role = incoming_role if specific_native_role(incoming_role) else label
-            return event | dict(agent_role=role, agent_type=label) | (
+            return event | dict(session_id=parent, agent_role=role, agent_type=label) | (
                 {visibility.MANAGED_DISPLAY_FIELD: label} if managed else {})
     except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError):
         return event

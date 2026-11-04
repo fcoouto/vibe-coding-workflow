@@ -117,7 +117,9 @@ The shared hook verifies each event's canonical working directory. Supply
 
 The wrapper checks the genuine child, parent, checkout and creation name with
 the native observer. For nested delegation, it verifies the native ancestry to
-the originating client while retaining the child's immediate parent binding.
+the originating client and resolves a root-valued hook session to the child's
+verified immediate parent before locating its declaration and forwarding the
+display event. Explicit publication still requires the exact immediate parent.
 It preserves the incoming native role separately and forwards
 the original event if the private declaration or live identity is unavailable.
 For a matching declaration, the display label uses the native model catalog's

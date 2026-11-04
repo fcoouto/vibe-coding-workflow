@@ -405,6 +405,35 @@ class NativeVisibilityTests(unittest.TestCase):
             with self.subTest(ancestor=ancestor), self.assertRaises(StartupError):
                 self.observe()
 
+    def test_hook_root_resolves_verified_immediate_parent_only(self):
+        root = str(uuid.uuid4())
+        self.ancestors[root] = self.parent_thread | dict(id=root)
+        self.parent_thread.update(parentThreadId=root,
+            source={'subAgent': {'thread_spawn': {'parent_thread_id': root}}})
+        with patch.object(codex, '_native_reader', self.reader):
+            value = codex.observe_worker_visibility(self.root, root, self.child, resolve_hook_parent=True)
+            self.assertEqual(value['parent_session_id'], self.parent)
+            self.assertEqual(value['hook_session_id'], root)
+            with self.assertRaises(StartupError):
+                codex.observe_worker_visibility(self.root, root, self.child)
+            with self.assertRaises(StartupError):
+                codex.observe_worker_visibility(self.root, str(uuid.uuid4()), self.child, resolve_hook_parent=True)
+
+    def test_hook_root_uses_immediate_parent_context_and_event_binding(self):
+        helper = self.native_helper()
+        root = str(uuid.uuid4())
+        path = helper.hook_context_path(self.task_context, self.parent, 'review_original')
+        path.parent.mkdir(mode=0o700)
+        helper.prepare_native(path, self.native_request())
+        event = dict(hook_event_name='SubagentStart', session_id=root,
+                     agent_id=self.child, cwd=str(self.root), agent_type='default')
+        observed = self.observe() | dict(hook_session_id=root)
+        with patch.object(codex, 'observe_worker_visibility', return_value=observed):
+            actual = helper.enrich_start(event, self.task_context, self.root, Path(sys.executable).resolve())
+        self.assertEqual(actual['session_id'], self.parent)
+        self.assertEqual(actual['vcw_display_label'], 'Audit lead · Native model')
+        self.assertEqual(event['session_id'], root)
+
     def test_catalog_failure_or_ambiguity_preserves_native_identity(self):
         for page in (dict(data=None), dict(data=[dict(model='Native model', displayName='First'),
                                               dict(model='Native model', displayName='Second')])):
