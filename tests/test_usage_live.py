@@ -74,6 +74,18 @@ class LiveAdmissionTests(unittest.TestCase):
         resolver.assert_not_called()
         self.assertEqual(self.ledger.snapshot(), before)
 
+    def test_legacy_enabled_canary_budget_cannot_admit_regular_live_task(self):
+        self.controller.enable(1)
+        policy = dict(POLICY, cycle='canary-old')
+        with self.ledger.transaction() as state:
+            state['organizations']['org']['policy'] = policy
+        proof = replace(self.proof, policy_digest=admission.digest(policy))
+        with self.assertRaisesRegex(budget.BudgetError, 'routing_budget_required'):
+            self.run_candidate(proof)
+        self.resolver.assert_not_called()
+        self.factory.assert_not_called()
+        self.assertEqual(self.ledger.snapshot()['runs'], {})
+
     def test_two_sends_share_review_reserve_and_cannot_replay(self):
         self.controller.enable(1)
         counted = Connection(Response(dict(object='response.input_tokens', input_tokens=1200)))

@@ -503,11 +503,11 @@
       ]
     },
     "skills/manage-usage-routing/references/first-canary.md": {
-      "sha256": "4b3bf4e39a34b9327420f42a1fcf1a63e6fd38d6472638ca100e197433c2b29c",
+      "sha256": "aef568867a3499d85863c95f7c55307785ad202e42a7ea55a74b4babb2aaafd3",
       "ranges": [
         [
           1,
-          42
+          45
         ]
       ]
     },
@@ -521,7 +521,7 @@
       ]
     },
     "skills/manage-usage-routing/references/procedure.md": {
-      "sha256": "91da52cb87a3f818716029bf112267c5e04266767c205bcf08f784e24fec2d89",
+      "sha256": "06ccb2ed627fdbee7fd6dc110f49f373d1e4e392a2dc393388290bf0306e300a",
       "ranges": [
         [
           1,
@@ -529,7 +529,7 @@
         ],
         [
           142,
-          149
+          169
         ]
       ]
     },

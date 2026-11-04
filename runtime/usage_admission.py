@@ -3,7 +3,7 @@
 The types separate host evidence from JSON. The host still owns provenance,
 approval capture and trusted observations. Digests bind inputs to that evidence.
 """
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import hashlib
 import json
 
@@ -11,6 +11,7 @@ from runtime import usage_credentials
 from runtime.usage_budget import BudgetError, FRESH_SECONDS, fields, integer, name, require
 
 NATIVE_REVIEW_ALLOWANCE_PP = 5
+CANARY_CYCLE_PREFIX = 'canary-'
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,11 +75,16 @@ def smart_native_allowance(record):
     return allowance
 
 
+def canary_budget_only(config, policy):
+    return policy['cycle'].startswith(CANARY_CYCLE_PREFIX) and config.get('production_budget') is not True
+
+
 def live_consent_current(config, policy, now):
     """Check saved consent within the caller's current scope and policy revision."""
     return (config.get('live_consent') is True and config['enabled'] is True
             and config['disabled'] is False and config['requested_mode'] in ('manual', 'smart')
             and config['binding'].get('storage_kind') == 'macos_keychain'
+            and not canary_budget_only(config, policy)
             and policy['start'] <= now < policy['stop_at'] < min(policy['end'], policy['expiry']))
 
 
@@ -95,6 +101,9 @@ def validate(evidence, *, scope, config, policy, task, now) -> int:
 
 def _validate(evidence, scope, config, policy, task, now):
     require(type(config) is dict and type(policy) is dict, 'invalid_live_admission')
+    if canary_budget_only(config, policy) or 'canary_owner' in config:
+        require(config.get('canary_owner') == digest(asdict(evidence))
+                and policy['cycle'] == CANARY_CYCLE_PREFIX + evidence.approval_id, 'routing_budget_required')
     mode = config['requested_mode']
     require(config['enabled'] is True and config['disabled'] is False and mode in ('manual', 'smart'),
             'live_mode_unqualified')

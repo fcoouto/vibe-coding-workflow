@@ -47,6 +47,8 @@ and [trusted host](../skills/manage-usage-routing/references/codex-host.md)
 carry Manual task selection, scoped Smart Balance consent, source and funding
 checks, full reservations, fixed native review capacity, and independent
 verification. Measurements, previews and bounded canaries are optional.
+The user directed that smoke-test limits stay isolated from the
+[regular-routing budget](../skills/manage-usage-routing/references/procedure.md#regular-routing-budget).
 [Observed validation](usage-routing-validation.md) records its tested scope
 separately from current admission rules.
 

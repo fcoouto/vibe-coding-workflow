@@ -24,7 +24,9 @@ when permitted. Never initiate a purchase or silently switch to a paid API pool.
 3. On the user's explicit enable request, pass the current `revision` as
    `expected_revision` and select `mode: manual` or `mode: smart`. This
    records live consent for the approved configuration. Use the existing
-   spending cap and expiry. Use `live_enabled` to verify saved live consent.
+   approved regular-routing budget and expiry. Use `live_enabled` to verify
+   saved live consent. If status reports `routing_budget_required`, follow
+   [regular-routing budget setup](#regular-routing-budget).
 4. In Manual, route only tasks explicitly selected by the user. In Smart
    Balance, use the standing consent for eligible tasks within the approved
    scope and budget. Load [delegation](delegation.md) for either mode. Previews,
@@ -72,13 +74,14 @@ counts/prices or granting spending permission. Use synthetic inputs for tests.
 - `policy`: `cycle`, `start`, `end`, `expiry`, `stop_at`, `ceiling`, `amount`,
   `grant_amount`, `pilot_limit`, `task_limit`;
 - `profile` as above; `class_name`; `mode` (`manual` or `smart`).
+- Optional `production_budget: true` for an existing smoke-test configuration
+  in the same organization and accounting cycle.
 
 All money values are exact integer USD micro-units. Ceiling is `none` (No ceiling),
 `subscription_benefit` (Monthly subscription benefit only), or `custom` (Specify
 it). Amount is positive for custom and null otherwise. Benefit-only requires
 actual authorized grant coverage before a live request; a numerical setting is
-not proof. Stop time precedes cycle end/expiry. No ceiling still respects credits,
-request/task/pilot bounds and retained uncertainty.
+not proof. Stop time precedes cycle end/expiry.
 
 Configuration requires the supported enrolled Codex scope. It explicitly creates
 owner-only feature state under `~/.local/state/vibe-coding-workflow/usage/` and
@@ -94,6 +97,23 @@ blocks new admissions. Explicit enable on a Keychain configuration sets
 The public `run` path remains unavailable.
 Live evidence belongs to the trusted host. `reconcile` takes `{}` and reports
 `manual_recovery_required`, not guessed settlement or cleared deductions.
+
+### Regular-routing budget
+
+Manual and Smart Balance use the same configured budget. The monthly ceiling
+limits total routing spend in a billing cycle. `pilot_limit` is the separate
+cumulative routing cap and `task_limit` bounds spend on one task. These caps
+limit exposure if calls are repeated or their charges remain uncertain. No
+monthly ceiling still leaves the cumulative and per-task caps in effect.
+Reserve each request's maximum cost before sending against the applicable
+limits and available approved credits.
+
+An optional smoke test uses its own budget, token limits and expiry. If its
+accounting cycle is still active, obtain the user's regular-routing budget
+choice and call `configure` with `production_budget: true`. Supply the approved
+limits, current price profile, and stop time. Keep the cycle ID and billing
+boundaries so costs and reservations still count. Then use the requested
+mode's normal enable procedure.
 
 ## Optional preview and evaluation
 

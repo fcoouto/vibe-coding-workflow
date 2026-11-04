@@ -1,6 +1,6 @@
 """Foreground host receipt checks with synthetic Desktop responses."""
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 import tempfile
 import unittest
@@ -30,7 +30,8 @@ class CanaryHostTests(unittest.TestCase):
         self.config = dict(enabled=True, disabled=False, requested_mode='manual', revision=2, org_revision=1,
                            class_name='canary', binding=self.binding,
                            profile=usage_canary.profile_for(101, 200))
-        self.policy = dict(cycle='fixture', start=90, end=10_000, expiry=10_000, stop_at=900,
+        cycle = 'canary-' + usage_admission.digest(asdict(self.plan))
+        self.policy = dict(cycle=cycle, start=90, end=10_000, expiry=10_000, stop_at=900,
                            ceiling='subscription_benefit', amount=None, grant_amount=270_000_000,
                            pilot_limit=50_640, task_limit=50_640)
         self.limits = dict(accountId='account', ordinaryUsageAllowed=True, rateLimitsByLimitId={
@@ -126,13 +127,15 @@ class CanaryHostTests(unittest.TestCase):
     def test_execution_failure_restores_off_and_same_plan_cannot_retry(self):
         with self.controller() as control:
             def reject(*args, **kwargs):
-                self.assertEqual(control.status()['mode'], 'manual')
+                state = control.status()
+                self.assertEqual((state['mode'], state['canary_active']), ('off', True))
                 raise BudgetError('fixture_transport_error')
 
             with patch.object(usage_canary, 'run', side_effect=reject) as run:
                 with self.assertRaisesRegex(BudgetError, 'fixture_transport_error'):
                     self.execute()
-                self.assertEqual(control.status()['mode'], 'off')
+                state = control.status()
+                self.assertEqual((state['mode'], state['canary_active']), ('off', False))
                 with self.assertRaisesRegex(BudgetError, 'canary_state_already_configured'):
                     self.execute()
                 run.assert_called_once()
@@ -169,6 +172,11 @@ class CanaryHostTests(unittest.TestCase):
         connections = iter((count, generate))
         with self.controller() as control:
             def dispatch(cwd, task, evidence):
+                changed = dict(task, packet=dict(task['packet'], text='Different task.'))
+                changed_evidence = replace(evidence, task_digest=usage_admission.digest(changed))
+                with self.assertRaisesRegex(BudgetError, 'routing_budget_required'):
+                    control._run_live(changed, changed_evidence, connection_factory=lambda *args: self.fail('sent'),
+                                      credential_resolver=lambda binding: self.fail('credential resolved'))
                 return control._run_live(
                     task, evidence, connection_factory=lambda *args: next(connections),
                     credential_resolver=lambda binding: b'synthetic-key')
@@ -182,6 +190,21 @@ class CanaryHostTests(unittest.TestCase):
             data = control.ledger.snapshot()
             self.assertIsNone(data['slot'])
             self.assertEqual(len(data['native']), 1)
+            old_org = data['organizations'][self.plan.organization]
+            request = dict(version=2, expected_revision=3, expected_org_revision=1, binding=self.binding,
+                           profile=self.config['profile'], class_name='proposal', mode='smart',
+                           policy=dict(old_org['policy'], pilot_limit=1_000_000, task_limit=100_000, stop_at=900))
+            configured = control.configure(dict(request, production_budget=True))
+            self.assertEqual((configured['mode'], configured['revision']), ('off', 4))
+            self.assertTrue(control.enable(4)['live_enabled'])
+            after = control.ledger.snapshot()
+            self.assertEqual(after['runs'], data['runs'])
+            self.assertEqual(after['native'], data['native'])
+            new_org = after['organizations'][self.plan.organization]
+            self.assertEqual(new_org, dict(old_org, revision=2, policy=request['policy']))
+            refreshed = control.configure(dict(request, expected_revision=5, expected_org_revision=2))
+            self.assertEqual(refreshed['mode'], 'off')
+            self.assertTrue(control.enable(6)['live_enabled'])
 
 
 if __name__ == '__main__':

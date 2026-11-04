@@ -105,6 +105,8 @@ def _reviewer(receipt, coordinator):
 
 def _settings(control, data, *, one_shot=False):
     config = control._config(data)
+    org = data['organizations'][config['binding']['organization']]
+    require(not usage_admission.canary_budget_only(config, org['policy']), 'routing_budget_required')
     require('canary_owner' not in config and 'manual_test_owner' not in config, 'live_mode_unqualified')
     if one_shot:
         require(config['enabled'] is False and config['requested_mode'] == 'manual', 'manual_test_requires_off')
@@ -113,7 +115,6 @@ def _settings(control, data, *, one_shot=False):
         require(config['enabled'] is True and config['disabled'] is False
                 and config['requested_mode'] in ('manual', 'smart'), 'live_mode_unqualified')
     usage_credentials.validate_binding(config['binding'])
-    org = data['organizations'][config['binding']['organization']]
     require(config['org_revision'] == org['revision'], 'policy_revision_changed')
     return config, org['policy']
 

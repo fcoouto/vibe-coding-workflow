@@ -30,7 +30,7 @@ and organization budget. Keep ordinary routing OFF during preparation.
    generation reservation is $0.05064. The gate reserves five native allowance
    points and keeps the interactive cushion. The direct approval expires after
    five minutes or the plan's earlier cutoff.
-6. Verify OFF after the attempt. The runner disables its temporary Manual
+6. Verify `canary_active:false` after the attempt. The runner disables its temporary Manual
    configuration on normal completion and handled failure. If interrupted,
    inspect status and disable the owned revision while preserving accounting.
    Keep uncertain charges and the native review reserve. Inspect the exact
@@ -40,3 +40,6 @@ and organization budget. Keep ordinary routing OFF during preparation.
 The foreground coordinator attests the evidence it reads from supported
 surfaces. The local validator checks exact bindings and consumes one ledger
 attempt. This workflow requires the current approved session.
+
+For regular use after this test, follow the
+[regular-routing budget procedure](procedure.md#regular-routing-budget).

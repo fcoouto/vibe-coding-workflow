@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from runtime import usage_routing as routing, usage_settings as settings
 from runtime.usage_budget import BudgetError
-from tests.test_smart_balance import BINDING, POLICY
+from tests.test_smart_balance import BINDING, POLICY, task
 from tests.test_usage_routing import PROFILE
 
 
@@ -99,6 +99,48 @@ class UsageSettingsTests(unittest.TestCase):
         self.assertEqual(routing.disable(self.root, dict(expected_revision=3))['mode'], 'off')
         with settings.controller(self.root) as controller:
             self.assertEqual(controller.ledger.snapshot()['organizations'], before)
+
+    def test_canary_budget_cannot_enable_or_be_cleared_by_a_price_refresh(self):
+        binding = dict(organization='org', project='project',
+                       credential_ref='vcw_' + '0' * 32, storage_kind='macos_keychain')
+        policy = dict(POLICY, cycle='canary-old')
+        request = dict(self.request, version=2, binding=binding, policy=policy)
+        routing.configure(self.root, request)
+        with settings.controller(self.root) as control, control.ledger.transaction() as state:
+            control._config(state).update(enabled=True, live_consent=True)
+        state = routing.status(self.root)
+        self.assertEqual((state['mode'], state['live_enabled'], state['reason']),
+                         ('off', False, 'routing_budget_required'))
+        self.assertEqual(routing.evaluate(self.root, task())['reason'], 'routing_budget_required')
+        self.assertEqual(routing.evaluate(self.root, task(local_preferred=True))['decision'], 'native')
+        request.update(expected_revision=1, expected_org_revision=1,
+                       profile=dict(PROFILE, verified_at=101))
+        self.assertEqual(routing.configure(self.root, request)['reason'], 'routing_budget_required')
+        for mode in ('manual', 'smart'):
+            with self.subTest(mode=mode), self.assertRaisesRegex(BudgetError, 'routing_budget_required'):
+                routing.enable(self.root, dict(expected_revision=2, mode=mode))
+        self.assertEqual(routing.status(self.root)['revision'], 2)
+
+    def test_canary_budget_conversion_requires_the_existing_organization_and_cycle(self):
+        binding = dict(organization='org', project='project',
+                       credential_ref='vcw_' + '0' * 32, storage_kind='macos_keychain')
+        policy = dict(POLICY, cycle='canary-old')
+        request = dict(self.request, version=2, binding=binding, policy=policy, production_budget=True)
+        with self.assertRaisesRegex(BudgetError, 'routing_budget_required'):
+            routing.configure(self.root, request)
+        original = dict(request)
+        del original['production_budget']
+        routing.configure(self.root, original)
+        with settings.controller(self.root) as control:
+            before = control.ledger.snapshot()
+            with self.assertRaisesRegex(BudgetError, 'routing_budget_required'):
+                control.configure(dict(request, expected_revision=1, binding=dict(binding, organization='other')))
+            with self.assertRaisesRegex(BudgetError, 'overlapping_cycle'):
+                control.configure(dict(request, expected_revision=1, expected_org_revision=1,
+                                       policy=dict(policy, cycle='ordinary')))
+            self.assertEqual(control.ledger.snapshot(), before)
+            control.configure(dict(request, expected_revision=1, expected_org_revision=1))
+            self.assertTrue(control.enable(2)['live_enabled'])
 
     def test_missing_database_with_saved_checkout_pin_never_recreates_allowance(self):
         routing.configure(self.root,self.request)
