@@ -22,12 +22,25 @@ external badges display `Role · Model Display Name`. Retain canonical role and
 specialty separately.
 The full label is sent in the existing display field without truncation. Report
 an unsupported label or receiver capability explicitly; the transport enforces
-its wire byte limit separately from the declared text lengths. Habblaud displays
-`Role not reported` when it has neither a declaration nor a specific native role.
+its wire byte limit separately from the declared text lengths. Habblaud uses its
+standard `Subagente (Codex)` fallback when it has neither a declaration nor a
+specific native role.
 
 Validate the declaration for display and reuse it for recovery. A native supervisor
 or reviewer has its own assignment and role. Dispatch follows the route's existing
 execution requirements independently of the badge.
+
+## Reconcile on discovery and upgrade
+
+When onboarding, workspace preparation or an authorized upgrade discovers an
+existing Habblaud integration, inspect its current start hook and reviewed
+adapter. Reuse the existing command and reconcile its owned wrapper with this
+package when needed. Preserve other hooks, arguments, customizations and a
+recoverable copy of the configuration. Keep one wrapper for this contract.
+Use the client's supported trust flow for changed commands and qualify the
+first badge of a future authorized worker. Record pending trust or refresh
+steps explicitly. Active workers continue under their loaded configuration.
+This procedure adds no execution requirement to delegation.
 
 ## Native workers and reviewers
 
@@ -67,7 +80,7 @@ Wrap the existing command with the reviewed package:
 
 ```text
 python3 -I -B <package>/scripts/worker_visibility.py forward-start
-  --context-directory <private-directory> --checkout <canonical-checkout>
+  --context-directory <private-directory>
   --codex-executable <absolute-reviewed-Codex-executable>
   -- <original-command-and-arguments>
 ```
@@ -76,12 +89,17 @@ Preserve the original hook configuration for recovery. Review the changed
 command through Codex's supported hook trust flow and use a Desktop session
 that has loaded it. Project hooks run alongside user hooks. Adding a second
 hook does not replace the original Habblaud command.
+The shared hook verifies each event's canonical working directory. Supply
+`--checkout` only for a deliberately checkout-scoped hook.
 
 The wrapper checks the genuine child, parent, checkout and creation name with
-the native observer. It preserves a native role and forwards the original
-event if the private declaration or live identity is unavailable. When the
-declaration matches, it adds the label to the event copy and calls the existing
-command. Habblaud 1.0.3 may capitalize or clip labels. This route forwards
+the native observer. It preserves the incoming native role separately and forwards
+the original event if the private declaration or live identity is unavailable.
+For a matching declaration, the display label uses the native model catalog's
+`displayName`, formatting the actual configured model identifier for display
+if the catalog is unavailable. The stored model identity stays exact.
+The wrapper sends `vcw_display_label` on the event copy
+and calls the existing command. Previously forwarded labels remain unchanged. Habblaud 1.0.3 may capitalize or clip labels. This route forwards
 labels that fit 200 UTF-16 units and survive that normalization. Qualify the
 first visible badge using a fresh worker. Rollout discovery can still register
 the child before the hook.

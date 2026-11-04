@@ -91,11 +91,28 @@ def specific_native_role(value):
     return isinstance(value, str) and value.strip().casefold() not in {'', 'default'}
 
 
+def native_label(metadata, observation):
+    # Prior observations froze the raw name before the catalog lookup was available.
+    model = observation.get('model_display_name')
+    if not model:
+        model = observation['configured_model']
+        if 'model_display_name' in observation and isinstance(model, str) and '-' in model and ' ' not in model:
+            model = model.replace('-', ' ').title()
+            if model.startswith('Gpt '):
+                model = 'GPT-' + model[4:]
+    composite = visibility.display_label(metadata, model)
+    label = visibility.text(observation.get('forwarded_label', composite), visibility.LABEL_LIMIT)
+    return label, label == composite
+
+
 def enrich_start(event, directory, checkout, executable):
-    if (event.get('hook_event_name') != 'SubagentStart' or event.get('cwd') != str(checkout)
-            or specific_native_role(event.get('agent_role'))):
+    if event.get('hook_event_name') != 'SubagentStart':
         return event
     try:
+        cwd = Path(event['cwd'])
+        if str(cwd) != event['cwd'] or (checkout is not None and cwd != checkout):
+            return event
+        checkout = cwd
         parent, child = event['session_id'], event['agent_id']
         parent_dir = hook_context_path(directory, parent, 'probe').parent
         if not parent_dir.is_dir() or parent_dir.is_symlink():
@@ -107,7 +124,7 @@ def enrich_start(event, directory, checkout, executable):
         observed = codex.observe_worker_visibility(checkout, parent, child, deadline=time.monotonic() + 1,
                                                    executable=str(executable))
         task = observed['task_name']
-        if (not task or specific_native_role(observed.get('native_role')) or observed['parent_session_id'] != parent
+        if (not task or observed['parent_session_id'] != parent
                 or observed['worker_id'] != child or observed['checkout'] != str(checkout)):
             return event
         path = context_path(hook_context_path(directory, parent, task), checkout)
@@ -120,14 +137,17 @@ def enrich_start(event, directory, checkout, executable):
             prior = context.get('observed')
             if prior is not None and prior['worker_id'] != child:
                 return event
-            label = visibility.display_label(context['visibility'], (prior or observed)['configured_model'])
+            incoming_role = event.get('agent_role')
+            label, managed = native_label(context['visibility'], prior or observed)
             # The downstream hook can reduce every string to 200 UTF-16 units.
             if (len(label.encode('utf-16-le')) > 400 or label.strip() != label
                     or label[0].upper() != label[0] or 'guardian' in label.casefold()):
                 return event
             if prior is None:
-                visibility.save(path, context | dict(observed=observed))
-            return event | dict(agent_role=label, agent_type=label)
+                visibility.save(path, context | dict(observed=observed | dict(forwarded_label=label)))
+            role = incoming_role if specific_native_role(incoming_role) else label
+            return event | dict(agent_role=role, agent_type=label) | (
+                {visibility.MANAGED_DISPLAY_FIELD: label} if managed else {})
     except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError):
         return event
 
@@ -180,11 +200,11 @@ def publish_native(path, worker_id, phase, plugin_root, endpoint, account, *, pa
                 return dict(delivered=False, reason='native_visibility_identity_unobserved')
             if prior is None:
                 visibility.save(path, context | dict(observed=observed))
-            label = visibility.display_label(metadata, (prior or observed)['configured_model'])
+            label, managed = native_label(metadata, prior or observed)
             binding = dict(parent=observed['parent_session_id'], agent_id=observed['worker_id'],
                            label=label, cwd=observed['checkout'])
             publisher = visibility.publisher(visibility.transport(plugin_root), endpoint, account, binding, metadata,
-                                             path.with_name(path.name + '.delivery.json'))
+                                             path.with_name(path.name + '.delivery.json'), managed_native_label=managed)
             return publisher(phase)
     except (ValueError, OSError, ImportError, KeyError, TypeError, AttributeError, RuntimeError):
         return dict(delivered=False, reason='native_visibility_unavailable')
@@ -194,7 +214,7 @@ def main():
     if sys.argv[1:2] == ['forward-start']:
         parser = argparse.ArgumentParser(description='Forward the existing Habblaud start hook')
         parser.add_argument('--context-directory', required=True, type=Path)
-        parser.add_argument('--checkout', required=True, type=Path)
+        parser.add_argument('--checkout', type=Path)
         parser.add_argument('--codex-executable', required=True, type=Path)
         parser.add_argument('command', nargs=argparse.REMAINDER)
         args = parser.parse_args(sys.argv[2:])

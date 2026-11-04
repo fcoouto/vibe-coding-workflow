@@ -16,6 +16,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 ROLES = frozenset({'Coordinator', 'Scout', 'Builder', 'Tester', 'Reviewer', 'Scribe', 'Investigator'})
 LIMIT = 128 * 1024
 LABEL_LIMIT = 2 * 4096 + len(' · ')
+MANAGED_DISPLAY_FIELD = 'vcw_display_label'
 TERMINAL = frozenset({'accepted', 'rejected', 'failed', 'unresolved', 'completed', 'cancelled'})
 
 
@@ -45,7 +46,9 @@ def optional_declaration(value):
 
 
 def display_label(value, model_display_name):
-    value = declaration(value) if value is not None else {'role': 'Role not reported'}
+    if value is None:
+        return 'Subagente (Codex)'
+    value = declaration(value)
     # Retain the existing model-display normalization; custom names remain exact.
     model = (' '.join(''.join(c for c in model_display_name if c.isprintable()).split())
              if isinstance(model_display_name, str) else '')
@@ -128,7 +131,7 @@ def transport(plugin_root):
         sys.path.remove(root)
 
 
-def publisher(module, endpoint, account, binding, visibility, receipt):
+def publisher(module, endpoint, account, binding, visibility, receipt, *, managed_native_label=False):
     """Freeze before delivery; reuse actual native or explicitly external identity."""
     visibility = declaration(visibility) if visibility is not None else None
     binding = dict(binding)
@@ -139,12 +142,14 @@ def publisher(module, endpoint, account, binding, visibility, receipt):
     text(account, 200)
     client = module.Client(endpoint)
     receipt = private_path(receipt)
+    expected_roles = ({binding['label']} if visibility is not None else
+                      {'Subagente (Codex)', 'Subagent (Codex)', 'Sous-agent (Codex)'})
 
     def observed_binding():
         snapshot = client.snapshot(account)
         matches = [item for item in snapshot['agents'] if item.get('id') == account + ':' + binding['agent_id']]
         if len(matches) > 1 or any(item.get('parentId') != account + ':' + binding['parent']
-                or item.get('role') != binding['label'] for item in matches):
+                or item.get('role') not in expected_roles for item in matches):
             raise ValueError('habblaud_binding_mismatch')
         return bool(matches)
 
@@ -162,7 +167,13 @@ def publisher(module, endpoint, account, binding, visibility, receipt):
                     text(old['phase'], 256)
                     if 'reason' in old:
                         text(old['reason'], 256)
-                    if any(old.get(key) != status[key] for key in ('binding', 'visibility', 'account')):
+                    old_binding = old['binding']
+                    if visibility is None and isinstance(old_binding, dict):
+                        old_label = old_binding.get('label')
+                        if isinstance(old_label, str) and old_label.startswith('Role not reported · '):
+                            old_binding = old_binding | dict(label=binding['label'])
+                    if (old_binding != binding or old['visibility'] != visibility
+                            or old['account'] != account):
                         return status | dict(reason='visibility_binding_changed')
                     status.update(started=old.get('started') is True, stopped=old.get('stopped') is True)
                 elif old is not None:
@@ -183,7 +194,10 @@ def publisher(module, endpoint, account, binding, visibility, receipt):
                 try:
                     present = observed_binding()
                     if not present and not status['stopped'] and (not status['started'] or phase not in TERMINAL):
-                        client.event(account, module._event(binding, 'SubagentStart'))
+                        start = module._event(binding, 'SubagentStart')
+                        if managed_native_label:
+                            start[MANAGED_DISPLAY_FIELD] = binding['label']
+                        client.event(account, start)
                         status['started'] = True
                         save(receipt, status)
                         present = observed_binding()

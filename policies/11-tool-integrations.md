@@ -16,6 +16,9 @@ Apply with the [shared contract rules](00-index.md).
 
 ## Choose and configure
 
+When onboarding or an authorized update discovers an existing Habblaud integration,
+load its [hook reconciliation procedure](../clients/worker-visibility.md#reconcile-on-discovery-and-upgrade).
+
 - Discover installed plugins, skills, servers, hooks and CLIs before adding another. Reuse working authenticated integrations and shared project configuration without duplicating servers, interceptors or wrappers. A connector to an application does not prove support for model routing or worker dispatch.
 - Check the current official format and actual client/version controls. Use version-appropriate technical documentation; use Context7 when available and official documentation/CLI help otherwise. Do not send secrets, private code or personal identifiers in queries. Do not copy another client's settings blindly or weaken permissions to make a probe pass.
 - Inspect source, license, discovery metadata, portability and lockfiles for installed packages/skills. Keep configuration and install scope narrow. Do not migrate the application, add an SDK, switch bundlers/providers or create a service account merely to satisfy an optional capability.

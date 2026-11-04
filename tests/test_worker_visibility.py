@@ -107,6 +107,37 @@ class VisibilityTests(unittest.TestCase):
         self.assertEqual([event['hook_event_name'] for event in self.client.events],
                          ['PreToolUse', 'SubagentStop'])
 
+    def test_external_registration_reuses_unreported_receipt_after_fallback_restoration(self):
+        args = self.external_args() | dict(visibility=None)
+        external_id = 'e16ee46f-5dff-57a5-a771-6e5147660779'
+        receipt = self.root / f'habblaud-{external_id}.json'
+        binding = dict(parent=args['parent'], agent_id=external_id,
+                       label='Role not reported · GPT-6.1 Sol', cwd=str(self.root))
+        self.api.save(receipt, dict(version=1, binding=binding, visibility=None,
+                                   account=args['account'], delivered=True,
+                                   started=True, stopped=False, phase='Working'))
+        self.client.agents.append(dict(id='account:' + external_id,
+                                       parentId='account:' + args['parent'], role='Subagent (Codex)'))
+        self.assertEqual(self.api.register_external(**args), dict(delivered=True))
+        self.assertEqual([event['hook_event_name'] for event in self.client.events],
+                         ['PreToolUse', 'SubagentStop'])
+        self.assertTrue(self.api.read(receipt)['stopped'])
+
+    def test_unreported_registration_confirms_only_standard_localized_fallbacks(self):
+        args = self.external_args() | dict(visibility=None)
+        external_id = 'e16ee46f-5dff-57a5-a771-6e5147660779'
+        row = dict(id='account:' + external_id, parentId='account:' + args['parent'])
+        for role in ('Role not reported · GPT-6.1 Sol', 'Default', 'Reviewer · Wrong model'):
+            with self.subTest(role=role):
+                self.client.agents = [row | dict(role=role)]
+                self.assertEqual(self.api.register_external(**args),
+                                 dict(delivered=False, reason='habblaud_binding_mismatch'))
+                self.assertEqual(self.client.events, [])
+        for role in ('Subagente (Codex)', 'Subagent (Codex)', 'Sous-agent (Codex)'):
+            with self.subTest(role=role):
+                self.client.agents = [row | dict(role=role)]
+                self.assertEqual(self.api.register_external(**args), dict(delivered=True))
+
     def test_external_registration_preserves_conflicting_frozen_binding(self):
         args = self.external_args()
         external_id = 'e16ee46f-5dff-57a5-a771-6e5147660779'
@@ -298,15 +329,20 @@ class NativeVisibilityTests(unittest.TestCase):
             cliVersion='0.163.0', model='Native model', modelProvider='native-account',
             source={'subAgent': {'thread_spawn': {'parent_thread_id': self.parent, 'agent_path': '/root/review_original'}}})
         self.spawn_prompt = None
+        self.model_pages = {None: dict(data=[], nextCursor=None)}
 
     def reader(self, methods):
         from contextlib import contextmanager
 
         @contextmanager
         def reader():
-            self.assertEqual(set(methods), {'initialize', 'thread/read'} |
+            self.assertEqual(set(methods), {'initialize', 'thread/read', 'model/list'} |
                 ({'thread/items/read'} if self.spawn_prompt is not None else set()))
             def request(method, params):
+                if method == 'model/list':
+                    self.assertEqual(params['limit'], 100)
+                    self.assertIs(params['includeHidden'], True)
+                    return copy.deepcopy(self.model_pages[params.get('cursor')])
                 if method == 'thread/items/read':
                     self.assertEqual(params, {'threadId': self.parent, 'turnId': 'parent-turn', 'itemIds': ['spawn']})
                     return dict(data=[dict(turnId='parent-turn', item=dict(id='spawn', type='collabAgentToolCall',
@@ -330,6 +366,31 @@ class NativeVisibilityTests(unittest.TestCase):
         self.assertIsNone(value['execution_model'])
         self.assertEqual(value['agent_path'], '/root/review_original')
         self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_native_observation_uses_the_catalog_display_name(self):
+        self.child_thread['model'] = 'gpt-6-astra'
+        self.model_pages = {
+            None: dict(data=[], nextCursor='page-two'),
+            'page-two': dict(data=[dict(model='gpt-6-astra', displayName='GPT-6-Astra')], nextCursor=None),
+        }
+        value = self.observe()
+        self.assertEqual(value['configured_model'], 'gpt-6-astra')
+        self.assertEqual(value['model_display_name'], 'GPT-6-Astra')
+
+    def test_catalog_failure_or_ambiguity_preserves_native_identity(self):
+        for page in (dict(data=None), dict(data=[dict(model='Native model', displayName='First'),
+                                              dict(model='Native model', displayName='Second')])):
+            with self.subTest(page=page):
+                self.model_pages = {None: page}
+                value = self.observe()
+                self.assertEqual(value['worker_id'], self.child)
+                self.assertEqual(value['configured_model'], 'Native model')
+                self.assertIsNone(value['model_display_name'])
+        request = unittest.mock.Mock(side_effect=OSError('catalog unavailable'))
+        self.assertIsNone(codex._visibility_model_name(request, 'Native model'))
+        request = unittest.mock.Mock(return_value=dict(data=[], nextCursor='same'))
+        self.assertIsNone(codex._visibility_model_name(request, 'Native model'))
+        self.assertEqual(request.call_count, 4)
 
     def test_native_observation_rejects_unrelated_or_uncertain_lineage(self):
         self.assertTrue(hasattr(codex, 'observe_worker_visibility'), 'Native visibility observer is missing')
@@ -360,7 +421,8 @@ class NativeVisibilityTests(unittest.TestCase):
         with patch.object(codex, 'observe_worker_visibility', return_value=self.observe()):
             actual = helper.enrich_start(event | dict(agent_role='Default'), self.task_context, self.root, executable)
             self.assertEqual(actual, event | dict(agent_role='Audit lead · Native model',
-                                                   agent_type='Audit lead · Native model'))
+                                                   agent_type='Audit lead · Native model',
+                                                   vcw_display_label='Audit lead · Native model'))
             self.assertEqual(event['agent_type'], 'default')
             self.assertEqual(helper.enrich_start(event | dict(agent_role='Native reviewer'),
                                                  self.task_context, self.root, executable)['agent_role'], 'Native reviewer')
@@ -368,6 +430,85 @@ class NativeVisibilityTests(unittest.TestCase):
             self.assertEqual(helper.enrich_start(other, self.task_context, self.root, executable), other)
             unrelated = event | dict(cwd=str(self.task_context))
             self.assertEqual(helper.enrich_start(unrelated, self.task_context, self.root, executable), unrelated)
+
+    def test_first_declared_badge_uses_catalog_and_preserves_native_role(self):
+        helper = self.native_helper()
+        request = self.native_request()
+        path = helper.hook_context_path(self.task_context, self.parent, request['task_name'])
+        path.parent.mkdir(mode=0o700)
+        helper.prepare_native(path, request)
+        observed = self.observe() | dict(model_display_name='Catalog Name', native_role='Native reviewer')
+        event = dict(hook_event_name='SubagentStart', session_id=self.parent, agent_id=self.child,
+                     cwd=str(self.root), agent_type='default')
+        label = 'Audit lead · Catalog Name'
+        with patch.object(codex, 'observe_worker_visibility', return_value=observed):
+            for role in ('Native reviewer', None, '', ' Default ', {}, 42):
+                with self.subTest(role=role):
+                    enriched = helper.enrich_start(event | dict(agent_role=role), self.task_context,
+                                                   None, Path(sys.executable).resolve())
+                    self.assertEqual(enriched['agent_type'], label)
+                    self.assertEqual(enriched['vcw_display_label'], label)
+                    self.assertEqual(enriched['agent_role'], role if role == 'Native reviewer' else label)
+        self.assertEqual(helper.read_context(path)['observed']['forwarded_label'], label)
+
+    def test_historical_forwarded_label_is_not_rewritten_by_catalog_lookup(self):
+        from runtime import worker_visibility
+        helper = self.native_helper()
+        request = self.native_request()
+        path = helper.hook_context_path(self.task_context, self.parent, request['task_name'])
+        path.parent.mkdir(mode=0o700)
+        helper.prepare_native(path, request)
+        observed = self.observe() | dict(model_display_name='Catalog Name',
+                                        forwarded_label='Audit lead · Legacy name')
+        worker_visibility.save(path, helper.read_context(path) | dict(observed=observed))
+        event = dict(hook_event_name='SubagentStart', session_id=self.parent, agent_id=self.child,
+                     cwd=str(self.root), agent_type='default')
+        with patch.object(codex, 'observe_worker_visibility', return_value=self.observe()):
+            enriched = helper.enrich_start(event, self.task_context, self.root, Path(sys.executable).resolve())
+        self.assertEqual(enriched['agent_type'], 'Audit lead · Legacy name')
+        self.assertNotIn('vcw_display_label', enriched)
+        self.assertEqual(helper.read_context(path)['observed'], observed)
+
+    def test_missing_catalog_formats_actual_model_and_invalid_saved_label_passes_through(self):
+        from runtime import worker_visibility
+        helper = self.native_helper()
+        request = self.native_request()
+        path = helper.hook_context_path(self.task_context, self.parent, request['task_name'])
+        path.parent.mkdir(mode=0o700)
+        helper.prepare_native(path, request)
+        observed = self.observe() | dict(configured_model='gpt-6-astra', model_display_name=None)
+        event = dict(hook_event_name='SubagentStart', session_id=self.parent, agent_id=self.child,
+                     cwd=str(self.root), agent_type='default')
+        with patch.object(codex, 'observe_worker_visibility', return_value=observed):
+            enriched = helper.enrich_start(event, self.task_context, self.root, Path(sys.executable).resolve())
+            self.assertEqual(enriched['vcw_display_label'], 'Audit lead · GPT-6 Astra')
+            saved = helper.read_context(path)
+            worker_visibility.save(path, saved | dict(observed=observed | dict(forwarded_label='')))
+            self.assertEqual(helper.enrich_start(event, self.task_context, self.root,
+                                                Path(sys.executable).resolve()), event)
+
+    def test_legacy_observation_keeps_raw_model_for_receipt_continuation(self):
+        from runtime import worker_visibility
+        helper = self.native_helper()
+        client, transport = fixture_transport()
+        request = self.native_request()
+        path = self.task_context / 'legacy.json'
+        helper.prepare_native(path, request)
+        legacy = self.observe() | dict(configured_model='gpt-6-astra')
+        legacy.pop('model_display_name', None)
+        worker_visibility.save(path, helper.read_context(path) | dict(observed=legacy))
+        binding = dict(parent=self.parent, agent_id=self.child, cwd=str(self.root),
+                       label='Audit lead · gpt-6-astra')
+        receipt = path.with_name(path.name + '.delivery.json')
+        publisher = worker_visibility.publisher(transport, 'http://127.0.0.1:1',
+                                                'account', binding, request['visibility'], receipt)
+        self.assertTrue(publisher('Working')['delivered'])
+        with patch.object(codex, 'observe_worker_visibility', return_value=self.observe()), \
+                patch.object(worker_visibility, 'transport', return_value=transport):
+            result = helper.publish_native(path, self.child, 'Continuing', self.root,
+                                           'http://127.0.0.1:1', 'account')
+        self.assertTrue(result['delivered'])
+        self.assertEqual(result['binding']['label'], binding['label'])
 
     def test_start_wrapper_preserves_original_bytes_and_exit_status(self):
         helper = self.native_helper()
@@ -404,6 +545,9 @@ class NativeVisibilityTests(unittest.TestCase):
         self.assertEqual([e['hook_event_name'] for e in client.events].count('SubagentStart'), 1)
         self.assertEqual({e['agent_id'] for e in client.events}, {self.child})
         self.assertEqual({e['agent_type'] for e in client.events}, {'Audit lead · Native model'})
+        starts = [e for e in client.events if e['hook_event_name'] == 'SubagentStart']
+        self.assertEqual(starts[0]['vcw_display_label'], 'Audit lead · Native model')
+        self.assertTrue(all('vcw_display_label' not in e for e in client.events if e not in starts))
         saved = worker_visibility.read(path)
         self.assertEqual(saved['task_name'], 'review_original')
         self.assertEqual(saved['visibility'], request['visibility'])

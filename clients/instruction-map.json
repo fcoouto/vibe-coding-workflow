@@ -211,15 +211,15 @@
       ]
     },
     "clients/worker-visibility.md": {
-      "sha256": "0dc332fb54ebfade499358106fdc2a8ead8d3f18be53313dc38ce74a758c90e7",
+      "sha256": "3999bd85b5cac78a778a685f15790a5318508b48e4a30957baeab4e61d83cd89",
       "ranges": [
         [
           1,
-          152
+          150
         ],
         [
-          153,
-          166
+          151,
+          184
         ]
       ]
     },
@@ -317,7 +317,7 @@
       ]
     },
     "policies/03-agent-delegation.md": {
-      "sha256": "3601f705ac2f406420219d13da0f1d3461ef961a4a7cce0198758b40d98002fc",
+      "sha256": "207845786a19868fd0ebc581f7a12b4038b0e579e69e416c98cc3c388caef4c0",
       "ranges": [
         [
           1,
@@ -401,11 +401,11 @@
       ]
     },
     "policies/11-tool-integrations.md": {
-      "sha256": "216e7fb96c30f00f88f3bf47161ac3961de5c8b4bbac515522fdcada66af4115",
+      "sha256": "6ba1cfcd8f40389a3ac1ea2b1c42e036bd403314d4b7db35fe7f6beb4bb843fd",
       "ranges": [
         [
           1,
-          35
+          38
         ]
       ]
     },
@@ -635,7 +635,7 @@
       ]
     },
     "skills/prepare-my-workspace/SKILL.md": {
-      "sha256": "96fb69acdd34bbd3e1705b21b003fc2a2f33bb951c7f6ec895fb0c15b16cbe6a",
+      "sha256": "a141fb870db622d80441f907af04b09115140af48fb2421dd3029b2baa9f8174",
       "ranges": [
         [
           1,

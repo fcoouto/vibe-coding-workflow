@@ -168,7 +168,7 @@ print(json.dumps({{'type':'step_finish','part':{{'reason':'stop','cost':0,'token
             publisher = self.api.habblaud_publisher(self.root, run, 'http://127.0.0.1:1', 'account')
             result = self.api.execute(run, exe, self.root / 'auth', publisher)
         self.assertEqual(result['state'], 'awaiting_verification')
-        self.assertEqual(client.events[0]['agent_type'], 'Role not reported · Model')
+        self.assertEqual(client.events[0]['agent_type'], 'Subagente (Codex)')
 
     def test_openrouter_reuses_external_display_identity_through_verification(self):
         from runtime import worker_visibility
