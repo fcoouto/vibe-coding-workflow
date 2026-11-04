@@ -389,6 +389,16 @@ without workers, implementation review, follow-up questions after completion and
 manual overrides. Package checks, instruction observations and installed native
 execution remain separate evidence; this source map claims no live delivery.
 
+### Thread Naming reopening · 4 November 2026
+
+The user approved [reopening an adopted title before resumed work](superpowers/specs/2026-11-04-thread-naming-reopening-design.md).
+Clear new objectives switch automatically, keep the family and member, and
+start with zero accepted milestones. Only a workflow-owned topic can change
+automatically. The [Codex client contract](../clients/codex.md) routes this case
+to the [title procedure](../clients/workstreams-titles.md#reopen-a-completed-objective).
+The decision extends the user's presentation rules and uses the existing task
+and title controls.
+
 ### Initial title baseline · 3 November 2026
 
 The user proposed retaining the feature's last title and comparing the current
