@@ -104,11 +104,10 @@ record the coordinator's acceptance decision. Keep milestones in this task plan,
 including required review and integration. Do not accept a worker's self-report
 as independent acceptance or count child work twice.
 
-The title meter rounds accepted weighted progress down to completed fifths,
-with at most four filled cells before `DONE`. No measurable milestones means an
-empty meter. `DONE` always uses five filled cells and still requires the normal
-completion evidence gate. Reopening work retains accepted milestones unless
-scope or evidence invalidates them.
+Use the [meter rules](workstreams-naming.md#status-and-accepted-progress) for both title
+paths. The activity indicator for unmeasured `WORKING` belongs only to the title.
+`DONE` still requires the normal completion evidence gate. Reopening work retains
+accepted milestones unless scope or evidence invalidates them.
 
 ## Event repair and failures
 

@@ -64,11 +64,13 @@ def reconcile(saved, current, task):
 
 
 def progress_cells(task):
-    """Use coordinator-accepted milestones on the authoritative task record."""
+    """Render accepted milestone progress or the unmeasured working indicator."""
     milestones = task.get('milestones', [])
     total = sum(item['weight'] for item in milestones)
+    if not total:
+        return 1 if task.get('state') == 'WORKING' else 0
     accepted = sum(item['weight'] for item in milestones if item['accepted'])
-    return min(4, accepted * 5 // total) if total else 0
+    return min(4, accepted * 5 // total)
 
 
 class NativeTitles:
