@@ -37,20 +37,21 @@ titles, not unrelated chats. If title controls or the procedure's required
 observations are unavailable, report the naming limitation without guessing a
 title, identity or successful update.
 
-Use this display title, with exactly five meter cells and one ASCII space
-between the meter and status:
+Start every managed title with one `U+FFFB` (interlinear annotation terminator),
+immediately followed by five visible meter cells. Put one ASCII space
+between the meter and status. The examples include the leading character.
 
 ```text
-<meter> <STATUS> · [W<number>] <P|C<number>> · <short_topic>
+<U+FFFB><meter> <STATUS> · [W<number>] <P|C<number>> · <short_topic>
 ```
 
 ```text
-▰▰▱▱▱ WORKING · [W1] P · Thread naming
-▰▰▰▰▰ DONE · [W1] C1 · Naming rules
-▰▰▰▰▱ REVIEW · [W1] C2 · Status tags
-▰▰▰▱▱ BLOCKED · [W1] C3 · Search support
-▰▰▰▱▱ WAITING · [W1] C4 · Client check
-▱▱▱▱▱ WORKING · [W2] P · Solo fix
+￻▰▰▱▱▱ WORKING · [W1] P · Thread naming
+￻▰▰▰▰▰ DONE · [W1] C1 · Naming rules
+￻▰▰▰▰▱ REVIEW · [W1] C2 · Status tags
+￻▰▰▰▱▱ BLOCKED · [W1] C3 · Search support
+￻▰▰▰▱▱ WAITING · [W1] C4 · Client check
+￻▱▱▱▱▱ WORKING · [W2] P · Solo fix
 ```
 
 The literal brackets enclose the shared family code. `P` identifies the parent;
