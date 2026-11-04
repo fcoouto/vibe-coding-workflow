@@ -6,9 +6,11 @@ import importlib
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import sys
 import tempfile
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 
 ROLES = frozenset({'Coordinator', 'Scout', 'Builder', 'Tester', 'Reviewer', 'Scribe', 'Investigator'})
@@ -200,3 +202,24 @@ def publisher(module, endpoint, account, binding, visibility, receipt):
             return status | dict(delivered=False, reason='visibility_unavailable')
 
     return publish
+
+
+def register_external(*, module, endpoint: str, account: str, parent: str, checkout: str,
+                      run_id: str, execution_route: str, model_display_name: str,
+                      visibility: dict, state_directory: Path) -> dict:
+    """Publish display metadata using the transport and identity verified by the host."""
+    try:
+        if (str(UUID(text(parent, 36))) != parent
+                or re.fullmatch(r'[A-Za-z0-9_-]+', text(execution_route, 256)) is None):
+            raise ValueError('invalid_external_visibility_identity')
+        text(run_id, 256)
+        external_id = str(uuid5(NAMESPACE_URL, f'vcw:{execution_route}:{parent}:{run_id}'))
+        metadata = declaration(visibility)
+        badge_role = {key: metadata[key] for key in ('version', 'role', 'specialty')}
+        binding = dict(parent=parent, agent_id=external_id, cwd=checkout,
+                       label=display_label(badge_role, text(model_display_name, 160)))
+        receipt = state_directory / f'habblaud-{external_id}.json'
+        status = publisher(module, endpoint, account, binding, metadata, receipt)('completed')
+        return {key: status[key] for key in ('delivered', 'reason') if key in status}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError, ImportError):
+        return dict(delivered=False, reason='visibility_unavailable')

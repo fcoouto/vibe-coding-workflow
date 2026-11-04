@@ -51,15 +51,15 @@
       ]
     },
     "clients/delegation.md": {
-      "sha256": "5e11064b775155ce419a57a2b48e8b94087a9bc4b83716969d48cca6de9798ab",
+      "sha256": "3f81a213a9e6455fe14ae37cfd3086d68399c8f8ccb736070dbe863293615c3a",
       "ranges": [
         [
           1,
-          56
+          54
         ],
         [
-          57,
-          65
+          55,
+          67
         ]
       ]
     },
@@ -211,11 +211,15 @@
       ]
     },
     "clients/worker-visibility.md": {
-      "sha256": "de7fb8703af2cbf4ec4e36e5b361465f361f2a277fe21925b1dbcab1d850c46d",
+      "sha256": "c836e1c079634435b3f61332afb6b97f757ee7d4b2b5f543a64ab282cb570820",
       "ranges": [
         [
           1,
-          130
+          152
+        ],
+        [
+          153,
+          165
         ]
       ]
     },
@@ -313,15 +317,15 @@
       ]
     },
     "policies/03-agent-delegation.md": {
-      "sha256": "d61073d192a2f86dbca6e970d1dd1c4f11ac4cf6de7e51cb89797847bde2e67a",
+      "sha256": "8e9a3a3d82b0c3d2ab94fb8c797c2a80eb31dfa915555c5bb2f6f4790511df5b",
       "ranges": [
         [
           1,
-          41
+          43
         ],
         [
-          42,
-          60
+          44,
+          62
         ]
       ]
     },
@@ -462,6 +466,64 @@
         ]
       ]
     },
+    "skills/manage-usage-routing/SKILL.md": {
+      "sha256": "5f547b35821309937de98bd69e9e9d6c02ffc84d760ceaae3f1b9c08d1ef8502",
+      "ranges": [
+        [
+          1,
+          22
+        ]
+      ]
+    },
+    "skills/manage-usage-routing/references/codex-host.md": {
+      "sha256": "1f57d3a0fe9b548886824c6989e17a64ce9b9f8b4b88662269a104e155e32243",
+      "ranges": [
+        [
+          1,
+          114
+        ]
+      ]
+    },
+    "skills/manage-usage-routing/references/delegation.md": {
+      "sha256": "a6af5ac565239e29658acf79df395e0b9d36d40d19e66f8b5a99e3bae9839c5e",
+      "ranges": [
+        [
+          1,
+          108
+        ]
+      ]
+    },
+    "skills/manage-usage-routing/references/first-canary.md": {
+      "sha256": "b7089f243cfd2dbadbb12ecf4630f607cae6cbf4cd08f86c5559378137366eeb",
+      "ranges": [
+        [
+          1,
+          43
+        ]
+      ]
+    },
+    "skills/manage-usage-routing/references/keychain-setup.md": {
+      "sha256": "50e65a7033312a538fa74ebd07c2511ccd074403550e73b2e6106784cabd1f05",
+      "ranges": [
+        [
+          1,
+          40
+        ]
+      ]
+    },
+    "skills/manage-usage-routing/references/procedure.md": {
+      "sha256": "08a7f980477dcd7d2d1b6b0f9aee7548e45db8a0099b20712d1f2269938497f3",
+      "ranges": [
+        [
+          1,
+          130
+        ],
+        [
+          131,
+          175
+        ]
+      ]
+    },
     "skills/onboard-my-project/SKILL.md": {
       "sha256": "1f003ca257145beafef3e722e80279665a1001d25fe0bcab5c1618bff0c0a771",
       "ranges": [
@@ -560,7 +622,7 @@
       ]
     },
     "skills/openrouter-workers/references/procedure.md": {
-      "sha256": "e63e0c79f6ec1110677d8c11748478fe9ee38ad718c290e57d00a06a1f812c90",
+      "sha256": "6317021c64a3dd9b0c3b3945f685232631414bc03cb21955dfa71e6dd619d95d",
       "ranges": [
         [
           1,
@@ -568,7 +630,7 @@
         ],
         [
           123,
-          181
+          182
         ]
       ]
     },

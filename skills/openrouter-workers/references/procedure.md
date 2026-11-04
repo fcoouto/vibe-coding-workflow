@@ -19,8 +19,9 @@ cache or an `approval_ref` alone does not replace saved checkout consent.
    exact runner/runtime paths, role, specialty, copied inputs, checks and stop rule.
    For selected Habblaud visibility, use the [shared role declaration](../../../clients/worker-visibility.md)
    for both the supervisor and external worker, with their own actual responsibilities.
-   Keep its native model identity truthful. Use `Task (via Model Display Name)` in
-   progress details; the native card represents the supervisor, not OpenRouter.
+   Keep its native model identity truthful. Prepare its
+   [native task name with the OpenRouter suffix](../../../clients/worker-visibility.md#external-routes-in-chat-and-habblaud)
+   before dispatch, whether or not Habblaud is configured.
 2. Load only the discovery/cache and triage sections of
    `../../openrouter-proposals/references/procedure.md`. Use the status response's
    `proposal_store` as the shared metadata cache even when `proposals` is disabled;
@@ -136,10 +137,10 @@ Do not mutate that plugin's job database or fabricate Codex transcripts.
 
 Use completion events or bounded process waits, then `scripts/openrouter_workers.py status --root <saved-worker-root> --compact` with `{"task_id":"<run-id>"}` on stdin for compact recorded progress. Omit `--compact` to retrieve the response/accounting when verification or diagnostics need it. Compact status includes sanitized failure facts, nullable stop observations and a path/SHA-256 reference to the bytes read; it never rewrites `result.json`. A response being available does not prove a complete or accepted report, current liveness or stopped ownership. If the saved result changes before verification, inspect the current result and use its actual binding.
 
-Read `progress.jsonl` for a specific observed-event diagnostic and `visibility.json` for delivery receipts. The current CLI
-emits tool events at completion/error; while a tool is running, report only that
-the worker is active. A heartbeat is presence, not evidence of progress. Forward
-events through native supervisor commentary. Do not imply exact native-card parity.
+Read `progress.jsonl` for specific observed events and `visibility.json` for
+delivery receipts. The CLI emits tool events on completion or error. The native
+supervisor uses those events to report meaningful progress or failures. A
+heartbeat establishes presence only.
 
 Habblaud receives the shared full label and retains Codex account/provider
 association. Its Stats model/token fields are not populated by these hooks. Failure

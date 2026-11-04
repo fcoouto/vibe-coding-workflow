@@ -1,0 +1,4 @@
+interface:
+  display_name: "Manage Usage Routing"
+  short_description: "Manage Manual and Smart Balance routing"
+  default_prompt: "Use $manage-usage-routing to show routing status and help me choose a mode."

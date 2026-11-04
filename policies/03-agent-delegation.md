@@ -24,6 +24,8 @@ Apply with the [shared contract rules](00-index.md).
 - Apply the test-first and self-review procedure in [Task Planning](02-task-planning.md#planning-and-verification) to each assignment; parallel dispatch preserves it.
 - Split work at separable context boundaries. Keep tightly coupled work together. Use narrow specialist roles with distinct triggers; retain a standing role only for a recurring need.
 
+When considering an already authorized Usage Routing proposal, load its [proposal selection, verification and recovery procedure](../skills/manage-usage-routing/references/delegation.md). Load routing setup only for explicit routing management.
+
 For native delegation, load the [display naming rules](../clients/workstreams-naming.md) to assess parent/child eligibility, including ordinary workers and independent reviewers. Follow their implementation trigger; dispatch alone does not authorize title adoption. This route is independent of Workstreams feature preferences and does not select managed task controls.
 
 When optional Habblaud visibility is selected, load the [shared worker visibility contract](../clients/worker-visibility.md) before dispatch. Use it for ordinary and managed native workers, reviewers, and native supervisors of external workers. Display roles and custom names grant no execution authority.
