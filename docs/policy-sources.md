@@ -255,6 +255,14 @@ task prerequisite. Original runtime readers and active pins remain intact;
 recognizing saved status-last presentation permits reconciliation during an
 authorized update, not a bulk rename or silent runtime migration.
 
+The sidebar width report on 4 November 2026 showed that the earlier empty meter
+used more space than the full meter. The user selected one leading `U+FFFB`
+before the five original cells after verifying tight spacing at 0%, 20% and
+100% in the Codex sidebar on macOS. The [naming contract](../clients/workstreams-naming.md)
+specifies that prefix at every fill level. Titles without it remain readable
+for reconciliation. The browser fixture rendered the original Menlo shapes at
+each level. CoreText did not apply that font fallback to the empty meter.
+
 Instruction-path review covers solo implementation, questions, planning with and
 without workers, implementation review, follow-up questions after completion and
 manual overrides. Package checks, instruction observations and installed native

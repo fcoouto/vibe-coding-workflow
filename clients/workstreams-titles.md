@@ -177,11 +177,11 @@ Reconcile affected owners with their original runtime and use the existing
 [approved runtime update](runtime.md#change-a-pinned-runtime) procedure with a fresh
 state authority. Existing ownership and unresolved assignments remain binding.
 
-An authorized display-format update can reconcile a saved status-last title
-before rendering the current format. Preserve its family/member binding,
-topic-only edits and manual-title pauses. A user changing the layout remains a
-whole-format override. Do not bulk-rewrite titles, replace original runtime
-readers or silently repin active tasks for a format change.
+An authorized display-format update can reconcile saved titles with the earlier
+layout or without the leading meter character. Preserve the family/member
+binding, topic-only edits and manual-title pauses. A user changing the layout
+or meter remains a whole-format override. Do not bulk-rewrite titles, replace
+original runtime readers or silently repin active tasks for a format change.
 
 Formatting, state, command and hook-boundary tests qualify source behavior.
 Installed hook trust and callback delivery, rendering and literal title search

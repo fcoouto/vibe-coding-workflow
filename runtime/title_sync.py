@@ -5,10 +5,11 @@ import re
 
 from runtime.task_statuses import STATES as STATUSES
 from runtime.evidence import _digest
-MAX_TITLE = 4096
+MAX_TITLE_BODY = 4096
 MAX_STATUS_LENGTH = max(map(len, STATUSES))
-TITLE = re.compile(r'(?P<meter>▰{0,5}▱{0,5}) (?P<status>[A-Z ]+) · \[(?P<family>W[1-9][0-9]*)\] (?P<member>P|C[1-9][0-9]*) · (?P<topic>.+)')
-# Retain prior observations so an authorized update preserves owner topic edits.
+METER_PREFIX = '\uFFFB'  # Keeps the five cells in the compact Codex fallback font.
+# Accept saved titles from before the prefix and before the status placement change.
+TITLE = re.compile(r'(?P<meter>\uFFFB?▰{0,5}▱{0,5}) (?P<status>[A-Z ]+) · \[(?P<family>W[1-9][0-9]*)\] (?P<member>P|C[1-9][0-9]*) · (?P<topic>.+)')
 LEGACY_TITLE = re.compile(r'(?P<meter>▰{0,5}▱{0,5}) \[(?P<family>W[1-9][0-9]*)\] (?P<member>P|C[1-9][0-9]*) · (?P<topic>.+) · (?P<status>[A-Z ]+)')
 
 
@@ -23,16 +24,16 @@ def format_title(family, member, topic, status, cells):
         raise ValueError('Invalid canonical status or progress')
     filled=5 if status=='DONE' else min(cells,4)
     title = '▰'*filled+'▱'*(5-filled)+f' {status} · [{family}] {member} · {topic}'
-    if len(title) - len(status) + MAX_STATUS_LENGTH > MAX_TITLE:
+    if len(title) - len(status) + MAX_STATUS_LENGTH > MAX_TITLE_BODY:
         raise ValueError('Managed title exceeds the supported length')
-    return title
+    return METER_PREFIX + title
 
 
 def _parsed(title):
     match=(TITLE.fullmatch(title) or LEGACY_TITLE.fullmatch(title)) if isinstance(title,str) else None
     if match is None:return None
     fields=match.groupdict()
-    if len(fields['meter'])!=5 or fields['status'] not in STATUSES or ' · ' in fields['topic']:
+    if len(fields['meter'].removeprefix(METER_PREFIX))!=5 or fields['status'] not in STATUSES or ' · ' in fields['topic']:
         return None
     try:
         format_title(fields['family'], fields['member'], fields['topic'], fields['status'], fields['meter'].count('▰'))
@@ -155,9 +156,10 @@ def _load(path):
     state._fields(saved, ('identity', 'family', 'member', 'topic', 'cells', 'applied',
                           'pending', 'paused', 'notified', 'applied_revision'))
     format_title(saved['family'], saved['member'], saved['topic'], 'WORKING', saved['cells'])
-    if not isinstance(saved['applied'], str) or len(saved['applied']) > MAX_TITLE:
+    if not isinstance(saved['applied'], str) or len(saved['applied'].removeprefix(METER_PREFIX)) > MAX_TITLE_BODY:
         raise ValueError('Invalid saved title observation')
-    if saved['pending'] is not None and (not isinstance(saved['pending'], str) or len(saved['pending']) > MAX_TITLE):
+    if saved['pending'] is not None and (not isinstance(saved['pending'], str)
+            or len(saved['pending'].removeprefix(METER_PREFIX)) > MAX_TITLE_BODY):
         raise ValueError('Invalid pending title')
     if type(saved['paused']) is not bool or type(saved['notified']) is not bool:
         raise ValueError('Invalid title ownership state')
@@ -222,7 +224,7 @@ def operate(scope, action, request, transport=None, *, force=False):
             raise ValueError('Resume cannot change family or member identity')
         with (transport or NativeTitles)() as native:
             current = native.read(session)
-            if len(current) > MAX_TITLE and (action == 'resume' or (action == 'configure' and saved is None)):
+            if len(current.removeprefix(METER_PREFIX)) > MAX_TITLE_BODY and (action == 'resume' or (action == 'configure' and saved is None)):
                 raise ValueError('Native title is too long for managed adoption')
             if action == 'configure' and rebind:
                 # Compare the prior managed observation before adopting the new task.

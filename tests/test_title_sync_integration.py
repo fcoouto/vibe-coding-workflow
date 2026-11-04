@@ -81,7 +81,7 @@ class TitleIntegrationTests(unittest.TestCase):
 
     def test_explicit_adoption_then_same_revision_does_not_rewrite(self):
         self.call('configure', topic='Thread naming')
-        self.assertEqual(self.native.title, '▱▱▱▱▱ WORKING · [W1] P · Thread naming')
+        self.assertEqual(self.native.title, '\uFFFB▱▱▱▱▱ WORKING · [W1] P · Thread naming')
         self.call()
         self.assertEqual(self.native.writes, 1)
         self.task.update(state='REVIEW', revision=self.task['revision']+1)
@@ -114,13 +114,13 @@ class TitleIntegrationTests(unittest.TestCase):
     def test_longest_safe_member_survives_status_transitions_and_resume(self):
         self.task['state'] = 'TRIAGE'
         self.call('configure', topic='Title', parent_session_id='parent', member='C' + '1' * 4064)
-        self.assertEqual(len(self.native.title), 4093)
+        self.assertEqual(len(self.native.title), 4094)
         for status in ('READY', 'WORKING', 'REVIEW', 'WAITING', 'BLOCKED', 'PAUSED', 'DONE', 'CANCELLED'):
             self.task.update(state=status, revision=self.task['revision'] + 1)
             self.call()
             self.assertEqual(self.native.title.split(' ', 2)[1], status)
             self.assertTrue(self.call('status')['managed'])
-        self.assertEqual(len(self.native.title), 4096)
+        self.assertEqual(len(self.native.title), 4097)
         self.assertFalse(self.call('resume')['paused'])
 
     def test_oversized_manual_title_is_preserved_and_pauses_once(self):
@@ -161,10 +161,10 @@ class TitleIntegrationTests(unittest.TestCase):
         self.native.title = self.native.title.replace('Thread naming','Better naming')
         self.task.update(state='REVIEW', revision=self.task['revision']+1)
         self.call()
-        self.assertEqual(self.native.title, '▱▱▱▱▱ REVIEW · [W1] P · Better naming')
+        self.assertEqual(self.native.title, '\uFFFB▱▱▱▱▱ REVIEW · [W1] P · Better naming')
         self.task.update(state='WORKING', revision=self.task['revision']+1)
         self.call()
-        self.assertEqual(self.native.title, '▱▱▱▱▱ WORKING · [W1] P · Better naming')
+        self.assertEqual(self.native.title, '\uFFFB▱▱▱▱▱ WORKING · [W1] P · Better naming')
 
     def test_manual_done_does_not_complete_task_and_notice_only_once(self):
         self.call('configure', topic='Thread naming')
@@ -197,7 +197,7 @@ class TitleIntegrationTests(unittest.TestCase):
         self.call('configure', topic='Thread naming')
         self.task.update(state='DONE', revision=self.task['revision']+1)
         self.call()
-        self.assertTrue(self.native.title.startswith('▰▰▰▰▰ '))
+        self.assertTrue(self.native.title.startswith('\uFFFB▰▰▰▰▰ '))
 
     def hook(self, kind, result):
         import io
@@ -369,7 +369,7 @@ class BoundTaskTitleTests(unittest.TestCase):
             dict(expected_revision=task['revision'], state='WORKING', reason='Accepted design', reference='user:approve',
                  milestones=[dict(id='design',weight=2,accepted=True,reference='user:approve'),
                              dict(id='implementation',weight=3,accepted=False,reference='plan:next')]))
-        self.assertTrue(self.native.title.startswith('▰▰▱▱▱ '))
+        self.assertTrue(self.native.title.startswith('\uFFFB▰▰▱▱▱ '))
 
     def test_explicit_new_task_adoption_rebinds_presentation_preserving_history(self):
         self.configure()
@@ -414,7 +414,7 @@ class CompletedTaskTitleTests(unittest.TestCase):
         (fixture.repo / 'app.py').write_text('print("Changed after completion")\n')
         title_sync.operate(fixture.scope, 'sync', dict(client='codex',session_id='parent'), transport=lambda: native, force=True)
         self.assertIn(' REVIEW · [', native.title)
-        self.assertFalse(native.title.startswith('▰▰▰▰▰ '))
+        self.assertFalse(native.title.startswith('\uFFFB▰▰▰▰▰ '))
 
     def test_completion_verification_cannot_resolve_wait_states(self):
         from tests import test_evidence
