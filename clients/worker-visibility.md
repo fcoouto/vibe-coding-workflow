@@ -102,6 +102,9 @@ already saved. Otherwise reuse the role in the managed assignment, or choose
 the role once for this follow-up if none was recorded. The helper verifies the
 native binding before capturing a missing declaration. It preserves the child,
 saved declaration and exact follow-up message, without adding a marker to it.
+If the original context has no observed child and Codex omits its native path,
+include the original `parent_turn_id` and `spawn_item_id` together. Preparation
+checks the saved marker or immutable assignment digest against that spawn.
 
 For configured Habblaud delivery, include the same `--visibility-plugin`,
 `--habblaud-endpoint` and `--habblaud-account` options as publication below.

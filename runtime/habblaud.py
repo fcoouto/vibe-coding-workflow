@@ -244,6 +244,16 @@ def forward_start(directory, checkout, executable, command):
         return child.wait()
 
 
+def _original_spawn_binding(context, parent_turn_id, spawn_item_id):
+    if parent_turn_id is None and spawn_item_id is None:
+        return None
+    if context is None or not parent_turn_id or not spawn_item_id:
+        raise ValueError('native_visibility_spawn_proof_unavailable')
+    return {key: context[key] for key in (
+        'task_name', 'visibility', 'ledger_assignment_digest', 'prompt_marker') if key in context
+    } | dict(parent_turn_id=parent_turn_id, spawn_item_id=spawn_item_id)
+
+
 def publish_native(path, worker_id, phase, plugin_root, endpoint, account, *, parent_turn_id=None, spawn_item_id=None):
     """Bind only to a real child of the declared parent; continuation reuses it."""
     try:
@@ -251,11 +261,7 @@ def publish_native(path, worker_id, phase, plugin_root, endpoint, account, *, pa
         context = read_context(path)
         context_path(path, context['checkout'], plugin_root)
         metadata = visibility.declaration(context['visibility'])
-        spawn_binding = None
-        if parent_turn_id is not None or spawn_item_id is not None:
-            spawn_binding = {key: context[key] for key in (
-                'task_name', 'visibility', 'ledger_assignment_digest', 'prompt_marker') if key in context}
-            spawn_binding.update(parent_turn_id=parent_turn_id, spawn_item_id=spawn_item_id)
+        spawn_binding = _original_spawn_binding(context, parent_turn_id, spawn_item_id)
         with visibility.locked(path.with_name(path.name + '.lock')):
             if visibility.read(path) != context:
                 return dict(delivered=False, reason='native_visibility_context_changed')
@@ -298,7 +304,7 @@ def prepare_reuse(request, *, context=None, context_directory=None):
     try:
         message, child = request['message'], request['worker_id']
         keys = ('parent_session_id', 'checkout', 'task_name')
-        if (set(request) - {*keys, 'message', 'worker_id', 'visibility'}
+        if (set(request) - {*keys, 'message', 'worker_id', 'visibility', 'parent_turn_id', 'spawn_item_id'}
                 or not isinstance(message, str) or len(message.encode('utf-8')) > LIMIT
                 or str(UUID(child)) != child):
             raise ValueError('invalid_native_visibility_request')
@@ -311,11 +317,13 @@ def prepare_reuse(request, *, context=None, context_directory=None):
             metadata = declaration(existing['visibility'] if existing else request.get('visibility'))
             if request.get('visibility') is not None and declaration(request['visibility']) != metadata:
                 raise ValueError('native_visibility_context_changed')
+            spawn_binding = _original_spawn_binding(existing, request.get('parent_turn_id'), request.get('spawn_item_id'))
             if existing is not None and 'observed' in existing:
                 if _saved_native_binding(existing)['worker_id'] != child:
                     raise ValueError('native_visibility_identity_changed')
             else:
-                observed = codex.observe_worker_visibility(identity['checkout'], identity['parent_session_id'], child)
+                observed = codex.observe_worker_visibility(identity['checkout'], identity['parent_session_id'], child,
+                                                           spawn_binding=spawn_binding)
                 if observed['worker_id'] != child or any(observed[key] != value for key, value in identity.items()):
                     raise ValueError('native_visibility_identity_changed')
                 label, _ = native_label(metadata, observed)

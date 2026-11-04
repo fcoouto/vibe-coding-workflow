@@ -886,7 +886,18 @@ class NativeVisibilityTests(unittest.TestCase):
                                                   parent_turn_id='parent-turn', spawn_item_id='spawn')
                     self.assertFalse(wrong['delivered'])
                     self.assertEqual(client.events, [])
+                    followup = {key: request[key] for key in ('parent_session_id', 'checkout', 'task_name')}
+                    followup.update(worker_id=self.child, message='Continue the review.',
+                                    parent_turn_id='parent-turn', spawn_item_id='spawn')
+                    before = path.read_bytes()
+                    self.assertFalse(helper.prepare_assignment(followup, context=path)['prepared'])
+                    self.assertEqual(path.read_bytes(), before)
                     self.spawn_prompt = valid_prompt
+                    continued = helper.prepare_assignment(followup, context=path)
+                    self.assertTrue(continued['prepared'])
+                    self.assertEqual(continued['message'], followup['message'])
+                    self.assertEqual(helper.read_context(path)['observed']['worker_id'], self.child)
+                    self.assertEqual(client.events, [])
                     result = helper.publish_native(path, self.child, 'Reviewing', self.root, 'http://127.0.0.1:1', 'account',
                                                    parent_turn_id='parent-turn', spawn_item_id='spawn')
                 self.assertTrue(result['delivered'])
