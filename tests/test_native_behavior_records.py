@@ -74,6 +74,59 @@ class NativeBehaviorRecordTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             fact['sources'][0]['sha256'] = 'a'*64
 
+    def test_exec_wrapper_binds_only_one_exact_patch_denial(self):
+        script = 'text(await tools.apply_patch(' + json.dumps(PATCH) + '));\n'
+        wrapper = row('response_item', dict(type='custom_tool_call', name='exec',
+            call_id='native-call', input=script))
+        text = [dict(type='input_text', text='Script failed\nWall time 0.5 seconds\nOutput:\n'),
+            dict(type='input_text', text='Script error:\n' + REJECTION)]
+        fact = self.rejection([session(), started(), wrapper, output(text)])
+        self.assertEqual(fact['call_id'], 'native-call')
+        self.assertEqual(len(fact['sources']), 2)
+        for input_text, result in (
+            (script + 'text(1);', text),
+            (script.replace('after', 'different'), text),
+            (script, text + [dict(type='input_text', text='extra')]),
+            (script, [text[0], dict(type='input_text', text='Script error:\nEPERM')]),
+        ):
+            changed = row('response_item', dict(wrapper['payload'], input=input_text))
+            with self.subTest(input_text=input_text, result=result), self.assertRaises(doctor.ObservationError):
+                self.rejection([session(), started(), changed, output(result)])
+        with self.assertRaises(doctor.ObservationError):
+            self.rejection([session(), started(), call(), output(), wrapper, output(text)])
+
+    def test_retained_journal_reuse_rechecks_identity_and_preserves_bounds(self):
+        import os
+        import tempfile
+        from runtime import setup_observation as source
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory).resolve() / 'transaction.json'
+            path.write_bytes(b'{}')
+            path.chmod(0o600)
+            budget = source._budget()
+            read = source._retained_journal_bytes
+            self.assertEqual(read(path, budget, 100), b'{}')
+            self.assertEqual(read(path, budget, 100), b'{}')
+            self.assertEqual((budget['paths'], budget['bytes']), (2, 2))
+            with self.assertRaisesRegex(startup.StartupError, 'budget exhausted'):
+                read(path, budget | {'paths': 4096}, 100)
+            with self.assertRaises(startup.StartupError):
+                read(path, budget | {'deadline': 0}, 100)
+            with self.assertRaisesRegex(startup.StartupError, 'file size limit'):
+                read(path, source._budget() | {'bytes': source.d3.MAX_TOTAL-2}, 100)
+            replacement = path.with_suffix('.new')
+            replacement.write_bytes(b'[]')
+            replacement.chmod(0o600)
+            os.replace(replacement, path)
+            with self.assertRaisesRegex(startup.StartupError, 'journal changed'):
+                read(path, budget, 100)
+            fresh = source._budget()
+            self.assertEqual(read(path, fresh, 100), b'[]')
+            path.chmod(0o644)
+            with self.assertRaisesRegex(startup.StartupError, 'must be private'):
+                read(path, fresh, 100)
+
     def test_no_generic_error_refusal_or_serialized_success_is_required(self):
         for value in ('EPERM', 'I cannot edit files', REJECTION+'\n', 'SandboxDenied: '+REJECTION):
             with self.subTest(value=value), self.assertRaises(doctor.ObservationError):
@@ -496,6 +549,47 @@ class NativeBehaviorOwnerTests(unittest.TestCase):
             self.assertTrue(seen['witness']['observations']['startup-context'])
         return dict(source=captured, filtered=seen['filtered'], assessment=seen['assessment'], directory=metadata_directory,
             decision=decision, allocation=allocation)
+
+    def test_retained_native_successor_admits_task_within_one_entry_budget(self):
+        import os
+        import time
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from runtime import changes, state
+        from tests.fixture_staged_successor import publish_successor
+
+        original = self._observe_original_cli(limited=True)
+        metadata = self._observe_metadata(original)
+        active = self._publish_partial_source(metadata, original, 'budget-bootstrap')
+        self.home = original['home']
+        identity = dict(client='codex', session_id='native-thread', task_id='budget-review')
+        reference = dict(reference='fixture:successor-review', sha256='e' * 64)
+        authority = startup._canonical_copy(active['decision']['qualification_scope'])
+        authority['attempts'] = [dict(reference=reference, task=identity,
+            native_sessions=[identity['session_id']], operations=['task-start'],
+            capability_keys=['pre-tool-enforcement'],
+            limits=dict(deadline=time.time()+90, max_attempts=1, max_resource_units=1),
+            stop_conditions=['Admit only this fixture task'])]
+        prior = changes._load_journal(active['directory'])
+        with patch.dict(os.environ, CODEX_HOME=str(self.home)):
+            successor = publish_successor(self, self.fixture, prior, qualification_scope=authority)
+            paths = [Path(ref['reference'].partition('#')[0]) for ref in
+                (original['source'], metadata['source'], active['binding']['receipt'],
+                 successor.qualification['reference'])]
+            # Match observed journal sizes without changing decoded evidence or receipt digests.
+            self.assertEqual(len(set(paths)), 4)
+            for path, size in zip(paths, (322_990, 321_327, 351_254, 354_956)):
+                raw = path.read_bytes()
+                self.assertLess(len(raw), size)
+                with path.open('ab') as stream:
+                    stream.write(b' ' * (size - len(raw)))
+            event = SimpleNamespace(client='codex', cwd=self.fixture.repo)
+            current = startup.acquire_project_entry(event, state.PACKAGE).resolution
+            self.assertEqual(current.status, 'active', current.reason)
+            task = state.start_task(current.scope, identity | dict(scope_ref='fixture:successor-review',
+                mode='read-only', decision_ref='fixture:approved', attempt_ref=reference))['task']
+            self.assertEqual(task['qualification_attempt'], reference)
+            self.assertNotIn('delegation', task)
 
     def test_real_owner_metadata_policy_source_keeps_toolkit_cases_pending(self):
         self._observe_metadata(self._observe_original_cli())

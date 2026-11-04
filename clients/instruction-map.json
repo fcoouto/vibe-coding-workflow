@@ -503,15 +503,15 @@
       ]
     },
     "skills/onboard-my-project/references/qualification.md": {
-      "sha256": "2dc572f19b8e94f695ac4a0ea6e11300d107b42131dc25a599ba36a51d34ed40",
+      "sha256": "173b2df7b1db5d25d24fcc2b6f0235e31b7b9626b634e160c8575a35c9aedb78",
       "ranges": [
         [
           1,
-          30
+          28
         ],
         [
-          31,
-          35
+          29,
+          37
         ]
       ]
     },

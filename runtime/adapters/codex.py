@@ -612,6 +612,27 @@ NATIVE_FAILURE_CODES = {"contextWindowExceeded", "sessionBudgetExceeded", "usage
 NATIVE_READ_ONLY_REJECTION = 'patch rejected: writing is blocked by read-only sandbox; rejected by user approval settings'
 
 
+def _native_patch_denied(item, output, submitted_patch):
+    if item.get('name') == 'apply_patch':
+        return item.get('input') == submitted_patch and output == NATIVE_READ_ONLY_REJECTION
+    if item.get('name') != 'exec' or not isinstance(item.get('input'), str):
+        return False
+    script = item['input'].removesuffix('\n')
+    prefix, suffix = 'text(await tools.apply_patch(', '));'
+    if not script.startswith(prefix) or not script.endswith(suffix):
+        return False
+    literal = script[len(prefix):-len(suffix)]
+    if not literal.startswith('"') or json.loads(literal) != submitted_patch:
+        return False
+    if not isinstance(output, list) or len(output) != 2:
+        return False
+    envelope, denial = output
+    return (isinstance(envelope, dict) and set(envelope) == {'type', 'text'}
+            and envelope['type'] == 'input_text' and isinstance(envelope['text'], str)
+            and re.fullmatch(r'Script failed\nWall time [0-9]{1,6}(?:\.[0-9]{1,6})? seconds\nOutput:\n', envelope['text'])
+            and denial == {'type': 'input_text', 'text': 'Script error:\n' + NATIVE_READ_ONLY_REJECTION})
+
+
 def _native_policy_rejection(records, *, submitted_patch, turn_id):
     """Bind the submitted patch to native policy denial, not effective input or OS enforcement."""
     from runtime.startup import MAX_INPUT, _canonical_freeze, _canonical_plain
@@ -632,10 +653,9 @@ def _native_policy_rejection(records, *, submitted_patch, turn_id):
         item, result = call['payload'], output['payload']
         call_id = _review_id(item.get('call_id'))
         if (call['turn_id'] != turn_id or output['turn_id'] != turn_id
-                or item['type'] != 'custom_tool_call' or item.get('name') != 'apply_patch'
-                or item.get('namespace') not in (None, 'functions') or item.get('input') != submitted_patch
+                or item['type'] != 'custom_tool_call' or item.get('namespace') not in (None, 'functions')
                 or result['type'] != 'custom_tool_call_output' or result.get('call_id') != call_id
-                or result.get('output') != NATIVE_READ_ONLY_REJECTION):
+                or not _native_patch_denied(item, result.get('output'), submitted_patch)):
             raise ValueError
         return _canonical_freeze(dict(thread_id=data['thread_id'], turn_id=turn_id, call_id=call_id,
             submitted_patch_sha256=hashlib.sha256(submitted_patch.encode()).hexdigest(),
