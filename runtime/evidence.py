@@ -704,7 +704,7 @@ def _register_recovery_source(scope, db, source, *, context=None):
     lifetime=changes._check_d4_publication(source, selected, db)
     prior_registration=lifetime['registrations'].get(str(selected.database))
     if prior_registration is not None:
-        _check_recovery_registration(selected,db,source)
+        _verify_recovery_registration(selected,db,source,lifetime)
         _require(prior_registration['reference'] is not None,'Recovery registration is already in progress')
         return _canonical_freeze(prior_registration['reference'])
     baseline = state._source_baseline(None, db, context=selected)
@@ -730,7 +730,7 @@ def _register_recovery_source(scope, db, source, *, context=None):
         if projection['reference']==previous:
             lifetime['registrations'][str(selected.database)]=dict(baseline=baseline,expected=baseline,
                 content=prior,created_at=created,dependencies=_recovery_source_dependencies(prior,_canonical_plain(selected.authority_set[0])),reference=previous)
-            _check_recovery_registration(selected,db,source)
+            _verify_recovery_registration(selected,db,source,lifetime)
             return _canonical_freeze(previous)
     dependencies = projection['dependencies']
     registration=dict(baseline=baseline,expected=baseline,content=content,created_at=created,dependencies=dependencies,reference=None)
@@ -746,7 +746,8 @@ def _register_recovery_source(scope, db, source, *, context=None):
     metadata['dependencies'] = edges
     db.execute('update evidence_metadata set data=? where name=?', (_raw(metadata).decode(),baseline['reference']['name']))
     registration['expected']=dict(baseline,dependencies=edges)
-    _check_recovery_registration(selected,db,source)
+    # The writer reobserves the source again immediately before commit.
+    _verify_recovery_registration(selected,db,source,lifetime)
     return _canonical_freeze(reference)
 
 

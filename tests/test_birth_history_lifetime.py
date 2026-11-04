@@ -6,7 +6,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from runtime import evidence, review_storage, state
+from runtime import changes, evidence, review_storage, state
 from tests import fixture_canonical_birth as canonical_birth
 
 
@@ -18,6 +18,25 @@ class BirthHistoryLifetimeTests(unittest.TestCase):
                 self.assertFalse(args or kwargs)
                 case._cleanups[index] = (self.cleanup_case, (child,), {})
         self.assertTrue(case.doCleanups(), 'Nested canonical birth cleanup failed')
+
+    def test_birth_recovery_checks_current_source_without_repeating_the_overlay_check(self):
+        birth = canonical_birth.CanonicalBirthFixture('runTest')
+        self.addCleanup(self.cleanup_case, birth)
+        prepared = birth.prepare()
+        original = changes._check_d4_publication
+        checks = {}
+
+        def observe(source, context, db):
+            if source.birth_certificate is not None:
+                checks[db] = checks.get(db, 0) + 1
+            return original(source, context, db)
+
+        with patch.object(changes, '_check_d4_publication', side_effect=observe):
+            result = birth.invoke(prepared)
+
+        self.assertEqual(result['state'], 'applied', result)
+        self.assertTrue(checks)
+        self.assertEqual(set(checks.values()), {1, 3})
 
     def source_snapshot(self, project_context, authority_path, history):
         configuration = history['machine']['configuration']
