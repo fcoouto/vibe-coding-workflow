@@ -622,6 +622,98 @@ def observe_native_review_assignment(scope, attempt_id, parent_turn_id, spawn_it
     return _observe_native_assignment(scope, attempt_id, parent_turn_id, spawn_item_id, review=True, cooperative=cooperative)
 
 
+def _exec_wrapped_input(item, tool):
+    if item.get('name') != 'exec' or not isinstance(item.get('input'), str):
+        return None
+    script = item['input'].removesuffix('\n').removesuffix(';')
+    prefix = f'text(await tools.{tool}('
+    if not script.startswith(prefix) or not script.endswith('))'):
+        return None
+    literal = script[len(prefix):-2]
+    if tool == 'exec_command':
+        return json_object(literal)
+    command = json.loads(literal)
+    return command if isinstance(command, str) and command.strip() else None
+
+
+def _exec_wrapped_pairs(raw, data, turn, *, tools):
+    """Bind a literal one-tool wrapper to its one native completion inside the call interval."""
+    rows = [row for row in data['records'] if row['payload']['type'].endswith(('_call', '_call_output'))]
+    pairs, ids = {}, set()
+    for call, output in zip(rows, rows[1:]):
+        item, result = call['payload'], output['payload']
+        if (call['turn_id'] != turn or item['type'] != 'custom_tool_call' or item.get('name') != 'exec'):
+            continue
+        for tool in tools:
+            value = _exec_wrapped_input(item, tool)
+            if value is not None:
+                break
+        else:
+            continue
+        outer = _review_id(item.get('call_id'))
+        parts = result.get('output')
+        if (output['turn_id'] != turn or item.get('namespace') not in (None, 'functions')
+                or result['type'] != 'custom_tool_call_output' or result.get('call_id') != outer
+                or result.get('namespace') not in (None, 'functions') or result.get('name') not in (None, 'exec')
+                or not isinstance(parts, list) or len(parts) != 2
+                or any(not isinstance(part, dict) or set(part) != {'type', 'text'}
+                    or part['type'] != 'input_text' or not isinstance(part['text'], str) for part in parts)
+                or not re.fullmatch(r'Script completed\nWall time [0-9]{1,6}(?:\.[0-9]{1,6})? seconds\nOutput:\n',
+                    parts[0]['text'])):
+            raise ObservationError('cooperative_wrapper_unverified')
+        _, call_offset, call_size = call['source']['reference'].rsplit(':', 2)
+        source, output_offset, output_size = output['source']['reference'].rsplit(':', 2)
+        start = int(call_offset) + int(call_size)
+        end = int(output_offset) + int(output_size)
+        middle = [json_object(line) for line in raw[start:int(output_offset)].splitlines()]
+        completion, = [row for row in middle if row['type'] != 'token_usage_record']
+        event = completion['payload']
+        if (completion['type'] != 'event_msg' or event.get('type') != 'item_completed'
+                or event.get('thread_id') != data['thread_id'] or event.get('turn_id') != turn):
+            raise ObservationError('cooperative_wrapper_unverified')
+        nested = event['item']
+        if not isinstance(nested, dict):
+            raise ObservationError('cooperative_wrapper_unverified')
+        inner = _review_id(nested.get('id'))
+        if inner == outer or {inner, outer} & ids or nested.get('status') != 'completed':
+            raise ObservationError('cooperative_wrapper_unverified')
+        ids.update((inner, outer))
+        payload = parts[1]['text']
+        if tool == 'exec_command':
+            reply = json_object(payload)
+            if (nested.get('type') != 'CommandExecution'
+                    or set(reply) - {'chunk_id', 'wall_time_seconds', 'exit_code', 'original_token_count', 'output'}
+                    or type(reply.get('exit_code')) is not int or reply['exit_code'] != 0
+                    or reply.get('output') != 'D6_READY\n' or nested.get('aggregated_output') != reply['output']):
+                raise ObservationError('cooperative_wait_unverified')
+            inner_call = dict(type='function_call', call_id=inner, name=tool, arguments=json.dumps(value))
+            inner_output = dict(type='function_call_output', call_id=inner, output=reply['output'])
+        else:
+            if (payload != '{}' or nested.get('type') != 'FileChange' or nested.get('stderr') != ''
+                    or not isinstance(nested.get('changes'), dict) or not nested['changes']
+                    or not isinstance(nested.get('stdout'), str) or not nested['stdout']):
+                raise ObservationError('cooperative_wrapper_unverified')
+            inner_call = dict(type='custom_tool_call', call_id=inner, name=tool, input=value)
+            inner_output = dict(type='custom_tool_call_output', call_id=inner, name=tool, output=nested['stdout'])
+        # Keep proof of both the nested completion and the matching outer result.
+        proof = dict(reference=f'{source}:{start}:{end-start}', sha256=hashlib.sha256(raw[start:end]).hexdigest())
+        pairs[outer] = (dict(call, payload=inner_call), dict(output, payload=inner_output, source=proof))
+    if pairs:
+        nested_ids = {call['payload']['call_id'] for call, _ in pairs.values()}
+        completed = set()
+        for line in raw.splitlines():
+            row = json_object(line)
+            event = row['payload']
+            item = event.get('item')
+            if (row['type'] == 'event_msg' and event.get('type') == 'item_completed'
+                    and event.get('turn_id') == turn and isinstance(item, dict)
+                    and isinstance(item.get('id'), str) and item['id'] in nested_ids):
+                if item['id'] in completed:
+                    raise ObservationError('cooperative_wrapper_unverified')
+                completed.add(item['id'])
+    return pairs
+
+
 def _cooperative_activity(raw, *, path, child, turn, result, review, wait_args=None):
     """Account for one completed rollout under the native trust assumption."""
     from runtime.doctor import native_behavior_records
@@ -629,18 +721,33 @@ def _cooperative_activity(raw, *, path, child, turn, result, review, wait_args=N
     data = _canonical_plain(native_behavior_records(raw, thread_id=child, source_reference=str(path)))
     if data['turn_ids'] != [turn]:
         raise ObservationError('cooperative_turn_unverified')
+    wrapped = {} if review else _exec_wrapped_pairs(raw, data, turn, tools=('exec_command', 'apply_patch'))
+    inner_ids = {outer: pair[0]['payload']['call_id'] for outer, pair in wrapped.items()}
+    wrapped_ids = set(inner_ids.values())
     calls, outputs = {}, set()
+    declared = False
     wait_call = None
     wait_digest = _tool_fingerprint(dict(tool_name='exec_command', tool_input=wait_args)) if wait_args else None
     for record in data['records']:
         item = record['payload']
         kind = item['type']
+        if (kind == 'additional_tools' and not declared and not calls and item.get('role') == 'developer'
+                and isinstance(item.get('tools'), list) and item.get('delivery') is None):
+            declared = True
+            continue
         if kind in {'message', 'agent_message', 'reasoning'}:
             if item.get('delivery') is not None:
                 raise ObservationError('cooperative_activity_unverified')
             continue
         if review or record['turn_id'] != turn or item.get('namespace') not in (None, 'functions'):
             raise ObservationError('cooperative_activity_unverified')
+        pair = wrapped.get(item.get('call_id'))
+        if pair is not None:
+            index = {'custom_tool_call': 0, 'custom_tool_call_output': 1}.get(kind)
+            if index is None:
+                raise ObservationError('cooperative_activity_unverified')
+            item = pair[index]['payload']
+            kind = item['type']
         call_id = _review_id(item.get('call_id'))
         if kind == 'function_call' and item.get('name') == 'exec_command' and wait_args is not None and not calls:
             arguments = item.get('arguments')
@@ -652,7 +759,7 @@ def _cooperative_activity(raw, *, path, child, turn, result, review, wait_args=N
         elif kind == 'function_call_output' and call_id == wait_call and call_id not in outputs:
             output = item.get('output')
             # The pinned direct tool output has no session line when it returns synchronously.
-            if (not isinstance(output, str) or re.fullmatch(
+            if pair is None and (not isinstance(output, str) or re.fullmatch(
                     r'(?:Chunk ID: [0-9a-f]+\n)?Wall time: [0-9]+\.[0-9]{4} seconds\n'
                     r'Process exited with code 0\n(?:Original token count: [0-9]+\n)?Output:\nD6_READY\n',
                     output) is None):
@@ -681,6 +788,8 @@ def _cooperative_activity(raw, *, path, child, turn, result, review, wait_args=N
     initial_delivery = set()
     wait_started = False
     wait_completed = False
+    tools_started = False
+    settings_seen = False
     for line in raw.splitlines():
         row = json_object(line)
         kind, event = row['type'], row['payload']
@@ -692,11 +801,13 @@ def _cooperative_activity(raw, *, path, child, turn, result, review, wait_args=N
             initial_delivery.add(kind)
             continue
         if kind == 'response_item' and (phase == 'active' or phase == 'before'
-                and event.get('type') in {'message', 'agent_message', 'reasoning'}):
-            if wait_call is not None:
-                if event['type'] == 'function_call' and event.get('call_id') == wait_call:
+                and event.get('type') in {'message', 'agent_message', 'reasoning', 'additional_tools'}):
+            if event['type'] in {'function_call', 'custom_tool_call'}:
+                tools_started = True
+                call_id = event.get('call_id')
+                if wait_call is not None and inner_ids.get(call_id, call_id) == wait_call:
                     wait_started = True
-                if event['type'] == 'custom_tool_call' and not wait_completed:
+                elif wait_call is not None and event['type'] == 'custom_tool_call' and not wait_completed:
                     raise ObservationError('cooperative_wait_unverified')
             continue
         if kind != 'event_msg':
@@ -709,13 +820,16 @@ def _cooperative_activity(raw, *, path, child, turn, result, review, wait_args=N
                     or event.get('will_retry', False) is not False):
                 raise ObservationError('cooperative_turn_unverified')
             phase = 'after'
-        elif event_type in {'token_count', 'thread_settings_applied'} and (
-                event_type != 'thread_settings_applied' or phase == 'before'):
+        elif event_type == 'token_count':
             continue
+        elif (event_type == 'thread_settings_applied' and not settings_seen and not tools_started
+                and (phase == 'before' or phase == 'active' and event.get('thread_id') == child
+                     and isinstance(event.get('thread_settings'), dict))):
+            settings_seen = True
         elif phase == 'active' and event_type in {'user_message', 'agent_message', 'agent_reasoning', 'agent_reasoning_raw_content'}:
             continue
         elif (phase == 'active' and event_type == 'patch_apply_end' and event.get('turn_id') == turn
-                and event.get('call_id') in outputs):
+                and event.get('call_id') in outputs and event.get('call_id') not in wrapped_ids):
             continue
         elif phase == 'active' and event_type == 'item_completed':
             item = event.get('item')
@@ -912,7 +1026,34 @@ def _native_patch_denied(item, output, submitted_patch):
             and denial == {'type': 'input_text', 'text': 'Script error:\n' + NATIVE_READ_ONLY_REJECTION})
 
 
-def _native_policy_rejection(records, *, submitted_patch, turn_id):
+def _verify_bootstrap_reads(rows, expected_hashes, patch_call_id):
+    if len(expected_hashes) != 3 or len(rows) not in (6, 7):
+        raise ValueError
+    seen = {patch_call_id}
+    for call, result, expected in zip(rows[:6:2], rows[1:6:2], expected_hashes, strict=True):
+        item, output = call['payload'], result['payload']
+        call_id = _review_id(item.get('call_id'))
+        script, parts = item.get('input'), output.get('output')
+        if (item['type'] != 'custom_tool_call' or item.get('name') != 'exec'
+                or item.get('namespace') not in (None, 'functions') or call_id in seen
+                or not isinstance(script, str) or hashlib.sha256(script.encode()).hexdigest() != expected
+                or output['type'] != 'custom_tool_call_output' or output.get('call_id') != call_id
+                or output.get('name') is not None or not isinstance(parts, list) or len(parts) != 2
+                or any(not isinstance(part, dict) or set(part) != {'type', 'text'}
+                    or part['type'] != 'input_text' or not isinstance(part['text'], str) for part in parts)
+                or not re.fullmatch(r'Script completed\nWall time [0-9]{1,6}(?:\.[0-9]{1,6})? seconds\nOutput:\n',
+                    parts[0]['text'])):
+            raise ValueError
+        seen.add(call_id)
+    # The instruction loader can also emit one separate notification on its own call.
+    if len(rows) == 7:
+        notification = rows[6]['payload']
+        if (notification['type'] != 'custom_tool_call_output' or notification.get('name') != 'exec'
+                or notification.get('call_id') != call_id or not isinstance(notification.get('output'), str)):
+            raise ValueError
+
+
+def _native_policy_rejection(records, *, submitted_patch, turn_id, startup_read_sha256=()):
     """Bind the submitted patch to native policy denial, not effective input or OS enforcement."""
     from runtime.startup import MAX_INPUT, _canonical_freeze, _canonical_plain
     try:
@@ -924,15 +1065,17 @@ def _native_policy_rejection(records, *, submitted_patch, turn_id):
                 or not any(line.startswith(('+', '-')) for line in submitted_patch.splitlines())
                 or data['turn_ids'] != [turn_id]):
             raise ValueError
-        calls = [row for row in data['records'] if row['payload']['type'] in {
-            'custom_tool_call', 'custom_tool_call_output', 'function_call', 'function_call_output', 'local_shell_call'}]
-        if len(calls) != 2:
+        calls = [row for row in data['records'] if row['payload']['type'].endswith(('_call', '_call_output'))]
+        if len(calls) < 2 or any(row['turn_id'] != turn_id for row in calls):
             raise ValueError
-        call, output = calls
+        call, output = calls[-2:]
         item, result = call['payload'], output['payload']
         call_id = _review_id(item.get('call_id'))
-        if (call['turn_id'] != turn_id or output['turn_id'] != turn_id
-                or item['type'] != 'custom_tool_call' or item.get('namespace') not in (None, 'functions')
+        if startup_read_sha256:
+            _verify_bootstrap_reads(calls[:-2], startup_read_sha256, call_id)
+        elif len(calls) != 2:
+            raise ValueError
+        if (item['type'] != 'custom_tool_call' or item.get('namespace') not in (None, 'functions')
                 or result['type'] != 'custom_tool_call_output' or result.get('call_id') != call_id
                 or not _native_patch_denied(item, result.get('output'), submitted_patch)):
             raise ValueError
@@ -943,7 +1086,7 @@ def _native_policy_rejection(records, *, submitted_patch, turn_id):
         raise ObservationError('native_policy_rejection_unobserved') from None
 
 
-def _native_managed_tool(records, *, submitted_patch, turn_id, call_id, case_id, child_patch=False):
+def _native_managed_tool(records, *, submitted_patch, turn_id, call_id, case_id, child_patch=False, raw=None):
     """Correlate native tool records; post success additionally requires Core-owned effects."""
     from runtime.startup import MAX_INPUT, _canonical_freeze, _canonical_plain
     try:
@@ -960,6 +1103,13 @@ def _native_managed_tool(records, *, submitted_patch, turn_id, call_id, case_id,
         calls = [row for row in data['records'] if row['payload'].get('call_id') == call_id
             and row['payload']['type'] in {'custom_tool_call', 'custom_tool_call_output',
                 'function_call', 'function_call_output', 'local_shell_call'}]
+        if child_patch and raw is not None:
+            pairs = _exec_wrapped_pairs(raw, data, turn_id, tools=('apply_patch',))
+            matches = [pair for pair in pairs.values() if pair[0]['payload']['call_id'] == call_id]
+            if matches:
+                if calls or len(matches) != 1:
+                    raise ValueError
+                calls = matches[0]
         if len(calls) != 2:
             raise ValueError
         call, output = calls
@@ -1226,7 +1376,8 @@ def observe_setup_metadata(process, attempt):
                 if len(data['turn_ids']) != 1:
                     raise ObservationError('setup_native_turn_unobserved')
                 rejected = startup._canonical_plain(_native_policy_rejection(records,
-                    submitted_patch=probe['patch'], turn_id=data['turn_ids'][0]))
+                    submitted_patch=probe['patch'], turn_id=data['turn_ids'][0],
+                    startup_read_sha256=probe.get('startup_read_sha256', ())))
                 readback = startup._canonical_plain(setup_observation.setup_probe_readback(attempt, process=process))
                 if readback['before_reference'] != probe['reference']:
                     raise ObservationError('setup_probe_reference_mismatch')
@@ -1305,7 +1456,7 @@ def observe_managed_case(scope, task_ref, attempt_ref, case_id):
             records = native_behavior_records(raw, thread_id=stream['id'], source_reference=str(path))
             fact = startup._canonical_plain(_native_managed_tool(records, submitted_patch=probe['patch'],
                 turn_id=selectors['turn_id'], call_id=selectors['call_id'], case_id=case_id,
-                child_patch=selectors['stream'] == 'child'))
+                child_patch=selectors['stream'] == 'child', raw=raw))
             after = startup._canonical_plain(setup_observation.managed_observation_readback(
                 scope, task_ref, attempt_ref, case_id=case_id))
             before = probe['before']; receipt = after['receipt']

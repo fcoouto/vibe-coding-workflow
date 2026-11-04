@@ -872,7 +872,7 @@ def _authorization_shape(value):
         'An exact approved disposable target and bounded attempts are required')
     seen = set()
     for attempt in value['attempts']:
-        d3._object(attempt, ('reference', 'task', 'native_sessions', 'operations', 'capability_keys', 'limits', 'stop_conditions'), ('plan_reference','command_action','source_capture','native_execution','probe','context_reference'))
+        d3._object(attempt, ('reference', 'task', 'native_sessions', 'operations', 'capability_keys', 'limits', 'stop_conditions'), ('plan_reference','command_action','source_capture','native_execution','probe','context_reference','startup_read_sha256'))
         startup._canonical_ref(attempt['reference'])
         token = d3._digest(attempt['reference'])
         d3._require(token not in seen, 'Duplicate original qualification attempt');seen.add(token)
@@ -905,6 +905,20 @@ def _authorization_shape(value):
             d3._require(('native_execution' in attempt or not bootstrap) and not metadata and path.is_relative_to(Path(target['repository_root'])),
                 'Native canary must be an originally approved public checkout file')
             _public_canary_patch(attempt['probe'],Path(target['repository_root']))
+        if 'startup_read_sha256' in attempt:
+            execution = attempt.get('native_execution', {})
+            argv = execution.get('argv', [])
+            reads = attempt['startup_read_sha256']
+            # The reviewer pins the exact three startup input strings before launch.
+            d3._require(bootstrap and not metadata and 'probe' in attempt
+                and execution.get('source_contract')=='bounded-native-source-v1'
+                and argv[1:5]==['exec','--json','--sandbox','read-only'] and argv[-2:-1]==['--']
+                and (len(argv)==7 or len(argv)==9 and argv[5]=='-c')
+                and isinstance(reads,list) and len(reads)==3,
+                'Startup reads need an exact bounded read-only bootstrap allocation')
+            for read_hash in reads:
+                startup._canonical_hash(read_hash)
+            d3._require(len(set(reads))==3,'Duplicate startup read input')
         if 'context_reference' in attempt:startup._canonical_ref(attempt['context_reference'])
         if metadata:startup._canonical_ref(attempt.get('source_capture'))
         else:d3._require('source_capture' not in attempt,'Only the claimed metadata operation consumes a frontend fragment')
@@ -1151,8 +1165,11 @@ def setup_probe_projection(decision, *, process):
     context=_live_native_context(decision,process);row,directory=_native_probe_source(context)
     if row is None or row['allocation'].get('probe') is None:return None
     probe=row['allocation']['probe']
-    return startup._canonical_freeze(dict(patch=probe['patch'],canary=probe['canary'],before=row['before'],
-        reference=_native_reference(directory,row,'before')))
+    projection=dict(patch=probe['patch'],canary=probe['canary'],before=row['before'],
+        reference=_native_reference(directory,row,'before'))
+    if 'startup_read_sha256' in row['allocation']:
+        projection['startup_read_sha256']=row['allocation']['startup_read_sha256']
+    return startup._canonical_freeze(projection)
 
 
 def setup_probe_readback(decision, *, process):

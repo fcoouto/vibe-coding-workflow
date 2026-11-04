@@ -493,7 +493,8 @@ for line in sys.stdin:
         responses['initialize'] = dict(codexHome=str(self.root), platformFamily='unix', platformOs='macos', userAgent='fixture')
         result = responses['items']['data'][0]['item']['text']
         rows = [('session_meta', dict(id='child')), ('event_msg', dict(type='task_started', turn_id='child-turn'))]
-        rows.extend(('event_msg' if item['type'] == 'item_completed' else 'response_item', item) for item in activity)
+        rows.extend(('event_msg' if item['type'] in {'item_completed', 'thread_settings_applied'} else 'response_item',
+                     item) for item in activity)
         if terminal:
             rows.append(('event_msg', dict(type='task_complete', turn_id='child-turn', last_agent_message=result)))
         raw = ''.join(json.dumps(dict(timestamp='fixture', type=kind, payload=payload)) + '\n' for kind, payload in rows).encode()
@@ -513,6 +514,60 @@ for line in sys.stdin:
         responses, binding = self.review_assignment_fixture()
         self.cooperative_rollout(responses, [])
         self.assertEqual(self.observe_review_assignment(responses, binding, cooperative=True)['activity']['calls'], [])
+
+    def test_cooperative_observation_binds_wrapped_wait_and_patch_to_nested_ids(self):
+        responses, binding = self.worker_fixture()
+        wait = dict(marker=str(self.root / 'ready'), python=str(Path(sys.executable).resolve()), seconds=5)
+        binding['foreground_wait'] = wait
+        args = codex.foreground_wait_args(wait, self.scope.repository_root)
+        command = '*** Begin Patch\n*** Update File: canary.py\n@@\n-return 0\n+return 42\n*** End Patch'
+
+        def wrapped(outer, tool, value, item, result):
+            return [dict(type='custom_tool_call', name='exec', call_id=outer,
+                input=f'text(await tools.{tool}({json.dumps(value)}));\n'),
+                dict(type='item_completed', thread_id='child', turn_id='child-turn', item=item),
+                dict(type='custom_tool_call_output', call_id=outer, output=[
+                    dict(type='input_text', text='Script completed\nWall time 0.3 seconds\nOutput:\n'),
+                    dict(type='input_text', text=json.dumps(result)),
+                ])]
+
+        wait_result = dict(chunk_id='1234ab', wall_time_seconds=0.05, exit_code=0, original_token_count=3,
+            output='D6_READY\n')
+        wait_item = dict(type='CommandExecution', id='inner-wait', status='completed', exit_code=0,
+            source='unified_exec_startup', aggregated_output='D6_READY\n', cwd=Path(args['workdir']).as_uri(),
+            command=[args['shell'], '-c', args['cmd']])
+        patch_item = dict(type='FileChange', id='inner-patch', status='completed', changes={'canary.py': {'type': 'update'}},
+            stdout='Success. Updated the following files:\nM canary.py\n', stderr='')
+        wait_rows = wrapped('outer-wait', 'exec_command', args, wait_item, wait_result)
+        patch_rows = wrapped('outer-patch', 'apply_patch', command, patch_item, {})
+        patch_rows[0]['input'] = patch_rows[0]['input'].replace('));\n', '))\n')
+        rows = [dict(type='additional_tools', role='developer', tools=[]),
+                dict(type='thread_settings_applied', thread_id='child', thread_settings={}), *wait_rows, *patch_rows]
+        projection = dict(type='commandExecution', id='inner-wait', status='completed', exitCode=0,
+                          source='unifiedExecStartup', aggregatedOutput='D6_READY\n', cwd=args['workdir'])
+        patch_projection = dict(type='fileChange', id='inner-patch', status='completed')
+        responses['history'] = [dict(turnId='child-turn', item=item) for item in (projection, patch_projection)] + responses['items']['data']
+        raw = self.cooperative_rollout(responses, rows)
+        observed = self.observe_worker(responses, binding, cooperative=True)
+        self.assertEqual(observed['activity'], dict(source_digest=hashlib.sha256(raw).hexdigest(), calls=[
+            dict(id='inner-wait', tool='exec_command', input_digest=evidence._digest(dict(tool_name='exec_command', tool_input=args))),
+            dict(id='inner-patch', tool='apply_patch', input_digest=codex.patch_input_fingerprint(command))]))
+
+        for name, activity in (
+            ('extra JS', [*wait_rows, dict(patch_rows[0], input=patch_rows[0]['input'] + 'text(1);'), *patch_rows[1:]]),
+            ('wrong wait args', [*wrapped('outer-wait', 'exec_command', dict(args, tty=True), wait_item, wait_result), *patch_rows]),
+            ('resumable', [*wrapped('outer-wait', 'exec_command', args, wait_item, dict(wait_result, session_id=42)), *patch_rows]),
+            ('extra nested item', [*wait_rows[:2], dict(wait_rows[1], item=dict(wait_item, id='another')), wait_rows[2], *patch_rows]),
+            ('early patch', [*wait_rows[:2], *patch_rows, wait_rows[2]]),
+            ('missing nested patch', [*wait_rows, patch_rows[0], patch_rows[2]]),
+        ):
+            self.cooperative_rollout(responses, activity)
+            with self.subTest(name=name), self.assertRaises(StartupError):
+                self.observe_worker(responses, binding, cooperative=True)
+        self.cooperative_rollout(responses, rows)
+        projection['id'] = 'outer-wait'
+        with self.assertRaises(StartupError):
+            self.observe_worker(responses, binding, cooperative=True)
 
     def test_cooperative_observation_rejects_unknown_or_unfinished_activity(self):
         call = dict(type='custom_tool_call', call_id='patch', name='apply_patch', input='patch')
