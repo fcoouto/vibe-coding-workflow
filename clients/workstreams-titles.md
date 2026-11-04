@@ -48,9 +48,14 @@ Parent request:
   "scope_ref": "<bound_scope_reference>",
   "expected_revision": 1,
   "reference": "<user_or_workflow_decision>",
-  "topic": "Thread naming"
+  "workflow_topic": "Thread naming"
 }
 ```
+
+Use `workflow_topic` for text chosen by the coordinator. Use `topic` for an
+explicit user choice. Supply only one. The saved presentation records workflow
+ownership when established. Older records without that observation retain their
+topic during an automatic switch. `workflow_topic` is a configure input only.
 
 For an explicitly associated child, also provide `parent_session_id` and `member`
 (for example `C1`). The parent session must differ from the child's session;
@@ -73,8 +78,9 @@ do not bypass it with a direct write.
 
 For ordinary native work without a bound runtime task, use supported client
 display-title controls directly after observing the actual native identity. Keep
-the family/member mapping, last verified managed title, pending delivery and any
-manual-title pause in the existing task plan. Apply the manual-title rules below
+the family/member mapping, last verified managed title, pending delivery, topic
+ownership and any manual-title pause in the existing task plan. Record workflow
+ownership only for a topic the workflow chose. Apply the manual-title rules below
 before every write and acknowledge delivery by readback. Resolve an uncertain
 write against that same identity before retrying. Update titles during existing
 milestone, phase and blocker handling using accepted plan progress. Do not create
@@ -113,6 +119,44 @@ paths. The activity indicator for unmeasured `WORKING` belongs only to the title
 `DONE` still requires the normal completion evidence gate. Reopening work retains
 accepted milestones unless scope or evidence invalidates them.
 
+### Reopen a completed objective
+
+For an adopted chat with a completed objective, classify the user's request
+before the first substantive action, including investigation, review, edits or
+delegation.
+
+- **Continue or correct the same objective.** Record the actual phase, normally
+  `WORKING`. Keep accepted milestones that still apply, add the agreed
+  remaining work and recalculate the meter.
+- **Clearly start a different objective here.** Switch automatically. Keep the
+  same family and member. Start the new objective with zero accepted milestones
+  and retain the old objective and evidence in history.
+- **Ask about the completed result or acknowledge it.** Keep the full meter.
+- **The requested work could belong to either objective.** Ask which one before
+  switching or starting work.
+
+For ordinary native work, record the phase and progress in the existing plan
+and use the direct title procedure. For a runtime-bound continuation, use
+`task update` with the current revision. For a runtime-bound switch, use
+`task start` with a new task identity and `replaces` containing the current
+`task_id` and `expected_revision`. The clear work request supplies the scope
+decision reference. Runtime authority and replacement prerequisites still
+apply. Record the new phase, then use `task title configure` with the new
+binding and its current revision.
+
+Reconcile pending delivery and compare the observed title with the last
+verified title before choosing the topic. During a switch, use a short topic
+for the new objective only when the workflow owns the current topic. For
+runtime-bound titles pass that proposed text as `workflow_topic` so configure
+can recheck ownership against the observed title. If ownership is unknown,
+preserve the current topic. Apply the [manual title rules](#manual-titles).
+
+Attempt title delivery before substantive work. A display failure alone does
+not block authorized work. On an uncertain rebind, inspect the task binding
+and presentation before retrying. Use `task title sync` when the rebind is
+already recorded with delivery pending. Reconcile against the same task
+identity rather than replacing it again for title repair.
+
 ## Event repair and failures
 
 Committed task, evidence and delegation commands repair an adopted title. Existing
@@ -145,8 +189,9 @@ display-title controls and runtime synchronization. An unexplained mismatch
 indicates an external change, not who made it; the user, client or another
 automation may have changed the title.
 
-- If only the topic changed and the format is unambiguous, adopt the topic and
-  continue meter/status updates. Queued updates use the new topic.
+- If only the topic changed and the format is unambiguous, adopt the topic,
+  clear workflow topic ownership and continue meter/status updates. Queued
+  updates use the new topic.
 - If meter, family, member, status or overall format changed, preserve the title
   and pause title synchronization for that thread. Announce the pause once.
 - Resume only after an explicit user request. For runtime-bound titles, use

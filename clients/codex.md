@@ -19,6 +19,12 @@ controls are explicitly selected. Their failure must not disable status,
 configuration recovery or file undo. Preserve selected controls and existing
 repository protections.
 
+When a request calls for work after a completed objective in an adopted Thread
+Naming chat, load [reopen a completed objective](workstreams-titles.md#reopen-a-completed-objective)
+before substantive work. Use that procedure when the relationship to the old
+objective is unclear. Ordinary questions about a completed result and
+acknowledgments need no title update.
+
 ## Instruction output budgets
 
 Select only applicable instruction files. Supply Vibe paths relative to the package or as absolute paths; supply external skills and their triggered Markdown references as absolute paths. A selection may mix both: the reader determines each source's authority and retains its package or external checks. Never run `--prepare` during routine tasks.

@@ -504,6 +504,47 @@ class BoundTaskTitleTests(unittest.TestCase):
 
 
 class CompletedTaskTitleTests(unittest.TestCase):
+    def test_verified_task_can_reopen_title_with_retained_milestones(self):
+        import io
+        import json
+        from types import SimpleNamespace
+        from runtime import state
+        from scripts import workflow
+        from tests import test_evidence
+
+        fixture = test_evidence.EvidenceTests('runTest')
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        accepted = [dict(id=name, weight=1, accepted=True, reference='proof:accepted')
+                    for name in ('collect', 'normalize', 'analyze', 'summarize')]
+        state.update_task(fixture.scope, fixture.request(
+            state='WORKING', reason='Record accepted work', reference='proof:accepted', milestones=accepted))
+        fixture.plan()
+        fixture.checked()
+        fixture.review()
+        done = fixture.verify()['task']
+        self.assertEqual(done['state'], 'DONE')
+        native = NativeFixture()
+        native_config = fixture.request(reference='user:adopt', workflow_topic='Completed task')
+        with patch.object(Path, 'home', return_value=fixture.root):
+            title_sync.operate(fixture.scope, 'configure', native_config, transport=lambda: native)
+        self.assertEqual(native.title, '\uFFFB▰▰▰▰▰ [W1] P · Completed task')
+        milestones = accepted + [dict(id='next-data', weight=1, accepted=False, reference='user:continue')]
+        request = fixture.request(state='WORKING', reason='Check another dataset',
+                                  reference='user:continue', milestones=milestones)
+        output = io.StringIO()
+        with patch.object(Path, 'home', return_value=fixture.root), \
+             patch('sys.argv', ['workflow.py', 'task', 'update', '--cwd', str(fixture.repo)]), \
+             patch('sys.stdin', SimpleNamespace(buffer=io.BytesIO(json.dumps(request).encode()))), \
+             patch('sys.stdout', output), \
+             patch('runtime.startup.acquire_project_entry', return_value=test_acquisition(fixture.scope)), \
+             patch.object(title_sync, 'NativeTitles', return_value=native):
+            self.assertEqual(workflow.main(), 0, output.getvalue())
+        reopened = json.loads(output.getvalue())['task']
+        self.assertEqual(reopened['task_id'], done['task_id'])
+        self.assertEqual(reopened['milestones'], milestones)
+        self.assertEqual(native.title, '\uFFFB▰▰▰▰▱ [W1] P · Completed task')
+
     def test_explicit_refresh_revalidates_done_before_title_fast_path(self):
         from tests import test_evidence
         fixture = test_evidence.EvidenceTests('runTest')
