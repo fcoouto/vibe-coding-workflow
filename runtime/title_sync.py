@@ -58,7 +58,7 @@ def reconcile(saved, current, task):
         if pending and after and all(pending[k] == after[k] for k in ('meter','family','member','status','layout')):
             before = pending
         if before and after and all(before[k]==after[k] for k in ('meter','family','member','status','layout')):
-            saved.update(topic=after['topic'],applied=current,pending=None)
+            saved.update(topic=after['topic'],topic_workflow_owned=False,applied=current,pending=None)
         else:
             saved.update(paused=True,pending=None)
             return saved,None
@@ -164,7 +164,7 @@ def _load(path):
     saved = json.loads(raw)
     from runtime import state
     state._fields(saved, ('identity', 'family', 'member', 'topic', 'cells', 'applied',
-                          'pending', 'paused', 'notified', 'applied_revision'))
+                          'pending', 'paused', 'notified', 'applied_revision'), ('topic_workflow_owned',))
     format_title(saved['family'], saved['member'], saved['topic'], 'WORKING', saved['cells'])
     if not isinstance(saved['applied'], str) or len(saved['applied'].removeprefix(METER_PREFIX)) > MAX_TITLE_BODY:
         raise ValueError('Invalid saved title observation')
@@ -173,6 +173,8 @@ def _load(path):
         raise ValueError('Invalid pending title')
     if type(saved['paused']) is not bool or type(saved['notified']) is not bool:
         raise ValueError('Invalid title ownership state')
+    if type(saved.get('topic_workflow_owned', False)) is not bool:
+        raise ValueError('Invalid saved topic ownership')
     if saved['applied_revision'] is not None:
         state._integer(saved['applied_revision'], 'applied title revision', 1)
     return saved
@@ -196,12 +198,18 @@ def operate(scope, action, request, transport=None, *, force=False):
     if action in {'sync', 'status'}:
         state._fields(request, ('client', 'session_id'))
     if action in {'configure', 'resume'}:
+        optional = ('topic', 'parent_session_id', 'member')
+        if action == 'configure':
+            optional += ('workflow_topic',)
         state._fields(request, ('client', 'session_id', 'task_id', 'scope_ref', 'expected_revision', 'reference'),
-                      ('topic', 'parent_session_id', 'member'))
+                      optional)
         state._integer(request['expected_revision'], 'title task revision', 1)
         if any(request[key] != task[key] for key in ('task_id', 'scope_ref')) or request['expected_revision'] != task['revision']:
             raise ValueError('Title request differs from current task binding or revision')
         state._text(request['reference'], 'title decision reference')
+    workflow_topic = request.get('workflow_topic')
+    if 'workflow_topic' in request and ('topic' in request or not isinstance(workflow_topic, str)):
+        raise ValueError('Workflow topic must be text supplied without an explicit topic')
     descriptor = os.open(path.with_suffix('.lock'), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
     try:
         state._private(path.with_suffix('.lock'))
@@ -217,13 +225,14 @@ def operate(scope, action, request, transport=None, *, force=False):
                 raise ValueError('Presentation belongs to a previous task; explicitly configure or resume it')
             if any(key in request for key in ('parent_session_id', 'member')):
                 raise ValueError('Task replacement retains the native family/member binding')
-            if request.get('topic') is not None:
-                format_title(saved['family'], saved['member'], request['topic'], task['state'], 0)
+            topic = request.get('topic', workflow_topic)
+            if topic is not None:
+                format_title(saved['family'], saved['member'], topic, task['state'], 0)
             history = path.with_name('title-history-' + _digest(saved) + '.json')
             _atomic(history, saved)
             saved = dict(saved, identity=identity, applied_revision=None)
             if request.get('topic') is not None:
-                saved['topic'] = request['topic']
+                saved.update(topic=topic, topic_workflow_owned=False)
         if action == 'status':
             return dict(ok=True, managed=saved is not None, presentation=saved)
         if action == 'sync' and saved is not None and saved['paused'] and saved['notified']:
@@ -239,6 +248,8 @@ def operate(scope, action, request, transport=None, *, force=False):
             if action == 'configure' and rebind:
                 # Compare the prior managed observation before adopting the new task.
                 saved, _ = reconcile(saved, current, task)
+                if workflow_topic is not None and saved.get('topic_workflow_owned') and not saved['paused']:
+                    saved['topic'] = workflow_topic
             elif action == 'configure':
                 if saved is not None:
                     raise ValueError('Title already managed; use explicit resume')
@@ -250,20 +261,21 @@ def operate(scope, action, request, transport=None, *, force=False):
                 member = request.get('member', 'P')
                 if (member == 'P') != (parent == session):
                     raise ValueError('Member role differs from declared family parent')
-                topic = request.get('topic')
+                topic = request.get('topic', workflow_topic)
                 format_title('W1', member, topic, task['state'], 0)
                 try:
                     family = reserve(Path.home() / '.vibe-coding-workflow' / 'workstreams-families.sqlite3', client, parent)
                 except sqlite3.Error:
                     raise OSError('Family code register unavailable') from None
                 saved = dict(identity=identity, family=family, member=member, topic=topic,
+                    topic_workflow_owned=workflow_topic is not None,
                     cells=0, applied=current, pending=None, paused=False, notified=False, applied_revision=None)
             elif action == 'resume':
                 if saved is None:
                     raise ValueError('Title is not managed')
                 if 'topic' in request:
                     format_title(saved['family'], saved['member'], request['topic'], task['state'], 0)
-                    saved['topic'] = request['topic']
+                    saved.update(topic=request['topic'], topic_workflow_owned=False)
                 saved.update(paused=False, applied=current, pending=None, notified=False)
             task = _task(scope, client, session, presentation=True)
             if {key: task[key] for key in identity} != identity:
