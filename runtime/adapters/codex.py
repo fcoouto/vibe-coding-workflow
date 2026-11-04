@@ -114,7 +114,15 @@ def normalize_runtime(payload) -> RuntimeEvent:
     if (patch_input is not None and isinstance(raw_path, str) and 0 < len(raw_path) <= 4096
             and raw_path.isprintable() and Path(raw_path).is_absolute()):
         transcript = Path(raw_path)
-    return RuntimeEvent(kind, "codex", session, cwd, turn, call, tool, active, fingerprint, patch_input, transcript)
+    parent_session = None
+    if tool == 'apply_patch' and 'agent_id' in payload:
+        # Native child tool hooks carry the root session and the concrete child thread separately.
+        agent = native_string(payload, 'agent_id')
+        if agent == session:
+            raise StartupError('Codex child tool hook must identify a distinct agent')
+        parent_session, session = session, agent
+    return RuntimeEvent(kind, "codex", session, cwd, turn, call, tool, active, fingerprint, patch_input,
+                        transcript, parent_session)
 
 
 def render_runtime(result: HookResult) -> dict | None:
@@ -855,7 +863,10 @@ def _cooperative_activity(raw, *, path, child, turn, result, review, wait_args=N
         if kind in {'session_meta', 'turn_context', 'token_usage_record', 'world_state'}:
             continue
         if kind in {'inter_agent_communication', 'inter_agent_communication_metadata'}:
-            if phase != 'before' or kind in initial_delivery:
+            initial_trigger = (kind == 'inter_agent_communication_metadata' and phase == 'active'
+                and settings_seen and not tools_started and event.keys() == {'trigger_turn'}
+                and event['trigger_turn'] is True)
+            if kind in initial_delivery or (phase != 'before' and not initial_trigger):
                 raise ObservationError('cooperative_activity_unverified')
             initial_delivery.add(kind)
             continue

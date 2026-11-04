@@ -290,6 +290,16 @@ class StateTests(unittest.TestCase):
         self.update(conditions=[dict(id="patch", kind="blocker", action="patch", reason="Check", reference="ref")])
         self.assertEqual(self.api().process_event(self.scope, other).action, "pass")
 
+    def test_native_child_keeps_ordinary_parent_patch_authority(self):
+        self.start()
+        self.update(state='WORKING')
+        child = dict(session_id='child', hook_parent_session_id='session')
+        self.assertEqual(self.event(**child).action, 'pass')
+        self.assertEqual(self.event('PostToolUse', **child).action, 'pass')
+        self.assertIsNone(self.status(session='child')['task'])
+        self.update(state='BLOCKED')
+        self.assertEqual(self.event(**child, tool_call_id='second').action, 'deny')
+
     def test_receipts_deduplicate_conflicts_missing_identity_and_late_events(self):
         self.start()
         self.event("PostToolUse", tool_name="unknown")

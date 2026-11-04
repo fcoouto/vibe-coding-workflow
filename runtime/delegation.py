@@ -1575,6 +1575,7 @@ def _qualified_child_patch(scope, db, event, *, budget, pre_fingerprint=None):
             state._entry_budget_check(budget)
         owner, data = record['owner'], record['data']
         if (owner['scope_id'] != scope_id or owner['client'] != event.client
+                or event.hook_parent_session_id not in (None, owner['session_id'])
                 or owner['session_id'] == event.session_id or data['role'] != 'worker'):
             continue
         request = record['body']['request']

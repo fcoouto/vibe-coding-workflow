@@ -1132,8 +1132,12 @@ class CooperativeQualificationTests(unittest.TestCase):
         prepared = delegation.prepare_assignment(scope, request)
         self.assertTrue(prepared['launch_admitted'])
         self.assertFalse(delegation.prepare_assignment(scope, request)['launch_admitted'])
-        payload = dict(hook_event_name='PreToolUse', session_id='child', cwd=str(d5.repo), turn_id='child-turn',
-            tool_use_id='patch-1', tool_name='apply_patch', tool_input=dict(command=command))
+        payload = dict(hook_event_name='PreToolUse', session_id='parent', agent_id='child', agent_type='default',
+            cwd=str(d5.repo), turn_id='child-turn', tool_use_id='patch-1', tool_name='apply_patch',
+            tool_input=dict(command=command))
+        for malformed in (None, '', 'parent'):
+            with self.assertRaises(state.StartupError):
+                codex.normalize_runtime(payload | dict(agent_id=malformed))
         self.assertEqual(state.process_event(scope, codex.normalize_runtime(payload)).action, 'deny')
         payload['transcript_path'] = str(d5.root / 'rollout.jsonl')
         lineage = dict(parent_session_id='parent', task_name=prepared['task_name'],
@@ -1141,6 +1145,8 @@ class CooperativeQualificationTests(unittest.TestCase):
         with patch.object(codex, 'guarded_child_lineage', return_value=lineage | dict(parent_session_id='foreign'), create=True):
             self.assertEqual(state.process_event(scope, codex.normalize_runtime(payload)).action, 'deny')
         with patch.object(codex, 'guarded_child_lineage', return_value=lineage, create=True):
+            wrong_parent = payload | dict(session_id='foreign')
+            self.assertEqual(state.process_event(scope, codex.normalize_runtime(wrong_parent)).action, 'deny')
             self.assertEqual(state.process_event(scope, codex.normalize_runtime(payload)).action, 'pass')
             repeated = payload | dict(tool_use_id='another-patch-call')
             self.assertEqual(state.process_event(scope, codex.normalize_runtime(repeated)).action, 'deny')

@@ -624,6 +624,38 @@ for line in sys.stdin:
         with self.assertRaises(StartupError):
             self.observe_worker(responses, binding, cooperative=True)
 
+    def test_cooperative_activity_allows_only_the_initial_v2_trigger_metadata(self):
+        def row(kind, **payload):
+            return dict(timestamp='fixture', type=kind, payload=payload)
+
+        start = [row('session_meta', id='child'), row('event_msg', type='task_started', turn_id='child-turn'),
+                 row('turn_context', turn_id='child-turn', multi_agent_version='v2'),
+                 row('event_msg', type='thread_settings_applied', thread_id='child', thread_settings={})]
+        trigger = row('inter_agent_communication_metadata', trigger_turn=True)
+        call = row('response_item', type='custom_tool_call', call_id='patch', name='apply_patch', input='patch')
+        output = row('response_item', type='custom_tool_call_output', call_id='patch', output='Success')
+        completed = row('event_msg', type='task_complete', turn_id='child-turn', last_agent_message='report')
+
+        def observe(rows, *, review=False):
+            raw = b''.join(json.dumps(item).encode() + b'\n' for item in rows)
+            return codex._cooperative_activity(raw, path=self.root / 'rollout.jsonl', child='child',
+                turn='child-turn', result='report', review=review)['calls']
+
+        self.assertEqual(observe([*start, trigger, call, output, completed]), [
+            dict(id='patch', tool='apply_patch', input_digest=codex.patch_input_fingerprint('patch'))])
+        self.assertEqual(observe([*start, trigger, completed], review=True), [])
+        for rows in (
+            [*start[:-1], trigger, start[-1], call, output, completed],
+            [*start, trigger, trigger, call, output, completed],
+            [*start, row('inter_agent_communication_metadata', trigger_turn=1), call, output, completed],
+            [*start, row('inter_agent_communication_metadata', trigger_turn=True, extra=True), call, output, completed],
+            [*start, row('inter_agent_communication', trigger_turn=True), call, output, completed],
+            [*start, call, trigger, output, completed],
+            [*start, call, output, completed, trigger],
+        ):
+            with self.subTest(rows=rows), self.assertRaises(doctor.ObservationError):
+                observe(rows)
+
     def test_cooperative_observation_rejects_unknown_or_unfinished_activity(self):
         call = dict(type='custom_tool_call', call_id='patch', name='apply_patch', input='patch')
         output = dict(type='custom_tool_call_output', call_id='patch', output='Success')
