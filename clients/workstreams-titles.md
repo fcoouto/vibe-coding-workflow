@@ -2,9 +2,8 @@
 
 Load for eligible implementation naming, adopting a managed title, recording
 task progress, resolving a manual rename, or diagnosing missed title updates.
-The [naming contract](workstreams-naming.md) owns the format and adoption trigger.
-For runtime-bound tasks, render canonical state verbatim; there is no separate
-display-status list.
+The [naming contract](workstreams-naming.md) owns the format, attention rules
+and adoption trigger.
 
 ## Adopt a parent or child
 
@@ -95,10 +94,15 @@ The existing `WAITING` state covers merge waits; its reason identifies the depen
 One or several PRs do not change the title format. A child's wait never assigns
 the parent's state or progress; the parent follows its own accepted scope.
 
-For direct display controls, use the same phase meanings in the existing task
-plan without creating runtime state. For runtime-bound threads, use the existing
-task update command and its revision checks. Optional
-`milestones` entries are exactly `{id, weight, accepted, reference}`. IDs are
+For direct display controls, use the same phase meanings and next-action owner
+in the existing task plan without creating runtime state. For runtime-bound
+threads, pass `user_attention: true` in the revision-checked task update when
+the [attention rules](workstreams-naming.md#status-and-accepted-progress) apply.
+Use a same-state update if the next action changes without a phase change. Pass
+`user_attention: false` to suppress a generated label when the next action
+belongs elsewhere.
+Generated waits for manual merge use the retained delivery plan and readiness.
+Optional `milestones` entries are exactly `{id, weight, accepted, reference}`. IDs are
 unique; weights are positive bounded integers; accepted is boolean; references
 record the coordinator's acceptance decision. Keep milestones in this task plan,
 including required review and integration. Do not accept a worker's self-report
@@ -176,8 +180,8 @@ Reconcile affected owners with their original runtime and use the existing
 [approved runtime update](runtime.md#change-a-pinned-runtime) procedure with a fresh
 state authority. Existing ownership and unresolved assignments remain binding.
 
-An authorized display-format update can reconcile saved titles with the earlier
-layout or without the leading meter character. Preserve the family/member
+An authorized display-format update can reconcile saved titles with earlier
+status layouts or without the leading meter character. Preserve the family/member
 binding, topic-only edits and manual-title pauses. A user changing the layout
 or meter remains a whole-format override. Do not bulk-rewrite titles, replace
 original runtime readers or silently repin active tasks for a format change.

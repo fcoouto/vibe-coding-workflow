@@ -38,20 +38,22 @@ observations are unavailable, report the naming limitation without guessing a
 title, identity or successful update.
 
 Start every managed title with one `U+FFFB` (interlinear annotation terminator),
-immediately followed by five visible meter cells. Put one ASCII space
-between the meter and status. The examples include the leading character.
+immediately followed by five visible meter cells and one ASCII space. Include
+the status field and its separator only when the user needs to act. The examples
+include the leading character.
 
 ```text
+<U+FFFB><meter> [W<number>] <P|C<number>> · <short_topic>
 <U+FFFB><meter> <STATUS> · [W<number>] <P|C<number>> · <short_topic>
 ```
 
 ```text
-￻▰▰▱▱▱ WORKING · [W1] P · Thread naming
-￻▰▰▰▰▰ DONE · [W1] C1 · Naming rules
+￻▰▰▱▱▱ [W1] P · Thread naming
+￻▰▰▰▰▰ [W1] C1 · Naming rules
 ￻▰▰▰▰▱ REVIEW · [W1] C2 · Status tags
 ￻▰▰▰▱▱ BLOCKED · [W1] C3 · Search support
 ￻▰▰▰▱▱ WAITING · [W1] C4 · Client check
-￻▰▱▱▱▱ WORKING · [W2] P · Solo fix
+￻▰▱▱▱▱ [W2] P · Solo fix
 ```
 
 The literal brackets enclose the shared family code. `P` identifies the parent;
@@ -98,7 +100,7 @@ when needed. Reviewer topics start with `Review`.
 
 ## Status and accepted progress
 
-Use exactly one uppercase status immediately after the meter:
+Use these canonical task states in the existing task plan:
 
 | Status | Use when |
 | --- | --- |
@@ -111,6 +113,14 @@ Use exactly one uppercase status immediately after the meter:
 | `PAUSED` | Work was deliberately put aside. |
 | `DONE` | The thread's agreed scope is complete and verified. |
 | `CANCELLED` | Work was closed without completing its agreed scope. |
+
+Show `REVIEW` when the user is asked to review a result, `WAITING` when the
+user owes an action such as a reply, approval or manual merge, and `BLOCKED`
+when the user must intervene to unblock work. Hide the label for internal
+review, agent-owned next steps, background dependencies and all other states.
+Decide from the actual next action and its owner. Clear the label when the user
+has acted or the next action moves to someone else, even if the task state stays
+the same.
 
 Compute each thread's progress from currently accepted milestones in its existing
 task plan, with task-appropriate weights when outcomes differ substantially.
@@ -126,13 +136,14 @@ unfinished work at four cells. Without measurable milestones, show one filled
 cell during `WORKING` as an activity indicator. Other unfinished statuses use
 an empty meter in that case. At adoption, use the actual phase. Newly started
 implementation uses `WORKING`, not an automatic `TRIAGE` reset.
-Reserve `▰▰▰▰▰` for verified `DONE`, keeping both the full meter and that label.
+Reserve `▰▰▰▰▰` for verified `DONE`.
 Show no numeric percentage or `% done`. Measured progress comes from accepted
 milestones. `BLOCKED`, `WAITING` and `PAUSED` retain
 accepted progress; `CANCELLED` retains partial progress and never implies completion.
 
-Update display titles on meaningful milestone, phase or blocker changes during
-existing handling, without extra model turns, polling or a progress registry.
+Update display titles on meaningful milestone, phase, blocker or next-action
+owner changes during existing handling, without extra model turns, polling or
+a progress registry.
 For naming-only requests, change display metadata without enabling Workstreams,
 starting work or altering task state. Apply this convention to requested existing
 titles through supported controls; do not bulk-rename unrelated threads.

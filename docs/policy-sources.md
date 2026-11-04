@@ -268,6 +268,10 @@ milestones. The [naming contract](../clients/workstreams-naming.md#status-and-ac
 defines this as a display indicator. Measurable plans still use accepted
 milestone weights.
 
+The user requested labels only when their action is needed. The [naming contract](../clients/workstreams-naming.md#status-and-accepted-progress)
+limits labels to actionable `REVIEW`, `WAITING` and `BLOCKED`. The [title procedure](../clients/workstreams-titles.md#record-status-and-accepted-progress)
+connects the next action to the ordinary and runtime-bound title paths.
+
 Instruction-path review covers solo implementation, questions, planning with and
 without workers, implementation review, follow-up questions after completion and
 manual overrides. Package checks, instruction observations and installed native

@@ -1,9 +1,10 @@
 """Manual-flow acceptance gaps; all provider execution uses disposable fixtures."""
 from copy import deepcopy
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from runtime import delivery, evidence, state
+from runtime import delivery, evidence, state, title_sync
 from scripts.delivery_coordinator import DeliveryOperationOwner
 from tests import test_delivery_provider_mutations, test_delivery_reconcile
 
@@ -225,6 +226,8 @@ class ManualDeliveryTests(unittest.TestCase):
         self.assertEqual(waiting['task']['state'], 'WAITING')
         marker = waiting['task']['delivery']['merge_wait']
         self.assertEqual(marker['verification'], waiting['task']['evidence']['verification'])
+        with state._database(self.scope) as db:
+            self.assertTrue(delivery.manual_merge_needs_user(self.scope, db, waiting['task']))
         self.case.merged()
         self.case.reconcile('actual-gate-manual-merge')
         settled = self.operate('settle')
@@ -284,10 +287,47 @@ class ManualDeliveryTests(unittest.TestCase):
         self.assertNotEqual(self.status()['task']['state'], 'DONE')
 
     def test_observed_manual_merge_resolves_only_generated_wait_before_verification(self):
+        from tests.test_title_sync_integration import NativeFixture
+
         waiting = self.waiting()
         marker = waiting['task']['delivery']['merge_wait']
+        self.case.reconcile('manual-ready-observed')
+        waiting = self.status()
+        task = waiting['task']
+        native = NativeFixture()
+        request = {key: task[key] for key in ('client', 'session_id', 'task_id', 'scope_ref')}
+        with patch.object(Path, 'home', return_value=self.fixture.root):
+            title_sync.operate(self.scope, 'configure', request | dict(expected_revision=task['revision'],
+                reference='fixture:adopt', topic='Delivery'), transport=lambda: native)
+        self.assertIn(' WAITING · [', native.title)
+        baseline = native.title.replace(' WAITING · [', ' [')
+
+        def sync():
+            return title_sync.operate(self.scope, 'sync', dict(client='codex', session_id='parent'),
+                                      transport=lambda: native)
+
+        update = {key: task[key] for key in ('state', 'reason', 'reference')}
+        state.update_task(self.scope, self.fixture.request(**update, user_attention=False))
+        sync()
+        self.assertEqual(native.title, baseline)
+        state.update_task(self.scope, self.fixture.request(**update, conditions=[dict(id='agent-check',
+            kind='blocker', action='task', reason='Agent must finish a check', reference='fixture:check')]))
+        sync()
+        self.assertEqual(native.title, baseline)
+        state.update_task(self.scope, self.fixture.request(**update,
+            resolutions=[dict(id='agent-check', reference='fixture:checked')]))
+        sync()
+        self.assertIn(' WAITING · [', native.title)
+        self.case.provider.pr['draft'] = True
+        self.case.reconcile('manual-back-to-draft')
+        sync()
+        self.assertEqual(native.title, baseline)
         self.case.merged()
         self.case.reconcile('manual-merge')
+        self.assertEqual(self.status()['task']['state'], 'WAITING')
+        sync()
+        self.assertEqual(native.title, baseline)
+        self.assertEqual(set(native.written_sessions), {request['session_id']})
         result = self.operate('settle')
         conditions = {condition['id']: condition for condition in result['task']['conditions']}
         self.assertEqual(conditions[marker['condition_id']]['status'], 'resolved')
