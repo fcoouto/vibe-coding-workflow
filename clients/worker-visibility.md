@@ -92,6 +92,24 @@ assignment preparation can still omit role metadata and use the original
 fallback. Qualification must observe the first badge; preparation alone does
 not prove rendering.
 
+### Prepare a follow-up for an existing child
+
+Use the same `prepare` action when preparing a new assignment for a reused
+native child. Add its actual `worker_id` to the full brief. Keep its original
+parent UUID, checkout and creation `task_name`; use the original `--context`
+if it was explicitly selected. Omit `visibility` when the declaration is
+already saved. Otherwise reuse the role in the managed assignment, or choose
+the role once for this follow-up if none was recorded. The helper verifies the
+native binding before capturing a missing declaration. It preserves the child,
+saved declaration and exact follow-up message, without adding a marker to it.
+
+For configured Habblaud delivery, include the same `--visibility-plugin`,
+`--habblaud-endpoint` and `--habblaud-account` options as publication below.
+The result's `badge` reports a display-only update. An unavailable declaration
+or receiver never prevents the authorized follow-up. For managed continuations,
+prepare display before consuming the one-use send intent. Use the exact
+admitted prompt and the existing continuation controls to send it.
+
 ### Forward the original Desktop start event
 
 When the existing Habblaud `SubagentStart` command is configured to use this
@@ -194,7 +212,8 @@ attempts. It forwards the canonical role and verified model display name.
 The routing ledger owns execution and accounting, and native review owns
 acceptance. A display receipt establishes visibility only.
 
-The current Habblaud transport handles Codex accounts and hooks. A host for
+The [Habblaud adapter](../runtime/habblaud.py) owns transport, label rendering,
+registration and recovery for all routes. The current transport handles Codex accounts and hooks. A host for
 another client can reuse registration after verifying its own parent and
 execution evidence and supplying a qualified transport for that client.
 Observe the first rendered badge separately from delivery and later recovery.

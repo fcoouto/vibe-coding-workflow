@@ -1,13 +1,15 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index ff23889..3c38269 100644
+index ff23889..172bf2a 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -10,6 +10,19 @@ do meio (0.**3**.0).
+@@ -10,6 +10,21 @@ do meio (0.**3**.0).
 
  ## [Não lançado]
 
 +### Corrigido
 +
++- **Codex: selos declarados são restaurados após reiniciar o Habblaud.** A recuperação confirma o pai e a conta do
++  subagente, preservando seu estado e sua atividade quando ele volta a trabalhar.
 +- **Codex: delegações aninhadas usam o pai confirmado pelo rollout**, preservando a identidade e a atividade do
 +  subagente. Registros herdados dos pais não substituem a identidade dos filhos.
 +  Filhos novos com papel genérico aguardam até três segundos pelo selo de início; sem metadados,
@@ -183,6 +185,20 @@ index 29059c1..7ebd8a7 100644
  }
 
  /** Barra de progresso fina; `value` 0–1. */
+diff --git a/server/index.ts b/server/index.ts
+index 227e0e5..4e98c7a 100644
+--- a/server/index.ts
++++ b/server/index.ts
+@@ -136,7 +136,8 @@ const office = new Office({
+ const claude = new ClaudeWatcher({ accounts, office, inDocker: config.inDocker });
+ const agents = new SourceSet([claude]);
+ const codexDirs = config.codex ? discoverCodexDirs(process.env, config.home) : [];
+-const codex = codexDirs.length ? new CodexSource({ accounts, office, dirs: codexDirs, env: process.env, home: config.home }) : undefined;
++const codex = codexDirs.length ? new CodexSource({ accounts, office, dirs: codexDirs, env: process.env,
++  home: config.home, badgeFile: join(config.dataDir, 'codex-badges.json') }) : undefined;
+ if (codex) agents.add(codex);
+ // Eventos dos hooks do Codex (POST /api/codex/events, mod/habblaud-codex/hook.mjs): vão para a fonte do Codex ao vivo
+ // (CodexLive); sem ela (nenhuma pasta do Codex ou HABBLAUD_CODEX=0) a rota responde {ok: false}.
 diff --git a/server/model/office.ts b/server/model/office.ts
 index aacf0b7..ba766f1 100644
 --- a/server/model/office.ts
@@ -220,11 +236,120 @@ index aacf0b7..ba766f1 100644
    completeSub(id: string, opts: { notify?: boolean } = {}): void {
      const rec = this.agents.get(id);
      if (!rec || rec.info.kind !== 'sub' || rec.info.status === 'done' || rec.info.status === 'offline') return;
+diff --git a/server/sources/codex/badges.ts b/server/sources/codex/badges.ts
+new file mode 100644
+index 0000000..6dd95b2
+--- /dev/null
++++ b/server/sources/codex/badges.ts
+@@ -0,0 +1,73 @@
++import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
++import { dirname } from 'node:path';
++import { isUnreportedCodexRole } from '../../../shared/codex-role';
++import { tr } from '../../../shared/i18n';
++import { errMsg, log } from '../../log';
++import { readRolloutHead } from './files';
++
++export function declaredDisplayLabel(raw: unknown): string | undefined {
++  const maxCodePoints = 8_195;
++  if (typeof raw !== 'string' || raw.length > 2 * maxCodePoints || [...raw].length > maxCodePoints
++    || raw.trim() !== raw || /[\p{C}\p{Zl}\p{Zp}]/u.test(raw) || /guardian/i.test(raw)) return undefined;
++  const separator = raw.lastIndexOf(' · ');
++  return separator > 0 && raw.slice(separator + 3).trim() ? raw : undefined;
++}
++
++// Mesmo limite de nomes persistidos dos personagens.
++const MAX_BADGES = 4_000;
++
++/** Guarda apenas a apresentação, vinculada à pasta da conta e à relação pai/filho. */
++export class CodexBadges {
++  private readonly labels = new Map<string, string>();
++  private dirty = false;
++
++  constructor(private readonly file?: string) {
++    if (!file) return;
++    try {
++      const saved = JSON.parse(readFileSync(file, 'utf8'));
++      if (saved?.version !== 1 || !saved.labels || typeof saved.labels !== 'object' || Array.isArray(saved.labels)) return;
++      for (const [key, raw] of Object.entries(saved.labels).slice(-MAX_BADGES)) {
++        const label = declaredDisplayLabel(raw);
++        if (label && !isUnreportedCodexRole(label)) this.labels.set(key, label);
++      }
++    } catch {
++      // Um arquivo indisponível não muda a presença nem a execução dos agentes.
++    }
++  }
++
++  get(accountDir: string, child: string, parent: string): string | undefined {
++    return this.labels.get(JSON.stringify([accountDir, child, parent]));
++  }
++
++  remember(accountDir: string, child: string, parent: string, label: string): string {
++    const key = JSON.stringify([accountDir, child, parent]);
++    const saved = this.labels.get(key);
++    if (saved === undefined) {
++      this.labels.set(key, label);
++      if (this.labels.size > MAX_BADGES) this.labels.delete(this.labels.keys().next().value!);
++      this.dirty = true;
++    }
++    this.save();
++    return saved ?? label;
++  }
++
++  rememberNative(accountDir: string, child: string, parent: string, label: string, path?: string): boolean {
++    const meta = path && readRolloutHead(path).meta;
++    if (!meta || meta.internal || meta.threadId !== child || meta.parentThreadId !== parent) return false;
++    return this.remember(accountDir, child, parent, label) === label && (!this.file || !this.dirty);
++  }
++
++  private save(): void {
++    if (!this.file || !this.dirty) return;
++    try {
++      mkdirSync(dirname(this.file), { recursive: true });
++      const tmp = `${this.file}.${process.pid}.tmp`;
++      writeFileSync(tmp, JSON.stringify({ version: 1, labels: Object.fromEntries(this.labels) }), { mode: 0o600 });
++      renameSync(tmp, this.file);
++      this.dirty = false;
++      log.clearOnce('codex-badges-write');
++    } catch (err) {
++      log.warnOnce('codex-badges-write', tr('Não consegui gravar {0}: {1}', [this.file, errMsg(err)]));
++    }
++  }
++}
 diff --git a/server/sources/codex/source.test.ts b/server/sources/codex/source.test.ts
-index 0afe870..2016733 100644
+index 0afe870..8163c94 100644
 --- a/server/sources/codex/source.test.ts
 +++ b/server/sources/codex/source.test.ts
-@@ -482,6 +482,331 @@ describe('fonte do Codex: eventos de hook', () => {
+@@ -24,10 +24,16 @@ afterEach(() => {
+   cleanups = [];
+ });
+
+-function setup(opts: { names?: string[]; noLocks?: boolean; env?: (dirs: string[]) => NodeJS.ProcessEnv } = {}) {
+-  const homes = (opts.names ?? ['.codex']).map((n) => codexHome(n));
++function setup(opts: {
++  names?: string[];
++  homes?: ReturnType<typeof codexHome>[];
++  badgeFile?: string;
++  noLocks?: boolean;
++  env?: (dirs: string[]) => NodeJS.ProcessEnv;
++} = {}) {
++  const homes = opts.homes ?? (opts.names ?? ['.codex']).map((n) => codexHome(n));
+   const home = homes[0];
+-  cleanups.push(...homes.map((h) => h.cleanup));
++  if (!opts.homes) cleanups.push(...homes.map((h) => h.cleanup));
+   if (opts.noLocks) rmSync(join(home.dir, 'thread-writer-locks'), { recursive: true });
+   let clock = Date.now();
+   const now = () => clock;
+@@ -44,7 +50,8 @@ function setup(opts: { names?: string[]; noLocks?: boolean; env?: (dirs: string[
+   });
+   late.office = office;
+   const dirs = homes.map((h) => h.dir);
+-  const source = new CodexSource({ accounts, office, dirs, env: opts.env?.(dirs) ?? {}, home: home.home, now, watch: false });
++  const source = new CodexSource({ accounts, office, dirs, env: opts.env?.(dirs) ?? {}, home: home.home,
++    now, watch: false, badgeFile: opts.badgeFile });
+   // Para antes de apagar as pastas (nenhum ciclo agendado roda depois).
+   cleanups.unshift(() => source.stop());
+   const notices: Notice[] = [];
+@@ -482,6 +489,391 @@ describe('fonte do Codex: eventos de hook', () => {
      expect(ctx.agent(`.codex:${C}`)?.status).toBe('done');
    });
 
@@ -314,6 +439,66 @@ index 0afe870..2016733 100644
 +    });
 +    ctx.hook(ev('SubagentStart', { agent_id: C, agent_type: 'Reviewer · GPT-6.1 Sol' }));
 +    expect(ctx.agent(key)?.role).toBe('Scout · GPT-6.1 Sol');
++  });
++
++  it.each(['SubagentStart', 'SubagentBadge'])('restaura o selo de %s depois de reiniciar o receptor', (event) => {
++    const home = codexHome('.codex');
++    cleanups.push(home.cleanup);
++    const options = { homes: [home], badgeFile: join(home.home, 'codex-badges.json') };
++    const ctx = setup(options);
++    const at = ctx.now() - 10_000;
++    const key = `.codex:${C}`;
++    home.rollout(T, [R.meta(T, { at })]);
++    const path = home.rollout(C, [R.meta(C, { at, sessionId: T, source: SOURCES.sub(T, 'default') }),
++      R.taskStarted('s1', at), R.taskComplete('s1', at + 1)]);
++    home.lock(T, at);
++    home.lock(C, at);
++    ctx.source.boot();
++    expect(ctx.hook(ev(event, { agent_id: C, vcw_display_label: 'Reviewer · Native Model' }), '.codex')).toBe(true);
++    if (event === 'SubagentBadge') expect(ctx.agent(key)).toBeUndefined();
++    ctx.source.stop();
++
++    const restarted = setup(options);
++    home.append(path, [R.taskStarted('s2', restarted.now())]);
++    restarted.source.boot();
++    expect(restarted.agent(key)).toMatchObject({ role: 'Reviewer · Native Model', parentId: KEY, status: 'working' });
++  });
++
++  it('reconcilia o selo de um filho reutilizado sem trocar seu estado ou sua declaração', () => {
++    const ctx = setup({ names: ['.codex', '.codex-trabalho'] });
++    const at = ctx.now() - 10_000;
++    const key = `.codex:${C}`;
++    ctx.home.rollout(T, [R.meta(T, { at })]);
++    ctx.home.rollout(C, [R.meta(C, { at, sessionId: T, source: SOURCES.sub(T, 'default') }), R.taskStarted('s1', at)]);
++    ctx.home.lock(T, at);
++    ctx.home.lock(C, at);
++    ctx.source.boot();
++    ctx.hook(ev('PermissionRequest', { agent_id: C }), '.codex');
++    const before = ctx.agent(key)!;
++    expect(before).toMatchObject({ role: 'Subagente (Codex)', status: 'waiting' });
++    const badge = ev('SubagentBadge', { agent_id: C, vcw_display_label: 'Reviewer · Native Model' });
++    expect(ctx.hook(badge)).toBe(false);
++    expect(ctx.hook(badge, '.codex-trabalho')).toBe(false);
++    expect(ctx.hook({ ...badge, session_id: threadId(3) }, '.codex')).toBe(false);
++    expect(ctx.hook({ ...badge, agent_id: threadId(4) }, '.codex')).toBe(false);
++    expect(ctx.hook(badge, '.codex')).toBe(true);
++    expect(ctx.hook(badge, '.codex')).toBe(true);
++    expect(ctx.hook({ ...badge, vcw_display_label: 'Builder · Native Model' }, '.codex')).toBe(false);
++    expect(ctx.agent(key)).toEqual({ ...before, role: 'Reviewer · Native Model' });
++  });
++
++  it('permite repetir a recuperação quando o arquivo de selos não pode ser gravado', () => {
++    const home = codexHome('.codex');
++    cleanups.push(home.cleanup);
++    const data = join(home.home, 'blocked');
++    writeFileSync(data, '');
++    const ctx = setup({ homes: [home], badgeFile: join(data, 'codex-badges.json') });
++    ctx.home.rollout(C, [R.meta(C, { at: ctx.now(), sessionId: T, source: SOURCES.sub(T, 'default') })]);
++    const badge = ev('SubagentBadge', { agent_id: C, vcw_display_label: 'Reviewer · Native Model' });
++    expect(ctx.hook(badge, '.codex')).toBe(false);
++    rmSync(data);
++    expect(ctx.hook(badge, '.codex')).toBe(true);
++    expect(ctx.agent(`.codex:${C}`)).toBeUndefined();
 +  });
 +
 +  it('mostra o primeiro selo aninhado com o pai nativo e preserva a atividade antecipada', () => {
@@ -557,10 +742,18 @@ index 0afe870..2016733 100644
      const ctx = setup({ names: ['.codex', '.codex-trabalho'] });
      ctx.source.boot();
 diff --git a/server/sources/codex/source.ts b/server/sources/codex/source.ts
-index e0accad..a551405 100644
+index e0accad..e5f67e8 100644
 --- a/server/sources/codex/source.ts
 +++ b/server/sources/codex/source.ts
-@@ -48,6 +48,7 @@ import {
+@@ -35,6 +35,7 @@ import type { AgentSource } from '../source';
+ import { FileTail, LineBuffer, warnOversizedLine } from '../tail';
+ import type { TerminalParser } from '../terminal';
+ import { codexPlanLabel, detectCodexAccounts } from './accounts';
++import { CodexBadges, declaredDisplayLabel } from './badges';
+ import { readLocks, readRolloutHead, rolloutDirs, RolloutIndex, parseRolloutName, LOCKS_DIR, type LockInfo } from './files';
+ import type { CodexLive } from './live';
+ import {
+@@ -48,6 +49,7 @@ import {
  } from './rollout';
  import { createCodexTerminalParser } from './terminal';
  import { tr } from '../../../shared/i18n';
@@ -568,7 +761,23 @@ index e0accad..a551405 100644
 
  /** Idade mínima do lock para valer como sessão aberta (os locks de manutenção duram menos). */
  export const LOCK_SETTLE_MS = 3_000;
-@@ -125,6 +126,7 @@ interface ThreadTracker {
+@@ -83,6 +85,7 @@ const HOOK_EVENTS = new Set([
+   'PermissionRequest',
+   'Stop',
+   'SubagentStart',
++  'SubagentBadge',
+   'SubagentStop',
+   'PreCompact',
+   'PostCompact',
+@@ -102,6 +105,7 @@ export interface CodexSourceOptions {
+   tailBytes?: number;
+   /** Desliga o fs.watch (testes). */
+   watch?: boolean;
++  badgeFile?: string;
+ }
+
+ interface CodexAccount {
+@@ -125,6 +129,7 @@ interface ThreadTracker {
    key: string;
    acc: CodexAccount;
    threadId: string;
@@ -576,7 +785,7 @@ index e0accad..a551405 100644
    /** main/sub pelo session_meta (ou pelo hook); internal = fica fora do escritório. */
    kind: 'main' | 'sub' | 'internal';
    parentThreadId?: string;
-@@ -138,6 +140,7 @@ interface ThreadTracker {
+@@ -138,6 +143,7 @@ interface ThreadTracker {
    inOffice: boolean;
    hookCwd?: string;
    hookRole?: string;
@@ -584,7 +793,7 @@ index e0accad..a551405 100644
    status: AgentStatus;
    /** Quando o status foi decidido (linha do rollout ou evento de hook): informação mais velha não o muda. */
    statusAt: number;
-@@ -151,6 +154,7 @@ interface ThreadTracker {
+@@ -151,6 +157,7 @@ interface ThreadTracker {
    subDone: boolean;
    /** Criado agora por um hook (SubagentStart): entra mesmo sem turno visto. */
    hookSpawned?: boolean;
@@ -592,7 +801,7 @@ index e0accad..a551405 100644
    watcher?: FSWatcher;
  }
 
-@@ -162,10 +166,18 @@ function rec(v: unknown): Record<string, unknown> | undefined {
+@@ -162,10 +169,10 @@ function rec(v: unknown): Record<string, unknown> | undefined {
    return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
  }
 
@@ -604,18 +813,25 @@ index e0accad..a551405 100644
 +  const role = raw?.trim();
 +  return role && !isUnreportedCodexRole(role) && !/^(?:default|subagent|subagente)(?: \(codex\))?$/i.test(role)
 +    ? `${role[0].toUpperCase()}${role.slice(1)}` : undefined;
-+}
-+
-+function declaredDisplayLabel(raw: unknown): string | undefined {
-+  const maxCodePoints = 8_195;
-+  if (typeof raw !== 'string' || raw.length > 2 * maxCodePoints || [...raw].length > maxCodePoints
-+    || raw.trim() !== raw || /[\p{C}\p{Zl}\p{Zp}]/u.test(raw) || /guardian/i.test(raw)) return undefined;
-+  const separator = raw.lastIndexOf(' · ');
-+  return separator > 0 && raw.slice(separator + 3).trim() ? raw : undefined;
  }
 
  export class CodexSource implements AgentSource, CodexLive {
-@@ -366,6 +378,7 @@ export class CodexSource implements AgentSource, CodexLive {
+@@ -182,12 +189,14 @@ export class CodexSource implements AgentSource, CodexLive {
+   private readonly now: () => number;
+   private readonly tailBytes: number;
+   private readonly useWatch: boolean;
++  private readonly badges: CodexBadges;
+   private stopped = false;
+
+   constructor(private readonly opts: CodexSourceOptions) {
+     this.now = opts.now ?? Date.now;
+     this.tailBytes = opts.tailBytes ?? 1024 * 1024;
+     this.useWatch = opts.watch ?? true;
++    this.badges = new CodexBadges(opts.badgeFile);
+     const env = opts.env ?? process.env;
+     const claude = opts.accounts.entries();
+     this.detected = detectCodexAccounts(opts.dirs, {
+@@ -366,6 +375,7 @@ export class CodexSource implements AgentSource, CodexLive {
        key: `${acc.id}:${threadId}`,
        acc,
        threadId,
@@ -623,7 +839,7 @@ index e0accad..a551405 100644
        kind: 'main',
        nextResolveAt: 0,
        state: createCodexState(),
-@@ -391,6 +404,13 @@ export class CodexSource implements AgentSource, CodexLive {
+@@ -391,6 +401,13 @@ export class CodexSource implements AgentSource, CodexLive {
 
    /** O thread deve estar no escritório agora? Entra, sai ou muda de sala conforme o caso. */
    private reconcile(t: ThreadTracker, now: number, via?: 'lock' | 'recent' | 'hook'): void {
@@ -637,7 +853,7 @@ index e0accad..a551405 100644
      const want = this.wanted(t, now, via);
      if (!want) {
        if (t.inOffice) this.leave(t);
-@@ -424,6 +444,10 @@ export class CodexSource implements AgentSource, CodexLive {
+@@ -424,6 +441,10 @@ export class CodexSource implements AgentSource, CodexLive {
        if (!parent || !this.opts.office.has(parent) || this.opts.office.isSubDone(parent) || this.opts.office.get(parent)?.status === 'offline') return false;
        // Subagente só aparece trabalhando (ou recém-criado pelo hook); depois de entregar, sai.
        if (!t.inOffice && t.status !== 'working' && t.status !== 'waiting' && !t.hookSpawned) return false;
@@ -648,7 +864,7 @@ index e0accad..a551405 100644
      }
      return true;
    }
-@@ -464,7 +488,7 @@ export class CodexSource implements AgentSource, CodexLive {
+@@ -464,7 +485,7 @@ export class CodexSource implements AgentSource, CodexLive {
          id: t.key,
          parentId: parent,
          sessionId: t.threadId,
@@ -657,7 +873,7 @@ index e0accad..a551405 100644
          title: t.state.title,
          background: false,
          startedAt: t.meta?.startedAt ?? t.state.firstAt ?? now,
-@@ -559,6 +583,7 @@ export class CodexSource implements AgentSource, CodexLive {
+@@ -559,6 +580,7 @@ export class CodexSource implements AgentSource, CodexLive {
 
    /** Lê o começo (session_meta, título) e a janela do fim do rollout; o resto do começo vai em segundo plano. */
    private load(t: ThreadTracker, path: string): void {
@@ -665,7 +881,7 @@ index e0accad..a551405 100644
      this.unwatch(t);
      const head = readRolloutHead(path);
      if (head.meta) this.setMeta(t, head.meta);
-@@ -568,7 +593,7 @@ export class CodexSource implements AgentSource, CodexLive {
+@@ -568,7 +590,7 @@ export class CodexSource implements AgentSource, CodexLive {
      t.rolloutPath = path;
      t.state = createCodexState(head.meta);
      if (head.title) t.state.title = head.title;
@@ -674,7 +890,7 @@ index e0accad..a551405 100644
      for (let i = 0; i < 64; i++) {
        const r = tail.read();
        for (const line of r.lines) this.apply(t, parseRolloutLine(t.state, line, { idPrefix: t.key, now: this.now() }), false);
-@@ -586,6 +611,14 @@ export class CodexSource implements AgentSource, CodexLive {
+@@ -586,6 +608,14 @@ export class CodexSource implements AgentSource, CodexLive {
    }
 
    private setMeta(t: ThreadTracker, meta: RolloutMeta): void {
@@ -689,18 +905,19 @@ index e0accad..a551405 100644
      t.meta = meta;
      if (meta.internal) t.kind = 'internal';
      else if (meta.parentThreadId) {
-@@ -595,7 +628,10 @@ export class CodexSource implements AgentSource, CodexLive {
+@@ -595,7 +625,11 @@ export class CodexSource implements AgentSource, CodexLive {
          t.inOffice = false;
        }
        t.kind = 'sub';
 +      if (t.parentThreadId !== meta.parentThreadId) delete t.hookRole;
        t.parentThreadId = meta.parentThreadId;
++      if (meta.threadId === t.threadId) t.declaredDisplayLabel ??= this.badges.get(t.acc.configDir, t.threadId, t.parentThreadId);
 +      const role = t.declaredDisplayLabel ?? specificRole(meta.agentRole);
 +      if (t.inOffice && role) this.opts.office.setSubRole(t.key, this.parentKey(t)!, role);
      }
    }
 
-@@ -670,6 +706,7 @@ export class CodexSource implements AgentSource, CodexLive {
+@@ -670,6 +704,7 @@ export class CodexSource implements AgentSource, CodexLive {
     */
    private decide(t: ThreadTracker, status: AgentStatus, at: number, waitingFor: string | undefined, live: boolean): void {
      if (at < t.statusAt) return;
@@ -708,14 +925,15 @@ index e0accad..a551405 100644
      t.statusAt = at;
      t.status = status;
      if (waitingFor) t.waitingFor = waitingFor;
-@@ -806,7 +843,19 @@ export class CodexSource implements AgentSource, CodexLive {
+@@ -806,7 +841,29 @@ export class CodexSource implements AgentSource, CodexLive {
      const target = agent && isThreadId(agent) ? agent : root;
      const agentType = str(input.agent_type);
      if (agentType && /guardian/i.test(agentType)) return false;
 -    const acc = this.accountFor(account, input, target);
 +    const starting = event === 'SubagentStart';
++    const badgeUpdate = event === 'SubagentBadge';
 +    const role = specificRole(agentType);
-+    const marked = starting && Object.hasOwn(input, 'vcw_display_label');
++    const marked = (starting || badgeUpdate) && Object.hasOwn(input, 'vcw_display_label');
 +    const parsedDisplayLabel = marked ? declaredDisplayLabel(input.vcw_display_label) : undefined;
 +    const unreportedDisplay = marked && typeof input.vcw_display_label === 'string'
 +      && isUnreportedCodexRole(input.vcw_display_label)
@@ -724,12 +942,21 @@ index e0accad..a551405 100644
 +    if (marked && ((!unreportedDisplay && displayLabel === undefined) || account === undefined || target === root)) return false;
 +    const explicitRoleAccount = account !== undefined && (role || displayLabel || unreportedDisplay) && target !== root
 +      ? this.accountFor(account, input, target, root) : undefined;
++    if (badgeUpdate) {
++      const acc = explicitRoleAccount;
++      if (!acc || !displayLabel || !this.badges.rememberNative(acc.configDir, target, root, displayLabel, acc.index.find(target))) return false;
++      const key = `${acc.id}:${target}`;
++      const tracker = this.threads.get(key);
++      if (tracker?.kind === 'sub' && tracker.parentThreadId === root) tracker.declaredDisplayLabel = displayLabel;
++      this.opts.office.setSubRole(key, `${acc.id}:${root}`, displayLabel);
++      return true;
++    }
 +    if (starting && account !== undefined && (role || displayLabel || unreportedDisplay) && !explicitRoleAccount) return false;
 +    const acc = explicitRoleAccount ?? this.accountFor(account, input, target);
      if (!acc) return false;
      const now = this.now();
      const cwd = str(input.cwd);
-@@ -826,15 +875,37 @@ export class CodexSource implements AgentSource, CodexLive {
+@@ -826,15 +883,37 @@ export class CodexSource implements AgentSource, CodexLive {
      const isSubEvent = target !== root || event === 'SubagentStart' || event === 'SubagentStop';
      const subId = event === 'SubagentStart' || event === 'SubagentStop' ? (agent && isThreadId(agent) ? agent : undefined) : target !== root ? target : undefined;
      if (isSubEvent && !subId) return false;
@@ -757,7 +984,7 @@ index e0accad..a551405 100644
        case 'SubagentStart':
 -        t.hookSpawned = true;
 -        this.decide(t, 'working', now, undefined, true);
-+        if (displayLabel) t.declaredDisplayLabel ??= displayLabel;
++        if (displayLabel) t.declaredDisplayLabel = this.badges.remember(acc.configDir, t.threadId, root, t.declaredDisplayLabel ?? displayLabel);
 +        if (t.declaredDisplayLabel) {
 +          office.setSubRole(t.key, rootT.key, t.declaredDisplayLabel);
 +        } else if (t.hookRole && office.get(t.key)?.role === SUB_ROLE && !specificRole(t.meta?.agentRole)) {
@@ -770,7 +997,7 @@ index e0accad..a551405 100644
          break;
        case 'SubagentStop':
          this.decide(t, 'idle', now, undefined, true);
-@@ -853,7 +924,7 @@ export class CodexSource implements AgentSource, CodexLive {
+@@ -853,7 +932,7 @@ export class CodexSource implements AgentSource, CodexLive {
          const { desc, tool } = describeCodexTool(toolName, toolInput);
          const id = str(input.tool_use_id);
          const act: Activity = { id: `${t.key}#${id ?? `hook${now.toString(36)}`}`, at: now, ...desc, tool };
@@ -779,7 +1006,7 @@ index e0accad..a551405 100644
          break;
        }
        case 'PermissionRequest':
-@@ -871,7 +942,7 @@ export class CodexSource implements AgentSource, CodexLive {
+@@ -871,7 +950,7 @@ export class CodexSource implements AgentSource, CodexLive {
    }
 
    /** Tracker do thread (criado se preciso), com a presença dada pelo hook. */
@@ -788,7 +1015,7 @@ index e0accad..a551405 100644
      const key = `${acc.id}:${threadId}`;
      let t = this.threads.get(key);
      if (!t) {
-@@ -886,7 +957,6 @@ export class CodexSource implements AgentSource, CodexLive {
+@@ -886,7 +965,6 @@ export class CodexSource implements AgentSource, CodexLive {
        t.kind = 'sub';
        t.parentThreadId = parent;
      }
@@ -796,7 +1023,7 @@ index e0accad..a551405 100644
      if (t.inOffice && !this.opts.office.has(t.key)) t.inOffice = false;
      this.pump(t, false);
      return t;
-@@ -913,7 +983,7 @@ export class CodexSource implements AgentSource, CodexLive {
+@@ -913,7 +991,7 @@ export class CodexSource implements AgentSource, CodexLive {
     * Conta de um evento: `account` (id ou pasta), senão a do `transcript_path`, senão a que já conhece o thread;
     * com uma conta só, ela.
     */
@@ -805,7 +1032,7 @@ index e0accad..a551405 100644
      const norm = (p: string) => {
        try {
          return resolve(p);
-@@ -921,18 +991,21 @@ export class CodexSource implements AgentSource, CodexLive {
+@@ -921,18 +999,21 @@ export class CodexSource implements AgentSource, CodexLive {
          return p;
        }
      };

@@ -40,7 +40,14 @@ badge rendering and regression tests. The patch is qualified against Habblaud
    git -C "$habblaud_source" apply --reverse --check "$receiver_patch"
    ```
 
-   If both checks fail, report the receiver as incompatible or partially patched.
+   If both checks fail on the previously bundled receiver, check and apply
+   [the upgrade delta](../assets/habblaud/receiver-upgrade.patch) in the staged
+   source. Verify its digest and `upgrade.from_patch_sha256` in the provenance
+   against the previous full bundle. Require `git apply --check` before applying
+   the delta and the full patch's reverse check afterward.
+
+   If these checks cannot establish a complete update, report the receiver as
+   incompatible or partially patched.
    Inspect the changed upstream implementation or local edits before preparing
    an updated patch. Preserve the installation and continue independent setup.
    Do not force hunks, create rejects, reset user files or treat an unverified
@@ -65,6 +72,26 @@ badge rendering and regression tests. The patch is qualified against Habblaud
    service manager. Verify health and that the running bundle or image is the
    one just built. Record the recovery location and deployed identity.
 
+## Restore previously saved declarations
+
+Keep the receiver's `codex-badges.json` with its existing data directory.
+It restores labels for verified native children after restart without creating
+agents or changing their activity. To carry forward a declaration observed
+before the receiver could persist labels, replay its original private context:
+
+```sh
+printf '{}\n' | python3 -I -B <package>/scripts/worker_visibility.py restore \
+  --context <existing-observed-context> \
+  --visibility-plugin <trusted-installed-local-model-delegation-root> \
+  --habblaud-endpoint <literal-loopback-HTTP-url> \
+  --habblaud-account <observed-Codex-account-id>
+```
+
+Use only saved contexts with an observed native child. The receiver verifies
+the child and immediate parent in the selected account. It will not overwrite
+a different saved badge. Unobserved or unavailable records keep the standard
+fallback; never guess a role or replay a start event to restore a badge.
+
 ## Verify and retain during upgrades
 
 The receiver must accept the declared `Role · Model Display Name` for the
@@ -76,6 +103,9 @@ They also cover nested immediate-parent reconciliation, the bounded display
 grace for new generic children, preserved early activity and the original
 fallback when no start label arrives. Existing agents continue immediately;
 the grace never changes execution or renews on later tool events.
+Check restored badges using a separate receiver process with retained test data.
+Check a reused child with and without a saved declaration. Verify its identity,
+role and activity remain correct without a new start or a second declaration.
 
 Reconcile the existing hook after receiver deployment. Observe a real authorized
 fresh child and its first badge before claiming live delivery. Fixture tests,

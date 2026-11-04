@@ -172,22 +172,8 @@ def progress(run, phase):
 
 
 def habblaud_publisher(plugin_root, run, endpoint, account):
-    """Reuse installed transport, never create local-delegation jobs or native logs."""
-    brief = json.loads((run / 'brief.json').read_text())
-    metadata = visibility_declaration(brief)
-    receipt = run / 'visibility.json'
-    display_role = {key: value for key, value in metadata.items() if key != 'custom_role_name'} if metadata else None
-    model = brief.get('model_display_name') or brief['model']
-    previous = worker_visibility.read(receipt)
-    if previous and 'binding' in previous:
-        # A published run keeps its original label when verification resumes.
-        legacy_label = worker_visibility.display_label(metadata, model)
-        if previous['binding'].get('label') == legacy_label:
-            display_role = metadata
-    binding = {'parent': brief['coordinator_chat_id'], 'agent_id': str(uuid.uuid5(uuid.NAMESPACE_URL, str(run))),
-               'label': worker_visibility.display_label(display_role, model), 'cwd': brief['source_root']}
-    return worker_visibility.publisher(worker_visibility.transport(plugin_root), endpoint, account, binding,
-                                       metadata, receipt)
+    from runtime.habblaud import openrouter_publisher
+    return openrouter_publisher(plugin_root, run, endpoint, account, visibility_declaration)
 
 
 @contextmanager
@@ -553,13 +539,7 @@ def main():
         if not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,63}', request['task_id']): raise ValueError('invalid_task_id')
         run = args.root / request['task_id']
     if args.visibility_plugin and args.action != 'status':
-        try:
-            publisher = habblaud_publisher(args.visibility_plugin, run, args.habblaud_endpoint, args.habblaud_account)
-        except (ValueError, OSError, ImportError, AttributeError, TypeError, KeyError, RecursionError):
-            try:
-                worker_visibility.save(run / 'visibility.json', {'delivered': False, 'reason': 'adapter_unavailable'}, exclusive=True)
-            except (ValueError, OSError):
-                pass
+        publisher = habblaud_publisher(args.visibility_plugin, run, args.habblaud_endpoint, args.habblaud_account)
     if args.action == 'run': result = execute(run, args.opencode, args.auth_data, publisher)
     elif args.action == 'verify':
         result = verify(run, request['disposition'], request['checks'], publisher)

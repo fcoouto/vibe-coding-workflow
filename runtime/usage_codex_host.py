@@ -5,10 +5,9 @@ register a CLI action, change enablement, or initiate retries.
 """
 from copy import deepcopy
 from dataclasses import asdict, dataclass
-from pathlib import Path
 import re
 import time
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 from runtime import usage_admission, usage_credentials, usage_routing, usage_settings, worker_visibility
 from runtime.usage_budget import BudgetError, fields, integer, name, require
@@ -346,28 +345,10 @@ def _publish_generation(plan, task, evidence, result, habblaud, *, visibility):
                     and generation['cost'] == result['reported_cost_usd_micros'], 'generation_unconfirmed')
             state = control.ledger.path.parent
 
-        # Older display callers supplied a role here. Prefer the assignment's role when available.
-        fields({key: value for key, value in habblaud.items() if key != 'visibility'},
-               'plugin_root endpoint account model model_display_name')
-        plugin_root = Path(habblaud['plugin_root'])
-        require(plugin_root.is_absolute() and plugin_root.resolve(strict=True) == plugin_root
-                and habblaud['model'] == plan.model, 'visibility_unavailable')
-        parent = str(UUID(plan.thread_id))
-        require(parent == plan.thread_id, 'visibility_parent_unavailable')
-        account = worker_visibility.text(habblaud['account'], 200)
-        module = worker_visibility.transport(plugin_root)
-        endpoint = habblaud['endpoint']
-        agents = module.Client(endpoint).snapshot(account)['agents']
-        matches = [agent for agent in agents if agent.get('id') == account + ':' + parent]
-        require(len(matches) == 1 and matches[0].get('kind') == 'main'
-                and matches[0].get('account') == account and matches[0].get('provider') == 'codex',
-                'visibility_parent_unavailable')
-        return worker_visibility.register_external(
-            module=module, endpoint=endpoint, account=account, parent=parent, checkout=plan.checkout,
-            run_id=run_id, execution_route=result['execution_route'],
-            model_display_name=habblaud['model_display_name'],
-            visibility=visibility or worker_visibility.optional_declaration(habblaud.get('visibility')),
-            state_directory=state)
+        from runtime.habblaud import publish_usage_badge
+        return publish_usage_badge(habblaud, model=plan.model, thread_id=plan.thread_id,
+            checkout=plan.checkout, run_id=run_id, execution_route=result['execution_route'],
+            visibility=visibility, state=state)
     except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError, ImportError) as error:
         reason = str(error) if str(error) in ('generation_unconfirmed', 'visibility_parent_unavailable') else 'visibility_unavailable'
         return dict(delivered=False, reason=reason)

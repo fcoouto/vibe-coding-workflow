@@ -25,6 +25,15 @@ def local_file(root, value):
     return path
 
 
+def validate_receiver_patch(root, name, provenance):
+    patch = local_file(root, f"./assets/habblaud/{name}.patch").read_bytes()
+    if provenance.get("patch_sha256") != hashlib.sha256(patch).hexdigest():
+        raise ValueError(f"Bundled {name} patch digest differs from its provenance")
+    files = re.findall(r"^diff --git a/(\S+) b/\S+$", patch.decode("utf-8"), re.MULTILINE)
+    if not files or provenance.get("files") != files:
+        raise ValueError(f"Bundled {name} patch inventory differs from its provenance")
+
+
 def validate_startup_hook(root, manifest, client, root_variable):
     hook_file = local_file(root, manifest["hooks"])
     hooks = read_json(hook_file)["hooks"]
@@ -93,13 +102,14 @@ def validate(root=ROOT):
     validate_codex_hooks(root, manifest)
     validate_startup_hook(root, claude, "claude-code", "CLAUDE_PLUGIN_ROOT")
     receiver = read_json(local_file(root, "./assets/habblaud/receiver.json"))
-    receiver_patch = local_file(root, "./assets/habblaud/receiver.patch").read_bytes()
     local_file(root, "./assets/habblaud/LICENSE")
-    if receiver.get("patch_sha256") != hashlib.sha256(receiver_patch).hexdigest():
-        raise ValueError("Bundled receiver patch digest differs from its provenance")
-    patched_files = re.findall(r"^diff --git a/(\S+) b/\S+$", receiver_patch.decode("utf-8"), re.MULTILINE)
-    if receiver.get("version") != 1 or not patched_files or receiver.get("files") != patched_files:
-        raise ValueError("Bundled receiver patch inventory differs from its provenance")
+    upgrade = receiver.get("upgrade")
+    if (receiver.get("version") != 1 or not isinstance(upgrade, dict)
+            or not re.fullmatch(r"[a-f0-9]{64}", str(upgrade.get("from_patch_sha256")))
+            or upgrade["from_patch_sha256"] == receiver.get("patch_sha256")):
+        raise ValueError("Invalid receiver upgrade provenance")
+    validate_receiver_patch(root, "receiver", receiver)
+    validate_receiver_patch(root, "receiver-upgrade", upgrade)
     for path in ("scripts/workflow.py", "runtime/__init__.py", "runtime/startup.py",
                  "runtime/engine.py", "runtime/state.py", "runtime/doctor.py", "runtime/evidence.py",
                  "runtime/adapters/__init__.py", "runtime/adapters/session_start.py",
@@ -108,7 +118,7 @@ def validate(root=ROOT):
                  "runtime/recovery_uses.py", "runtime/resource_accounting.py", "runtime/closure_witness.py",
                  "runtime/review_storage.py", "runtime/screening.py",
                  "runtime/delegation.py", "clients/delegation.md", "runtime/repository_gate.py",
-                 "runtime/worker_visibility.py", "scripts/worker_visibility.py", "clients/worker-visibility.md",
+                 "runtime/worker_visibility.py", "runtime/habblaud.py", "scripts/worker_visibility.py", "clients/worker-visibility.md",
                  "clients/habblaud-receiver.md",
                  "scripts/repository_gate.py", "clients/repository-gate.md",
                  "skills/onboard-my-project/SKILL.md",
