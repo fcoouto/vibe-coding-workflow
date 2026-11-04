@@ -90,18 +90,48 @@ def _budget(deadline=None):
     return dict(paths=0, bytes=0, deadline=deadline if deadline is not None else time.monotonic()+4)
 
 
-def _read(path, budget, *, absent=False, private=False, limit=d3.MAX_FILE):
+def _read(path, budget, *, absent=False, private=False, limit=d3.MAX_FILE, expected_binding=None):
     startup._entry_budget_check(budget)
     budget['paths'] += 1
     d3._no_links(path)
     try:
-        raw = d3._read_file(path, min(limit, d3.MAX_TOTAL-budget['bytes']-1), private=private)
+        raw = d3._read_file(path, min(limit, d3.MAX_TOTAL-budget['bytes']-1), private=private,
+            expected_binding=expected_binding)
     except FileNotFoundError:
         if absent:
             return None
         raise
     budget['bytes'] += len(raw)
     startup._entry_budget_check(budget)
+    return raw
+
+
+def _retained_journal_bytes(path, budget, limit):
+    # Multiple retained references may point into one immutable transaction.
+    def stamp():
+        descriptor = d3._open_path(path, os.O_RDONLY)
+        try:
+            info = os.fstat(descriptor)
+            d3._private(info)
+            return (info.st_dev, info.st_ino, info.st_size, info.st_mode, info.st_nlink,
+                    info.st_mtime_ns, info.st_ctime_ns)
+        finally:
+            os.close(descriptor)
+
+    startup._entry_budget_check(budget)
+    snapshots = budget.setdefault('retained_journals', {})
+    current = stamp()
+    if path in snapshots:
+        budget['paths'] += 1
+        startup._entry_budget_check(budget)
+        previous, raw = snapshots[path]
+        d3._require(current == previous, 'Retained setup journal changed during observation')
+        return raw
+    binding = dict(device=current[0], inode=current[1])
+    raw = _read(path, budget, private=True, limit=limit, expected_binding=binding)
+    d3._require(stamp() == current, 'Retained setup journal changed during observation')
+    startup._entry_budget_check(budget)
+    snapshots[path] = current, raw
     return raw
 
 
@@ -512,7 +542,7 @@ def _retained_reference(reference, budget):
     pointer = startup._canonical_path(path)
     d3._require(separator and pointer.name == 'transaction.json', 'Setup source is not its retained D4 journal')
     d3._private(pointer.parent.stat(), directory=True)
-    journal = d3.read_request(_read(pointer, budget, private=True, limit=changes.MAX_JOURNAL), changes.MAX_JOURNAL)
+    journal = d3.read_request(_retained_journal_bytes(pointer, budget, changes.MAX_JOURNAL), changes.MAX_JOURNAL)
     changes._scoped_journal_shape(journal)
     d3._require(journal['state'] == 'applied' and not journal['blocked'] and journal['enrollment'] is not None
         and any(row['phase'] == 'final' for row in journal['enrollment']['postimages']), 'Original setup operation did not complete')
@@ -619,7 +649,7 @@ def _retained_capture(reference,budget):
     action_id,attempt_id=suffix.split(':');pointer=startup._canonical_path(path)
     d3._require(pointer.name=='transaction.json','Native capture is not its original D4 journal')
     d3._private(pointer.parent.stat(),directory=True)
-    journal=d3.read_request(_read(pointer,budget,private=True,limit=changes.MAX_JOURNAL),changes.MAX_JOURNAL)
+    journal=d3.read_request(_retained_journal_bytes(pointer, budget, changes.MAX_JOURNAL),changes.MAX_JOURNAL)
     changes._scoped_journal_shape(journal)
     command=journal['receipts'].get(action_id);capture=command.get('setup_capture') if command else None
     d3._require(capture is not None and reference==_capture_reference(pointer.parent,capture)
@@ -659,9 +689,24 @@ def setup_capture_projection(decision, *, process):
     return startup._canonical_freeze(payload)
 
 
-def collect_retained_setup(reference, identity, new_transaction, assessment, *, witness=None):
+def collect_retained_setup(reference, identity, new_transaction, assessment, *, witness=None, readiness=None):
     """Publish an exact successor, preserving the actual native capture transaction."""
-    budget=_budget();native_origin='#native-observation:' in reference['reference']
+    native_origin = '#native-observation:' in reference['reference']
+    readiness_facts = None
+    if readiness is not None:
+        from runtime import setup_readiness, state
+        d3._require(not native_origin, 'Review readiness must extend its original full setup receipt')
+        scope = startup.acquire_project_entry(SimpleNamespace(client=identity['client'],
+            cwd=Path(identity['repository_root'])), state.PACKAGE).resolution.scope
+        d3._require(scope is not None and scope.accepted_scope_digest == d3._digest(identity)
+            and startup._canonical_plain(scope.qualification['reference']) == reference,
+            'Review readiness lost its original active qualification scope')
+        readiness_facts = setup_readiness.evidence(readiness, scope)
+        d3._require(readiness_facts['setup_reference'] == reference,
+            'Review readiness belongs to another original setup receipt')
+    # Native readiness uses its own bounded observer. Start the local receipt
+    # and configuration budget after that observation finishes.
+    budget = _budget()
     if native_origin:
         row,journal,part=_read_native_reference(reference,budget)
         d3._require(part is None and row['result']['kind']=='setup','A filtered native setup source is required')
@@ -675,6 +720,11 @@ def collect_retained_setup(reference, identity, new_transaction, assessment, *, 
     if witness is not None:
         d3._require(not native_origin,'Managed behavior must extend its original full setup receipt')
         _merge_managed_witness(content,reference,identity,witness)
+    if readiness_facts is not None:
+        proofs = content['source']['observations'].setdefault('review-readiness', [])
+        for proof in readiness_facts['observations']:
+            if proof not in proofs:
+                proofs.append(proof)
     observations=content.get('source',{}).get('observations',{})
     for row in assessment['cases']:
         actual=observations.get(row['id'],[])
@@ -974,7 +1024,7 @@ def _read_native_reference(reference,budget):
     pointer=startup._canonical_path(path)
     d3._require(pointer.name=='transaction.json','Native observation must retain its original journal')
     d3._private(pointer.parent.stat(),directory=True)
-    journal=d3.read_request(_read(pointer,budget,private=True,limit=changes.MAX_JOURNAL),changes.MAX_JOURNAL)
+    journal=d3.read_request(_retained_journal_bytes(pointer, budget, changes.MAX_JOURNAL),changes.MAX_JOURNAL)
     changes._scoped_journal_shape(journal)
     row=journal.get('native_observations',{}).get(parts[0])
     d3._require(row is not None and row['claim_id']==parts[1] and row['status']=='reconciled' and row['stopped']
@@ -1301,7 +1351,7 @@ def _read_qualification(record, facts, *, cwd=None, pending_journal=None, budget
         d3._require(pointer.name == 'transaction.json', 'Setup receipt route is not an original D4 journal')
         budget = budget if budget is not None else _budget(facts.get('deadline'))
         d3._private(pointer.parent.stat(), directory=True)
-        raw = _read(pointer, budget, private=True, limit=changes.MAX_JOURNAL)
+        raw = _retained_journal_bytes(pointer, budget, changes.MAX_JOURNAL)
         journal = d3.read_request(raw, changes.MAX_JOURNAL)
         changes._scoped_journal_shape(journal)
         d3._require(journal['transaction_id'] == activation['transaction_id'] and journal['manifest_digest'] == d3._digest(journal['manifest']), 'Original setup transaction changed')
