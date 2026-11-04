@@ -85,32 +85,40 @@ class UnenrolledCheckoutTests(unittest.TestCase):
         self.authority.write_text(json.dumps(self.record))
         self.assertIsNone(self.hook(self.repo))
 
-    def test_suspended_member_keeps_its_guard(self):
+    def assert_runtime_diagnostic(self, root, reason):
+        with self.assertRaisesRegex(startup.RuntimeScopeError, reason):
+            startup._entry_scope(self.acquire(root))
+        output = self.hook(root)
+        self.assertIn(reason, output['systemMessage'])
+        self.assertNotIn('hookSpecificOutput', output)
+        self.assertFalse((self.base / 'state').exists())
+
+    def test_suspended_member_reports_unavailable_runtime(self):
         self.record['repositories'][0]['checkouts'][0]['clients'][0]['activation']['status'] = 'suspended'
         self.authority.write_text(json.dumps(self.record))
-        self.assertEqual(self.hook(self.repo)["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assert_runtime_diagnostic(self.repo, 'activation_suspended')
 
-    def test_configured_records_with_retained_active_signals_keep_the_guard(self):
+    def test_configured_records_with_retained_active_signals_require_current_authority(self):
         activation = self.record['repositories'][0]['checkouts'][0]['clients'][0]['activation']
         binding = dict(client='codex', surface='codex-cli', version='fixture', configuration_digest='a' * 64,
             accepted_scope_digest='b' * 64, receipt=dict(reference='fixture:old-qualification', sha256='c' * 64),
             hook_owner=dict(root=str(PACKAGE), source=str(PACKAGE / 'scripts/workflow.py'),
                 binding=self.record['project_binding'], sha256='d' * 64))
-        for retained in (dict(qualification='qualified'), dict(accepted_scope_digest='b' * 64),
-                         dict(qualification_binding=binding)):
+        for retained, reason in ((dict(qualification='qualified'), 'qualification_unobserved'),
+                                 (dict(accepted_scope_digest='b' * 64), 'configuration_changed'),
+                                 (dict(qualification_binding=binding), 'qualification_unobserved')):
             with self.subTest(retained=next(iter(retained))):
                 original = copy.deepcopy(activation)
                 activation.update(retained)
                 self.authority.write_text(json.dumps(self.record))
-                self.assertEqual(self.hook(self.repo)['hookSpecificOutput']['permissionDecision'], 'deny')
+                self.assert_runtime_diagnostic(self.repo, reason)
                 activation.clear()
                 activation.update(original)
 
     def test_future_join_remains_pending(self):
         self.record["membership"]["future_join"] = True
         self.authority.write_text(json.dumps(self.record))
-        self.assertEqual(self.acquire(self.linked).resolution.reason, "member_pending")
-        self.assertEqual(self.hook(self.linked)["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assert_runtime_diagnostic(self.linked, 'member_pending')
 
     def test_known_checkout_aliases_and_unknown_membership_fail_closed(self):
         acquired = startup._acquire_canonical_membership(self.linked, authority_path=None,

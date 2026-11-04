@@ -417,9 +417,11 @@ class StateTests(unittest.TestCase):
         target = self.base / "database-copy"
         database.rename(target)
         database.symlink_to(target)
-        self.assertEqual(self.event().action, "deny")
+        self.assertEqual(self.event().action, "context")
         with self.assertRaises(self.api().StateError):
             self.start()
+        self.assertEqual(database.readlink(), target)
+        self.assertEqual(target.read_bytes(), before)
         database.unlink()
         self.assertEqual(self.event("Stop").action, "pass")
         self.assertFalse(database.exists())

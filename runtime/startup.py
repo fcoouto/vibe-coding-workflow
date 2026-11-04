@@ -1264,9 +1264,6 @@ def acquire_canonical_project(event, package, *, authority_path=None, qualifier=
         _entry_budget_check(budget)
         if qualifier is not None and not callable(qualifier):
             raise StartupError("Invalid internal qualification owner")
-        if managed and qualifier is None and event.client == 'codex':
-            from runtime.setup_observation import read_qualification
-            qualifier = lambda record, facts: read_qualification(record, facts, cwd=event.cwd, budget=budget)
         if not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", event.client):
             raise StartupError("Invalid client identity")
         acquired = _acquire_canonical_membership(event.cwd, authority_path=authority_path, budget=budget)
@@ -1288,20 +1285,42 @@ def acquire_canonical_project(event, package, *, authority_path=None, qualifier=
                          for c in r["checkouts"] if c["root"] == str(root)), None)
         entry = next((e for e in selected["clients"] if e["client"] == event.client), None) if selected else None
         config = entry["configuration"] if entry else None
+        qualification_startup = managed is None
+        if qualification_startup:
+            managed = bool(event.client == "codex" and config and config["runtime"]
+                           and entry["activation"]["status"] == "active"
+                           and entry["activation"]["qualification_binding"] is not None)
+        if managed and qualifier is None and event.client == 'codex':
+            from runtime.setup_observation import read_qualification
+            qualifier = lambda record, facts: read_qualification(record, facts, cwd=event.cwd, budget=budget)
         if config:
             for name in sorted(config["shared_dependencies"]):
                 observation["dependencies"].append(_acquired_dependency(Path(name), budget))
-            if managed and config["runtime"]:
-                observation["runtime_location"] = _acquired_runtime_location(Path(config["runtime"]["state_dir"]),
-                    Path(package).resolve(strict=True), data, observation, budget)
         package = Path(package).resolve(strict=True)
         if package != Path(__file__).resolve().parents[1]:
             return result("conflict", "installed_unavailable")
         _check_observation_deadline(budget)
-        installed = dict(clients=[event.client] if (package / "clients" / (event.client + ".md")).is_file()
+        basic_installed = dict(clients=[event.client] if (package / "clients" / (event.client + ".md")).is_file()
             and (package / "policies/00-index.md").is_file() else [], package_root=str(package))
+
+        def runtime_inputs():
+            try:
+                location = (_acquired_runtime_location(Path(config["runtime"]["state_dir"]),
+                    package, data, observation, budget) if config and config["runtime"] else None)
+                pins = dict(policy_digest=policy_digest(package, budget=budget),
+                            runtime_digest=runtime_fingerprint(budget=budget))
+                return location, pins
+            except (StartupError, OSError):
+                if not qualification_startup:
+                    raise
+                return None
+
+        installed = basic_installed
+        initial_runtime = runtime_inputs() if managed else None
+        managed = initial_runtime is not None
         if managed:
-            installed.update(policy_digest=policy_digest(package, budget=budget), runtime_digest=runtime_fingerprint(budget=budget))
+            observation["runtime_location"], pins = initial_runtime
+            installed = basic_installed | pins
         facts = dict(authority=dict(path=str(pointer), target=_canonical_plain(acquired.authority_target)), observation=observation,
                      client=event.client, installed=installed)
         _check_observation_deadline(budget)
@@ -1317,16 +1336,26 @@ def acquire_canonical_project(event, package, *, authority_path=None, qualifier=
                 fresh = _acquired_dependency(Path(dependency["path"]), budget)
                 if fresh != dependency:
                     return result("suspended", "dependency_changed" if fresh["status"] == "read" else "dependency_unobserved")
-            if observation["runtime_location"] is not None:
-                fresh = _acquired_runtime_location(Path(config["runtime"]["state_dir"]), package, data, observation, budget)
-                if fresh != observation["runtime_location"]:
-                    return result("conflict", "observation_unavailable")
-            if (policy_digest(package, budget=budget) != installed["policy_digest"]
-                    or runtime_fingerprint(budget=budget) != installed["runtime_digest"]
-                    or ([event.client] if (package / "clients" / (event.client + ".md")).is_file() else []) != installed["clients"]
+            if (([event.client] if (package / "clients" / (event.client + ".md")).is_file()
+                    and (package / "policies/00-index.md").is_file() else []) != installed["clients"]
                     or str(package.resolve(strict=True)) != installed["package_root"]):
                 return result("suspended", "configuration_changed")
-            resolution = resolve_canonical_scope(record, **facts, managed=managed)
+            fresh_runtime = runtime_inputs()
+            if fresh_runtime == initial_runtime:
+                try:
+                    resolution = resolve_canonical_scope(record, **facts, managed=managed)
+                except StartupError:
+                    if not qualification_startup:
+                        raise
+                    # Malformed optional qualification cannot replace basic startup guidance.
+            elif not qualification_startup:
+                if fresh_runtime[0] != initial_runtime[0]:
+                    return result("conflict", "observation_unavailable")
+                return result("suspended", "configuration_changed")
+        if qualification_startup and managed and not qualification_only(resolution.scope):
+            basic_observation = dict(observation, qualification=None, runtime_location=None)
+            resolution = resolve_canonical_scope(record, authority=facts["authority"], observation=basic_observation,
+                client=event.client, installed=basic_installed, managed=False)
         _check_observation_deadline(budget)
         return CanonicalAcquisition(resolution, pointer)
     except (StartupError, OSError, TypeError, KeyError, RecursionError, subprocess.SubprocessError):

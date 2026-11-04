@@ -240,6 +240,7 @@ class Store:
 
 @contextmanager
 def guard(cwd, *, write=False, create=False, recovery=False):
+    require(cwd is not None and os.name == 'posix', 'openrouter_scope_required')
     in_body = False
     try:
         local = local_ownership.settings_scope(cwd)
