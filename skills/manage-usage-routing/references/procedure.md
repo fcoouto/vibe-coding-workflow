@@ -24,9 +24,11 @@ when permitted. Never initiate a purchase or silently switch to a paid API pool.
    with `configure`. Use verified values for pricing, expiry and limits, and
    report any prerequisite that is missing. Saving settings leaves routing OFF.
 3. Only on an explicit enable request, pass the current `revision` as
-   `expected_revision` and `mode: manual` or `mode: smart` to `enable`. Warn about
-   account funding and explain the current live or shadow limit. Mode changes
-   reuse the existing connection and shared allowance. Do not create a second key.
+   `expected_revision` and `mode: manual` or `mode: smart` to `enable`. Other Codex
+   activity does not delay enablement. Do not ask the user to pause other work.
+   Warn about account funding and explain the current live or shadow limit. Reuse
+   the existing connection and shared allowance when changing modes. Do not create
+   a second key.
 4. In Manual, use the API only for explicitly selected tasks within the approved
    scope. Smart Balance evaluates suitable assignments at the task boundary.
    It stays in shadow while live host or class qualification is missing. Read
@@ -134,9 +136,11 @@ selected checkout. Other-provider/local choices retain priority.
 
 Smart Balance requires a matching qualified profile/class, positive measured
 native allowance savings beyond uncertainty, calibrated native capacity, current
-credits/prices/expiry and an available independent reviewer. Proxy token counts
-alone cannot qualify savings. Unqualified work stays Manual/shadow; no exploratory
-inference or stronger reasoning is added to spend credits. Expiry can break ties
+credits/prices/expiry and an available independent reviewer. Account for unrelated
+Codex activity when judging whether pilot allowance measurements are attributable.
+Proxy token counts alone cannot qualify savings. Unqualified work stays
+Manual/shadow. Do not add exploratory inference or stronger reasoning to spend
+credits. Expiry can break ties
 among equally important ready work, not manufacture tasks.
 
 ## Tests and live boundary
