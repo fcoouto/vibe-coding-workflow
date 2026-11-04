@@ -476,43 +476,43 @@
       ]
     },
     "skills/manage-usage-routing/SKILL.md": {
-      "sha256": "5f547b35821309937de98bd69e9e9d6c02ffc84d760ceaae3f1b9c08d1ef8502",
+      "sha256": "85630a04845f1d8fed7528bb73a75ece6376e70d8f092493281ed3c972f98520",
       "ranges": [
         [
           1,
-          22
+          21
         ]
       ]
     },
     "skills/manage-usage-routing/references/codex-host.md": {
-      "sha256": "2f891a521a103fe999cd1b99f2f938218936e56958d7f49a4c4b27ba53d8163c",
+      "sha256": "1652edba35b8b5a6a714880436a6f218f1d8fc33ab7685c6f95111b1a2605e05",
       "ranges": [
         [
           1,
-          114
+          121
         ]
       ]
     },
     "skills/manage-usage-routing/references/delegation.md": {
-      "sha256": "a6af5ac565239e29658acf79df395e0b9d36d40d19e66f8b5a99e3bae9839c5e",
+      "sha256": "0a3833bbc7d9b3c0a7a224281bd26e195ec2cd16543d9795f938dcc17e316392",
       "ranges": [
         [
           1,
-          108
+          103
         ]
       ]
     },
     "skills/manage-usage-routing/references/first-canary.md": {
-      "sha256": "b7089f243cfd2dbadbb12ecf4630f607cae6cbf4cd08f86c5559378137366eeb",
+      "sha256": "4b3bf4e39a34b9327420f42a1fcf1a63e6fd38d6472638ca100e197433c2b29c",
       "ranges": [
         [
           1,
-          43
+          42
         ]
       ]
     },
     "skills/manage-usage-routing/references/keychain-setup.md": {
-      "sha256": "50e65a7033312a538fa74ebd07c2511ccd074403550e73b2e6106784cabd1f05",
+      "sha256": "002deb23e74941b05014cc657761948e78cddfe4a70ba6372e07715289d35955",
       "ranges": [
         [
           1,
@@ -521,15 +521,15 @@
       ]
     },
     "skills/manage-usage-routing/references/procedure.md": {
-      "sha256": "5d82ac30c3983ff0ee804bb736626487933d7eeeb896f545e391685be325f6e5",
+      "sha256": "91da52cb87a3f818716029bf112267c5e04266767c205bcf08f784e24fec2d89",
       "ranges": [
         [
           1,
-          131
+          141
         ],
         [
-          132,
-          179
+          142,
+          149
         ]
       ]
     },

@@ -3,23 +3,24 @@
 Use existing coordinator task scoping, native worker selection and independent
 review contracts. API proposals receive only the bounded approved task packet;
 no shell, tools, native connector access, external writes or reviewer authority.
-Use `Controller.run_shadow` with synthetic connections for tests. For qualified
-foreground work, load [Codex host admission](codex-host.md). Pause live routing
-if the host cannot obtain trusted evidence. The foreground canary authorizes
-only its fixed request.
+For foreground work, load [Codex host admission](codex-host.md). For optional
+local tests, use `Controller.run_shadow` with synthetic connections.
 
 ## Admission and execution
 
 1. Preserve explicit provider/model/local choices, scope and transmission consent.
    Freeze the source snapshot, task, profile, reasoning, output allowance and price
    evidence. Keep one original task outstanding through native integration/review.
-2. Evaluate without writes or inference. Unknown class/quality/savings, reviewer,
-   native quota, funding, price, expiry or budget pauses the API assignment.
-   Ordinary initial native/provider selection keeps its existing permissions.
-3. Pin consent and qualification revisions through atomic begin/dispatch. Count
+2. Select a bounded eligible assignment. Manual needs explicit task selection.
+   Smart Balance may choose within standing consent. Require independently
+   checkable output and a ready native reviewer. Unknown consent, native quota,
+   funding, price, expiry or budget pauses the API assignment.
+3. Pin current consent and admission evidence through atomic begin/dispatch. Count
    and generation have separate attempt IDs under one run/slot. Reserve count's
    known maximum first; generation needs its own bound after the exact count.
-   Never assume the count call is free or use cache discounts to shrink a maximum.
+   Reserve the fixed five-point native review allowance while preserving existing
+   interactive headroom. Never assume counting is free or shrink the maximum
+   using cache discounts.
 4. Prepare IO before the final atomic dispatch grant. Disable ordered before that
    grant prevents admission. Work already granted dispatch is accounted as
    in-flight; a later disable cannot guarantee physical cancellation or no send.
@@ -74,16 +75,10 @@ reserve; it requires reasoned selection under the accepted envelope.
 Known generation completion can release the API slot while retaining credit
 charges and the native task reserve. Native reserves stay until integration/review
 complete or the task is explicitly abandoned with stopped work and fresh quota
-evidence. Changed windows cannot hide reserves. Observed allowance overrun pauses
-that account for requalification; unknown/insufficient evidence never waives review.
+evidence. Changed windows cannot hide reserves. Use current headroom for the next
+dispatch. An account-wide change alone does not measure the cost of one task.
+Unknown or insufficient evidence never waives review.
 Existing conservative deductions can pause before provider credits run out.
-
-Account/provider funding isolation is a residual risk, not an enablement gate.
-Warn without changing billing. Local grant reservations and conservative early
-stops reduce risk without guaranteeing zero paid funding. The actual authenticated
-API adapter and internal Manual admission gate are wired offline. The qualified
-host must supply trusted evidence before execution. Public dispatch remains
-unavailable. Smart Balance stays in shadow pending the bounded pilot.
 
 ## Continue remaining work natively
 

@@ -38,11 +38,17 @@ catalog lookup is unavailable, following Vibe Setup's
 
 ## Usage Routing enablement — 4 November 2026
 
-The user directed the workflow to apply explicit Usage Routing enablement
-without asking them to pause other Codex work. The
+The user authorized first-task routing after Keychain setup and explicit
+activation in either mode while other Codex work continues. The
 [management procedure](../skills/manage-usage-routing/references/procedure.md#set-up-and-select-a-mode)
-owns the rule. Attribution of pilot measurements and live admission remain
-separate from local enablement.
+binds consent to the selected configuration. The
+[proposal procedure](../skills/manage-usage-routing/references/delegation.md)
+and [trusted host](../skills/manage-usage-routing/references/codex-host.md)
+carry Manual task selection, scoped Smart Balance consent, source and funding
+checks, full reservations, fixed native review capacity, and independent
+verification. Measurements, previews and bounded canaries are optional.
+[Observed validation](usage-routing-validation.md) records its tested scope
+separately from current admission rules.
 
 ## Usage Routing delegation registration — 4 November 2026
 

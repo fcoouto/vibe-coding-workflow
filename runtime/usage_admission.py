@@ -10,6 +10,8 @@ import json
 from runtime import usage_credentials
 from runtime.usage_budget import BudgetError, FRESH_SECONDS, fields, integer, name, require
 
+NATIVE_REVIEW_ALLOWANCE_PP = 5
+
 
 @dataclass(frozen=True, slots=True)
 class Grant:
@@ -70,6 +72,14 @@ def smart_native_allowance(record):
     allowance = record.get('native_allowance_pp')
     require(type(allowance) is int and 0 < allowance <= 100, 'native_calibration_unqualified')
     return allowance
+
+
+def live_consent_current(config, policy, now):
+    """Check saved consent within the caller's current scope and policy revision."""
+    return (config.get('live_consent') is True and config['enabled'] is True
+            and config['disabled'] is False and config['requested_mode'] in ('manual', 'smart')
+            and config['binding'].get('storage_kind') == 'macos_keychain'
+            and policy['start'] <= now < policy['stop_at'] < min(policy['end'], policy['expiry']))
 
 
 def validate(evidence, *, scope, config, policy, task, now) -> int:
@@ -134,11 +144,19 @@ def _validate(evidence, scope, config, policy, task, now):
             and price_start <= now < price_end, 'pricing_stale')
     integer(profile['count_maximum'])
     deadline = min(observed_at + FRESH_SECONDS, price_end, stop, evidence.approval_until)
+    allowance = None
     if mode == 'smart':
-        record = smart_qualification(config, now)
-        require(evidence.qualification_digest == digest([config['qualification_revision'], record]),
-                'qualification_changed')
-        deadline = min(deadline, record['valid_until'])
+        if evidence.qualification_digest is None:
+            require(live_consent_current(config, policy, now), 'live_consent_required')
+            allowance = NATIVE_REVIEW_ALLOWANCE_PP
+        else:
+            # Retain admission for exact approvals issued under the legacy scope.
+            require(config.get('live_consent') is not True, 'qualification_changed')
+            record = smart_qualification(config, now)
+            require(evidence.qualification_digest == digest([config['qualification_revision'], record]),
+                    'qualification_changed')
+            deadline = min(deadline, record['valid_until'])
+            allowance = smart_native_allowance(record)
     else:
         require(evidence.qualification_digest is None, 'qualification_changed')
 
@@ -149,8 +167,10 @@ def _validate(evidence, scope, config, policy, task, now):
     windows = native['windows']
     require(type(windows) is list and 0 < len(windows) <= 8, 'native_capacity_unknown')
     for window in windows:
-        if mode == 'smart':
-            require(window['allowance_pp'] == smart_native_allowance(record), 'native_calibration_unqualified')
+        if allowance is not None:
+            require(integer(window['allowance_pp']) == allowance,
+                    'native_review_allowance_invalid' if evidence.qualification_digest is None
+                    else 'native_calibration_unqualified')
         native_start = integer(window['observed_at'])
         native_end = min(integer(window['reset_at']), native_start + FRESH_SECONDS)
         require(native_start <= now < native_end, 'native_capacity_expired')

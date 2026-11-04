@@ -55,6 +55,30 @@ class UsageSettingsTests(unittest.TestCase):
         self.assertFalse((self.root / '.vibe-coding-workflow').exists())
         self.assertFalse((self.root / '.env').exists())
 
+    def test_live_consent_requires_explicit_keychain_enable_and_can_be_revoked(self):
+        binding = dict(organization='org', project='project',
+                       credential_ref='vcw_' + '0' * 32, storage_kind='macos_keychain')
+        request = dict(self.request, version=2, binding=binding)
+        self.assertFalse(routing.configure(self.root, request)['live_enabled'])
+        with settings.controller(self.root) as control, control.ledger.transaction() as state:
+            config = control._config(state)
+            config.update(enabled=True)
+            config.pop('live_consent', None)
+        self.assertFalse(routing.status(self.root)['live_enabled'])
+        for revision, mode in ((1, 'manual'), (2, 'smart')):
+            result = routing.enable(self.root, dict(expected_revision=revision, mode=mode))
+            self.assertEqual(result['mode'], mode)
+            self.assertTrue(result['live_enabled'])
+            self.assertFalse(result['live_dispatch'])
+        with patch('time.time', return_value=POLICY['stop_at']):
+            self.assertFalse(routing.status(self.root)['live_enabled'])
+            with self.assertRaisesRegex(BudgetError, 'expiry_or_cycle_boundary'):
+                routing.enable(self.root, dict(expected_revision=3))
+        self.assertFalse(routing.disable(self.root, dict(expected_revision=3))['live_enabled'])
+        self.assertTrue(routing.enable(self.root, dict(expected_revision=4))['live_enabled'])
+        result = routing.configure(self.root, dict(request, expected_revision=5, expected_org_revision=1))
+        self.assertFalse(result['live_enabled'])
+
     def test_explicit_mode_enablement_preserves_shared_policy_and_off_recovery(self):
         configured = routing.configure(self.root, self.request)
         self.assertEqual(configured['mode'], 'off')
@@ -63,6 +87,7 @@ class UsageSettingsTests(unittest.TestCase):
         manual = routing.enable(self.root, dict(expected_revision=1, mode='manual'))
         self.assertEqual(manual['mode'], 'manual')
         self.assertFalse(manual['live_dispatch'])
+        self.assertFalse(manual['live_enabled'])
         self.assertTrue(manual['warnings'])
         with self.assertRaisesRegex(BudgetError, 'consent_revision_changed'):
             routing.enable(self.root, dict(expected_revision=1, mode='smart'))

@@ -73,6 +73,8 @@ class Plan:
     pilot_digest: str | None = None
     pilot_revision: int | None = None
     pilot_output_limit: int | None = None
+    standing_consent: bool = False
+    prepared_turn_id: str | None = None
 
 
 def approval_text(plan):
@@ -150,13 +152,14 @@ def _funding_pool(policy, pool):
 
 
 def freeze(cwd, proposals, *, thread_snapshot, native_limits, reviewer, maximum_usd_micros,
-           expires_at, pool='benefit', manual_allowance_pp=5, manual_price=None, pilot_digest=None):
-    """Prepare the exact proposal set for one displayed user approval. Read only."""
+           expires_at, pool='benefit', manual_allowance_pp=5, manual_price=None, pilot_digest=None,
+           standing_consent=False):
+    """Pin the exact proposals and limits without dispatching or writing settings."""
     now = int(time.time())
     try:
         with usage_settings.controller(cwd) as control:
             checkout = str(control.root)
-            (thread_id, host_id), _ = _current(thread_snapshot, checkout, now)
+            (thread_id, host_id), turn = _current(thread_snapshot, checkout, now)
             reviewer_id = _reviewer(reviewer, thread_id)
             one_shot = manual_price is not None
             state = control.ledger.snapshot()
@@ -169,6 +172,10 @@ def freeze(cwd, proposals, *, thread_snapshot, native_limits, reviewer, maximum_
                         'invalid_manual_pilot')
                 pilot_revision = config['revision']
             mode = config['requested_mode']
+            live_consent = usage_admission.live_consent_current(config, policy, now)
+            require(type(standing_consent) is bool and
+                    (not standing_consent or (mode == 'smart' and live_consent and not one_shot)),
+                    'standing_consent_required')
             _funding_pool(policy, pool)
             require(0 < integer(maximum_usd_micros) <= policy['pilot_limit'], 'live_approval_unqualified')
             window = _MANUAL_WINDOW if mode == 'manual' else _SMART_WINDOW
@@ -185,14 +192,21 @@ def freeze(cwd, proposals, *, thread_snapshot, native_limits, reviewer, maximum_
             if one_shot:
                 config = _temporary_config(config, manual_price, now, pilot_output_limit=pilot_output_limit)
             proposals = [_execution_proposal(proposal) for proposal in proposals]
+            if standing_consent:
+                require(len(proposals) == 1 and proposals[0].get('snapshots') == [],
+                        'standing_source_scope_exceeded')
             maximum = sum(_proposal(control, config, proposal, now) for proposal in proposals)
             if one_shot:
                 spent = control.ledger._total(state, config['binding']['organization'])
                 require(spent + maximum <= maximum_usd_micros, 'live_cap_exceeded')
             require(len({proposal['task_id'] for proposal in proposals}) == len(proposals)
                     and maximum <= maximum_usd_micros, 'codex_proposals_invalid')
-            allowance = (manual_allowance_pp if mode == 'manual' else
-                         usage_admission.smart_native_allowance(usage_admission.smart_qualification(config, now)))
+            if live_consent:
+                allowance = usage_admission.NATIVE_REVIEW_ALLOWANCE_PP
+            elif mode == 'manual':
+                allowance = manual_allowance_pp
+            else:
+                allowance = usage_admission.smart_native_allowance(usage_admission.smart_qualification(config, now))
             account = name(native_limits['accountId'])
             native_capacity(account, native_limits, now, now, allowance)
             return Plan(
@@ -204,7 +218,8 @@ def freeze(cwd, proposals, *, thread_snapshot, native_limits, reviewer, maximum_
                 quoted_usd_micros=maximum, proposal_digests=tuple(usage_admission.digest(item) for item in proposals),
                 created_at=now, expires_at=expires_at,
                 manual_price_window=(manual_price.observed_at, manual_price.valid_until) if one_shot else None,
-                pilot_digest=pilot_digest, pilot_revision=pilot_revision, pilot_output_limit=pilot_output_limit)
+                pilot_digest=pilot_digest, pilot_revision=pilot_revision, pilot_output_limit=pilot_output_limit,
+                standing_consent=standing_consent, prepared_turn_id=turn['id'] if mode == 'manual' else None)
     except (KeyError, IndexError, TypeError, AttributeError, OverflowError, RecursionError,
             usage_credentials.CredentialError):
         raise BudgetError('invalid_codex_host_evidence') from None
@@ -231,6 +246,27 @@ def _approved_at(plan, thread_snapshot, approval_snapshot, now, *, case_index=0)
 
 def _run_id(plan, proposal_digest):
     return 'codex-api-' + usage_admission.digest([usage_admission.digest(asdict(plan)), proposal_digest])
+
+
+def _task_authorization(plan, proposal, proposal_digest, current, previous, selection, config, policy, now, case_index):
+    if not plan.standing_consent and selection is None:
+        return (_approved_at(plan, current, previous, now, case_index=case_index),
+                _run_id(plan, proposal_digest))
+    identity, turn = _current(current, plan.checkout, now)
+    require(identity == (plan.thread_id, plan.host_id), 'codex_thread_changed')
+    require(previous is None and plan.created_at <= now < plan.expires_at
+            and usage_admission.live_consent_current(config, policy, now), 'live_consent_required')
+    if plan.standing_consent:
+        require(plan.mode == 'smart' and selection is None and len(plan.proposal_digests) == 1
+                and proposal['snapshots'] == [], 'standing_source_scope_exceeded')
+        # Refreezing one task must not create another automatic attempt.
+        key = ['standing', plan.scope, proposal['task_id']]
+        return now, 'codex-api-' + usage_admission.digest(key)
+    require(plan.mode == 'manual' and plan.manual_price_window is None and turn['id'] == plan.prepared_turn_id
+            and type(selection) is str and 0 < len(selection) <= 8000 and selection.strip()
+            and direct_approval(turn, selection), 'codex_approval_missing')
+    key = ['manual', plan.scope, plan.thread_id, turn['id']]
+    return turn['startedAt'], 'codex-api-' + usage_admission.digest(key)
 
 
 def _plan_settings(control, data, plan, case_index, prior_review):
@@ -331,7 +367,7 @@ def _publish_generation(plan, task, evidence, result, habblaud, *, visibility):
 
 def execute(plan, proposal, *, thread_snapshot, approval_snapshot=None, reviewer,
             native_limits, native_observed_at, grant, price, prior_review=None,
-            habblaud=None, generation_ready=None):
+            habblaud=None, generation_ready=None, manual_selection=None):
     """Issue exact, short-lived admission from current trusted Codex observations."""
     now = int(time.time())
     require(type(plan) is Plan, 'invalid_codex_host_plan')
@@ -346,10 +382,12 @@ def execute(plan, proposal, *, thread_snapshot, approval_snapshot=None, reviewer
             proposal_digest = usage_admission.digest(supplied)
         require(proposal_digest in plan.proposal_digests, 'codex_proposal_changed')
         case_index = plan.proposal_digests.index(proposal_digest)
-        approved_at = _approved_at(plan, thread_snapshot, approval_snapshot, now, case_index=case_index)
         one_shot = plan.manual_price_window is not None
         with usage_settings.controller(plan.checkout) as control:
             config, policy = _plan_settings(control, control.ledger.snapshot(), plan, case_index, prior_review)
+            approved_at, run_id = _task_authorization(
+                plan, proposal, proposal_digest, thread_snapshot, approval_snapshot, manual_selection,
+                config, policy, now, case_index)
             if one_shot:
                 require(type(price) is Price and (price.observed_at, price.valid_until) == tuple(plan.manual_price_window),
                         'pricing_stale')
@@ -363,12 +401,12 @@ def execute(plan, proposal, *, thread_snapshot, approval_snapshot=None, reviewer
                     profile['verified_at'], profile['valid_until']), 'pricing_stale')
             native = native_capacity(plan.account, native_limits, native_observed_at, now, plan.native_allowance_pp)
             qualification = None
-            if plan.mode == 'smart':
+            if plan.mode == 'smart' and not usage_admission.live_consent_current(config, policy, now):
                 record = usage_admission.smart_qualification(config, now)
                 qualification = usage_admission.digest([config['qualification_revision'], record])
             approval_id = usage_admission.digest(asdict(plan))
             visibility = worker_visibility.optional_declaration(supplied.get('visibility'))
-            task = dict(proposal, run_id=_run_id(plan, proposal_digest),
+            task = dict(proposal, run_id=run_id,
                         reviewer_available=True, native=dict(native, task=proposal['task_id']))
             evidence = usage_admission.Admission(
                 scope=plan.scope, config_revision=config['revision'], org_revision=config['org_revision'],

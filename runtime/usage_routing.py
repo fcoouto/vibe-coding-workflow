@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from runtime import startup, usage_admission, usage_credentials
-from runtime.usage_budget import BudgetError, fields, integer, name, require
+from runtime.usage_budget import BudgetError, FRESH_SECONDS, fields, integer, name, require
 
 PACKAGE = Path(__file__).resolve().parents[1]
 MAX_INPUT = 65536
@@ -26,7 +26,7 @@ def status(cwd=None):
         except (OSError, ValueError, startup.StartupError):
             enrollment = 'unavailable'
     enrolled = True if enrollment in ('active', 'configured') else False if enrollment == 'outside' else None
-    result = dict(version=1, mode='off', live_dispatch=False, simulation_only=True,
+    result = dict(version=1, mode='off', live_enabled=False, live_dispatch=False, simulation_only=True,
                   review_authority=False, enrolled=enrolled, enrollment=enrollment,
                   reason='live_adapter_unavailable', enabled=False, funding_policy='best_effort_grant',
                   warnings=[FUNDING_WARNING])
@@ -158,19 +158,26 @@ class Controller:
             revision = self.ledger._configure(data, binding['organization'], request['policy'], request['expected_org_revision'])
             records[self.scope] = dict(revision=request['expected_revision']+1, binding=binding.copy(),
                 org_revision=revision, profile=profile.copy(), class_name=request['class_name'],
-                requested_mode=request['mode'], enabled=False, disabled=False, qualification=None, qualification_revision=0)
+                requested_mode=request['mode'], enabled=False, disabled=False, live_consent=False,
+                qualification=None, qualification_revision=0)
         return self.status()
 
     def status(self):
         data = self.ledger.snapshot()
         config = data.get('routing', {}).get(self.scope)
-        enabled = bool(config and config.get('enabled',False) and not config['disabled'])
+        enabled = bool(config and config.get('enabled', False) and not config['disabled'])
+        live_enabled = False
+        if enabled:
+            org = data['organizations'][config['binding']['organization']]
+            live_enabled = (config['org_revision'] == org['revision'] and
+                            usage_admission.live_consent_current(config, org['policy'], self.clock()))
+        reason = 'trusted_host_required' if live_enabled else 'live_adapter_unavailable'
         return dict(version=1, mode=config['requested_mode'] if enabled else 'off', enabled=enabled,
-                    live_dispatch=False, review_authority=False, funding_policy='best_effort_grant',
+                    live_enabled=live_enabled, live_dispatch=False, review_authority=False, funding_policy='best_effort_grant',
                     warnings=[FUNDING_WARNING],
                     simulation_only=True, requested_mode=config['requested_mode'] if config else None,
                     revision=config['revision'] if config else 0,
-                    reason='disabled' if config and config['disabled'] else 'live_adapter_unavailable')
+                    reason='disabled' if config and config['disabled'] else reason)
 
     def enable(self, expected_revision, *, mode=None):
         integer(expected_revision)
@@ -184,6 +191,12 @@ class Controller:
             config['revision'] += 1
             config['enabled'] = True
             config['disabled'] = False
+            config['live_consent'] = config['binding'].get('storage_kind') == 'macos_keychain'
+            if config['live_consent']:
+                org = data['organizations'][config['binding']['organization']]
+                require(config['org_revision'] == org['revision'], 'policy_revision_changed')
+                require(usage_admission.live_consent_current(config, org['policy'], self.clock()),
+                        'expiry_or_cycle_boundary')
         return self.status()
 
     def disable(self, expected_revision):
@@ -194,6 +207,7 @@ class Controller:
             config['revision'] += 1
             config['disabled'] = True
             config['enabled'] = False
+            config['live_consent'] = False
         return self.status()
 
     def record_qualification(self, record):
@@ -248,7 +262,7 @@ class Controller:
                     and path.is_file() and path.stat().st_size <= MAX_INPUT, 'snapshot_changed')
             require(hashlib.sha256(path.read_bytes()).hexdigest() == snapshot['sha256'], 'snapshot_changed')
 
-    def _evaluate(self, data, task):
+    def _evaluate(self, data, task, *, pin_qualification=False):
         fields(task, 'task_id run_id class_name packet provider local_preferred api_only reviewer_available native snapshots')
         for field in ('local_preferred','api_only','reviewer_available'):
             require(type(task[field]) is bool, 'invalid_task')
@@ -261,8 +275,6 @@ class Controller:
         require(task['class_name'] == config['class_name'], 'task_class_unqualified')
         org_id = config['binding']['organization']
         require(data['organizations'][org_id]['revision'] == config['org_revision'], 'policy_revision_changed')
-        if config['requested_mode'] == 'smart':
-            usage_admission.smart_qualification(config, self.clock())
         self._snapshots(task['snapshots'])
         bound = quote(task['packet'], config['profile'], self.clock())
         require(task['native'].get('task') == task['task_id'], 'native_task_mismatch')
@@ -273,7 +285,11 @@ class Controller:
                            bound['maximum_usd_micros'] + bound['count_maximum_usd_micros'],
                            config['org_revision'], self.clock())
         return dict(decision='eligible', reason='qualified_profile_and_budget', maximum_usd_micros=bound['maximum_usd_micros'],
-                    consent=dict(scope=self.scope, revision=config['revision'], qualification_revision=config['qualification_revision']))
+                    consent=self._consent(config, pin_qualification))
+
+    def _consent(self, config, pin_qualification):
+        return dict(scope=self.scope, revision=config['revision'],
+                    qualification_revision=config['qualification_revision'] if pin_qualification else None)
 
     def evaluate(self, task):
         try:
@@ -441,6 +457,7 @@ class Controller:
             return dict(replayed=True, simulation_only=True, accepted=False,
                         requires_native_review=True, state=existing['calls'])
         live_gate = final_check = None
+        pin_qualification = False
         if evidence is None:
             decision = self.evaluate(task)
             data = self.ledger.snapshot()
@@ -464,7 +481,8 @@ class Controller:
                     denial = error
             if denial is not None:
                 raise denial
-            decision = self._evaluate(data, task)
+            pin_qualification = self._config(data).get('live_consent') is not True
+            decision = self._evaluate(data, task, pin_qualification=pin_qualification)
 
             def live_gate(state, now):
                 return self._stage_live(state, task, evidence, now)[1]
@@ -476,15 +494,13 @@ class Controller:
 
         require(decision['decision'] == 'eligible', decision['reason'])
         config = self._config(data)
-        require(decision['consent'] == dict(scope=self.scope, revision=config['revision'],
-                qualification_revision=config['qualification_revision']), 'consent_changed')
+        require(decision['consent'] == self._consent(config, pin_qualification), 'consent_changed')
         binding, profile, packet = config['binding'], config['profile'], task['packet'].copy()
         now = self.clock(); org_id = binding['organization']; run_id = task['run_id']
         if evidence is None:
             deadline = min(now+300, profile['valid_until'],
                            data['organizations'][org_id]['policy']['stop_at'],
-                           min(min(w['reset_at'],w['observed_at']+900) for w in task['native']['windows']),
-                           config['qualification']['valid_until'] if config['requested_mode'] == 'smart' else profile['valid_until'])
+                           min(min(w['reset_at'], w['observed_at'] + FRESH_SECONDS) for w in task['native']['windows']))
         else:
             deadline = min(deadline, now + 300)
         packet_id = openai_api.packet_digest(packet)

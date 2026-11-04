@@ -1,6 +1,6 @@
-# First foreground canary
+# Optional foreground canary
 
-Use the reviewed, digest-pinned candidate and the accepted checkout. This test
+For an explicitly selected bounded test, use the reviewed, digest-pinned candidate and the accepted checkout. This test
 uses a new canary-only Manual configuration and requires an unused routing scope
 and organization budget. Keep ordinary routing OFF during preparation.
 
@@ -35,8 +35,7 @@ and organization budget. Keep ordinary routing OFF during preparation.
    inspect status and disable the owned revision while preserving accounting.
    Keep uncertain charges and the native review reserve. Inspect the exact
    result and obtain independent native review. Verify project and observed
-   credit attribution before any evaluation case. A failed or ambiguous canary
-   pauses the pilot.
+   credit attribution for the test. Preserve an ambiguous attempt for recovery.
 
 The foreground coordinator attests the evidence it reads from supported
 surfaces. The local validator checks exact bindings and consumes one ledger
