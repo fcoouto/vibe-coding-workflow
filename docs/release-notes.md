@@ -1,5 +1,9 @@
 # Release notes
 
+## 0.1.19
+
+- Make cumulative and per-task Usage Routing caps optional. Verified funding, applicable monthly limits, and full per-request reservations still apply. [PR #91](https://github.com/fcoouto/vibe-coding-workflow/pull/91)
+
 ## 0.1.18
 
 - Capture each subagent's role once while preparing its assignment. Reuse existing native, OpenRouter and Usage Routing metadata without blocking execution when display preparation fails. [PR #90](https://github.com/fcoouto/vibe-coding-workflow/pull/90)

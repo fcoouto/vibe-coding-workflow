@@ -88,6 +88,12 @@ def live_consent_current(config, policy, now):
             and policy['start'] <= now < policy['stop_at'] < min(policy['end'], policy['expiry']))
 
 
+def validate_maximum(maximum, policy):
+    """Require a finite approval bound even when the policy omits its cumulative cap."""
+    limit = policy['pilot_limit']
+    require(0 < integer(maximum) and (limit is None or maximum <= integer(limit)), 'live_approval_unqualified')
+
+
 def validate(evidence, *, scope, config, policy, task, now) -> int:
     """Return the exclusive send deadline for the current, exact admission inputs."""
     try:
@@ -130,9 +136,9 @@ def _validate(evidence, scope, config, policy, task, now):
             and name(evidence.reviewer).strip() == evidence.reviewer and evidence.coordinator != evidence.reviewer,
             'independent_review_unavailable')
     require(name(evidence.approval_id).strip() == evidence.approval_id
-            and integer(evidence.approved_at) <= now < integer(evidence.approval_until)
-            and 0 < integer(evidence.maximum_usd_micros) <= integer(policy['pilot_limit']),
+            and integer(evidence.approved_at) <= now < integer(evidence.approval_until),
             'live_approval_unqualified')
+    validate_maximum(evidence.maximum_usd_micros, policy)
 
     grant = evidence.grant
     require((name(grant.organization), name(grant.project)) == (binding['organization'], binding['project']),

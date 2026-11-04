@@ -26,8 +26,9 @@ API proposals in enrolled Codex checkouts. Routing defaults to OFF.
 To opt in, open the project checkout in Codex and ask **“Enable Smart Balance
 for this project”** or **“Enable Manual Usage Routing for this project.”**
 Connect an OpenAI project key if prompted. Activation saves the selected mode,
-task scope and spending limits. Manual uses the API for tasks you select. Smart
-Balance chooses eligible tasks within the approved scope. Each live request
+task scope and funding policy, including any spending caps you choose. Manual
+uses the API for tasks you select. Smart Balance chooses eligible tasks within
+the approved scope. Each live request
 checks funding, budget and review capacity. Ask **“Disable Usage Routing for
 this project”** to stop new requests.
 

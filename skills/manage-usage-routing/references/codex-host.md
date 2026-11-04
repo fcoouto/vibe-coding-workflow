@@ -18,10 +18,13 @@ host cannot validate admission, continue natively when the task permits.
    [packet schema](procedure.md#read-only-status-quoting-and-selection)
    and [proposal procedure](delegation.md). Keep one original task outstanding
    through integration and review.
-3. Call `freeze` with the one-item `proposals` list, `maximumUsdMicros`,
-   `expiresAt`, and the authorized `pool`. Use the existing cap and expiry
-   as outer bounds. The maximum includes existing organization exposure
-   and outstanding reservations.
+3. Call `freeze` with the one-item `proposals` list, `expiresAt`, and the
+   authorized `pool`. Supply `maximumUsdMicros` when required by a configured
+   cumulative cap or an explicit request or test bound. For an ordinary
+   request with `pilot_limit: null` and no explicit bound, omit it. The host
+   sets the exposure limit to retained organization exposure, including
+   outstanding reservations, plus the full quote. Verified credit, applicable
+   caps, consent, price and expiry still govern admission.
 4. For Manual, use `provider: openai-api`. Pass `manualSelection` to
    `execute` with the exact direct, active user message that selects API
    for this task and authorizes the packet's data. Verify it in native chat

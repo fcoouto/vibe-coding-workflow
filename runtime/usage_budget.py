@@ -135,7 +135,7 @@ class Ledger:
         name(organization); integer(expected_revision)
         fields(policy, 'cycle start end expiry stop_at ceiling amount grant_amount pilot_limit task_limit')
         name(policy['cycle'])
-        for key in ('start', 'end', 'expiry', 'stop_at', 'grant_amount', 'pilot_limit', 'task_limit'):
+        for key in ('start', 'end', 'expiry', 'stop_at', 'grant_amount'):
             integer(policy[key])
         require(policy['start'] < policy['stop_at'] < min(policy['end'], policy['expiry']), 'invalid_expiry_window')
         require(policy['ceiling'] in ('none', 'custom', 'subscription_benefit'), 'invalid_ceiling')
@@ -143,7 +143,8 @@ class Ledger:
             require(integer(policy['amount']) > 0, 'invalid_ceiling')
         else:
             require(policy['amount'] is None, 'unexpected_amount')
-        require(policy['pilot_limit'] > 0 and policy['task_limit'] > 0, 'invalid_limits')
+        for limit in (policy['pilot_limit'], policy['task_limit']):
+            require(limit is None or integer(limit) > 0, 'invalid_limits')
         if policy['ceiling'] == 'subscription_benefit':
             require(policy['grant_amount'] > 0, 'missing_grant_coverage')
         org = data['organizations'].get(organization)
@@ -191,9 +192,10 @@ class Ledger:
     @classmethod
     def _headroom(cls, data, organization, task=None):
         org = data['organizations'][organization]; policy = org['policy']
-        limits = [cls._credit(data, organization),
-                  policy['pilot_limit'] - cls._total(data, organization)]
-        if task is not None:
+        limits = [cls._credit(data, organization)]
+        if policy['pilot_limit'] is not None:
+            limits.append(policy['pilot_limit'] - cls._total(data, organization))
+        if task is not None and policy['task_limit'] is not None:
             limits.append(policy['task_limit'] - cls._total(data, organization, task))
         cap = policy['amount'] if policy['ceiling'] == 'custom' else policy['grant_amount']
         if policy['ceiling'] != 'none':
@@ -336,8 +338,10 @@ class Ledger:
             self._admit(data, run['organization'], run['task'], 0, revision, now)
             require(self._headroom(data, run['organization'], run['task']) >= 0, 'insufficient_headroom')
             policy = data['organizations'][run['organization']]['policy']
-            require(self._total(data, run['organization']) <= policy['pilot_limit'] and
-                    self._total(data, run['organization'], run['task']) <= policy['task_limit'], 'limits_changed')
+            require((policy['pilot_limit'] is None or self._total(data, run['organization']) <= policy['pilot_limit'])
+                    and (policy['task_limit'] is None
+                         or self._total(data, run['organization'], run['task']) <= policy['task_limit']),
+                    'limits_changed')
             cap = policy['amount'] if policy['ceiling'] == 'custom' else policy['grant_amount']
             require(policy['ceiling'] == 'none' or self._total(data, run['organization'], cycle=policy['cycle']) <= cap, 'limits_changed')
             require(data['organizations'][run['organization']]['balance'] >=
