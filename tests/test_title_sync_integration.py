@@ -309,7 +309,7 @@ class BoundTaskTitleTests(unittest.TestCase):
         home.start()
         self.addCleanup(home.stop)
 
-    def command(self, arguments, request):
+    def command(self, arguments, request, *, expected_code=0):
         import io
         import json
         from types import SimpleNamespace
@@ -322,14 +322,93 @@ class BoundTaskTitleTests(unittest.TestCase):
              patch.object(title_sync, 'NativeTitles', return_value=self.native):
             code = workflow.main()
         result = json.loads(output.getvalue())
-        self.assertEqual(code, 0, result)
+        self.assertEqual(code, expected_code, result)
         return result
 
-    def configure(self):
+    def configure(self, **topic_fields):
         task = self.fixture.status()['task']
         return self.command(['task', 'title', 'configure'], {
             key: task[key] for key in ('client', 'session_id', 'task_id', 'scope_ref')} |
-            dict(expected_revision=task['revision'], reference='user:adopt', topic='Real title'))
+            dict(expected_revision=task['revision'], reference='user:adopt') |
+            (topic_fields or dict(topic='Real title')))
+
+    def start_new_objective(self):
+        old = self.fixture.status()['task']
+        task = self.fixture.start(task_id='next-task', replaces={
+            'task_id': old['task_id'], 'expected_revision': old['revision']})['task']
+        self.assertEqual(task.get('milestones', []), [])
+
+    def assert_topic_rebind(self, expected_title):
+        self.start_new_objective()
+        result = self.configure(workflow_topic='New objective')
+        self.assertEqual(self.native.title, expected_title)
+        self.assertEqual(len(list(self.fixture.scope.runtime.state_dir.glob('title-history-*.json'))), 1)
+        return result
+
+    def test_workflow_topic_rebind_respects_ownership(self):
+        self.configure(workflow_topic='Old objective')
+        self.assert_topic_rebind('\uFFFB▱▱▱▱▱ [W1] P · New objective')
+
+    def test_workflow_topic_rebind_preserves_explicit_topic(self):
+        self.configure(topic='User wording')
+        self.assert_topic_rebind('\uFFFB▱▱▱▱▱ [W1] P · User wording')
+
+    def test_workflow_topic_rebind_preserves_legacy_topic(self):
+        import json
+        self.configure(workflow_topic='Old objective')
+        path = title_sync._path(self.fixture.scope, 'codex', 'session')
+        saved = json.loads(path.read_text())
+        del saved['topic_workflow_owned']
+        path.write_text(json.dumps(saved))
+        self.assert_topic_rebind('\uFFFB▱▱▱▱▱ [W1] P · Old objective')
+
+    def test_workflow_topic_rebind_preserves_previously_reconciled_edit(self):
+        self.configure(workflow_topic='Old objective')
+        self.native.title = self.native.title.replace('Old objective', 'My research')
+        self.command(['task', 'title', 'sync'], dict(client='codex', session_id='session'))
+        self.assert_topic_rebind('\uFFFB▱▱▱▱▱ [W1] P · My research')
+
+    def test_workflow_topic_rebind_reconciles_edit_before_choosing_topic(self):
+        self.configure(workflow_topic='Old objective')
+        self.native.title = self.native.title.replace('Old objective', 'My research')
+        self.assert_topic_rebind('\uFFFB▱▱▱▱▱ [W1] P · My research')
+
+    def test_workflow_topic_rebind_preserves_paused_title(self):
+        self.configure(workflow_topic='Old objective')
+        self.native.title = 'My custom title'
+        self.command(['task', 'title', 'sync'], dict(client='codex', session_id='session'))
+        before = self.native.writes
+        self.assertTrue(self.assert_topic_rebind('My custom title')['paused'])
+        self.assertEqual(self.native.writes, before)
+
+    def test_workflow_topic_rebind_recovers_lost_acknowledgment(self):
+        self.configure(workflow_topic='Old objective')
+        self.start_new_objective()
+        before = self.native.writes
+        self.native.lose_ack = True
+        task = self.fixture.status()['task']
+        identity = {key: task[key] for key in ('client', 'session_id')}
+        request = identity | {key: task[key] for key in ('task_id', 'scope_ref')} | dict(
+            expected_revision=task['revision'], reference='user:new', workflow_topic='New objective')
+        result = self.command(['task', 'title', 'configure'], request, expected_code=1)
+        self.assertFalse(result['ok'])
+        status = self.command(['task', 'title', 'status'], identity)
+        self.assertEqual(status['presentation']['pending'], '\uFFFB▱▱▱▱▱ [W1] P · New objective')
+        self.command(['task', 'title', 'sync'], identity)
+        self.assertEqual(self.native.title, '\uFFFB▱▱▱▱▱ [W1] P · New objective')
+        self.assertEqual(self.native.writes, before + 1)
+        self.assertIsNone(self.command(['task', 'title', 'status'], identity)['presentation']['pending'])
+
+    def test_invalid_workflow_topic_requests_leave_native_title_untouched(self):
+        task = self.fixture.status()['task']
+        request = {key: task[key] for key in ('client', 'session_id', 'task_id', 'scope_ref')} | dict(
+            expected_revision=task['revision'], reference='user:adopt', workflow_topic='Generated')
+        cases = [('configure', dict(topic='Explicit')), ('configure', dict(workflow_topic='')),
+                 ('configure', dict(workflow_topic=None)), ('resume', {})]
+        for action, extra in cases:
+            with self.subTest(action=action, extra=extra):
+                self.command(['task', 'title', action], request | extra, expected_code=1)
+        self.assertEqual(self.native.writes, 0)
 
     def test_malformed_native_data_and_constructor_failure_return_json(self):
         import io
