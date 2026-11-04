@@ -57,6 +57,20 @@ const request = {root:'/installed', python:'/python', threadId:'parent', hostId:
   await assert.rejects(run({...request, plan:{...request.plan,mode:'manual'}},tools), /approval/);
   assert.ok(!checks.includes('python'));
 
+  const fresh = {...request, approvalTurnId:undefined};
+  const manual = {...fresh, plan:{...fresh.plan, mode:'manual'}, manualSelection:'Native receipt'};
+  await run(manual, {...tools, exec_command: async args => {
+    assert.match(args.cmd, /"manual_selection":"Native receipt"/);
+    assert.match(args.cmd, /"id":"user-current"/);
+    return {exit_code:0,output:'{"ok":true}'};
+  }});
+  const standing = {...fresh, plan:{...fresh.plan, standing_consent:true}};
+  await run(standing, {...tools, exec_command: async args => {
+    assert.match(args.cmd, /"standing_consent":true/);
+    assert.doesNotMatch(args.cmd, /Native receipt|user-current/);
+    return {exit_code:0,output:'{"ok":true}'};
+  }});
+
   const local = {...tools, exec_command: async args => {
     const child = spawnSync('/bin/sh', ['-c',args.cmd], {encoding:'utf8'});
     assert.equal(child.stderr,'');

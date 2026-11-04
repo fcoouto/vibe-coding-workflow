@@ -23,17 +23,16 @@ Observability activation stays outside project onboarding; successful onboarding
 Use [Manage Usage Routing](skills/manage-usage-routing/SKILL.md) for opt-in OpenAI
 API proposals in enrolled Codex checkouts. Routing defaults to OFF.
 
-To opt in, open the configured project checkout in Codex and ask
-**“Enable Smart Balance for this project.”** If Usage Routing needs setup, ask
-**“Set up Usage Routing for this project”** first. The skill saves consent for
-the selected checkout and reports its status. Smart Balance evaluates in shadow
-until the host and task class qualify. Live proposals require exact approval,
-current grant and budget checks, and independent native review. To turn it off,
-ask **“Disable Usage Routing for this project.”**
+To opt in, open the project checkout in Codex and ask **“Enable Smart Balance
+for this project”** or **“Enable Manual Usage Routing for this project.”**
+Connect an OpenAI project key if prompted. Activation saves the selected mode,
+task scope and spending limits. Manual uses the API for tasks you select. Smart
+Balance chooses eligible tasks within the approved scope. Each live request
+checks funding, budget and review capacity. Ask **“Disable Usage Routing for
+this project”** to stop new requests.
 
-See the [routing controls](skills/manage-usage-routing/references/procedure.md),
-[comparison template](docs/superpowers/specs/2026-10-31-usage-routing-design.md#paired-comparison-template)
-and [validation record](docs/usage-routing-validation.md).
+See the [routing controls](skills/manage-usage-routing/references/procedure.md)
+and the [optional comparison template](docs/superpowers/specs/2026-10-31-usage-routing-design.md#paired-comparison-template).
 
 ## Prepare your Workspace
 

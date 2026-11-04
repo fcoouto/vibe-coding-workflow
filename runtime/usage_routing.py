@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from runtime import startup, usage_admission, usage_credentials
-from runtime.usage_budget import BudgetError, fields, integer, name, require
+from runtime.usage_budget import BudgetError, FRESH_SECONDS, fields, integer, name, require
 
 PACKAGE = Path(__file__).resolve().parents[1]
 MAX_INPUT = 65536
@@ -26,7 +26,8 @@ def status(cwd=None):
         except (OSError, ValueError, startup.StartupError):
             enrollment = 'unavailable'
     enrolled = True if enrollment in ('active', 'configured') else False if enrollment == 'outside' else None
-    result = dict(version=1, mode='off', live_dispatch=False, simulation_only=True,
+    result = dict(version=1, mode='off', live_enabled=False, live_dispatch=False, simulation_only=True,
+                  canary_active=False,
                   review_authority=False, enrolled=enrolled, enrollment=enrollment,
                   reason='live_adapter_unavailable', enabled=False, funding_policy='best_effort_grant',
                   warnings=[FUNDING_WARNING])
@@ -130,9 +131,13 @@ class Controller:
         return config
 
     def configure(self, request):
-        fields(request, 'version expected_revision expected_org_revision binding policy profile class_name mode')
+        expected = 'version expected_revision expected_org_revision binding policy profile class_name mode'
+        convert_budget = isinstance(request, dict) and 'production_budget' in request
+        fields(request, expected + (' production_budget' if convert_budget else ''))
         version = request['version']
         require(type(version) is int and version in (1, 2), 'invalid_version')
+        require(not convert_budget or (version == 2 and request['production_budget'] is True),
+                'invalid_production_budget')
         integer(request['expected_revision']); integer(request['expected_org_revision'])
         binding = request['binding']
         if version == 1:
@@ -155,22 +160,49 @@ class Controller:
             records = data.setdefault('routing', {})
             old = records.get(self.scope)
             require((old['revision'] if old else 0) == request['expected_revision'], 'consent_revision_changed')
-            revision = self.ledger._configure(data, binding['organization'], request['policy'], request['expected_org_revision'])
+            organization, policy = binding['organization'], request['policy']
+            previous = data['organizations'].get(organization, {}).get('policy')
+            revision = self.ledger._configure(data, organization, policy, request['expected_org_revision'])
+            same_canary_cycle = (old is not None and old['binding']['organization'] == organization
+                                 and previous is not None and previous['cycle'] == policy['cycle']
+                                 and policy['cycle'].startswith(usage_admission.CANARY_CYCLE_PREFIX))
+            require(not convert_budget or (same_canary_cycle and
+                    ('canary_owner' not in old or old['disabled'] is True)),
+                    'routing_budget_required')
             records[self.scope] = dict(revision=request['expected_revision']+1, binding=binding.copy(),
                 org_revision=revision, profile=profile.copy(), class_name=request['class_name'],
-                requested_mode=request['mode'], enabled=False, disabled=False, qualification=None, qualification_revision=0)
+                requested_mode=request['mode'], enabled=False, disabled=False, live_consent=False,
+                production_budget=same_canary_cycle and (convert_budget or old.get('production_budget') is True),
+                qualification=None, qualification_revision=0)
         return self.status()
 
     def status(self):
         data = self.ledger.snapshot()
         config = data.get('routing', {}).get(self.scope)
-        enabled = bool(config and config.get('enabled',False) and not config['disabled'])
+        canary_only = False
+        live_enabled = False
+        if config:
+            org = data['organizations'][config['binding']['organization']]
+            canary_only = usage_admission.canary_budget_only(config, org['policy'])
+            live_enabled = (config['org_revision'] == org['revision'] and
+                            usage_admission.live_consent_current(config, org['policy'], self.clock()))
+        locally_enabled = bool(config and config.get('enabled', False) and not config['disabled'])
+        canary_active = locally_enabled and 'canary_owner' in config
+        enabled = locally_enabled and not canary_only
+        reason = 'live_adapter_unavailable'
+        if canary_only:
+            reason = 'routing_budget_required'
+        elif live_enabled:
+            reason = 'trusted_host_required'
+        elif config and config['disabled']:
+            reason = 'disabled'
         return dict(version=1, mode=config['requested_mode'] if enabled else 'off', enabled=enabled,
-                    live_dispatch=False, review_authority=False, funding_policy='best_effort_grant',
+                    live_enabled=live_enabled, live_dispatch=False, review_authority=False, funding_policy='best_effort_grant',
+                    canary_active=canary_active,
                     warnings=[FUNDING_WARNING],
                     simulation_only=True, requested_mode=config['requested_mode'] if config else None,
                     revision=config['revision'] if config else 0,
-                    reason='disabled' if config and config['disabled'] else 'live_adapter_unavailable')
+                    reason=reason)
 
     def enable(self, expected_revision, *, mode=None):
         integer(expected_revision)
@@ -179,11 +211,18 @@ class Controller:
             config = self._config(data)
             require(config['revision'] == expected_revision, 'consent_revision_changed')
             require('manual_test_owner' not in config, 'manual_test_in_use')
+            org = data['organizations'][config['binding']['organization']]
+            require(not usage_admission.canary_budget_only(config, org['policy']), 'routing_budget_required')
             if mode is not None:
                 config['requested_mode'] = mode
             config['revision'] += 1
             config['enabled'] = True
             config['disabled'] = False
+            config['live_consent'] = config['binding'].get('storage_kind') == 'macos_keychain'
+            if config['live_consent']:
+                require(config['org_revision'] == org['revision'], 'policy_revision_changed')
+                require(usage_admission.live_consent_current(config, org['policy'], self.clock()),
+                        'expiry_or_cycle_boundary')
         return self.status()
 
     def disable(self, expected_revision):
@@ -194,6 +233,7 @@ class Controller:
             config['revision'] += 1
             config['disabled'] = True
             config['enabled'] = False
+            config['live_consent'] = False
         return self.status()
 
     def record_qualification(self, record):
@@ -248,7 +288,7 @@ class Controller:
                     and path.is_file() and path.stat().st_size <= MAX_INPUT, 'snapshot_changed')
             require(hashlib.sha256(path.read_bytes()).hexdigest() == snapshot['sha256'], 'snapshot_changed')
 
-    def _evaluate(self, data, task):
+    def _evaluate(self, data, task, *, pin_qualification=False, live=False):
         fields(task, 'task_id run_id class_name packet provider local_preferred api_only reviewer_available native snapshots')
         for field in ('local_preferred','api_only','reviewer_available'):
             require(type(task[field]) is bool, 'invalid_task')
@@ -257,12 +297,12 @@ class Controller:
         require(not config['disabled'], 'disabled')
         if task['provider'] not in ('auto','openai-api') or task['local_preferred']:
             return dict(decision='paused' if task['api_only'] else 'native', reason='explicit_provider_or_local_preference')
+        org_id = config['binding']['organization']
+        org = data['organizations'][org_id]
+        require(live or not usage_admission.canary_budget_only(config, org['policy']), 'routing_budget_required')
         require(task['reviewer_available'], 'independent_review_unavailable')
         require(task['class_name'] == config['class_name'], 'task_class_unqualified')
-        org_id = config['binding']['organization']
-        require(data['organizations'][org_id]['revision'] == config['org_revision'], 'policy_revision_changed')
-        if config['requested_mode'] == 'smart':
-            usage_admission.smart_qualification(config, self.clock())
+        require(org['revision'] == config['org_revision'], 'policy_revision_changed')
         self._snapshots(task['snapshots'])
         bound = quote(task['packet'], config['profile'], self.clock())
         require(task['native'].get('task') == task['task_id'], 'native_task_mismatch')
@@ -273,7 +313,11 @@ class Controller:
                            bound['maximum_usd_micros'] + bound['count_maximum_usd_micros'],
                            config['org_revision'], self.clock())
         return dict(decision='eligible', reason='qualified_profile_and_budget', maximum_usd_micros=bound['maximum_usd_micros'],
-                    consent=dict(scope=self.scope, revision=config['revision'], qualification_revision=config['qualification_revision']))
+                    consent=self._consent(config, pin_qualification))
+
+    def _consent(self, config, pin_qualification):
+        return dict(scope=self.scope, revision=config['revision'],
+                    qualification_revision=config['qualification_revision'] if pin_qualification else None)
 
     def evaluate(self, task):
         try:
@@ -441,6 +485,7 @@ class Controller:
             return dict(replayed=True, simulation_only=True, accepted=False,
                         requires_native_review=True, state=existing['calls'])
         live_gate = final_check = None
+        pin_qualification = False
         if evidence is None:
             decision = self.evaluate(task)
             data = self.ledger.snapshot()
@@ -464,7 +509,8 @@ class Controller:
                     denial = error
             if denial is not None:
                 raise denial
-            decision = self._evaluate(data, task)
+            pin_qualification = self._config(data).get('live_consent') is not True
+            decision = self._evaluate(data, task, pin_qualification=pin_qualification, live=True)
 
             def live_gate(state, now):
                 return self._stage_live(state, task, evidence, now)[1]
@@ -476,15 +522,13 @@ class Controller:
 
         require(decision['decision'] == 'eligible', decision['reason'])
         config = self._config(data)
-        require(decision['consent'] == dict(scope=self.scope, revision=config['revision'],
-                qualification_revision=config['qualification_revision']), 'consent_changed')
+        require(decision['consent'] == self._consent(config, pin_qualification), 'consent_changed')
         binding, profile, packet = config['binding'], config['profile'], task['packet'].copy()
         now = self.clock(); org_id = binding['organization']; run_id = task['run_id']
         if evidence is None:
             deadline = min(now+300, profile['valid_until'],
                            data['organizations'][org_id]['policy']['stop_at'],
-                           min(min(w['reset_at'],w['observed_at']+900) for w in task['native']['windows']),
-                           config['qualification']['valid_until'] if config['requested_mode'] == 'smart' else profile['valid_until'])
+                           min(min(w['reset_at'], w['observed_at'] + FRESH_SECONDS) for w in task['native']['windows']))
         else:
             deadline = min(deadline, now + 300)
         packet_id = openai_api.packet_digest(packet)

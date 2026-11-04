@@ -36,5 +36,5 @@ grants no permission to create a key or start inference.
    authorized action.
 
 The bridge accepts no approval field and makes no account calls. A bridge receipt
-establishes local storage only. Keep routing OFF until the trusted admission
-path and bounded Manual pilot pass their own checks.
+establishes local storage. Use [explicit activation](procedure.md#set-up-and-select-a-mode)
+to select a live mode after setup.
