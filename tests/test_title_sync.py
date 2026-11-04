@@ -24,6 +24,13 @@ class TitleSyncTests(unittest.TestCase):
         for status in ('active','IN PROGRESS','ready'):
             with self.assertRaises(ValueError): title_sync.format_title('W1','P','Topic',status,0)
 
+    def test_working_fallback_applies_only_without_measurable_milestones(self):
+        self.assertEqual(title_sync.progress_cells(self.task()), 1)
+        self.assertEqual(title_sync.progress_cells(self.task() | dict(milestones=[])), 1)
+        self.assertEqual(title_sync.progress_cells(self.task('REVIEW')), 0)
+        milestones = [dict(weight=1, accepted=True), dict(weight=5, accepted=False)]
+        self.assertEqual(title_sync.progress_cells(self.task() | dict(milestones=milestones)), 0)
+
     def test_topic_edit_adopted_while_new_status_applied(self):
         saved=self.saved()
         current=saved['applied'].replace('Thread naming','Better naming')

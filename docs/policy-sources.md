@@ -263,6 +263,11 @@ specifies that prefix at every fill level. Titles without it remain readable
 for reconciliation. The browser fixture rendered the original Menlo shapes at
 each level. CoreText did not apply that font fallback to the empty meter.
 
+The user requested one filled cell for `WORKING` when there are no measurable
+milestones. The [naming contract](../clients/workstreams-naming.md#status-and-accepted-progress)
+defines this as a display indicator. Measurable plans still use accepted
+milestone weights.
+
 Instruction-path review covers solo implementation, questions, planning with and
 without workers, implementation review, follow-up questions after completion and
 manual overrides. Package checks, instruction observations and installed native

@@ -81,7 +81,7 @@ class TitleIntegrationTests(unittest.TestCase):
 
     def test_explicit_adoption_then_same_revision_does_not_rewrite(self):
         self.call('configure', topic='Thread naming')
-        self.assertEqual(self.native.title, '\uFFFB▱▱▱▱▱ WORKING · [W1] P · Thread naming')
+        self.assertEqual(self.native.title, '\uFFFB▰▱▱▱▱ WORKING · [W1] P · Thread naming')
         self.call()
         self.assertEqual(self.native.writes, 1)
         self.task.update(state='REVIEW', revision=self.task['revision']+1)
@@ -164,7 +164,7 @@ class TitleIntegrationTests(unittest.TestCase):
         self.assertEqual(self.native.title, '\uFFFB▱▱▱▱▱ REVIEW · [W1] P · Better naming')
         self.task.update(state='WORKING', revision=self.task['revision']+1)
         self.call()
-        self.assertEqual(self.native.title, '\uFFFB▱▱▱▱▱ WORKING · [W1] P · Better naming')
+        self.assertEqual(self.native.title, '\uFFFB▰▱▱▱▱ WORKING · [W1] P · Better naming')
 
     def test_manual_done_does_not_complete_task_and_notice_only_once(self):
         self.call('configure', topic='Thread naming')

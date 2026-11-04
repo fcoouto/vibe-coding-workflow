@@ -51,7 +51,7 @@ between the meter and status. The examples include the leading character.
 ￻▰▰▰▰▱ REVIEW · [W1] C2 · Status tags
 ￻▰▰▰▱▱ BLOCKED · [W1] C3 · Search support
 ￻▰▰▰▱▱ WAITING · [W1] C4 · Client check
-￻▱▱▱▱▱ WORKING · [W2] P · Solo fix
+￻▰▱▱▱▱ WORKING · [W2] P · Solo fix
 ```
 
 The literal brackets enclose the shared family code. `P` identifies the parent;
@@ -120,13 +120,15 @@ progress covers its own scope. Elapsed time, token consumption and worker
 self-reports do not establish acceptance. Reopened or invalidated milestones stop
 counting and may reduce the meter or reopen a `DONE` thread.
 
-Fill `▰` cells from the left and use `▱` for remaining cells. Each filled cell
-represents a completed 20% step; round down and cap unfinished work at four cells.
-Use `▱▱▱▱▱` until there is a measurable plan. At adoption, use the actual phase;
-newly started implementation uses `WORKING`, not an automatic `TRIAGE` reset.
+Fill `▰` cells from the left and use `▱` for remaining cells. With measurable
+milestones, each filled cell represents a completed 20% step. Round down and cap
+unfinished work at four cells. Without measurable milestones, show one filled
+cell during `WORKING` as an activity indicator. Other unfinished statuses use
+an empty meter in that case. At adoption, use the actual phase. Newly started
+implementation uses `WORKING`, not an automatic `TRIAGE` reset.
 Reserve `▰▰▰▰▰` for verified `DONE`, keeping both the full meter and that label.
-Show no numeric percentage or `% done`. Status alone sets no intermediate progress:
-`REVIEW` is not automatically four cells. `BLOCKED`, `WAITING` and `PAUSED` retain
+Show no numeric percentage or `% done`. Measured progress comes from accepted
+milestones. `BLOCKED`, `WAITING` and `PAUSED` retain
 accepted progress; `CANCELLED` retains partial progress and never implies completion.
 
 Update display titles on meaningful milestone, phase or blocker changes during
