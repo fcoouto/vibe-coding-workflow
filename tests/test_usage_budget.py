@@ -268,6 +268,37 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual(self.ledger.headroom('org'), 19)
         with self.assertRaises(budget.BudgetError): self.ledger.configure('org', policy, 2)
 
+    def test_optional_caps_are_independent_and_benefit_ceiling_still_applies(self):
+        self.observe()
+        policy = dict(self.ledger.snapshot()['organizations']['org']['policy'],
+                      ceiling='subscription_benefit', amount=None, grant_amount=400)
+        for revision, caps, maximum in ((1, dict(pilot_limit=None, task_limit=200), 201),
+                                        (2, dict(pilot_limit=300, task_limit=None), 301)):
+            self.ledger.configure('org', dict(policy, **caps), revision)
+            with self.subTest(caps=caps), self.assertRaisesRegex(budget.BudgetError, 'insufficient_headroom'):
+                self.ledger.begin('org', 'task', 'run', 'packet', maximum, revision + 1, 101, native())
+
+        self.ledger.configure('org', dict(policy, pilot_limit=None, task_limit=None), 3)
+        self.ledger.begin('org', 'task', 'run', 'packet', 350, 4, 101, native())
+        self.ledger.dispatch('run', 'count', 4, 102)
+        self.ledger.complete('run', 'count', 350)
+        self.ledger.close_run('run')
+        self.assertEqual(self.ledger.headroom('org'), 50)
+        with self.assertRaisesRegex(budget.BudgetError, 'insufficient_headroom'):
+            self.ledger.begin('org', 'task', 'next', 'packet', 51, 4, 103, native())
+
+    def test_lower_grant_balance_revokes_a_reservation_with_both_optional_caps_omitted(self):
+        self.observe()
+        policy = dict(self.ledger.snapshot()['organizations']['org']['policy'], ceiling='subscription_benefit',
+                      amount=None, pilot_limit=None, task_limit=None)
+        self.ledger.configure('org', policy, 1)
+        self.ledger.begin('org', 'task', 'run', 'packet', 300, 2, 101, native())
+        self.ledger.observe('org', 459, 102)
+        with self.assertRaisesRegex(budget.BudgetError, 'credit_changed'):
+            self.ledger.dispatch('run', 'count', 2, 103)
+        call = self.ledger.snapshot()['runs']['run']['calls']['count']
+        self.assertEqual((call['state'], call['maximum']), ('reserved', 300))
+
     def test_new_cycle_retains_prior_cost_and_unknown_exposure(self):
         self.observe(); self.begin(); self.count_done(); self.ledger.close_run('run')
         policy = self.ledger.snapshot()['organizations']['org']['policy'].copy()

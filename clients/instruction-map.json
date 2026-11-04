@@ -485,11 +485,11 @@
       ]
     },
     "skills/manage-usage-routing/references/codex-host.md": {
-      "sha256": "1652edba35b8b5a6a714880436a6f218f1d8fc33ab7685c6f95111b1a2605e05",
+      "sha256": "ad5c557baf666e305c05a24322b27ff9c53de8d6901173697f2fa66b5d39a5d6",
       "ranges": [
         [
           1,
-          121
+          124
         ]
       ]
     },
@@ -521,15 +521,15 @@
       ]
     },
     "skills/manage-usage-routing/references/procedure.md": {
-      "sha256": "06ccb2ed627fdbee7fd6dc110f49f373d1e4e392a2dc393388290bf0306e300a",
+      "sha256": "eac89a9890e31c651939dad0c69b735b50e21c477106ae22ccbd7c983533f3f8",
       "ranges": [
         [
           1,
-          141
+          137
         ],
         [
-          142,
-          169
+          138,
+          172
         ]
       ]
     },

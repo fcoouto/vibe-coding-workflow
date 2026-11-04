@@ -11,6 +11,7 @@ from unittest.mock import patch
 from runtime import usage_admission, usage_budget, usage_routing, usage_settings, worker_visibility
 from runtime.usage_budget import BudgetError
 from tests.test_openai_api import Connection, Response, completed
+from tests.test_usage_budget import native
 from tests.test_smart_balance import POLICY, qualification
 from tests.test_usage_routing import PACKET, PROFILE
 
@@ -54,9 +55,9 @@ class CodexUsageHostTests(unittest.TestCase):
         self.dispatch = patcher.start()
         self.addCleanup(patcher.stop)
 
-    def configure(self, mode='manual', *, enabled=True, profile=PROFILE):
+    def configure(self, mode='manual', *, enabled=True, profile=PROFILE, policy=POLICY):
         self.control.configure(dict(version=2, expected_revision=0, expected_org_revision=0,
-                                    binding=self.binding, policy=POLICY, profile=profile,
+                                    binding=self.binding, policy=policy, profile=profile,
                                     class_name='investigation', mode=mode))
         if mode == 'smart':
             # Install the stored qualification fixture without making any host claims.
@@ -167,6 +168,74 @@ class CodexUsageHostTests(unittest.TestCase):
         with self.assertRaises(BudgetError):
             self.execute(plan)
         self.dispatch.assert_not_called()
+
+    def test_first_ordinary_live_request_can_exceed_canary_cap_with_no_optional_caps(self):
+        policy = dict(POLICY, ceiling='subscription_benefit', amount=None, grant_amount=1_000_000,
+                      pilot_limit=None, task_limit=None)
+        profile = dict(PROFILE, output_rate=300_000_000, count_maximum=7)
+        self.configure(profile=profile, policy=policy)
+        with self.assertRaisesRegex(BudgetError, 'pool_unqualified'):
+            self.freeze(maximum_usd_micros=None, pool='prepaid')
+        proposal = self.proposal()
+        selection = 'Use the OpenAI API for this task.'
+        receipt = self.receipt(selection)
+        plan = self.host.freeze(self.root, [proposal], thread_snapshot=receipt, native_limits=self.limits,
+                                reviewer=self.reviewer, expires_at=200)
+        self.assertEqual((plan.quoted_usd_micros, plan.maximum_usd_micros), (75_008, 75_008))
+
+        counted = Connection(Response(dict(object='response.input_tokens', input_tokens=1200)))
+        reply = completed()
+        reply['model'] = PROFILE['model']
+        reply['usage'].update(input_tokens=1200, output_tokens=200, total_tokens=1400)
+        generated = Connection(Response(reply))
+        connections = iter((counted, generated))
+        self.dispatch.side_effect = lambda _, task, evidence: self.control._run_live(
+            task, evidence, connection_factory=lambda *_: next(connections),
+            credential_resolver=lambda _: b'synthetic-key')
+        price = self.host.Price(usage_routing.profile_digest(profile), 100, 1000)
+        result = self.execute(plan, proposal, thread_snapshot=receipt, manual_selection=selection,
+                              grant=replace(self.grant, balance=1_000_000), price=price)
+        self.assertEqual(result['reported_cost_usd_micros'], 60_001)
+        self.assertTrue(result['requires_native_review'])
+        calls = self.ledger.snapshot()['runs'][result['run_id']]['calls']
+        self.assertEqual((calls['count']['cost'], calls['generation']['maximum']), (7, 75_001))
+
+    def test_derived_cap_includes_prior_cost_and_blocks_generation_after_exposure_race(self):
+        self.configure(policy=dict(POLICY, pilot_limit=None, task_limit=None))
+        self.ledger.observe('org', 800, 100)
+        other_native = dict(native('other'), account='other-account')
+
+        def settle(run, cost):
+            self.ledger.begin('org', 'other', run, 'packet', cost, 1, 101, other_native)
+            self.ledger.dispatch(run, 'count', 1, 101)
+            self.ledger.complete(run, 'count', cost)
+            self.ledger.close_run(run)
+
+        settle('prior', 4)
+        plan = self.freeze(maximum_usd_micros=None)
+        self.assertEqual((plan.quoted_usd_micros, plan.maximum_usd_micros), (1, 5))
+        self.assertEqual(self.freeze(maximum_usd_micros=12).maximum_usd_micros, 12)
+        settle('racing', 1)
+        counted = Connection(Response(dict(object='response.input_tokens', input_tokens=1200)))
+        connections = iter((counted,))
+        self.dispatch.side_effect = lambda _, task, evidence: self.control._run_live(
+            task, evidence, connection_factory=lambda *_: next(connections),
+            credential_resolver=lambda _: b'synthetic-key')
+        with self.assertRaisesRegex(BudgetError, 'live_cap_exceeded'):
+            self.execute(plan)
+        self.assertEqual(len(counted.requests), 1)
+        state = self.ledger.snapshot()
+        run_id = self.dispatch.call_args.args[1]['run_id']
+        self.assertIsNone(state['slot'])
+        self.assertEqual(state['runs'][run_id]['calls']['count']['state'], 'completed')
+        self.assertNotIn('generation', state['runs'][run_id]['calls'])
+
+    def test_finite_cumulative_cap_requires_explicit_plan_limit_within_policy(self):
+        self.configure()
+        for cap in (None, 501):
+            with self.subTest(cap=cap), self.assertRaisesRegex(BudgetError, 'live_approval_unqualified'):
+                self.freeze(maximum_usd_micros=cap)
+        self.assertEqual(self.freeze(maximum_usd_micros=500).maximum_usd_micros, 500)
 
     def manual_price(self):
         profile = dict(PROFILE, verified_at=101, valid_until=190)

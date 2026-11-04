@@ -152,8 +152,8 @@ def _funding_pool(policy, pool):
             and (policy['ceiling'] != 'subscription_benefit' or pool == 'benefit'), 'pool_unqualified')
 
 
-def freeze(cwd, proposals, *, thread_snapshot, native_limits, reviewer, maximum_usd_micros,
-           expires_at, pool='benefit', manual_allowance_pp=5, manual_price=None, pilot_digest=None,
+def freeze(cwd, proposals, *, thread_snapshot, native_limits, reviewer, expires_at,
+           maximum_usd_micros=None, pool='benefit', manual_allowance_pp=5, manual_price=None, pilot_digest=None,
            standing_consent=False):
     """Pin the exact proposals and limits without dispatching or writing settings."""
     now = int(time.time())
@@ -178,7 +178,10 @@ def freeze(cwd, proposals, *, thread_snapshot, native_limits, reviewer, maximum_
                     (not standing_consent or (mode == 'smart' and live_consent and not one_shot)),
                     'standing_consent_required')
             _funding_pool(policy, pool)
-            require(0 < integer(maximum_usd_micros) <= policy['pilot_limit'], 'live_approval_unqualified')
+            if maximum_usd_micros is None:
+                require(policy['pilot_limit'] is None, 'live_approval_unqualified')
+            else:
+                usage_admission.validate_maximum(maximum_usd_micros, policy)
             window = _MANUAL_WINDOW if mode == 'manual' else _SMART_WINDOW
             if one_shot:
                 window = _MANUAL_PLAN_WINDOW
@@ -197,9 +200,13 @@ def freeze(cwd, proposals, *, thread_snapshot, native_limits, reviewer, maximum_
                 require(len(proposals) == 1 and proposals[0].get('snapshots') == [],
                         'standing_source_scope_exceeded')
             maximum = sum(_proposal(control, config, proposal, now) for proposal in proposals)
-            if one_shot:
-                spent = control.ledger._total(state, config['binding']['organization'])
-                require(spent + maximum <= maximum_usd_micros, 'live_cap_exceeded')
+            if maximum_usd_micros is None or one_shot:
+                exposure = control.ledger._total(state, config['binding']['organization']) + maximum
+                if maximum_usd_micros is None:
+                    usage_admission.validate_maximum(exposure, policy)
+                    maximum_usd_micros = exposure
+                else:
+                    require(exposure <= maximum_usd_micros, 'live_cap_exceeded')
             require(len({proposal['task_id'] for proposal in proposals}) == len(proposals)
                     and maximum <= maximum_usd_micros, 'codex_proposals_invalid')
             if live_consent:
