@@ -4,10 +4,16 @@
 qualification sequence for one disposable Codex CLI scope. Release requires
 separate authorization of the reviewed packet and its exact effects. The
 [held pilot plan](2026-11-03-d6-managed-lifecycle-pilot.md) owns the acceptance
-criteria and ceilings. The Lima/Docker preflight is retired. The current
-gate is read-only inspection of the exact native frontend.
+criteria and ceilings. The Lima/Docker preflight is retired. The next gate is
+the [approved cooperative contract alignment](../../d6-native-delegation-plan.md#pending-implementation-and-offline-acceptance)
+and its offline acceptance. This packet remains a held draft until the runtime
+supports that contract and the complete sequence has been independently reviewed.
 
-## Source checkpoint
+## Historical source checkpoint
+
+These pins describe the earlier packet. Re-pin the reviewed implementation and
+exact native frontend before any later release. The cooperative planning update
+does not repin historical evidence or grant execution allowance.
 
 | Item | Pinned planning input |
 | --- | --- |
@@ -25,8 +31,9 @@ belongs to a different runtime digest and disposable scope. Keep the earlier
 D4 failed claim and all receipts with their original authority.
 
 Retain the earlier disposable probes and run dispositions under their original
-identities. Same-parent managed continuation, actual child hooks and version-2
-reconciliation remain pending.
+identities. Same-parent managed continuation, actual child hooks and cooperative
+completion remain pending. Historical version-2 claims retain their original
+proof requirements.
 
 ## Freeze before requesting release
 
@@ -36,19 +43,19 @@ reconciliation remain pending.
   checkout, Git, D4 journal, native home and private schema-3 authority
   paths and physical identities in the private packet.
   Carry those identities across phases. Keep package files read-only.
-- [ ] Name the coordinator and independent observer in the private packet.
-  Freeze the native account route and minimum vendor egress. Require
-  positive controls for permitted access and denials for other workloads
-  and unapproved services. The check runs with networking disabled. Any proxy
-  or account change requires a separately scoped decision. Verify actual
+- [ ] Name the coordinator and independent reviewer/observer in the private packet.
+  Record the existing native account route and trust boundary. The canary check
+  uses local public fixture data. Any proxy or account change requires a
+  separately scoped decision. Verify actual
   capacity, native catalog, compatible guidance and supported observe/resume
   controls.
 - [ ] Freeze the public canary preimage, postimage, exact `apply_patch` bytes,
   immutable test and candidate inventory. The worker changes only `canary.py`
   from `0` to `42`. The reviewer and D5 checks receive the same read-only
-  candidate. Verify actual file restrictions for the selected tool route.
-  Reserve any coordination read path explicitly. Keep runtime and evidence
-  controls outside child write authority.
+  candidate. Record allowed foreground tools and the cooperative scope limits.
+  Reserve any coordination read path explicitly. Assign runtime, evidence and
+  coordination files to the coordinator and independently check their preservation.
+  Background jobs, mutable services and nested delegation are outside this pilot.
 - [ ] Review the exact D4 effect manifest, qualification allocations and
   original ownership. Bind the approved `qualification_scope` separately
   from proposal JSON. Record the applicable catalog and all nine behavior
@@ -101,16 +108,20 @@ preimage. Both registered post-edit executions must exit zero on the reviewed
 postimage. Freeze the interpreter path, timeout of at most 10 seconds, minimal
 environment and read-only effects in the D5 plan.
 
-## Independent stop proof
+## Cooperative completion and held ownership
 
-The next decision is whether the selected native Codex frontend can enforce
-one authorized synchronous canonical `apply_patch` for the worker. Verify that the exact
-native child can use the approved patch and read-only tools, with shell, code
-execution, mutable connectors, and nested worker routes unavailable. Use the
-existing frontend controls. If coverage is missing or unknown, hold managed
-dispatch.
+Use the [approved D6 contract](../../d6-native-delegation-plan.md#normal-completion-and-uncertain-ownership)
+for future worker/reviewer completion. Bind actual native identity, successful
+turn completion, complete tool activity and independent candidate inspection
+to the original claims. Account for foreground command termination and any
+pending host retry or continuation before release. Unknown activity retains
+ownership, capacity and consumed budgets. Automatic takeover remains deferred.
 
-**Read-only capability finding, 4 November 2026.** Current OpenAI docs
+The exact canary patch exercises child guard behavior. The native frontend may
+expose other tools under its ordinary trust boundary. The brief limits their use
+to approved foreground work. Enforced patch-only capability is deferred.
+
+**Historical capability finding, 4 November 2026.** The inspected OpenAI docs
 describe custom-agent feature reductions such as `features.shell_tool=false`.
 Custom agents inherit parent sandbox, approval settings and MCP servers.
 The spawn control exposed in this Codex chat has no custom-agent selector
@@ -119,32 +130,26 @@ or per-worker tool allowlist. The local Homebrew path points to CLI
 Current docs are unpinned to either build and leave the exact boundary
 unverified.
 Tool hooks have coverage exceptions, and the package’s write guard covers
-only canonical `apply_patch`. Complete enforcement for the proposed worker remains
-unverified. Managed writable dispatch stays on hold.
+only canonical `apply_patch`. Complete enforcement remains unverified. The
+approved cooperative scope accepts this limitation. D6 stays on hold pending
+runtime alignment, offline review and a separately released packet.
 [OpenAI subagent controls](https://learn.chatgpt.com/docs/agent-configuration/subagents#custom-agent-file-schema),
 [OpenAI hook coverage](https://learn.chatgpt.com/docs/hooks#tool-coverage),
 [runtime guard limits](../../../clients/runtime.md#guard-and-continuation-limits).
 
-For any later release, bind independent closure evidence to the exact
-admitted operation and its writable resources. Retain the native identity,
-turn and patch receipts or the D5 execution record, then independently verify
-that the operation and all writable descendants stopped and read back the
-candidate. A completed turn, hook receipt or parent exit alone leaves
-descendant shutdown unverified.
-
-Use the existing [version-2 proof fields](../../../clients/delegation-proofs.md)
-for the worker, reviewer, registered checks and any admitted coordinator
-operation. Retain the original claims, pins, current revision and applicable
-digests. Preserve the D5 review digest separately from the D6 ledger digest.
-Keep ownership and consumed limits on uncertainty. Advance only after the
-exact attempt reconciles.
+Current [version-2 proof fields](../../../clients/delegation-proofs.md) retain
+their stronger meaning. The implementation must represent cooperative completion
+explicitly and audit dependency/readiness consumers before this packet can use
+it. D5 check/coordinator proof and D7 requirements retain their own acceptance
+rules. Keep the D5 review digest separate from the D6 ledger digest. Any
+unsupported transition ends the sequence with its original claims retained.
 
 ## Staged child guard checks
 
 | Stage | Required observation and decision |
 | --- | --- |
 | D4 bootstrap | Under the separately released setup effects, capture genuine CLI provenance, restricted SessionStart context, bootstrap policy rejection, hook trust and registration, and independent canary facts. Use the exact disposable qualification-purpose task and original allocations. `task-start` and `task-patch` require the pre-tool key. Worker admission requires post-tool, Stop and Interrupt keys. Reviewer admission adds review-readiness. An allocation permits the listed bounded probe with pending cases. It does not mark those cases verified. |
-| Observe the child before allowing mutation | Accept the D5 plan, then the D6 plan. Prepare one worker and use its native launch permit once. Capture the actual parent turn and spawn item. Use `delegation observe` to record the exact child session and first turn as `inProgress`. Before launch, validate one supported same-turn barrier within the approved tool restrictions. Proposed barrier is one read-only wait of at most 60 seconds on a fresh, private readiness marker controlled by the observer. The observer publishes it only after the exact receipt and working parent are confirmed. Include its read claim, time and owner in the packet. Keep it outside the child's write authority. If the frontend cannot wait and patch in the same turn, hold. |
+| Observe the child before allowing mutation | Accept the D5 plan, then the D6 plan. Prepare one worker and use its native launch permit once. Capture the actual parent turn and spawn item. Use `delegation observe` to record the exact child session and first turn as `inProgress`. Before launch, validate one supported same-turn barrier within the approved foreground work. Proposed barrier is one bounded wait of at most 60 seconds on a fresh, private readiness marker controlled by the observer. The observer publishes it only after the exact receipt and working parent are confirmed. Include its read claim, time and owner in the packet. The child's brief permits only reading that marker. If the frontend cannot wait and patch in the same turn, hold. |
 | Parent pre-tool reference, when required | While the original parent is still editable and `TRIAGE`, after assignment observation and before mutation, use the exact approved canary patch to obtain a native parent-hook denial. Capture the current parent task turn and unchanged canary while that evidence is current. This is the existing formal parent `pre-tool-enforcement` case. Then confirm `WORKING` before releasing the child barrier. |
 | Child denial | After exact binding, use one separately listed, syntactically valid patch to the same disposable file with a different postimage. Use its own native call ID. Require a genuine workflow PreToolUse denial, unchanged canary and no successful patch completion. Stop on missing callback or unexpected effect. Keep foreign session, mismatched turn, malformed payload, timeout and Post collision cases in offline fixtures. |
 | Child success and paired witness | In the same admitted turn, invoke canonical `apply_patch` once with the exact approved command. Keep the observed child turn and working parent current until PostToolUse persists. Record actual hook session, turn, call and command plus the result. Require the expected one-file effect. Use `observe_managed_case` with `stream='child'` and `case_id='post-tool-handling'`. Independently read the exact native rollout, ordered fresh pre/post receipts, assignment-bound fingerprint and final canary. The generation delta must match all fresh unconflicted Post receipts in the observation window. Collect during a quiet window and account for all tool completions. |
@@ -173,8 +178,10 @@ packet.
    claim is held. Require rejection before command start. Replay worker prepare
    before and after launch without renewing its permit.
 2. Run the staged guard checks in the worker phase. Verify the expected change
-   and stop proof. A missing-proof reconciliation request must retain ownership.
-   Reconcile the real worker before any dependent check.
+   and cooperative completion evidence. An incomplete-evidence reconciliation
+   request must retain ownership. Reconcile the real worker through the reviewed
+   completion path before any dependent check. Uncertain activity ends this pilot
+   with claims retained and no automatic takeover.
 3. Run the registered D5 acceptance check, close its phase and reconcile it.
    Resume the same native parent through the supported control path only after
    prior claims settle. Prepare the reviewer through `evidence review prepare`,
@@ -185,7 +192,7 @@ packet.
 The proposed schedule reserves one worker, one reviewer and two registered
 passing check executions. Bind distinct dispatch IDs for executions and retain
 stable IDs for replays. Fit the failing baseline, blocked exclusion request,
-proof-negative request, optional parent pre case, up to two worker self-checks and
+incomplete-evidence request, optional parent pre case, up to two worker self-checks and
 all observations into the approved schedule before release. Count any admitted
 coordinator operation in the original qualification allocation. Account for the
 D5 completion barrier according to source. The original ceiling is eight
@@ -196,11 +203,11 @@ zero retries or replacements. Reserve the second check phase explicitly.
 Count all bootstrap and setup turns and contexts in the exact schedule.
 Overflow or an incompatible managed resume means hold before launch.
 
-**Release decision remains pending.** Effective patch-only worker controls
-and an independent stop source are the first gates. The private identity
-and effect pins, exact ledger schedule, same-turn barrier and native guard
-route still need review if those gates can be met. Actual native
-observations require separate release. Keep the base pilot free of optional
+**Release decision remains pending.** Reviewed cooperative reconciliation and
+offline acceptance are the first gates. The private identity and effect pins,
+exact ledger schedule, same-turn barrier and native guard route then need review.
+The complete sequence must satisfy each consumer's evidence requirements.
+Actual native observations require separate release. Keep the base pilot free of optional
 Habblaud, Desktop, external models and D7 enforcement. Report software checks,
 native guard observations and reconciled ownership separately. No live step
 was taken to prepare this packet.

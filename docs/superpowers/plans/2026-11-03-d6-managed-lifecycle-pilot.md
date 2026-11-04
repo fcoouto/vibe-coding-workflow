@@ -5,8 +5,11 @@ planning. Installation, trust changes, runtime preparation/activation and live
 qualification are not authorized. Current live execution allowance is **zero**.
 The limits below are proposed ceilings for a later, explicitly released packet;
 neither this document nor a passing fixture supplies that release.
-The Lima/Docker preflight is retired. Managed writable handoffs remain
-blocked on effective native tool restrictions and independent stop evidence.
+The Lima/Docker preflight is retired. The user approved
+[cooperative native delegation](../../d6-native-delegation-plan.md#approved-cooperative-scope)
+on 4 November 2026. Runtime alignment, offline acceptance and a reviewed release
+packet remain pending. Uncertain ownership stays reserved and automatic takeover
+is deferred.
 
 **Goal:** observe one managed Codex CLI coordinator, one leaf worker and one
 independent reviewer, with admission before launch and independently verified
@@ -178,20 +181,18 @@ first managed CLI display. The base lifecycle pilot does not require Habblaud.
 | Exact target and authority | Frozen canary/package/journal paths and original D4 effects; fresh schema-3 state through supported D4 birth; current pins and physical membership. Birth alone grants no qualification. |
 | Native frontend and authentication | Actual CLI executable/surface, account route, creation provenance, supported native spawn/catalog/observation controls and compatible guidance. Preserve the user's coordinator model, reasoning, provider and authentication. No credential copying, proxy, billing or global configuration change. |
 | Staged admission and guards | Genuine setup witnesses and an exact qualification-purpose attempt; current startup/pre-tool and, for editing, post-tool evidence for the selected path. PR #78 provides offline child-guard coverage. The release packet must identify the staged path to genuine child PreToolUse and PostToolUse evidence. A stored label or fixture cannot supply it. |
-| Independent stop source | Identify a qualified method that can prove the exact worker/reviewer/check and every writable descendant stopped. Per-attempt evidence is collected after execution; the method must exist before launch. |
-| Actual isolation and ownership | One known shared authority, exact file/Git/resource claims, no conflicting or uncertain owners, and effective restrictions for the exact native child. The proposed worker uses one synchronous canonical patch and read-only tools. Shell, code execution, mutable connectors, and nested worker routes must be unavailable. Missing or unknown restrictions block launch. |
+| Completion and uncertainty | The reviewed runtime must support the approved cooperative completion contract for the exact worker and reviewer. Account for observed tool work, completed foreground operations and independently inspected effects. Incomplete or contradictory evidence retains ownership. Registered checks and coordinator operations retain their applicable D5 proof requirements. |
+| Cooperative ownership | One known shared authority, exact file/Git/resource claims and no conflicting or uncertain owners. Brief the leaf worker to use the approved patch and bounded foreground self-checks, with no background jobs or nested delegation. Record the native trust assumptions. Enforced patch-only availability is outside this pilot's prerequisites. |
 | Capacity and settings | Observe available capacity and suitable native selection/inheritance. Keep requested, configured, spawn-observed and execution settings separate; unknown stays unknown. No non-native fallback. |
 | Display, only if selected | Reviewed native role binding and an explicitly approved existing Habblaud connection. Custom-name support must be demonstrated, not assumed from the badge. |
 
-**Known stop-evidence gap:** the adapter deliberately returns
-`descendants_stopped=False` and unknown execution model/effort. A completed turn,
-interrupt/close acknowledgement, parent exit or empty process group is insufficient.
-[Version-2 reconciliation](../../../clients/delegation-proofs.md) needs independent
-exact-identity and stopped-descendant evidence. The limited
-`bounded-native-source-v1` setup closure does not relax D6 reconciliation.
-If no genuine source exists, finish preflight as **blocked/unqualified** without
-launching workers. Resolving a missing host capability is separate source work,
-not an excuse to spend this pilot debugging or to fabricate proof flags.
+**Current implementation gap.** The adapter reports `descendants_stopped=False`.
+[Version-2 reconciliation](../../../clients/delegation-proofs.md) still requires
+stronger shutdown proof for native assignments. Implement and independently
+review the [planned contract alignment](../../d6-native-delegation-plan.md#pending-implementation-and-offline-acceptance)
+before releasing this pilot. Cooperative completion evidence must carry its own
+meaning through dependency and readiness consumers. Historical claims retain
+their original proof requirements. The setup closure cannot clear those claims.
 
 ## 4. Proposed finite ceilings for one future CLI release
 
@@ -208,7 +209,7 @@ not an excuse to spend this pilot debugging or to fabricate proof flags.
 | Review | One independent review round; blocking findings end this pilot rather than start a fix/retry campaign |
 | Checks | At most three D5 check executions and two worker self-check commands; each exact canary command has a 10-second timeout |
 | Control traffic | At most 32 D5/D6 control requests, including at most 12 status/observation acquisitions; denied probes and replays count as requests |
-| Replay/negative cases | Two prepare replays, one blocked check-conflict request and one missing-stop-evidence reconciliation request; no extra native send |
+| Replay/negative cases | Two prepare replays, one blocked check-conflict request and one incomplete-completion-evidence reconciliation request; no extra native send |
 | Retries and replacements | Zero; no child continuation, replacement, nested agent, fallback route or automatic Stop continuation |
 | Reports | At most 8 KiB each, validated without truncating evidence into success; reuse existing artifact/output and retention limits |
 
@@ -256,18 +257,20 @@ Every step below is **not run**. The owner is the coordinator unless stated.
    makes the one-file fix, runs its passing self-check and returns the required
    bounded report. Parent/turn/spawn/child/origin/candidate identities must bind
    to the admission. Encrypted native prompt delivery remains unverified.
-6. **Prove uncertainty and reconcile.** Completion metadata alone must not release
-   claims. A reconciliation request without genuine stop proof must reject or
-   retain uncertainty without new permission. Then independently inspect effects,
-   current candidate and real stop/descendant evidence; submit the exact original
-   version-2 proof and assessment. Missing proof blocks the reviewer and retains
-   claims. Never manufacture `not-started` from missing history.
+6. **Prove uncertainty and reconcile.** An incomplete-evidence reconciliation
+   request must retain ownership and grant no new permission. Then assess the
+   successful worker through the approved cooperative completion contract,
+   binding its actual identity, complete observed foreground activity and
+   independently inspected current candidate. Any uncertainty ends dependent
+   work with claims retained. Automatic takeover remains deferred. Preserve the
+   original admission and never manufacture `not-started` from missing history.
 7. **Run the accepted check and independent reviewer.** After worker reconciliation,
    execute the planned D5 canary check. Use only D5 `evidence review prepare` for
    the read-only `review` job, dependent on `worker-edit`. Preserve the D5 plaintext
    assignment digest separately from the D6 ledger digest. The reviewer covers
    general/behavior/security impact, changes nothing, and runs one bounded turn.
-   Observe, collect, assess and independently reconcile its actual stop/effects.
+   Observe, collect, assess and reconcile its normal completion and effects under
+   the same cooperative contract. Unknown activity retains its claims.
 8. **Verify the final candidate.** Run the final planned check, compare the exact
    candidate, policy, review and all relevant settled claims, and use D5's verifier.
    A qualification-purpose result remains qualification evidence: ordinary
@@ -284,7 +287,7 @@ Every step below is **not run**. The owner is the coordinator unless stated.
 | A2 — once-only | One worker and one reviewer native start; prepare replays supply no additional permit, budget or context. |
 | A3 — exclusion | The planned check conflicts with the held writer, starts no command and changes no accepted evidence/ownership counters. |
 | A4 — result | Real initial failure, exact one-file fix and independently accepted final passing canary command; no unexplained effects. |
-| A5 — reconciliation | Missing stop proof retains ownership; genuine exact per-attempt proof is required before releasing claims or starting dependent work. |
+| A5 — reconciliation | Incomplete completion evidence retains ownership and consumed limits. A fully observed successful attempt may release claims through the reviewed cooperative path. Interrupted, failed or ambiguous work grants no automatic takeover. Stronger consumers reject insufficient evidence. |
 | A6 — independent review | Genuine different child, D5/D6 digest domains preserved, reviewed bytes unchanged, findings independently assessed. |
 | A7 — preservation | Primary/unrelated work, native settings/auth, old pins/history and saved optional feature choices unchanged. |
 | A8 — bounds | Every effect fits its original wall, model-turn, admission, command and review limits; no resets or hidden replacement. |
@@ -296,7 +299,8 @@ Every step below is **not run**. The owner is the coordinator unless stated.
 Use existing private D4/D5 artifacts outside repositories and plugin/cache trees.
 Retain source/command/check identities, original and current candidate digests,
 admission/replay/conflict receipts, actual native identities/settings, per-attempt
-stop evidence, reviewed bytes, findings, counters and supported recovery records.
+completion evidence and its trust assumptions, reviewed bytes, findings, counters
+and supported recovery records. Preserve stronger stop evidence where applicable.
 No raw transcript, prompt, source dump, credential or private accounting enters
 public docs or Habblaud. Existing Project caps/retention remain; uncertainty is not
 deleted to fit a limit. The final public summary belongs in `docs/d6-validation.md`
@@ -305,7 +309,8 @@ only after actual observations exist, with source/surface-specific limits.
 This first pilot excludes Desktop/Claude qualification, parallel native children,
 crash/ambiguous-native-send fault injection, cross-authority/shared-service races,
 legacy migration/repinning, D7 enforcement, D9 campaigns/usage collection, external
-models, telemetry, automatic cleanup and release publication. Existing software
+models, telemetry, automatic takeover, enforced per-worker containment, automatic
+cleanup and release publication. Existing software
 tests do not become native evidence for those cases. Full D6 completion retains
 its full-suite and broader native requirements; this bounded attempt cannot waive
 an applicable mandatory prerequisite or certify complete onboarding.
@@ -316,19 +321,19 @@ The 3 November probes remain historical observations for their original
 environment. Preserve the earlier failed D4 claim for reconciliation under
 its original authority.
 
-1. **Check native controls read-only.** Determine whether the exact frontend
-   can enforce the patch-only worker described in §3. If the controls are
-   unavailable or unverified, leave writable managed D6 on hold. Record the
-   capability finding in the [successor packet](2026-11-04-d6-successor-release-packet.md#independent-stop-proof).
-2. **Freeze and independently review a successor packet if the route is supported.**
+1. **Align the cooperative contract offline.** Complete the bounded implementation
+   and acceptance work in the [D6 plan](../../d6-native-delegation-plan.md#pending-implementation-and-offline-acceptance).
+   Verify normal completion, uncertainty retention, freshness and strict-consumer
+   compatibility. Current runtime requirements continue until that work is reviewed.
+2. **Freeze and independently review a supported successor packet.**
    Bind the current package and selected CLI to one disposable checkout, one
    private D4 journal and authority, the actual hook trust and supported account route, exact
-   claims and the original finite limits. Confirm that the selected route's
-   egress, isolation, capacity and operation schedule meet the gate in §3.
-3. **Establish an independent stop source before managed dispatch.** Bind the
-   trusted observer to exact phase and operation identities. Collect actual
-   version-2 proof that the admitted operation and its writable descendants
-   stopped before releasing its claims or advancing.
+   claims and the original finite limits. Confirm that authentication, ownership,
+   capacity and the operation schedule meet the gate in §3.
+3. **Bind completion observations before managed dispatch.** Identify the native
+   lifecycle/tool observations and independent candidate inspection needed for
+   the worker and reviewer. Account for D5 check/coordinator proof requirements.
+   Missing evidence keeps the affected phase blocked with ownership retained.
 4. **Define the staged native guard proof.** Use the exact supported CLI and
    tool route to observe D4 bootstrap, same-parent managed continuation, the
    admitted and denied child patch calls, and the successful assignment-bound
