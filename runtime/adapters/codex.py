@@ -109,7 +109,12 @@ def normalize_runtime(payload) -> RuntimeEvent:
         if type(payload["stop_hook_active"]) is not bool:
             raise StartupError("Invalid codex stop_hook_active")
         active = payload["stop_hook_active"]
-    return RuntimeEvent(kind, "codex", session, cwd, turn, call, tool, active, fingerprint, patch_input)
+    raw_path = payload.get('transcript_path')
+    transcript = None
+    if (patch_input is not None and isinstance(raw_path, str) and 0 < len(raw_path) <= 4096
+            and raw_path.isprintable() and Path(raw_path).is_absolute()):
+        transcript = Path(raw_path)
+    return RuntimeEvent(kind, "codex", session, cwd, turn, call, tool, active, fingerprint, patch_input, transcript)
 
 
 def render_runtime(result: HookResult) -> dict | None:
@@ -409,6 +414,60 @@ def _native_surface(thread, surface, observer_version=None):
             or (surface == "codex-desktop" and thread.get("source") == "vscode" and originator in {"Codex Desktop", "codex_work_desktop"})):
         raise ObservationError("surface_unverified")
     return originator
+
+
+def guarded_child_lineage(event, *, deadline):
+    """Read the CLI child hook transcript. Settlement corroborates the parent spawn separately."""
+    from runtime.onboarding import _read_file
+    from runtime.startup import CANONICAL_MAX_ROWS
+
+    try:
+        if event.client != 'codex' or event.kind != 'PreToolUse' or event.tool_name != 'apply_patch':
+            raise ObservationError('guarded_child_event_unverified')
+        child = _review_id(event.session_id)
+        turn = _review_id(event.turn_id)
+        cwd = str(event.cwd)
+        home = Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex').resolve(strict=True)
+        path = event.transcript_path
+        if (time.monotonic() >= deadline or not path.is_relative_to(home / 'sessions')
+                or path.resolve(strict=True) != path or not path.name.startswith('rollout-')
+                or not path.name.endswith(f'-{child}.jsonl')):
+            raise ObservationError('guarded_rollout_unverified')
+        raw = _read_file(path, MAX_OUTPUT, private=True)
+        lines = raw.splitlines()
+        if not lines or not raw.endswith(b'\n') or len(lines) > CANONICAL_MAX_ROWS:
+            raise ObservationError('guarded_rollout_unverified')
+        first, *rows = [json_object(line) for line in lines]
+        metadata = first['payload']
+        if (first['type'] != 'session_meta' or metadata['id'] != child
+                or any(row['type'] == 'session_meta' for row in rows)):
+            raise ObservationError('guarded_rollout_unverified')
+        origin = metadata['source']['subagent']['thread_spawn']
+        parent = _review_id(origin['parent_thread_id'])
+        agent_path = _review_id(origin['agent_path'])
+        task = re.fullmatch(r'/root/(worker_[0-9a-f]{32})', agent_path)
+        version = _review_id(metadata['cli_version'])
+        if (parent == child or not task or type(origin['depth']) is not int or origin['depth'] != 1
+                or metadata['cwd'] != cwd or metadata['originator'] != 'codex_exec'
+                or metadata['agent_path'] != agent_path):
+            raise ObservationError('guarded_child_source_unverified')
+        events = [row['payload'] for row in rows if row['type'] == 'event_msg']
+        start, = [item for item in events if item['type'] in ('task_started', 'turn_started')]
+        attribution = start['turn_attribution']
+        parent_turn = _review_id(attribution['parent_turn_id'])
+        if (start['type'] != 'task_started' or start['turn_id'] != turn or attribution['turn_id'] != turn
+                or attribution['turn_trigger'] != 'exec' or attribution['root_turn_id'] != parent_turn
+                or attribution['initiating_agent_path'] != '/root'
+                or any(item['type'] in ('task_complete', 'turn_complete', 'turn_aborted') for item in events)):
+            raise ObservationError('guarded_child_turn_unverified')
+        context, = [row['payload'] for row in rows if row['type'] == 'turn_context']
+        model, effort = _review_id(context['model']), _review_id(context['effort'])
+        if (context['turn_id'] != turn or context['cwd'] != cwd or context['multi_agent_version'] != 'v2'
+                or time.monotonic() >= deadline):
+            raise ObservationError('guarded_child_turn_unverified')
+        return dict(parent_session_id=parent, task_name=task[1], native_version=version, model=model, effort=effort)
+    except (ObservationError, OSError, StartupError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        raise StartupError('Guarded native child lineage is unavailable') from None
 
 
 def _native_setting(value):

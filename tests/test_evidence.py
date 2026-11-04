@@ -1117,11 +1117,7 @@ class CooperativeQualificationTests(unittest.TestCase):
         native = AdmissionTests('runTest')
         native.api, native.scope, native.identity = delegation, scope, d5.identity
         native.root, native.repo = d5.root, d5.repo
-        private = d5.root / 'observer'
-        private.mkdir(mode=0o700)
-        marker = private / 'ready'
-        wait = dict(marker=str(marker), python=str(Path(sys.executable).resolve()), seconds=15)
-        claims = [native.path_claim(), dict(kind='path', key=str(marker), mode='read')]
+        claims = [native.path_claim()]
         plan = native.plan_value(jobs=[
             dict(id='edit', role='worker', claims=claims, dependencies=[], max_attempts=1),
             dict(id='unit', role='check', claims=[native.path_claim(mode='read')], dependencies=['edit'], max_attempts=1),
@@ -1132,26 +1128,46 @@ class CooperativeQualificationTests(unittest.TestCase):
             assignment='Inspect the approved candidate and retained check read-only.')
         native.catalog, native.cache_request = d5.native_review_catalog, d5.native_review_cache
         request = native.prepare_request(selection=review_request['selection'])
-        request['brief'].update(resources=claims, foreground_wait=wait)
+        request['brief'].update(resources=claims)
         prepared = delegation.prepare_assignment(scope, request)
         self.assertTrue(prepared['launch_admitted'])
         self.assertFalse(delegation.prepare_assignment(scope, request)['launch_admitted'])
         payload = dict(hook_event_name='PreToolUse', session_id='child', cwd=str(d5.repo), turn_id='child-turn',
             tool_use_id='patch-1', tool_name='apply_patch', tool_input=dict(command=command))
         self.assertEqual(state.process_event(scope, codex.normalize_runtime(payload)).action, 'deny')
-        self.assertEqual(native.observe_worker(prepared, native.lifecycle_observation(prepared,
-            turn_status='inProgress'))['status'], 'observed')
-        marker.touch()
-        self.assertEqual(state.process_event(scope, codex.normalize_runtime(payload)).action, 'pass')
+        payload['transcript_path'] = str(d5.root / 'rollout.jsonl')
+        lineage = dict(parent_session_id='parent', task_name=prepared['task_name'],
+            native_version=native.catalog['native_version'], model=prepared['requested_model'], effort=prepared['requested_effort'])
+        with patch.object(codex, 'guarded_child_lineage', return_value=lineage | dict(parent_session_id='foreign'), create=True):
+            self.assertEqual(state.process_event(scope, codex.normalize_runtime(payload)).action, 'deny')
+        with patch.object(codex, 'guarded_child_lineage', return_value=lineage, create=True):
+            self.assertEqual(state.process_event(scope, codex.normalize_runtime(payload)).action, 'pass')
+            repeated = payload | dict(tool_use_id='another-patch-call')
+            self.assertEqual(state.process_event(scope, codex.normalize_runtime(repeated)).action, 'deny')
         canary.write_text('value = 42\n')
         post = payload | dict(hook_event_name='PostToolUse', tool_response='Success. Updated the following files: M app.py')
-        self.assertEqual(state.process_event(scope, codex.normalize_runtime(post)).action, 'pass')
+        post_event = codex.normalize_runtime(post)
+        self.assertEqual(state.process_event(scope, post_event).action, 'pass')
+        pre = delegation._child_patch_pre_fingerprint(prepared['assignment_digest'], post_event.patch_input_fingerprint)
+        with state._database(scope) as db:
+            self.assertEqual(db.execute("select kind,fingerprint,conflicted from receipts where scope_id=? "
+                "and session_id='child' and turn_id='child-turn' and tool_call_id='patch-1' order by kind",
+                (state._scope_id(scope),)).fetchall(), [
+                ('PostToolUse', delegation._child_patch_fingerprint(pre, post_event.receipt_fingerprint), 0),
+                ('PreToolUse', pre, 0),
+            ])
+        assignment, = delegation.delegation_status(scope, 'codex', 'parent')['assignments']
+        self.assertEqual((assignment['status'], assignment['observation']), ('prepared', None))
         activity = dict(source_digest='a' * 64, calls=[
-            dict(id='wait-1', tool='exec_command', input_digest=evidence._digest(
-                dict(tool_name='exec_command', tool_input=codex.foreground_wait_args(wait, d5.repo)))),
             dict(id='patch-1', tool='apply_patch', input_digest=codex.patch_input_fingerprint(command))])
         proof, observed = native.cooperative_worker(prepared, activity=activity)
         with patch.object(codex, 'observe_native_worker', return_value=observed):
+            with state._database(scope, write=True) as db:
+                db.execute("update receipts set conflicted=1 where kind='PostToolUse' and tool_call_id='patch-1'")
+            with self.assertRaisesRegex(state.StateError, 'exact paired hook receipts'):
+                delegation.reconcile_assignment(scope, proof)
+            with state._database(scope, write=True) as db:
+                db.execute("update receipts set conflicted=0 where kind='PostToolUse' and tool_call_id='patch-1'")
             result = delegation.reconcile_assignment(scope, proof)
         self.assertEqual(result['status'], 'cooperative-completed')
 

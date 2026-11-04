@@ -501,6 +501,61 @@ for line in sys.stdin:
         path.write_bytes(raw)
         return raw
 
+    def test_guarded_child_lineage_uses_only_the_current_child_rollout(self):
+        parent = "01a1a8b7-cf58-7421-8784-50419f70173e"
+        child = "01a1a8bb-e785-79d0-b2a1-be3d32d3ce57"
+        parent_turn = "01a1a8ba-7c00-7131-b423-b5827ded1768"
+        child_turn = "01a1a8bb-e7a7-7720-a018-8fbeb4439e39"
+        task_name = "worker_" + "a" * 32
+        agent_path = "/root/" + task_name
+        home = self.root / "native-home"
+        sessions = home / "sessions"
+        sessions.mkdir(parents=True, mode=0o700)
+        child_path = sessions / f"rollout-{child}.jsonl"
+        event = types.SimpleNamespace(client="codex", kind="PreToolUse", tool_name="apply_patch",
+            session_id=child, turn_id=child_turn, cwd=self.root, transcript_path=child_path)
+
+        def row(kind, **payload):
+            return dict(timestamp="2026-11-04T22:44:09.000Z", type=kind, payload=payload)
+
+        meta = dict(cwd=str(self.root), originator="codex_exec", cli_version="0.165.0")
+        child_meta = row("session_meta", id=child, **meta, agent_path=agent_path,
+            source=dict(subagent=dict(thread_spawn=dict(parent_thread_id=parent, depth=1, agent_path=agent_path))))
+        child_start = row("event_msg", type="task_started", turn_id=child_turn, turn_attribution=dict(
+            turn_id=child_turn, turn_trigger="exec", parent_turn_id=parent_turn,
+            root_turn_id=parent_turn, initiating_agent_path="/root"))
+        context = row("turn_context", turn_id=child_turn, cwd=str(self.root),
+                      multi_agent_version="v2", model="gpt-6-luna", effort="high")
+
+        def write(path, rows):
+            path.write_text("".join(json.dumps(item) + "\n" for item in rows))
+            path.chmod(0o600)
+
+        child_rows = [child_meta, child_start, context]
+        write(child_path, child_rows)
+        with patch.dict(os.environ, CODEX_HOME=str(home)), patch.object(codex, "_native_reader",
+                side_effect=AssertionError("The child hook must not launch another Codex process")):
+            observe = lambda: codex.guarded_child_lineage(event, deadline=time.monotonic() + 2)
+            self.assertEqual(observe(), dict(parent_session_id=parent, task_name=task_name,
+                native_version="0.165.0", model="gpt-6-luna", effort="high"))
+            wrong_turn = copy.deepcopy(context)
+            wrong_turn["payload"]["turn_id"] = parent_turn
+            for name, child_records in (
+                ("aborted", child_rows + [row("event_msg", type="turn_aborted")]),
+                ("wrong turn", [child_meta, child_start, wrong_turn]),
+                ("duplicate metadata", child_rows + [child_meta]),
+            ):
+                with self.subTest(name=name):
+                    write(child_path, child_records)
+                    with self.assertRaises(StartupError):
+                        observe()
+            write(child_path, child_rows)
+            alias = sessions / "linked" / child_path.name
+            alias.parent.symlink_to(sessions, target_is_directory=True)
+            event.transcript_path = alias
+            with self.assertRaises(StartupError):
+                observe()
+
     def test_cooperative_observation_accounts_for_the_exact_patch_and_read_only_reviewer(self):
         responses, binding = self.worker_fixture()
         command = '*** Begin Patch\n*** Update File: canary.py\n@@\n-return 0\n+return 42\n*** End Patch'

@@ -1560,27 +1560,46 @@ def _child_patch_pre_fingerprint(assignment_digest, patch_input):
     return _CHILD_PATCH_PRE_PREFIX + _child_patch_fingerprint(assignment_digest, patch_input)
 
 
-def _qualified_child_patch(scope, db, event, *, budget):
-    """Resolve the original observed writer without rebinding the parent or child task."""
+def _qualified_child_patch(scope, db, event, *, budget, pre_fingerprint=None):
+    """Bind the guarded event to the original writer without creating a task or completion receipt."""
     from runtime import setup_observation
-    from runtime.adapters.codex import patch_input_fingerprint
+    from runtime.adapters import codex
     from runtime.engine import patch_blocked
 
     if event.patch_input_fingerprint is None or event.cwd != scope.repository_root:
         return None
     scope_id = state._scope_id(scope)
-    matches = []
+    matches, prepared = [], []
     for record in _ledger(scope, db, current=True):
         if budget is not None:
             state._entry_budget_check(budget)
         owner, data = record['owner'], record['data']
         if (owner['scope_id'] != scope_id or owner['client'] != event.client
-                or owner['session_id'] == event.session_id or data['role'] != 'worker' or data['status'] != 'observed'):
+                or owner['session_id'] == event.session_id or data['role'] != 'worker'):
+            continue
+        request = record['body']['request']
+        if (data['status'] == 'prepared' and data['binding']['client_surface'] == 'codex-cli'
+                and 'foreground_wait' not in request['brief']
+                and not {'workstream_revision', 'workstream_context_id', 'continuation_limits'} & request.keys()):
+            prepared.append(record)
+        if data['status'] != 'observed':
             continue
         receipt = _observed_worker_receipt(scope, db, record)
         if (receipt is not None and receipt['worker_id'] == event.session_id
                 and receipt['worker_turn_id'] == event.turn_id and receipt['turn_status'] == 'inProgress'):
             matches.append(record)
+    if not matches and prepared:
+        if event.kind == 'PreToolUse' and event.transcript_path is not None:
+            deadline = budget['deadline'] if budget is not None else time.monotonic() + 4
+            lineage = codex.guarded_child_lineage(event, deadline=deadline)
+            matches = [record for record in prepared if
+                record['owner']['session_id'] == lineage['parent_session_id'] and all(
+                    record['data']['binding'][key] == lineage[field] for key, field in (
+                        ('task_name', 'task_name'), ('native_version', 'native_version'),
+                        ('requested_model', 'model'), ('requested_effort', 'effort')))]
+        elif event.kind == 'PostToolUse' and pre_fingerprint is not None:
+            matches = [record for record in prepared if _child_patch_pre_fingerprint(
+                record['data']['assignment']['digest'], event.patch_input_fingerprint) == pre_fingerprint]
     if not matches:
         return None
     _require(len(matches) == 1, 'Child patch has ambiguous assignment ownership')
@@ -1598,16 +1617,23 @@ def _qualified_child_patch(scope, db, event, *, budget):
     probe = _qualification_before_data(before, record['id'], owner, body)['probe']
     descriptor = state._canonical_plain(admission.original_attempt)['attempt'].get('probe')
     _require(descriptor is not None and probe is not None and probe['descriptor'] == descriptor
-        and event.patch_input_fingerprint == patch_input_fingerprint(descriptor['patch']),
+        and event.patch_input_fingerprint == codex.patch_input_fingerprint(descriptor['patch']),
         'Child patch differs from the approved public canary')
     target = probe['before']['target']
     _require(any(claim['kind'] == 'path' and claim['mode'] == 'write' and claim['path'] == target['path']
         and claim['physical'] == [target['binding']['device'], target['binding']['inode']] for claim in data['claims']),
         'Child patch requires the exact canary write claim')
+    fingerprint = _child_patch_pre_fingerprint(data['assignment']['digest'], event.patch_input_fingerprint)
     if event.kind == 'PreToolUse':
         _require(setup_observation._probe_fact(state._accepted_identity(scope.accepted_identity),
             descriptor['canary']) == probe['before'], 'Original child canary changed before the patch')
-    return _child_patch_pre_fingerprint(data['assignment']['digest'], event.patch_input_fingerprint)
+        if data['status'] == 'prepared':
+            prior = db.execute("select session_id,turn_id,tool_call_id,conflicted from receipts "
+                "where scope_id=? and client=? and kind='PreToolUse' and fingerprint=? limit 2",
+                (scope_id, event.client, fingerprint)).fetchall()
+            _require(not prior or prior == [(event.session_id, event.turn_id, event.tool_call_id, 0)],
+                'Prepared child patch already belongs to a different tool event')
+    return fingerprint
 
 
 def _admission(scope, db, task, plan, job, claims, records, request):
@@ -2725,6 +2751,23 @@ def reconcile_assignment(scope, request):
         if cooperative:
             _require(evidence.capture_candidate(scope, plan) == candidate,
                      'Candidate changed before cooperative release; ownership retained')
+            if current['data']['role'] == 'worker' and 'qualification_before' in current['body']:
+                before = evidence._read(scope, current['body']['qualification_before'], db=db)
+                if before['probe'] is not None:
+                    from runtime.adapters.codex import patch_input_fingerprint
+                    observed = latest[0][1]
+                    receipt = observed['receipt']
+                    patch = patch_input_fingerprint(before['probe']['descriptor']['patch'])
+                    calls = [call['id'] for call in observed['activity']['calls']
+                             if call['tool'] == 'apply_patch' and call['input_digest'] == patch]
+                    pre = _child_patch_pre_fingerprint(current['data']['assignment']['digest'], patch)
+                    paired = db.execute("select kind,fingerprint,conflicted from receipts where scope_id=? "
+                        "and client=? and session_id=? and turn_id=? and tool_call_id=? order by kind",
+                        (state._scope_id(scope), current['owner']['client'], receipt['worker_id'],
+                         receipt['worker_turn_id'], calls[0])).fetchall() if len(calls) == 1 else []
+                    _require(len(paired) == 2 and paired[1] == ('PreToolUse', pre, 0)
+                        and paired[0][0] == 'PostToolUse' and _hex(paired[0][1]) and paired[0][2] == 0,
+                        'Cooperative canary completion requires exact paired hook receipts')
         if current['data']['role'] == 'review':
             attempt = next(a for a in task['evidence']['attempts'] if a['id'] == current['id'])
             _linked_review(scope, state._scope_id(scope), task, attempt, [current])

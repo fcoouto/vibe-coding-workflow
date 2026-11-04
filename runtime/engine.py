@@ -22,6 +22,7 @@ class RuntimeEvent:
     # Conflict detection only; never substitute this digest for native identity.
     receipt_fingerprint: str | None = None
     patch_input_fingerprint: str | None = None
+    transcript_path: Path | None = None
 
 
 @dataclass(frozen=True)

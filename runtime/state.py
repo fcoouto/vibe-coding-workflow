@@ -2452,7 +2452,8 @@ def process_event(scope, event, *, deadline=None):
                     admitted = pre[1] == 0 and event.tool_name == 'apply_patch' and receipt == (post, 0)
                     if not admitted and pre[1] == 0 and event.tool_name == 'apply_patch':
                         try:
-                            admitted = delegation._qualified_child_patch(scope, db, event, budget=budget) == pre[0]
+                            admitted = delegation._qualified_child_patch(scope, db, event, budget=budget,
+                                pre_fingerprint=pre[0]) == pre[0]
                         except (StartupError, KeyError, TypeError):
                             pass
                     if admitted:
