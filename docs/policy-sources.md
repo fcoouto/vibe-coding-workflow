@@ -36,6 +36,14 @@ verified child's model display metadata and formats its actual identifier when
 catalog lookup is unavailable, following Vibe Setup's
 [consumer display guidance](https://github.com/fcoouto/vibe-setup/blob/main/skills/vibe-setup/native-display.md).
 
+## Usage Routing enablement — 4 November 2026
+
+The user directed the workflow to apply explicit Usage Routing enablement
+without asking them to pause other Codex work. The
+[management procedure](../skills/manage-usage-routing/references/procedure.md#set-up-and-select-a-mode)
+owns the rule. Attribution of pilot measurements and live admission remain
+separate from local enablement.
+
 ## Usage Routing delegation registration — 4 November 2026
 
 The user approved the [implementation plan](superpowers/plans/2026-11-04-usage-routing-delegation-registration.md)
