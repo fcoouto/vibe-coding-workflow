@@ -128,8 +128,11 @@ if the catalog is unavailable. The stored model identity stays exact.
 The wrapper sends `vcw_display_label` on the event copy
 and calls the existing command. Previously forwarded labels remain unchanged. Habblaud 1.0.3 may capitalize or clip labels. This route forwards
 labels that fit 200 UTF-16 units and survive that normalization. Qualify the
-first visible badge using a fresh worker. Rollout discovery can still register
-the child before the hook.
+first visible badge using a fresh worker. The receiver gives a new generic child
+up to three seconds for its start label, without delaying execution. A later
+hook can still follow the first fallback badge; report that observation rather
+than treating recovery as first-badge qualification. Verified native metadata
+can correct a provisional root parent without replacing the child or its history.
 
 ### Publish after dispatch
 

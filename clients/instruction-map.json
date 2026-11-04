@@ -158,11 +158,11 @@
       ]
     },
     "clients/habblaud-receiver.md": {
-      "sha256": "a38eb72df28cf9224d3c95f881d9a260a962aa8601faee38f15a5f4b9ae5609d",
+      "sha256": "4322d8b388a86f9f213efbc33433cd5bb162b05736b01f2ea9b6a9bbb728e1f8",
       "ranges": [
         [
           1,
-          86
+          90
         ]
       ]
     },
@@ -220,15 +220,15 @@
       ]
     },
     "clients/worker-visibility.md": {
-      "sha256": "1e5d5f75106e0792c099876a9d76575fb08d2f10d9c57d82a5518115a5982804",
+      "sha256": "ebc2ac125d350f480136d604a66125daa027b489c44db7adcd3dcf99a26f5aa1",
       "ranges": [
         [
           1,
-          146
+          142
         ],
         [
-          147,
-          219
+          143,
+          222
         ]
       ]
     },

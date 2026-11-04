@@ -1,13 +1,16 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index ff23889bbc2341f8f3425b874c6024d791eb28cd..d18665fad3712e77ea9a5db90e29ca093df32657 100644
+index ff23889..9d9f9d1 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -10,6 +10,15 @@ do meio (0.**3**.0).
- 
+@@ -10,6 +10,18 @@ do meio (0.**3**.0).
+
  ## [Não lançado]
- 
+
 +### Corrigido
 +
++- **Codex: delegações aninhadas usam o pai confirmado pelo rollout**, preservando a identidade e a atividade do
++  subagente. Filhos novos com papel genérico aguardam até três segundos pelo selo de início; sem metadados,
++  continuam com “Subagente (Codex)”. Essa espera afeta somente a apresentação, nunca a execução.
 +- **Codex: os subagentes exibem o papel informado no início.** Papéis ausentes ou genéricos mantêm
 +  o rótulo original “Subagente (Codex)” até chegar um papel para o mesmo filho e pai. Um rótulo declarado pelo fluxo
 +  preserva o nome do modelo. Nos outros eventos, papéis específicos do Codex continuam tendo prioridade.
@@ -16,10 +19,10 @@ index ff23889bbc2341f8f3425b874c6024d791eb28cd..d18665fad3712e77ea9a5db90e29ca09
 +  inclusive coordenadores, continuam mostrando seus papéis; os outros clientes mantêm os selos existentes.
 +
  ## [1.0.3] - 2026-10-16
- 
+
  ### Corrigido
 diff --git a/client/src/ui/drawer.ts b/client/src/ui/drawer.ts
-index 0120c9b7484e47d84cb18ad3571fb20bf8757155..1d956da4faa1da123f7b906ceed12479cd4fba31 100644
+index 0120c9b..1d956da 100644
 --- a/client/src/ui/drawer.ts
 +++ b/client/src/ui/drawer.ts
 @@ -28,6 +28,7 @@ import {
@@ -39,7 +42,7 @@ index 0120c9b7484e47d84cb18ad3571fb20bf8757155..1d956da4faa1da123f7b906ceed12479
      setText(this.title, a.title ?? '');
      setHidden(this.title, !a.title);
 diff --git a/client/src/ui/model.test.ts b/client/src/ui/model.test.ts
-index 295a5dabf5d0243e31c7c6eedf5d80a2964d455a..a5386892bf75efcb908600ef78a076e5444ccba7 100644
+index 295a5da..a538689 100644
 --- a/client/src/ui/model.test.ts
 +++ b/client/src/ui/model.test.ts
 @@ -12,6 +12,7 @@ import {
@@ -79,7 +82,7 @@ index 295a5dabf5d0243e31c7c6eedf5d80a2964d455a..a5386892bf75efcb908600ef78a076e5
      expect(aggregateTasks(agents)).toEqual({ completed: 1, inProgress: 1, total: 3 });
    });
 diff --git a/client/src/ui/model.ts b/client/src/ui/model.ts
-index fd0f8604de5f562689caadf032a82c13598ad67c..0df4cfee18065458fd703e15ec1f09a243abff64 100644
+index fd0f860..0df4cfe 100644
 --- a/client/src/ui/model.ts
 +++ b/client/src/ui/model.ts
 @@ -3,6 +3,7 @@
@@ -87,13 +90,13 @@ index fd0f8604de5f562689caadf032a82c13598ad67c..0df4cfee18065458fd703e15ec1f09a2
  import { formatElapsed, normalizeSearch } from './format';
  import { tr } from '../../../shared/i18n';
 +import { isUnreportedCodexRole } from '../../../shared/codex-role';
- 
+
  export const STATUS_LABEL: Record<AgentStatus, string> = {
    working: tr('Trabalhando'),
 @@ -38,9 +39,15 @@ export function activityFallback(agent: Pick<AgentInfo, 'status' | 'waitingFor'>
    }
  }
- 
+
 -/** Selo de papel: "Agente principal" ou o tipo do subagente ("Explore", "Plan"...). */
 -export function roleLabel(agent: Pick<AgentInfo, 'kind' | 'role'>): string {
 +/** O Codex mantém o selo nos filhos, inclusive quando um filho coordena outros. */
@@ -107,9 +110,9 @@ index fd0f8604de5f562689caadf032a82c13598ad67c..0df4cfee18065458fd703e15ec1f09a2
 +  if (agent.provider === 'codex' && (!agent.role.trim() || /^default$/i.test(agent.role.trim()))) return tr('Subagente');
    return agent.role || tr('Subagente');
  }
- 
+
 diff --git a/client/src/ui/rows.ts b/client/src/ui/rows.ts
-index 7ed23751ce7e15e7f53b616fa0ba8ce5420d3964..b2b91ce4d8a12bdbca8aefe37c205beb844736cc 100644
+index 7ed2375..b2b91ce 100644
 --- a/client/src/ui/rows.ts
 +++ b/client/src/ui/rows.ts
 @@ -3,7 +3,7 @@ import type { AccountInfo, AgentInfo } from '../../../shared/types';
@@ -131,7 +134,7 @@ index 7ed23751ce7e15e7f53b616fa0ba8ce5420d3964..b2b91ce4d8a12bdbca8aefe37c205beb
    const wait = shellWaitIn(agent, agents, now);
    const status = wait ? 'shell' : agent.status;
 diff --git a/client/src/ui/terminal.ts b/client/src/ui/terminal.ts
-index 9b6d010868ad6e746e67b7c087b428fbd22a82dd..b7edb032fdd56b42f91bded302b5bf5169f2b9f7 100644
+index 9b6d010..b7edb03 100644
 --- a/client/src/ui/terminal.ts
 +++ b/client/src/ui/terminal.ts
 @@ -19,7 +19,7 @@ import type { PtyControl } from './pty';
@@ -153,7 +156,7 @@ index 9b6d010868ad6e746e67b7c087b428fbd22a82dd..b7edb032fdd56b42f91bded302b5bf51
      const room = a ? this.ctx.store.room(a.roomId) : undefined;
      setText(this.roomEl, room ? tr('sala {0}', [room.name]) : '');
 diff --git a/client/src/ui/widgets.ts b/client/src/ui/widgets.ts
-index 29059c1c401d005dc0b2a9fc11efa0b4dfd9866e..7ebd8a7c60b96fe13b3c70c59118aa591326f7cf 100644
+index 29059c1..7ebd8a7 100644
 --- a/client/src/ui/widgets.ts
 +++ b/client/src/ui/widgets.ts
 @@ -3,7 +3,7 @@
@@ -164,11 +167,11 @@ index 29059c1c401d005dc0b2a9fc11efa0b4dfd9866e..7ebd8a7c60b96fe13b3c70c59118aa59
 +import { roleLabel, shellDoneKind, shellLine, shellStage, statusLabel, type ShellWait } from './model';
  import { accountChipLabel, accountProvider, fallbackShort, showsProviderTag } from './provider';
  import { tr } from '../../../shared/i18n';
- 
+
 @@ -52,10 +52,10 @@ export function createRoleBadge(): HTMLElement {
    return h('span', { class: 'ui-role' });
  }
- 
+
 -export function updateRoleBadge(badge: HTMLElement, agent: Pick<AgentInfo, 'kind' | 'role' | 'background'>): void {
 -  setText(badge, agent.kind === 'main' ? tr('Principal') : agent.role || tr('Subagente'));
 +export function updateRoleBadge(badge: HTMLElement, agent: Pick<AgentInfo, 'kind' | 'role' | 'background' | 'provider'>): void {
@@ -177,16 +180,16 @@ index 29059c1c401d005dc0b2a9fc11efa0b4dfd9866e..7ebd8a7c60b96fe13b3c70c59118aa59
 -  setTitle(badge, agent.kind === 'main' ? tr('Agente principal') : tr('Subagente: {0}{1}', [agent.role, agent.background ? tr(' (em segundo plano)') : '']));
 +  setTitle(badge, agent.kind === 'main' ? tr('Agente principal') : tr('Subagente: {0}{1}', [agent.provider === 'codex' ? roleLabel(agent) : agent.role, agent.background ? tr(' (em segundo plano)') : '']));
  }
- 
+
  /** Barra de progresso fina; `value` 0–1. */
 diff --git a/server/model/office.ts b/server/model/office.ts
-index aacf0b70a3079eeee2c20e46c1ec128dcbcb9ce7..c378ca11fe9ff9c824a675fa163324077ba478f2 100644
+index aacf0b7..ba766f1 100644
 --- a/server/model/office.ts
 +++ b/server/model/office.ts
-@@ -617,6 +617,13 @@ export class Office {
+@@ -617,6 +617,32 @@ export class Office {
      return true;
    }
- 
+
 +  setSubRole(id: string, parentId: string, role: string): void {
 +    const info = this.agents.get(id)?.info;
 +    if (!info || info.kind !== 'sub' || info.parentId !== parentId || info.role === role) return;
@@ -194,17 +197,36 @@ index aacf0b70a3079eeee2c20e46c1ec128dcbcb9ce7..c378ca11fe9ff9c824a675fa16332407
 +    this.markDirty();
 +  }
 +
++  reparentSub(id: string, parentId: string): boolean {
++    const info = this.agents.get(id)?.info;
++    const parent = this.agents.get(parentId)?.info;
++    if (!info || info.kind !== 'sub' || !parent || info.account !== parent.account
++        || info.provider !== parent.provider || info.roomId !== parent.roomId) return false;
++    const seen = new Set([id]);
++    let ancestor: AgentInfo | undefined = parent;
++    while (ancestor) {
++      if (seen.has(ancestor.id)) return false;
++      seen.add(ancestor.id);
++      ancestor = ancestor.parentId ? this.agents.get(ancestor.parentId)?.info : undefined;
++    }
++    if (info.parentId !== parentId) {
++      info.parentId = parentId;
++      this.markDirty();
++    }
++    return true;
++  }
++
    completeSub(id: string, opts: { notify?: boolean } = {}): void {
      const rec = this.agents.get(id);
      if (!rec || rec.info.kind !== 'sub' || rec.info.status === 'done' || rec.info.status === 'offline') return;
 diff --git a/server/sources/codex/source.test.ts b/server/sources/codex/source.test.ts
-index 0afe870b46ad04cfabc8d97964a8f0890171dcc6..0c18cd8abb6cd8168773112d4a6a53125796a835 100644
+index 0afe870..f062bde 100644
 --- a/server/sources/codex/source.test.ts
 +++ b/server/sources/codex/source.test.ts
-@@ -482,6 +482,233 @@ describe('fonte do Codex: eventos de hook', () => {
+@@ -482,6 +482,328 @@ describe('fonte do Codex: eventos de hook', () => {
      expect(ctx.agent(`.codex:${C}`)?.status).toBe('done');
    });
- 
+
 +  it('o papel do SubagentStart vence o papel padrão do rollout na primeira entrada', () => {
 +    const ctx = setup();
 +    const at = ctx.now() - 10_000;
@@ -291,6 +313,101 @@ index 0afe870b46ad04cfabc8d97964a8f0890171dcc6..0c18cd8abb6cd8168773112d4a6a5312
 +    });
 +    ctx.hook(ev('SubagentStart', { agent_id: C, agent_type: 'Reviewer · GPT-6.1 Sol' }));
 +    expect(ctx.agent(key)?.role).toBe('Scout · GPT-6.1 Sol');
++  });
++
++  it('mostra o primeiro selo aninhado com o pai nativo e preserva a atividade antecipada', () => {
++    const ctx = setup();
++    const child = threadId(3);
++    ctx.source.boot();
++    ctx.hook(ev('SessionStart'));
++    ctx.hook(ev('SubagentStart', { agent_id: C, agent_type: 'Coordinator · Native Model' }));
++    ctx.hook(ev('PreToolUse', { agent_id: child, tool_name: 'exec_command', tool_input: { cmd: 'echo check' }, tool_use_id: 'early' }));
++    expect(ctx.agent(`.codex:${child}`)).toBeUndefined();
++    ctx.home.rollout(child, [R.meta(child, { at: ctx.now(), sessionId: T, source: SOURCES.sub(C, 'default') })]);
++    expect(ctx.hook(ev('SubagentStart', {
++      session_id: C, agent_id: child, agent_type: 'Reviewer · Native Model', vcw_display_label: 'Reviewer · Native Model',
++    }), '.codex')).toBe(true);
++    expect(ctx.agent(`.codex:${child}`)).toMatchObject({ parentId: `.codex:${C}`, role: 'Reviewer · Native Model' });
++    expect(ctx.agent(`.codex:${child}`)?.recent.some((a) => a.id.endsWith('#early'))).toBe(true);
++    ctx.hook(ev('PostToolUse', { agent_id: child }));
++    expect(ctx.agent(`.codex:${child}`)).toMatchObject({ parentId: `.codex:${C}`, role: 'Reviewer · Native Model' });
++    expect(ctx.office.reparentSub(`.codex:${C}`, `.codex:${child}`)).toBe(false);
++  });
++
++  it.each([false, true])('corrige o pai provisório sem recriar o filho; metadados antes do início: %s', (metadataFirst) => {
++    const ctx = setup({ names: ['.codex', '.codex-trabalho'] });
++    const child = threadId(3);
++    const key = `.codex:${child}`;
++    ctx.source.boot();
++    ctx.hook(ev('SessionStart'), '.codex');
++    ctx.hook(ev('SubagentStart', { agent_id: C, agent_type: 'Coordinator · Native Model' }), '.codex');
++    ctx.hook(ev('PreToolUse', { agent_id: child, tool_name: 'exec_command', tool_use_id: 'early' }), '.codex');
++    ctx.advance(3_100);
++    ctx.poll();
++    const before = ctx.agent(key)!;
++    expect(before.role).toBe('Subagente (Codex)');
++    ctx.home.rollout(child, [R.meta(child, { at: ctx.now(), sessionId: T, source: SOURCES.sub(C, 'default') })]);
++    if (metadataFirst) { ctx.advance(3_100); ctx.poll(); }
++    const start = ev('SubagentStart', {
++      session_id: C, agent_id: child, agent_type: 'Reviewer · Native Model', vcw_display_label: 'Reviewer · Native Model',
++    });
++    expect(ctx.hook(start, '.codex-trabalho')).toBe(false);
++    expect(ctx.hook(start, '.codex')).toBe(true);
++    expect(ctx.agent(key)).toMatchObject({ id: before.id, name: before.name, account: before.account,
++      sessionId: child, parentId: `.codex:${C}`, role: 'Reviewer · Native Model' });
++    expect(ctx.agent(key)?.recent.some((a) => a.id.endsWith('#early'))).toBe(true);
++    expect(ctx.hook({ ...start, session_id: T }, '.codex')).toBe(false);
++    ctx.hook(ev('SessionStart', { session_id: threadId(9) }), '.codex-trabalho');
++    expect(ctx.office.reparentSub(key, `.codex-trabalho:${threadId(9)}`)).toBe(false);
++  });
++
++  it('limita a espera pelo selo sem renovar o prazo e mantém o fallback e a aprovação', () => {
++    const ctx = setup();
++    ctx.source.boot();
++    ctx.hook(ev('SessionStart'));
++    ctx.hook(ev('PreToolUse', { agent_id: C, tool_name: 'exec_command', tool_use_id: 'first' }));
++    expect(ctx.agent(`.codex:${C}`)).toBeUndefined();
++    ctx.advance(2_500);
++    ctx.hook(ev('PreToolUse', { agent_id: C, tool_name: 'exec_command', tool_use_id: 'second' }));
++    ctx.hook(ev('PermissionRequest', { agent_id: C }));
++    expect(ctx.agent(`.codex:${C}`)).toBeUndefined();
++    ctx.advance(500);
++    ctx.poll();
++    const agent = ctx.agent(`.codex:${C}`)!;
++    expect(agent).toMatchObject({ role: 'Subagente (Codex)', status: 'waiting' });
++    expect(agent.recent.some((a) => a.id.endsWith('#first'))).toBe(true);
++    expect(agent.recent.some((a) => a.id.endsWith('#second'))).toBe(true);
++    ctx.hook(ev('SubagentStart', { agent_id: C, agent_type: 'Reviewer · Native Model' }));
++    expect(ctx.agent(`.codex:${C}`)).toMatchObject({ role: 'Reviewer · Native Model', status: 'waiting' });
++  });
++
++  it('não ressuscita um filho concluído durante a espera pelo selo', () => {
++    const ctx = setup();
++    ctx.source.boot();
++    ctx.hook(ev('SessionStart'));
++    ctx.hook(ev('PreToolUse', { agent_id: C }));
++    expect(ctx.agent(`.codex:${C}`)).toBeUndefined();
++    ctx.hook(ev('SubagentStop', { agent_id: C }));
++    ctx.advance(3_100);
++    ctx.poll();
++    expect(ctx.agent(`.codex:${C}`)).toBeUndefined();
++    ctx.hook(ev('SubagentStart', { agent_id: C, agent_type: 'Reviewer · Native Model' }));
++    expect(ctx.agent(`.codex:${C}`)).toBeUndefined();
++    ctx.hook(ev('PreToolUse', { agent_id: C }));
++    expect(ctx.agent(`.codex:${C}`)).toMatchObject({ role: 'Reviewer · Native Model', status: 'working' });
++  });
++
++  it('preserva a conclusão nativa que precede o início enriquecido atrasado', () => {
++    const ctx = setup();
++    ctx.source.boot();
++    ctx.hook(ev('SessionStart'));
++    ctx.hook(ev('PreToolUse', { agent_id: C }));
++    ctx.home.rollout(C, [R.meta(C, { at: ctx.now(), sessionId: T, source: SOURCES.sub(T, 'default') }),
++      R.taskStarted('s1', ctx.now()), R.taskComplete('s1', ctx.now())]);
++    ctx.advance(3_100);
++    ctx.poll();
++    ctx.hook(ev('SubagentStart', { agent_id: C, agent_type: 'Reviewer · Native Model' }));
++    expect(ctx.agent(`.codex:${C}`)).toBeUndefined();
 +  });
 +
 +  it('um SubagentStart com conta explícita incorreta não rotula o filho de outra conta', () => {
@@ -436,7 +553,7 @@ index 0afe870b46ad04cfabc8d97964a8f0890171dcc6..0c18cd8abb6cd8168773112d4a6a5312
      const ctx = setup({ names: ['.codex', '.codex-trabalho'] });
      ctx.source.boot();
 diff --git a/server/sources/codex/source.ts b/server/sources/codex/source.ts
-index e0accad7640f3e81dd8afdf122945382e27e8b82..026e4ad84653bb1c6b93c1ab4babdf8be00bde5f 100644
+index e0accad..cddbe9e 100644
 --- a/server/sources/codex/source.ts
 +++ b/server/sources/codex/source.ts
 @@ -48,6 +48,7 @@ import {
@@ -444,10 +561,18 @@ index e0accad7640f3e81dd8afdf122945382e27e8b82..026e4ad84653bb1c6b93c1ab4babdf8b
  import { createCodexTerminalParser } from './terminal';
  import { tr } from '../../../shared/i18n';
 +import { isUnreportedCodexRole } from '../../../shared/codex-role';
- 
+
  /** Idade mínima do lock para valer como sessão aberta (os locks de manutenção duram menos). */
  export const LOCK_SETTLE_MS = 3_000;
-@@ -138,6 +139,7 @@ interface ThreadTracker {
+@@ -125,6 +126,7 @@ interface ThreadTracker {
+   key: string;
+   acc: CodexAccount;
+   threadId: string;
++  firstSeenAt: number;
+   /** main/sub pelo session_meta (ou pelo hook); internal = fica fora do escritório. */
+   kind: 'main' | 'sub' | 'internal';
+   parentThreadId?: string;
+@@ -138,6 +140,7 @@ interface ThreadTracker {
    inOffice: boolean;
    hookCwd?: string;
    hookRole?: string;
@@ -455,10 +580,18 @@ index e0accad7640f3e81dd8afdf122945382e27e8b82..026e4ad84653bb1c6b93c1ab4babdf8b
    status: AgentStatus;
    /** Quando o status foi decidido (linha do rollout ou evento de hook): informação mais velha não o muda. */
    statusAt: number;
-@@ -162,10 +164,18 @@ function rec(v: unknown): Record<string, unknown> | undefined {
+@@ -151,6 +154,7 @@ interface ThreadTracker {
+   subDone: boolean;
+   /** Criado agora por um hook (SubagentStart): entra mesmo sem turno visto. */
+   hookSpawned?: boolean;
++  completedBeforeStart?: boolean;
+   watcher?: FSWatcher;
+ }
+
+@@ -162,10 +166,18 @@ function rec(v: unknown): Record<string, unknown> | undefined {
    return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
  }
- 
+
 -function roleOf(raw: string | undefined): string {
 -  if (!raw) return SUB_ROLE;
 -  const r = raw.trim();
@@ -476,9 +609,42 @@ index e0accad7640f3e81dd8afdf122945382e27e8b82..026e4ad84653bb1c6b93c1ab4babdf8b
 +  const separator = raw.lastIndexOf(' · ');
 +  return separator > 0 && raw.slice(separator + 3).trim() ? raw : undefined;
  }
- 
+
  export class CodexSource implements AgentSource, CodexLive {
-@@ -464,7 +474,7 @@ export class CodexSource implements AgentSource, CodexLive {
+@@ -366,6 +378,7 @@ export class CodexSource implements AgentSource, CodexLive {
+       key: `${acc.id}:${threadId}`,
+       acc,
+       threadId,
++      firstSeenAt: this.now(),
+       kind: 'main',
+       nextResolveAt: 0,
+       state: createCodexState(),
+@@ -391,6 +404,13 @@ export class CodexSource implements AgentSource, CodexLive {
+
+   /** O thread deve estar no escritório agora? Entra, sai ou muda de sala conforme o caso. */
+   private reconcile(t: ThreadTracker, now: number, via?: 'lock' | 'recent' | 'hook'): void {
++    if (t.inOffice && t.kind === 'sub' && t.meta?.parentThreadId) {
++      const parent = this.parentKey(t)!;
++      if (this.opts.office.reparentSub(t.key, parent)) {
++        const role = t.declaredDisplayLabel ?? specificRole(t.meta.agentRole) ?? t.hookRole ?? SUB_ROLE;
++        this.opts.office.setSubRole(t.key, parent, role);
++      }
++    }
+     const want = this.wanted(t, now, via);
+     if (!want) {
+       if (t.inOffice) this.leave(t);
+@@ -424,6 +444,10 @@ export class CodexSource implements AgentSource, CodexLive {
+       if (!parent || !this.opts.office.has(parent) || this.opts.office.isSubDone(parent) || this.opts.office.get(parent)?.status === 'offline') return false;
+       // Subagente só aparece trabalhando (ou recém-criado pelo hook); depois de entregar, sai.
+       if (!t.inOffice && t.status !== 'working' && t.status !== 'waiting' && !t.hookSpawned) return false;
++      // A apresentação espera brevemente pelo início enriquecido; a execução nunca espera pelo selo.
++      const firstSeen = Math.min(t.firstSeenAt, t.meta?.startedAt ?? t.firstSeenAt);
++      if (!t.inOffice && !this.opts.office.has(t.key) && !t.hookSpawned && !t.declaredDisplayLabel
++          && !specificRole(t.meta?.agentRole) && !t.hookRole && now - firstSeen < LOCK_SETTLE_MS) return false;
+     }
+     return true;
+   }
+@@ -464,7 +488,7 @@ export class CodexSource implements AgentSource, CodexLive {
          id: t.key,
          parentId: parent,
          sessionId: t.threadId,
@@ -487,9 +653,26 @@ index e0accad7640f3e81dd8afdf122945382e27e8b82..026e4ad84653bb1c6b93c1ab4babdf8b
          title: t.state.title,
          background: false,
          startedAt: t.meta?.startedAt ?? t.state.firstAt ?? now,
-@@ -586,6 +596,12 @@ export class CodexSource implements AgentSource, CodexLive {
+@@ -559,6 +583,7 @@ export class CodexSource implements AgentSource, CodexLive {
+
+   /** Lê o começo (session_meta, título) e a janela do fim do rollout; o resto do começo vai em segundo plano. */
+   private load(t: ThreadTracker, path: string): void {
++    const pendingHooks = !t.rolloutPath && !t.inOffice ? t.backlog : [];
+     this.unwatch(t);
+     const head = readRolloutHead(path);
+     if (head.meta) this.setMeta(t, head.meta);
+@@ -568,7 +593,7 @@ export class CodexSource implements AgentSource, CodexLive {
+     t.rolloutPath = path;
+     t.state = createCodexState(head.meta);
+     if (head.title) t.state.title = head.title;
+-    t.backlog = [];
++    t.backlog = pendingHooks;
+     for (let i = 0; i < 64; i++) {
+       const r = tail.read();
+       for (const line of r.lines) this.apply(t, parseRolloutLine(t.state, line, { idPrefix: t.key, now: this.now() }), false);
+@@ -586,6 +611,12 @@ export class CodexSource implements AgentSource, CodexLive {
    }
- 
+
    private setMeta(t: ThreadTracker, meta: RolloutMeta): void {
 +    if (t.declaredDisplayLabel && (meta.internal || (meta.parentThreadId && meta.parentThreadId !== t.parentThreadId))) {
 +      const parent = this.parentKey(t);
@@ -500,7 +683,7 @@ index e0accad7640f3e81dd8afdf122945382e27e8b82..026e4ad84653bb1c6b93c1ab4babdf8b
      t.meta = meta;
      if (meta.internal) t.kind = 'internal';
      else if (meta.parentThreadId) {
-@@ -595,7 +611,10 @@ export class CodexSource implements AgentSource, CodexLive {
+@@ -595,7 +626,10 @@ export class CodexSource implements AgentSource, CodexLive {
          t.inOffice = false;
        }
        t.kind = 'sub';
@@ -510,8 +693,16 @@ index e0accad7640f3e81dd8afdf122945382e27e8b82..026e4ad84653bb1c6b93c1ab4babdf8b
 +      if (t.inOffice && role) this.opts.office.setSubRole(t.key, this.parentKey(t)!, role);
      }
    }
- 
-@@ -806,7 +825,19 @@ export class CodexSource implements AgentSource, CodexLive {
+
+@@ -670,6 +704,7 @@ export class CodexSource implements AgentSource, CodexLive {
+    */
+   private decide(t: ThreadTracker, status: AgentStatus, at: number, waitingFor: string | undefined, live: boolean): void {
+     if (at < t.statusAt) return;
++    if (t.kind === 'sub' && !t.inOffice) t.completedBeforeStart = status === 'idle';
+     t.statusAt = at;
+     t.status = status;
+     if (waitingFor) t.waitingFor = waitingFor;
+@@ -806,7 +841,19 @@ export class CodexSource implements AgentSource, CodexLive {
      const target = agent && isThreadId(agent) ? agent : root;
      const agentType = str(input.agent_type);
      if (agentType && /guardian/i.test(agentType)) return false;
@@ -532,11 +723,18 @@ index e0accad7640f3e81dd8afdf122945382e27e8b82..026e4ad84653bb1c6b93c1ab4babdf8b
      if (!acc) return false;
      const now = this.now();
      const cwd = str(input.cwd);
-@@ -826,13 +857,26 @@ export class CodexSource implements AgentSource, CodexLive {
+@@ -826,15 +873,37 @@ export class CodexSource implements AgentSource, CodexLive {
      const isSubEvent = target !== root || event === 'SubagentStart' || event === 'SubagentStop';
      const subId = event === 'SubagentStart' || event === 'SubagentStop' ? (agent && isThreadId(agent) ? agent : undefined) : target !== root ? target : undefined;
      if (isSubEvent && !subId) return false;
-+    const knownParent = subId ? this.threads.get(`${acc.id}:${subId}`)?.parentThreadId : undefined;
++    const known = subId ? this.threads.get(`${acc.id}:${subId}`) : undefined;
++    if (starting && known && !known.meta && known.parentThreadId !== root) {
++      // Um hook pode ter usado a raiz antes de o rollout informar o pai imediato.
++      acc.index.scanAll();
++      known.nextResolveAt = 0;
++      this.pump(known, false);
++    }
++    const knownParent = known?.parentThreadId;
 +    if (starting && (subId === root || (knownParent && knownParent !== root))) return false;
      const rootT = this.touch(acc, root, now, cwd);
 -    const t = subId ? this.touch(acc, subId, now, cwd, root, agentType) : rootT;
@@ -548,28 +746,43 @@ index e0accad7640f3e81dd8afdf122945382e27e8b82..026e4ad84653bb1c6b93c1ab4babdf8b
 +    }
      this.hintTranscript(acc, subId ?? root, event === 'SubagentStop' ? str(input.agent_transcript_path) : subId ? undefined : str(input.transcript_path));
      this.reconcile(rootT, now, 'hook');
- 
+
      switch (event) {
        case 'SubagentStart':
+-        t.hookSpawned = true;
+-        this.decide(t, 'working', now, undefined, true);
 +        if (displayLabel) t.declaredDisplayLabel ??= displayLabel;
 +        if (t.declaredDisplayLabel) {
 +          office.setSubRole(t.key, rootT.key, t.declaredDisplayLabel);
 +        } else if (t.hookRole && office.get(t.key)?.role === SUB_ROLE && !specificRole(t.meta?.agentRole)) {
 +          office.setSubRole(t.key, rootT.key, t.hookRole);
 +        }
-         t.hookSpawned = true;
-         this.decide(t, 'working', now, undefined, true);
++        if (!t.completedBeforeStart && !t.subDone) {
++          t.hookSpawned = true;
++          if (t.status !== 'waiting') this.decide(t, 'working', now, undefined, true);
++        }
          break;
-@@ -871,7 +915,7 @@ export class CodexSource implements AgentSource, CodexLive {
+       case 'SubagentStop':
+         this.decide(t, 'idle', now, undefined, true);
+@@ -853,7 +922,7 @@ export class CodexSource implements AgentSource, CodexLive {
+         const { desc, tool } = describeCodexTool(toolName, toolInput);
+         const id = str(input.tool_use_id);
+         const act: Activity = { id: `${t.key}#${id ?? `hook${now.toString(36)}`}`, at: now, ...desc, tool };
+-        if (t.inOffice) office.addActivity(t.key, act, true);
++        this.apply(t, { activities: [{ activity: act, current: true }], signals: [], changed: false, at: now }, true);
+         break;
+       }
+       case 'PermissionRequest':
+@@ -871,7 +940,7 @@ export class CodexSource implements AgentSource, CodexLive {
    }
- 
+
    /** Tracker do thread (criado se preciso), com a presença dada pelo hook. */
 -  private touch(acc: CodexAccount, threadId: string, now: number, cwd: string | undefined, parent?: string, agentType?: string): ThreadTracker {
 +  private touch(acc: CodexAccount, threadId: string, now: number, cwd: string | undefined, parent?: string): ThreadTracker {
      const key = `${acc.id}:${threadId}`;
      let t = this.threads.get(key);
      if (!t) {
-@@ -886,7 +930,6 @@ export class CodexSource implements AgentSource, CodexLive {
+@@ -886,7 +955,6 @@ export class CodexSource implements AgentSource, CodexLive {
        t.kind = 'sub';
        t.parentThreadId = parent;
      }
@@ -577,7 +790,7 @@ index e0accad7640f3e81dd8afdf122945382e27e8b82..026e4ad84653bb1c6b93c1ab4babdf8b
      if (t.inOffice && !this.opts.office.has(t.key)) t.inOffice = false;
      this.pump(t, false);
      return t;
-@@ -913,7 +956,7 @@ export class CodexSource implements AgentSource, CodexLive {
+@@ -913,7 +981,7 @@ export class CodexSource implements AgentSource, CodexLive {
     * Conta de um evento: `account` (id ou pasta), senão a do `transcript_path`, senão a que já conhece o thread;
     * com uma conta só, ela.
     */
@@ -586,7 +799,7 @@ index e0accad7640f3e81dd8afdf122945382e27e8b82..026e4ad84653bb1c6b93c1ab4babdf8b
      const norm = (p: string) => {
        try {
          return resolve(p);
-@@ -921,18 +964,21 @@ export class CodexSource implements AgentSource, CodexLive {
+@@ -921,18 +989,21 @@ export class CodexSource implements AgentSource, CodexLive {
          return p;
        }
      };
@@ -618,7 +831,7 @@ index e0accad7640f3e81dd8afdf122945382e27e8b82..026e4ad84653bb1c6b93c1ab4babdf8b
      if (known.length === 1) return known[0];
 diff --git a/shared/codex-role.ts b/shared/codex-role.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..bb438ed38d9d8982a0fdeafd31fc7ce29f6f616c
+index 0000000..bb438ed
 --- /dev/null
 +++ b/shared/codex-role.ts
 @@ -0,0 +1,4 @@
