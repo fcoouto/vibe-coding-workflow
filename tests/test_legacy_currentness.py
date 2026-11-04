@@ -73,7 +73,9 @@ class LegacyCurrentnessTests(unittest.TestCase):
                 before=self.snapshot()
                 acquisition=startup.acquire_project_entry(SimpleNamespace(client='codex',cwd=self.repo),state.PACKAGE)
                 self.assertIsNone(acquisition.resolution.scope)
-                self.assertNotEqual(acquisition.resolution.status,'outside')
+                self.assertEqual(acquisition.resolution.status,'suspended')
+                with self.assertRaises(startup.RuntimeScopeError):
+                    startup._entry_scope(acquisition)
                 request=self.identity|dict(mode='editable',decision_ref='fixture:new-attempt')
                 for operation in (lambda:state.start_task(scope,request),lambda:state.task_status(scope,'codex','old-session'),
                         lambda:evidence.revalidate_ready(scope,'codex','old-session'),
@@ -89,7 +91,7 @@ class LegacyCurrentnessTests(unittest.TestCase):
                 self.assertEqual(report['state']['status'],'incompatible')
                 self.assertIn('original pinned',report['state']['error'])
                 event=RuntimeEvent('PreToolUse','codex','old-session',self.repo,'turn','call','apply_patch',False,'receipt')
-                self.assertEqual(state.process_event(scope,event).action,'deny')
+                self.assertEqual(state.process_event(scope,event).action,'context')
                 command=[sys.executable,'-I','-B',str(state.PACKAGE/'scripts/workflow.py'),'task','start','--cwd',str(self.repo)]
                 result=subprocess.run(command,input=json.dumps(request).encode(),capture_output=True,timeout=5)
                 self.assertNotEqual(result.returncode,0,result.stdout)
