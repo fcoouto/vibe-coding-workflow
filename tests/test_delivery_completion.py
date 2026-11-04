@@ -14,6 +14,18 @@ def target():
 
 
 class MergeWaitBindingTests(unittest.TestCase):
+    def test_manual_merge_title_uses_latest_applicable_provider_facts(self):
+        publication = dict(id='pr', candidate=dict(observation='initial', readiness='receipt'))
+        records = dict(initial=dict(observation=dict(draft=False, mergeability=True)),
+            receipt=dict(operation='ready', binding='binding'),
+            ready=dict(kind='delivery-effect', action='ready', status='completed', binding='binding',
+                previous_plan='plan', observation=dict(draft=False, mergeability=False)),
+            plan=dict(publications=[dict(id='pr', candidate=dict(observation='initial'))]),
+            later=dict(observation=dict(draft=False, mergeability=True)))
+        self.assertFalse(delivery._manual_publication_needs_user(publication, records.__getitem__))
+        publication['candidate']['observation'] = 'later'
+        self.assertTrue(delivery._manual_publication_needs_user(publication, records.__getitem__))
+
     def test_changed_plan_cannot_reuse_the_old_wait_marker(self):
         reference = lambda char: dict(name=char * 32 + '.json', digest=char * 64)
         condition = dict(id='delivery:merge', kind='blocker', action='task', status='pending',
@@ -135,7 +147,7 @@ class CompletionTests(unittest.TestCase):
         conditions = result['task']['conditions']
         self.assertEqual([c['id'] for c in conditions if c['status'] == 'pending'], [])
         title = title_sync.format_title('W1', 'P', 'Feature', result['task']['state'], 4)
-        self.assertIn(' REVIEW · [W1] P · ', title)
+        self.assertEqual(title, '\uFFFB▰▰▰▰▱ [W1] P · Feature')
         self.assertNotIn('▰▰▰▰▰', title)
         status = self.fixture.api.evidence_status(self.scope, 'codex', 'parent')
         self.assertFalse(status['evidence']['delivery_complete'])

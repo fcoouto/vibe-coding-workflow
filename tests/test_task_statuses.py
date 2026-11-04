@@ -31,6 +31,22 @@ class CanonicalTaskStatusTests(unittest.TestCase):
         self.fixture.update(state='CANCELLED')
         with self.assertRaises(ValueError): self.fixture.update(state='WORKING',resolution_ref='user:resume')
 
+    def test_user_attention_is_explicit_and_scoped_to_the_latest_phase_update(self):
+        original = self.fixture.start()['task']
+        waiting = self.fixture.update(state='WAITING', user_attention=True)['task']
+        self.assertIs(self.fixture.status()['task']['user_attention'], True)
+        for invalid in (None, 1, 'yes'):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                self.fixture.update(state='WAITING', user_attention=invalid)
+        with self.assertRaises(ValueError):
+            self.fixture.update(state='WORKING', resolution_ref='user:resume', user_attention=True)
+        self.assertIs(self.fixture.update(state='WAITING', user_attention=False)['task']['user_attention'], False)
+        background = self.fixture.update(state='WAITING')['task']
+        self.assertNotIn('user_attention', background)
+        for key in ('client', 'session_id', 'task_id', 'scope_ref', 'pins'):
+            self.assertEqual(waiting[key], original[key])
+            self.assertEqual(background[key], original[key])
+
     def test_milestones_are_validated_and_update_with_task_revision(self):
         initial=self.fixture.start()['task']
         values=[dict(id='design',weight=2,accepted=True,reference='user:design-approved'),

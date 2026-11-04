@@ -3,17 +3,17 @@ from copy import deepcopy
 import re
 
 
-from runtime.task_statuses import STATES as STATUSES
+from runtime.task_statuses import ATTENTION_STATES, STATES as STATUSES
 from runtime.evidence import _digest
 MAX_TITLE_BODY = 4096
-MAX_STATUS_LENGTH = max(map(len, STATUSES))
+MAX_STATUS_LENGTH = max(map(len, ATTENTION_STATES))
 METER_PREFIX = '\uFFFB'  # Keeps the five cells in the compact Codex fallback font.
-# Accept saved titles from before the prefix and before the status placement change.
-TITLE = re.compile(r'(?P<meter>\uFFFB?▰{0,5}▱{0,5}) (?P<status>[A-Z ]+) · \[(?P<family>W[1-9][0-9]*)\] (?P<member>P|C[1-9][0-9]*) · (?P<topic>.+)')
+# Accept saved titles with routine labels, no meter prefix, or status at the end.
+TITLE = re.compile(r'(?P<meter>\uFFFB?▰{0,5}▱{0,5}) (?:(?P<status>[A-Z ]+) · )?\[(?P<family>W[1-9][0-9]*)\] (?P<member>P|C[1-9][0-9]*) · (?P<topic>.+)')
 LEGACY_TITLE = re.compile(r'(?P<meter>▰{0,5}▱{0,5}) \[(?P<family>W[1-9][0-9]*)\] (?P<member>P|C[1-9][0-9]*) · (?P<topic>.+) · (?P<status>[A-Z ]+)')
 
 
-def format_title(family, member, topic, status, cells):
+def format_title(family, member, topic, status, cells, *, user_attention=False):
     if not isinstance(family,str) or not re.fullmatch(r'W[1-9][0-9]*',family):
         raise ValueError('Invalid family code')
     if not isinstance(member,str) or not re.fullmatch(r'P|C[1-9][0-9]*',member):
@@ -23,20 +23,23 @@ def format_title(family, member, topic, status, cells):
     if status not in STATUSES or type(cells) is not int or not 0<=cells<=5:
         raise ValueError('Invalid canonical status or progress')
     filled=5 if status=='DONE' else min(cells,4)
-    title = '▰'*filled+'▱'*(5-filled)+f' {status} · [{family}] {member} · {topic}'
-    if len(title) - len(status) + MAX_STATUS_LENGTH > MAX_TITLE_BODY:
+    meter = '▰'*filled + '▱'*(5-filled) + ' '
+    identity_topic = f'[{family}] {member} · {topic}'
+    if len(meter) + MAX_STATUS_LENGTH + len(' · ') + len(identity_topic) > MAX_TITLE_BODY:
         raise ValueError('Managed title exceeds the supported length')
-    return METER_PREFIX + title
+    label = f'{status} · ' if user_attention is True and status in ATTENTION_STATES else ''
+    return METER_PREFIX + meter + label + identity_topic
 
 
 def _parsed(title):
-    match=(TITLE.fullmatch(title) or LEGACY_TITLE.fullmatch(title)) if isinstance(title,str) else None
+    match=(LEGACY_TITLE.fullmatch(title) or TITLE.fullmatch(title)) if isinstance(title,str) else None
     if match is None:return None
     fields=match.groupdict()
-    if len(fields['meter'].removeprefix(METER_PREFIX))!=5 or fields['status'] not in STATUSES or ' · ' in fields['topic']:
+    status = fields['status']
+    if len(fields['meter'].removeprefix(METER_PREFIX)) != 5 or (status is not None and status not in STATUSES):
         return None
     try:
-        format_title(fields['family'], fields['member'], fields['topic'], fields['status'], fields['meter'].count('▰'))
+        format_title(fields['family'], fields['member'], fields['topic'], status or 'WORKING', fields['meter'].count('▰'))
     except ValueError:
         return None
     fields['layout'] = 'status-after-meter' if match.re is TITLE else 'status-last'
@@ -59,7 +62,8 @@ def reconcile(saved, current, task):
         else:
             saved.update(paused=True,pending=None)
             return saved,None
-    desired=format_title(saved['family'],saved['member'],saved['topic'],task['state'],saved['cells'])
+    desired = format_title(saved['family'], saved['member'], saved['topic'], task['state'], saved['cells'],
+                           user_attention=task.get('user_attention', False))
     return saved,None if current==desired else desired
 
 
@@ -123,7 +127,7 @@ class NativeTitles:
         self.request('thread/name/set', {'threadId': session, 'name': title})
 
 
-def _task(scope, client, session, *, revalidate=False):
+def _task(scope, client, session, *, revalidate=False, presentation=False):
     from runtime import state
     if revalidate:
         return state.task_status(scope, client, session)["task"]
@@ -134,6 +138,10 @@ def _task(scope, client, session, *, revalidate=False):
         if task is None:
             raise ValueError('No bound workflow task')
         state._compatible(scope, task)
+        if presentation and task['state'] == 'WAITING' and 'user_attention' not in task:
+            from runtime import delivery
+            if delivery.manual_merge_needs_user(scope, db, task):
+                return dict(task, user_attention=True)
         return task
 
 
@@ -257,21 +265,26 @@ def operate(scope, action, request, transport=None, *, force=False):
                     format_title(saved['family'], saved['member'], request['topic'], task['state'], 0)
                     saved['topic'] = request['topic']
                 saved.update(paused=False, applied=current, pending=None, notified=False)
-            task = _task(scope, client, session)
+            task = _task(scope, client, session, presentation=True)
             if {key: task[key] for key in identity} != identity:
                 raise ValueError('Task binding changed during title observation')
             saved['cells'] = progress_cells(task)
             saved, desired = reconcile(saved, current, task)
             notification = None
             if desired is not None:
-                saved['pending'] = desired
-                _atomic(path, saved)
-                # Re-read immediately before mutation to detect edits during preparation.
-                if native.read(session) != current:
-                    return dict(ok=True, managed=True, pending=True, reason='title changed before write')
-                latest = _task(scope, client, session)
-                if latest['revision'] != task['revision']:
-                    return dict(ok=True, managed=True, pending=True, reason='task advanced')
+                _atomic(path, dict(saved, pending=desired))
+                ready_to_write = False
+                try:
+                    # Re-read immediately before mutation to detect edits during preparation.
+                    if native.read(session) != current:
+                        return dict(ok=True, managed=True, pending=True, reason='title changed before write')
+                    latest = _task(scope, client, session)
+                    if latest['revision'] != task['revision'] or any(latest[key] != value for key, value in identity.items()):
+                        return dict(ok=True, managed=True, pending=True, reason='task advanced')
+                    ready_to_write = True
+                finally:
+                    if not ready_to_write:
+                        _atomic(path, dict(saved, applied_revision=None))
                 native.write(session, desired)
                 observed = native.read(session)
                 if observed == desired:

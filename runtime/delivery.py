@@ -136,6 +136,57 @@ def _read_plan(scope, task, *, db=None, context=None):
     return evidence._read(scope, task['delivery']['plan'], db=db, context=context)
 
 
+def _merge_wait_acceptance(plan):
+    from runtime import evidence
+    plan = deepcopy(plan)
+    for item in plan['publications']:
+        if item['candidate'] is not None:
+            item['candidate'].pop('observation', None)
+    return evidence._raw(plan)
+
+
+def _manual_publication_needs_user(publication, read):
+    candidate = publication['candidate']
+    facts = read(candidate['observation'])['observation']
+    # The ready effect supersedes only the provider observation it started from.
+    receipt = read(candidate['readiness'])
+    if 'operation' in receipt:
+        effect = read(receipt['operation'])
+        if (effect['kind'] == 'delivery-effect' and effect['action'] == 'ready' and effect['status'] == 'completed'
+                and effect['binding'] == receipt['binding']):
+            before = read(effect['previous_plan'])
+            if any(item['id'] == publication['id'] and item['candidate'] is not None
+                   and item['candidate']['observation'] == candidate['observation'] for item in before['publications']):
+                facts = effect['observation']
+    return not facts['draft'] and facts['mergeability'] is not False
+
+
+def manual_merge_needs_user(scope, db, task):
+    """Project an existing generated wait using retained delivery evidence."""
+    from runtime import evidence
+    marker = task.get('delivery', {}).get('merge_wait')
+    if (task['state'] != 'WAITING' or task.get('reference') != 'delivery:completion'
+            or not marker or marker['verification'] != task.get('evidence', {}).get('verification')):
+        return False
+    pending = [condition for condition in task['conditions'] if condition['status'] == 'pending']
+    if pending != [dict(id=marker['condition_id'], kind='blocker', action='task', status='pending',
+                       reason=task['reason'], reference=task['reference'])]:
+        return False
+    plan = _read_plan(scope, task, db=db)
+    if plan['policy']['merge'] != 'manual':
+        return False
+    if marker['plan'] != task['delivery']['plan']:
+        original = evidence._read(scope, marker['plan'], db=db)
+        if _merge_wait_acceptance(original) != _merge_wait_acceptance(plan):
+            return False
+    def read(reference):
+        return evidence._read(scope, reference, db=db)
+
+    requirements = _scope_requirements(plan, read=read)
+    return requirements['waiting_for_merge'] and any(_manual_publication_needs_user(publication, read)
+        for publication in plan['publications'] if publication['id'] in requirements['pending'])
+
+
 def completion_requirements(scope, db, task: dict, *, context=None) -> dict:
     """Local retained facts only; a title or caller's remote claim is never proof."""
     from runtime import evidence
@@ -276,6 +327,7 @@ def apply_completion(task, requirements, implementation_verified):
     if requirements['delivery_complete']:
         task['state'] = 'DONE'
     else:
+        task.pop('user_attention', None)
         task.update(state='WAITING', reason='Implementation verified; required delivery remains pending',
                     reference='delivery:completion')
         ids = {c['id'] for c in task['conditions']}
@@ -396,13 +448,7 @@ def _manual_delivery(scope, action, request, owner):
             _require(task['state'] == 'WAITING' and marker is not None
                 and marker['verification'] == task.get('evidence', {}).get('verification'), 'Generated merge wait is unavailable or stale')
             original = evidence._read(scope, marker['plan'], db=db)
-            def acceptance(value):
-                value = deepcopy(value)
-                for item in value['publications']:
-                    if item['candidate'] is not None:
-                        item['candidate'].pop('observation', None)
-                return evidence._raw(value)
-            _require(acceptance(original) == acceptance(plan), 'Accepted scope changed during merge wait')
+            _require(_merge_wait_acceptance(original) == _merge_wait_acceptance(plan), 'Accepted scope changed during merge wait')
             conditions = [c for c in task['conditions'] if c['id'] == marker['condition_id']]
             _require(len(conditions) == 1 and conditions[0]['status'] == 'pending'
                 and conditions[0]['kind'] == 'blocker' and conditions[0]['action'] == 'task'

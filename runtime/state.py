@@ -224,7 +224,7 @@ def _capture_point(db,operation,parameters):
     except BaseException as error:owner.fail(error);raise
     else:
         row=measured=None;owner.release(payload);owner.release(control)
-from runtime.task_statuses import STATES
+from runtime.task_statuses import ATTENTION_STATES, STATES
 _HISTORICAL_STATES = {"planned", "active", "awaiting_user", "blocked", "verifying", "ready", "cancelled"}
 TABLE_SQL = {
     "checkouts": """CREATE TABLE checkouts(scope_id TEXT PRIMARY KEY, project_id TEXT NOT NULL,
@@ -1914,7 +1914,7 @@ def _task_unaccounted(db, scope_id, client, session, task_id=None, *, historical
 
 def _validate_task(db,scope_id,client,session,task_id,version,task,*,historical=False):
     _fields(task, ("client", "session_id", "task_id", "scope_ref", "mode", "decision_ref", "state", "revision",
-                   "pins", "reason", "reference", "conditions", "turn_id", "turn_uncertain", *(["accepted_identity"] if version == 3 else [])), ("resolution_ref", "evidence", "retirement", "delegation", "milestones", "delivery", *(["lifecycle","writer_stop","qualification_attempt"] if version == 3 else [])))
+                   "pins", "reason", "reference", "conditions", "turn_id", "turn_uncertain", *(["accepted_identity"] if version == 3 else [])), ("resolution_ref", "evidence", "retirement", "delegation", "milestones", "delivery", *(["lifecycle","writer_stop","qualification_attempt","user_attention"] if version == 3 else [])))
     if 'qualification_attempt' in task:
         _canonical_ref(task['qualification_attempt'])
         if task['state'] in {'READY', 'DONE'}:
@@ -1974,6 +1974,8 @@ def _validate_task(db,scope_id,client,session,task_id,version,task,*,historical=
         from runtime.delegation import validate_delegation
         validate_delegation(task["delegation"])
     if "milestones" in task:_milestones(task["milestones"])
+    if 'user_attention' in task and (type(task['user_attention']) is not bool or task['state'] not in ATTENTION_STATES):
+        raise StateError('Invalid stored title attention')
     if "writer_stop" in task:_writer_stop_shape(task["writer_stop"])
     if "retirement" in task:
         retirement = task["retirement"]
@@ -2005,6 +2007,8 @@ def _save(db, scope_id, task):
         if task['state'] in {'READY', 'DONE'}:
             raise StateError('Qualification task cannot acquire ordinary readiness or completion')
     if 'milestones' in task:_milestones(task['milestones'])
+    if task['state'] not in ATTENTION_STATES:
+        task.pop('user_attention', None)
     _task_projection(db, scope_id, task)
     if task["pins"]["schema_version"] == 3:
         previous = db.execute("select data from tasks where scope_id=? and client=? and session_id=? and task_id=?",
@@ -2220,7 +2224,7 @@ def _condition(value, task, previous):
 
 def update_task(scope, request):
     _fields(request, ("client", "session_id", "task_id", "scope_ref", "expected_revision", "state", "reason", "reference"),
-            ("conditions", "resolutions", "resolution_ref", "milestones"))
+            ("conditions", "resolutions", "resolution_ref", "milestones", "user_attention"))
     _identity(request)
     _integer(request["expected_revision"], "expected_revision", 1)
     for field in ("reason", "reference"):
@@ -2229,6 +2233,9 @@ def update_task(scope, request):
         _text(request["resolution_ref"], "resolution_ref")
     if not isinstance(request["state"], str) or request["state"] not in STATES - {"DONE"}:
         raise StateError("Only completion evidence verification can declare DONE")
+    user_attention = request.get('user_attention', False)
+    if type(user_attention) is not bool or (user_attention and request['state'] not in ATTENTION_STATES):
+        raise StateError('Title attention requires a boolean and an eligible task state')
     for field in ("conditions", "resolutions"):
         if field in request and (not isinstance(request[field], list) or len(request[field]) > 64):
             raise StateError("Task conditions and resolutions must be bounded lists")
@@ -2252,6 +2259,10 @@ def update_task(scope, request):
         if state == 'READY':
             _ordinary_capability(scope, task, 'task-ready')
         task.update(state=state, reason=request["reason"], reference=request["reference"])
+        if 'user_attention' in request and state in ATTENTION_STATES:
+            task['user_attention'] = user_attention
+        else:
+            task.pop('user_attention', None)
         if 'milestones' in request:task['milestones']=_milestones(request['milestones'])
         if "resolution_ref" in request:
             task["resolution_ref"] = request["resolution_ref"]
