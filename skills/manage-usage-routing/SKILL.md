@@ -5,18 +5,17 @@ description: Set up, enable, inspect or disable Manual and Smart Balance Usage R
 
 # Manage Usage Routing
 
-Read [management](references/procedure.md) for setup, mode selection, status,
-quotes and shadow decisions. Load [Keychain setup](references/keychain-setup.md)
-for a requested connection, [delegation](references/delegation.md) for proposal
-work or native handoff, and [first canary](references/first-canary.md) for the
-explicit foreground pilot.
+Read [management](references/procedure.md) for setup, activation, status and
+optional previews. Load [Keychain setup](references/keychain-setup.md) for a new
+connection, [delegation](references/delegation.md) for eligible proposals or
+native handoff, and [foreground canary](references/first-canary.md) only for
+an expressly selected test.
 
-Default OFF. Saving settings leaves routing OFF. Explicit enablement warns that
-grant funding is best effort and auto-reload may stay enabled. Never buy credits,
-change billing or switch to a paid fallback. Reserve maximum costs, stop early and
-request native continuation when permitted.
+Default Off. After Keychain setup and explicit activation, Manual can route
+the first explicitly selected eligible task. Smart Balance can route the first
+eligible task within standing consent. Trusted admission checks scope, funding,
+price, capacity and independent review before transmission.
 
-Preserve coordinator settings, other providers, local preferences and independent
-review. Keep uncertain costs through handoff and claim native dispatch once.
-Live execution requires trusted admission and qualification. Show the route and
-outcome in chat.
+Keep the coordinator and existing provider choices. Use approved existing
+credits, retain uncertain costs and warn about possible provider-side funding
+spill. Never purchase credits, change billing or switch to a paid fallback.

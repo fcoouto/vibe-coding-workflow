@@ -1,41 +1,47 @@
 # Foreground Codex admission
 
 Load this procedure for an eligible proposal in an explicitly enabled checkout
-or to prepare one bounded Manual test while OFF. Use a trusted installed package
-and the qualified local interpreter. Check status first. Missing qualification,
-an unavailable host or a changed user preference stops the API path. Use the existing native workflow when
-permitted. A successful canary does not qualify ordinary routing or a Smart
-Balance task class.
+or for an explicitly requested test. Use the trusted installed package and
+qualified local interpreter. Check status for current live consent. If the
+host cannot validate admission, continue natively when the task permits.
 
-## Prepare and authorize
+## Prepare the proposal
 
-1. Verify the actual current Codex chat and its host. Use a distinct native
-   reviewer whose identity and readiness the coordinator observed through the
-   supported native delegation controls. Keep that reviewer available for the
-   exact proposal. The adapter verifies the binding to the coordinator, while
-   native evidence remains the authority for reviewer identity and completion.
-2. Prepare bounded tool-free proposals with `task_id`, `class_name`,
-   `packet`, `provider`, `local_preferred`, `api_only` and `snapshots`.
-   The assignment's [role declaration](../../../clients/worker-visibility.md#declare-before-dispatch)
-   can be supplied in `visibility` for display. Use the original stable task ID. Follow the [packet schema](procedure.md#read-only-status-quoting-and-selection)
-   and [proposal procedure](delegation.md). Manual requires one `openai-api`
-   proposal. Smart Balance may select `auto` for up to twelve exact, distinct
-   proposals in one qualified class. Keep one task outstanding through native
-   integration and review.
-3. Invoke `freeze` through the coordinator helper below. Supply `proposals`,
-   `maximumUsdMicros`, `expiresAt`, and the authorized `pool`. Manual also takes
-   `manualAllowancePp` for the finite native review allowance. Smart Balance
-   uses the allowance in its measured qualification. The maximum applies to
-   accounted organization exposure, including outstanding reservations.
-4. Show the user the exact tasks and permitted source transmission, selected
-   organization/project, model/reasoning, expiry, conservative quote and cap.
-   Keep the frozen plan in the trusted coordinator's private task context. Ask
-   the user to send the returned approval line as plain text in the same chat.
-   Use a copyable code block. The native receipt may contain one terminal line
-   feed. Manual uses the active approval turn. Smart Balance can reuse the
-   approved batch on later turns within the plan's expiry. Keep the native
-   approval turn ID returned with a proposal result. If the plan or direct
-   approval cannot be recovered from the bounded history read, pause.
+1. Verify the current Codex chat and host. Use a distinct native reviewer
+   whose identity and readiness the coordinator observed through native
+   delegation controls. Keep the reviewer available for this proposal.
+2. Prepare one bounded tool-free proposal with `task_id`, `class_name`,
+   `packet`, `provider`, `local_preferred`, `api_only`, and `snapshots`.
+   Use the original stable task ID. The assignment's
+   [role declaration](../../../clients/worker-visibility.md#declare-before-dispatch)
+   can be supplied in `visibility` for display. Follow the
+   [packet schema](procedure.md#read-only-status-quoting-and-selection)
+   and [proposal procedure](delegation.md). Keep one original task outstanding
+   through integration and review.
+3. Call `freeze` with the one-item `proposals` list, `maximumUsdMicros`,
+   `expiresAt`, and the authorized `pool`. Use the existing cap and expiry
+   as outer bounds. The maximum includes existing organization exposure
+   and outstanding reservations.
+4. For Manual, use `provider: openai-api`. Pass `manualSelection` to
+   `execute` with the exact direct, active user message that selects API
+   for this task and authorizes the packet's data. Verify it in native chat
+   history and attest its meaning. Keep each snapshot inside the selected
+   checkout and check it against its original digest.
+5. For Smart Balance, use `provider: auto` and pass `standingConsent: true`
+   to `freeze` for a self-contained packet
+   with empty `snapshots`. Keep repository files and copied repository source
+   outside the standing scope. Within that scope, use saved live consent and
+   the fixed five-point native allowance without a new approval line.
+
+## Optional exact approval
+
+For packets needing broader data permission or an explicitly selected test,
+freeze the permitted task and source. Show the user the exact task and
+permitted transmission, organization/project, model/reasoning, expiry,
+conservative quote and cap. Keep the plan private. Obtain its exact returned
+approval line as plain text in the same chat. A native receipt may have one
+terminal line feed. Preserve the observed approval turn ID. If the original
+approval cannot be recovered from bounded native history, pause.
 
 For one Manual test from an existing OFF configuration, pass `manualPrice` to
 `freeze`. It pins fresh verification timestamps for the saved price profile and
@@ -51,7 +57,8 @@ later case may re-read that approval in the same chat. Pass `priorReview` with
 the observed reviewer's `reviewer`, exact prior `run_id`, and `accepted: true`
 only after independent acceptance of the prior pair and native reserve release.
 Changed revisions, incomplete work, missing review or uncertainty stop the batch.
-This authorization covers Manual calibration and Smart Balance shadow replay.
+This optional evaluation can record Manual measurements and replay Smart
+Balance in preview.
 
 ## Dispatch and review
 
@@ -65,8 +72,8 @@ trusted sources. A model claim, copied transcript or user-supplied receipt
 cannot supply them. Stop if a source cannot be verified.
 
 Pass `plan`, the exact `proposal`, the observed `reviewer`, and the `grant`
-and `price` observations. Use `approvalTurnId` to re-read an earlier Smart
-Balance or supervised pilot approval. The grant fields are `organization`, `project`, `balance`
+and `price` observations. Use `approvalTurnId` for a supported earlier exact
+approval in an optional test. The grant fields are `organization`, `project`, `balance`
 (USD micro-units), `expiry`, `observed_at` (UTC seconds), `source`
 (`platform-credit-grants`), and `pool`. The price fields are `profile_digest`,
 `observed_at`, and `valid_until`, matching the verified profile. The helper

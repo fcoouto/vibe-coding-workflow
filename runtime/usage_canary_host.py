@@ -129,7 +129,8 @@ def issue(plan, *, thread_snapshot, key_receipt, config, policy, grant, native_l
             maximum_usd_micros=usage_canary.MAXIMUM_USD_MICROS, coordinator=plan.thread_id,
             reviewer=reviewer)
         usage_canary.validate(evidence, binding=binding, profile=profile, task=task, now=now)
-        usage_admission.validate(evidence, scope=scope, config=config, policy=policy, task=task, now=now)
+        owned = dict(config, canary_owner=usage_admission.digest(asdict(evidence)))
+        usage_admission.validate(evidence, scope=scope, config=owned, policy=policy, task=task, now=now)
         return evidence, native
     except usage_credentials.CredentialError:
         raise BudgetError('canary_key_receipt_changed') from None
@@ -154,7 +155,7 @@ def package_digest(root=PACKAGE):
 
 
 def _temporary_run(controller, plan, evidence, binding, profile, native):
-    owner = evidence.approval_id
+    owner = usage_admission.digest(asdict(evidence))
     failure = None
     try:
         with controller.ledger.transaction() as data:
@@ -192,7 +193,7 @@ def execute(plan, *, thread_snapshot, key_receipt, grant, native_limits,
     except (KeyError, TypeError):
         raise BudgetError('canary_key_receipt_changed') from None
     profile = usage_canary.profile_for(price_observed_at, price_valid_until)
-    policy = dict(cycle='canary-' + usage_admission.digest(asdict(plan)), start=plan.created_at,
+    policy = dict(cycle=usage_admission.CANARY_CYCLE_PREFIX + usage_admission.digest(asdict(plan)), start=plan.created_at,
                   end=plan.grant_expiry, expiry=plan.grant_expiry,
                   stop_at=min(plan.expires_at, plan.grant_expiry - 900),
                   ceiling='subscription_benefit', amount=None, grant_amount=plan.grant_amount,

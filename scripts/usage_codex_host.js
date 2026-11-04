@@ -15,7 +15,10 @@
         return response.structuredContent ?? JSON.parse(response.content.find(item => item.type === 'text').text);
     };
     const read = async (turnLimit, cursor) => {
-        const args = {threadId, hostId, turnLimit, maxOutputCharsPerItem: 350, includeOutputs: false};
+        const selectionLength = action === 'execute' && typeof request.manualSelection === 'string'
+            ? request.manualSelection.length : 0;
+        const args = {threadId, hostId, turnLimit,
+            maxOutputCharsPerItem: Math.max(350, Math.min(selectionLength + 1, 8001)), includeOutputs: false};
         if (cursor) args.cursor = cursor;
         const page = result(await tools.mcp__codex_app__read_thread(args));
         if (page.thread.kind !== 'codex' || page.thread.id !== threadId || page.thread.hostId !== hostId
@@ -31,7 +34,7 @@
     const turn = page.turns[0];
     if (turn?.status !== 'inProgress') throw new Error('Active Codex turn unavailable');
     const historical = !!request.approvalTurnId && request.approvalTurnId !== turn.id;
-    const current = snapshot(page, turn, action === 'execute' && !historical);
+    const current = snapshot(page, turn, action === 'execute' && !historical && !plan.standing_consent);
     let approval = null;
     if (historical) {
         let cursor = page.page?.nextCursor;
@@ -51,7 +54,7 @@
         Object.assign(frame, {proposals: request.proposals, maximum_usd_micros: request.maximumUsdMicros,
             expires_at: request.expiresAt, pool: request.pool ?? 'benefit',
             manual_allowance_pp: request.manualAllowancePp ?? 5, manual_price: request.manualPrice ?? null,
-            pilot_digest: request.pilotDigest ?? null});
+            pilot_digest: request.pilotDigest ?? null, standing_consent: request.standingConsent ?? false});
     } else {
         if (request.grant?.pool === 'benefit') {
             const {benefit} = result(await tools.mcp__openai_api_credit_promo__preview_api_credit_promo({}));
@@ -62,7 +65,8 @@
         }
         Object.assign(frame, {plan, proposal: request.proposal, approval_snapshot: approval,
             native_observed_at: nativeObservedAt, grant: request.grant, price: request.price,
-            prior_review: request.priorReview ?? null, habblaud: request.habblaud});
+            prior_review: request.priorReview ?? null, habblaud: request.habblaud,
+            manual_selection: request.manualSelection ?? null});
     }
 
     const bridge = `from dataclasses import asdict
@@ -79,7 +83,7 @@ try:
         if frame['manual_price'] is not None:
             frame['manual_price'] = host.Price(**frame['manual_price'])
         plan = host.freeze(checkout, **frame)
-        value = dict(plan=asdict(plan), approval=host.approval_text(plan))
+        value = dict(plan=asdict(plan), approval=None if plan.standing_consent else host.approval_text(plan))
     else:
         plan = host.Plan(**frame.pop('plan'))
         frame['grant'] = usage_admission.Grant(**frame['grant'])
@@ -136,14 +140,15 @@ except BudgetError as error:
                 visibility = JSON.parse(observation).visibility ?? visibility;
             } catch {}
         }
-        return {...generation, visibility, approval_turn_id: (approval ?? current).turns[0].id};
+        return {...generation, visibility, ...(!plan.standing_consent
+            ? {approval_turn_id: (approval ?? current).turns[0].id} : {})};
     }
     if (execution.exit_code !== 0 || execution.session_id) {
         return {ok: false, reason: 'codex_host_outcome_unverified', uncertain: action === 'execute'};
     }
     try {
         const value = JSON.parse(output);
-        if (action === 'execute' && value.requires_native_review === true) {
+        if (action === 'execute' && value.requires_native_review === true && !plan.standing_consent) {
             value.approval_turn_id = (approval ?? current).turns[0].id;
         }
         return value;

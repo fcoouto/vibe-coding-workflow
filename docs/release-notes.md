@@ -1,5 +1,10 @@
 # Release notes
 
+## 0.1.17
+
+- Enable live Manual and Smart Balance after the user connects an OpenAI project key and activates a regular routing policy. Comparisons and smoke tests are optional.
+- Isolate smoke-test budgets from ordinary routing. Require explicit regular-budget setup and preserve prior charges and reservations. [PR #89](https://github.com/fcoouto/vibe-coding-workflow/pull/89)
+
 ## 0.1.15
 
 - Enable Usage Routing even when other Codex work is active. Account for unrelated activity when attributing pilot measurements. Live admission still requires its existing qualification and safeguards. [PR #88](https://github.com/fcoouto/vibe-coding-workflow/pull/88)
