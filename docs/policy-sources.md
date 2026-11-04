@@ -1,5 +1,21 @@
 # Policy source map
 
+## Cooperative D6 scope — 4 November 2026
+
+The user approved simplifying D6 around cooperative native delegation, keeping
+uncertain ownership reserved and deferring automatic takeover. The
+[canonical D6 scope](d6-native-delegation-plan.md#approved-cooperative-scope)
+records the native trust assumption, independent result verification, normal
+completion boundary and pending runtime alignment. The
+[held pilot](superpowers/plans/2026-11-03-d6-managed-lifecycle-pilot.md#3-required-gono-go-checks-before-any-managed-child-launch)
+and [successor packet](superpowers/plans/2026-11-04-d6-successor-release-packet.md#cooperative-completion-and-held-ownership)
+apply that decision with zero live allowance. Enforced patch-only isolation and
+universal descendant proof are deferred guarantees for normal native completion.
+Current runtime and stronger downstream evidence contracts retain their existing
+meaning until their own reviewed alignment. This planning update preserves
+Toolkit's delegation, ownership and review requirements under the stated trust
+assumption. It adds no runtime activation, installation or qualification evidence.
+
 ## Subagent role badges
 
 The user requested role badges for subagents and independent dispatch.
