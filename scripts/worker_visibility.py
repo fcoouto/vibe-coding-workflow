@@ -40,7 +40,7 @@ def context_path(path, checkout=None, plugin_root=None):
     return path
 
 
-def prepare_native(path, request):
+def prepare_native(path, request, *, reuse=False):
     if not isinstance(request, dict) or not CONTEXT_FIELDS <= set(request) <= CONTEXT_FIELDS | {'ledger_assignment_digest'}:
         raise ValueError('invalid_native_visibility_request')
     parent = request['parent_session_id']
@@ -57,9 +57,53 @@ def prepare_native(path, request):
             raise ValueError('invalid_visibility_assignment_digest')
     else:
         context['prompt_marker'] = 'VCW worker visibility ' + uuid.uuid4().hex
-    visibility.save(context_path(path, checkout), context, exclusive=True)
+    path = context_path(path, checkout)
+    if reuse and path.exists():
+        existing = read_context(path)
+        if ({key: value for key, value in context.items() if key != 'prompt_marker'} !=
+                {key: value for key, value in existing.items() if key not in {'prompt_marker', 'observed'}}):
+            raise ValueError('native_visibility_context_changed')
+        context = existing
+    else:
+        visibility.save(path, context, exclusive=True)
     return dict(prepared=True, visibility=context['visibility'],
                 **({'prompt_marker': context['prompt_marker']} if 'prompt_marker' in context else {}))
+
+
+def prepare_context(request, *, context=None, context_directory=None, reuse=False):
+    path = context
+    if path is None:
+        directory = context_directory or default_context_directory(create=True)
+        path = hook_context_path(directory, request['parent_session_id'], request['task_name'])
+        context_path(path.parent, request['checkout']).mkdir(mode=0o700, exist_ok=True)
+    return path, prepare_native(path, request, reuse=reuse)
+
+
+def prepare_assignment(request, *, context=None, context_directory=None):
+    """Assemble one native brief; display failure preserves its original spawn inputs."""
+    result = dict(prepared=False, task_name=request.get('task_name'), message=request.get('message'))
+    try:
+        message = request['message']
+        if not isinstance(message, str) or len(message.encode('utf-8')) > visibility.LIMIT:
+            raise ValueError('invalid_native_assignment_message')
+        declaration = {key: value for key, value in request.items() if key != 'message'}
+        declaration['visibility'] = visibility.declaration(request.get('visibility'))
+        path, prepared = prepare_context(declaration, context=context,
+                                         context_directory=context_directory, reuse=True)
+        message = prepared['prompt_marker'] + '\n' + message if 'prompt_marker' in prepared else message
+        return result | prepared | dict(context=str(path), message=message)
+    except (ValueError, OSError, TypeError, RuntimeError, KeyError):
+        return result | dict(reason='native_visibility_unavailable')
+
+
+def prepare_managed(checkout, parent, report, *, context_directory=None):
+    """Consume an already-prepared worker/reviewer result outside its transaction."""
+    prepared = prepare_assignment(dict(parent_session_id=parent, checkout=str(checkout),
+        task_name=report.get('task_name'), message=report.get('prompt'), visibility=report.get('visibility'),
+        ledger_assignment_digest=report.get('ledger_assignment_digest', report.get('assignment_digest'))),
+        context_directory=context_directory)
+    return report | dict(visibility_preparation={key: prepared[key] for key in ('prepared', 'context', 'reason')
+                                                if key in prepared})
 
 
 def read_context(path):
@@ -114,19 +158,17 @@ def enrich_start(event, directory, checkout, executable):
             return event
         checkout = cwd
         parent, child = event['session_id'], event['agent_id']
-        parent_dir = hook_context_path(directory, parent, 'probe').parent
-        if not parent_dir.is_dir() or parent_dir.is_symlink():
-            return event
         executable = Path(executable)
         if (not executable.is_absolute() or executable.resolve(strict=True) != executable
                 or not executable.is_file() or executable.stat().st_mode & 0o022):
             return event
         observed = codex.observe_worker_visibility(checkout, parent, child, deadline=time.monotonic() + 1,
-                                                   executable=str(executable))
+                                                   executable=str(executable), resolve_hook_parent=True)
         task = observed['task_name']
-        if (not task or observed['parent_session_id'] != parent
+        if (not task or observed.get('hook_session_id', observed['parent_session_id']) != parent
                 or observed['worker_id'] != child or observed['checkout'] != str(checkout)):
             return event
+        parent = observed['parent_session_id']
         path = context_path(hook_context_path(directory, parent, task), checkout)
         if not path.is_file():
             return event
@@ -146,7 +188,7 @@ def enrich_start(event, directory, checkout, executable):
             if prior is None:
                 visibility.save(path, context | dict(observed=observed | dict(forwarded_label=label)))
             role = incoming_role if specific_native_role(incoming_role) else label
-            return event | dict(agent_role=role, agent_type=label) | (
+            return event | dict(session_id=parent, agent_role=role, agent_type=label) | (
                 {visibility.MANAGED_DISPLAY_FIELD: label} if managed else {})
     except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError):
         return event
@@ -234,15 +276,12 @@ def main():
     try:
         request = json_object(sys.stdin.buffer.read(visibility.LIMIT + 1), limit=visibility.LIMIT)
         if args.action == 'prepare':
-            path = args.context
-            if path is None:
-                contexts = args.context_directory or default_context_directory(create=True)
-                path = hook_context_path(contexts, request['parent_session_id'], request['task_name'])
-                directory = context_path(path.parent, request['checkout'])
-                directory.mkdir(mode=0o700, exist_ok=True)
-            result = prepare_native(path, request)
-            if args.context is None:
-                result['context'] = str(path)
+            if 'message' in request:
+                result = prepare_assignment(request, context=args.context, context_directory=args.context_directory)
+            else:
+                path, result = prepare_context(request, context=args.context, context_directory=args.context_directory)
+                if args.context is None:
+                    result['context'] = str(path)
         else:
             fields = {'worker_id', 'phase'}
             if (set(request) not in (fields, fields | {'parent_turn_id', 'spawn_item_id'}) or not args.context or not args.visibility_plugin

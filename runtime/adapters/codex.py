@@ -480,7 +480,8 @@ def _visibility_model_name(request, model):
     return None
 
 
-def observe_worker_visibility(checkout, parent_session_id, worker_id, *, spawn_binding=None, deadline=None, executable=None):
+def observe_worker_visibility(checkout, parent_session_id, worker_id, *, spawn_binding=None, deadline=None,
+                              executable=None, resolve_hook_parent=False):
     """Read actual native lineage for display only; no runtime enrollment or stop proof."""
     from types import SimpleNamespace
     import uuid
@@ -501,16 +502,42 @@ def observe_worker_visibility(checkout, parent_session_id, worker_id, *, spawn_b
         if executable is not None:
             options['executable'] = executable
         with _native_reader(methods, **options) as (observed_version, request):
-            parent = _native_metadata(scope, request, parent_session_id, observed_version)
-            surface = 'codex-cli' if parent.get('source') == 'exec' else 'codex-desktop'
-            _native_surface(parent, surface, observed_version)
             child = _native_metadata(scope, request, worker_id, observed_version)
             source = child.get('source')
             subagent = source.get('subAgent') if isinstance(source, dict) else None
             origin = subagent.get('thread_spawn') if isinstance(subagent, dict) else None
-            if (child.get('parentThreadId') != parent_session_id or not isinstance(origin, dict)
-                    or origin.get('parent_thread_id') != parent_session_id):
+            immediate_parent = child.get('parentThreadId')
+            if (not isinstance(immediate_parent, str) or str(uuid.UUID(immediate_parent)) != immediate_parent
+                    or not isinstance(origin, dict) or origin.get('parent_thread_id') != immediate_parent):
                 raise ObservationError('child_mismatch')
+            hook_session_id = parent_session_id
+            if resolve_hook_parent:
+                parent_session_id = immediate_parent
+            elif immediate_parent != parent_session_id:
+                raise ObservationError('child_mismatch')
+            parent = _native_metadata(scope, request, parent_session_id, observed_version)
+            root, seen = parent, {worker_id}
+            for _ in range(16):
+                if root['id'] in seen:
+                    raise ObservationError('child_mismatch')
+                seen.add(root['id'])
+                source = root.get('source')
+                if not isinstance(source, dict):
+                    surface = 'codex-cli' if source == 'exec' else 'codex-desktop'
+                    _native_surface(root, surface, observed_version)
+                    break
+                subagent = source.get('subAgent')
+                origin = subagent.get('thread_spawn') if isinstance(subagent, dict) else None
+                ancestor = root.get('parentThreadId')
+                if (not isinstance(origin, dict) or not isinstance(ancestor, str)
+                        or str(uuid.UUID(ancestor)) != ancestor or origin.get('parent_thread_id') != ancestor):
+                    raise ObservationError('child_mismatch')
+                root = _native_metadata(scope, request, ancestor, observed_version)
+            else:
+                raise ObservationError('surface_unverified')
+            if hook_session_id not in seen:
+                raise ObservationError('child_mismatch')
+            origin = child['source']['subAgent']['thread_spawn']
             agent_path = origin.get('agent_path')
             task_name = None
             if agent_path is not None:
@@ -528,6 +555,7 @@ def observe_worker_visibility(checkout, parent_session_id, worker_id, *, spawn_b
                 model_display_name=_visibility_model_name(request, model),
                 configured_provider=_native_setting(child.get('modelProvider')),
                 execution_model=None, execution_effort=None,
+                **({'hook_session_id': hook_session_id} if resolve_hook_parent else {}),
                 **({'native_role': origin['agent_role']} if origin.get('agent_role') is not None else {}))
     except (ObservationError, OSError, ValueError, TypeError, KeyError, RecursionError, subprocess.TimeoutExpired):
         raise StartupError('Native display identity unavailable; visibility remains unverified') from None

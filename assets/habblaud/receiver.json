@@ -4,7 +4,7 @@
   "upstream_version": "1.0.3",
   "upstream_commit": "faa1a012b5fbf632c66dc6801c5383e53a542406",
   "license": "MIT",
-  "patch_sha256": "07a1cafe3a2b65acae2a3a3b4e106ffae13c079ac88133458ca4813d9aa252c2",
+  "patch_sha256": "acf710580aeb21886ab749ff310b6aaba51b414521e5c8d83785bdcc9e7ee55d",
   "files": [
     "CHANGELOG.md",
     "client/src/ui/drawer.ts",

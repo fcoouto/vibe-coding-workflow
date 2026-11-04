@@ -21,10 +21,21 @@ assumption. It adds no runtime activation, installation or qualification evidenc
 The user requested role badges for subagents and independent dispatch.
 [Agent Delegation](../policies/03-agent-delegation.md#select-capability-and-dispatch)
 loads the [shared contract](../clients/worker-visibility.md#declare-before-dispatch).
-Native badges use a bound declaration or the reported native role. OpenRouter and
-Usage Routing consume optional display metadata independently of execution
-admission. Habblaud shows its standard subagent fallback when neither source
-supplies a role and leaves native thread owners without a role badge.
+The coordinator chooses each subagent's role once while preparing its assignment.
+Ordinary native preparation accepts the full brief and returns the native name
+and message with its existing correlation marker. Managed D6 worker and D5
+review CLI preparation captures the returned declaration and ledger digest
+outside the runtime transaction, preserving immutable prompts and launch results.
+OpenRouter and Usage Routing reuse their existing brief or proposal fields.
+Display preparation failure never blocks dispatch. Legacy role-only preparation
+remains a compatibility and recovery path, not an extra routine step.
+
+Native badges use a bound declaration or the reported native role. Habblaud
+shows its standard subagent fallback when neither source supplies a role and
+leaves native thread owners without a role badge. A native CLI probe found the
+spawn message encrypted in `PreToolUse`; automatic hook parsing cannot capture
+its role. No new hook or role inference is introduced. Direct native spawning
+can still omit metadata, and first-badge rendering needs separate observation.
 
 Workspace preparation and integration discovery load the existing-hook
 [reconciliation procedure](../clients/worker-visibility.md#reconcile-on-discovery-and-upgrade)
