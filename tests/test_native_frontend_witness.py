@@ -180,24 +180,30 @@ class NativeCaptureFixtureTests(NativeFrontendFixture):
             '  if "id" in request: print(json.dumps({"id":request["id"],"result":responses[request["method"]]}),flush=True)\n')
         self.executable.chmod(0o700)
 
-    def owned(self, metadata=False):
-        child = doctor.NativeProcess([str(self.executable),*(('app-server','--listen','stdio://') if metadata else ('exec','--json','PRIVATE_PROMPT'))],
+    def owned(self, metadata=False, *, argv=None):
+        arguments = argv if argv is not None else (
+            ('app-server','--listen','stdio://') if metadata else ('exec','--json','PRIVATE_PROMPT'))
+        child = doctor.NativeProcess([str(self.executable),*arguments],
             time.monotonic()+3,cwd=self.root,env=dict(CODEX_HOME=str(self.home),HOME=str(self.root),NATIVE_PRIVATE_VAR='PRIVATE_ENV'),
             stdin=subprocess.PIPE if metadata else subprocess.DEVNULL)
         self.addCleanup(child.close)
         return child
 
     @contextmanager
-    def admitted(self, child, *, metadata=False, original=None, managed=False):
+    def admitted(self, child, *, metadata=False, original=None, managed=False, bounded=False, declared_argv=None):
         decision = object()
         reference = dict(reference='fixture:metadata-attempt' if metadata else 'fixture:cli-attempt',sha256='a'*64)
         attempt = dict(reference=reference,task=dict(client='codex',session_id='native-cli-thread',task_id='fixture-task') if managed else None,
             native_sessions=['native-cli-thread'] if metadata or managed else [],
             limits=dict(deadline=time.time()+30,max_attempts=1,max_resource_units=1))
+        if bounded:
+            attempt['native_execution'] = dict(source_contract='bounded-native-source-v1', cwd=str(self.root),
+                argv=list(child.argv) if declared_argv is None else declared_argv)
         if metadata:
             retained = self.root/'original-capture.json'
             raw = json.dumps(original,sort_keys=True,separators=(',',':')).encode();retained.write_bytes(raw)
-            attempt['source_capture'] = dict(reference=str(retained),sha256=hashlib.sha256(raw).hexdigest())
+            route = str(retained) + ('#native-observation:fixture:claim' if bounded else '')
+            attempt['source_capture'] = dict(reference=route,sha256=hashlib.sha256(raw).hexdigest())
         projection = dict(identity=self.identity,target=dict(disposable=True),transaction_id='metadata-transaction' if metadata else 'cli-transaction',attempt=attempt)
         calls = []
         def validate(value, *, operation=None, case_id, process=None):
@@ -217,11 +223,93 @@ class NativeCaptureFixtureTests(NativeFrontendFixture):
                 patch.object(setup_observation,'setup_context_projection',return_value=None,create=True):
             yield decision,projection,calls
 
-    def partial(self):
-        child = self.owned()
-        with self.admitted(child) as (decision,projection,_):
+    def partial(self, *, argv=None, bounded=False):
+        child = self.owned(argv=argv)
+        with self.admitted(child,bounded=bounded) as (decision,projection,_):
             witness = self.api(codex,'observe_cli_basic')(child,decision)
         return doctor._native_witness_content(witness),projection
+
+    def hook_isolation(self):
+        inherited = [f'{self.home}/hooks.json:stop:0:{index}' for index in range(2)]
+        override = 'hooks.state={' + ','.join(json.dumps(key) + '={enabled=false}' for key in reversed(inherited)) + '}'
+        launch = ('exec','--json','--sandbox','read-only','-c',override,'--','PRIVATE_PROMPT')
+        metadata = ('app-server','--listen','stdio://','-c',override)
+        source = doctor.PACKAGE/'hooks/codex.json'
+        definitions = json.loads(source.read_bytes())['hooks']
+        hooks = self.responses['hooks/list']['data'][0]['hooks']
+        for order, (name, groups) in enumerate(definitions.items()):
+            event = name[0].lower() + name[1:]
+            handler = groups[0]['hooks'][0]
+            hooks.append(dict(key=f'fixture-plugin:{event}', eventName=event, sourcePath=str(source), source='plugin',
+                currentHash='sha256:'+'a'*64, trustStatus='trusted', handlerType='command', enabled=True,
+                isManaged=False, displayOrder=order, timeoutSec=handler['timeout'], matcher=groups[0].get('matcher'),
+                command=handler['command'].replace('${PLUGIN_ROOT}', str(doctor.PACKAGE))))
+        hooks.extend(dict(key=key, eventName='stop', sourcePath=str(self.home/'hooks.json'), source='user',
+            enabled=False, isManaged=False) for key in inherited)
+        config = self.responses['config/read']
+        config['layers'].insert(0, dict(name=dict(type='sessionFlags'),
+            config=dict(hooks=dict(state={key:dict(enabled=False) for key in inherited})), version='fixture'))
+        config['config'] = dict(unrelated='x' * doctor.MAX_INPUT)
+        self.write_executable()
+        return inherited, launch, metadata
+
+    def test_scoped_hook_isolation_correlates_owned_launch_and_large_native_metadata(self):
+        inherited, launch, metadata = self.hook_isolation()
+        original, _ = self.partial(argv=launch, bounded=True)
+        retained = original['native']['threads'][0]['launch']
+        self.assertIs(retained['configuration_overrides_present'], True)
+        self.assertEqual(retained['disabled_inherited_hook_keys'], inherited)
+        self.assertNotIn('PRIVATE_PROMPT', json.dumps(original))
+        child = self.owned(metadata=True, argv=metadata)
+        with self.admitted(child, metadata=True, original=original, bounded=True) as (decision, _, __):
+            content = doctor._native_witness_content(codex.observe_setup_metadata(child, decision))
+        self.assertEqual(content['native']['threads'][0]['launch'], retained)
+        self.assertEqual(content['observations'], {})
+
+    def test_scoped_hook_isolation_rejects_unverified_launch_and_metadata(self):
+        inherited, launch, metadata = self.hook_isolation()
+        original, _ = self.partial(argv=launch, bounded=True)
+        for invalid in (launch[:5]+('hooks.state={}',)+launch[6:],
+                        launch[:5]+(launch[5].replace('enabled=false','enabled=true'),)+launch[6:],
+                        launch[:5]+(launch[5].replace('enabled=false','enabled=false,extra=false'),)+launch[6:],
+                        launch[:5]+(launch[5]+'\n[features]\nhooks=false',)+launch[6:],
+                        launch[:6]+('--disable','hooks')+launch[6:]):
+            with self.subTest(argv=invalid), self.assertRaises(doctor.ObservationError):
+                self.partial(argv=invalid, bounded=True)
+        for arguments, bounded, declared in (
+                (metadata[:3], True, None), (metadata, False, None),
+                (metadata, True, [str(self.executable), *metadata[:3]]),
+                (metadata[:4]+(metadata[4].replace(inherited[0], 'unknown'),), True, None)):
+            child = self.owned(metadata=True, argv=arguments)
+            with self.subTest(argv=arguments), self.admitted(child, metadata=True, original=original,
+                    bounded=bounded, declared_argv=declared) as (decision, _, __), self.assertRaises(doctor.ObservationError):
+                codex.observe_setup_metadata(child, decision)
+            self.assertEqual(child.bytes_read, 0)
+
+    def test_scoped_hook_isolation_rejects_conflicting_native_hook_metadata(self):
+        from copy import deepcopy
+        inherited, launch, metadata = self.hook_isolation()
+        original, _ = self.partial(argv=launch, bounded=True)
+        complete = deepcopy(self.responses)
+        for mutation in ('missing layer', 'wrong flag', 'wrong key', 'active user hook', 'unknown user key',
+                         'non-user key', 'untrusted candidate', 'active other plugin'):
+            self.responses = deepcopy(complete)
+            layers = self.responses['config/read']['layers']
+            hooks = self.responses['hooks/list']['data'][0]['hooks']
+            states = layers[0]['config']['hooks']['state']
+            if mutation == 'missing layer': layers.pop(0)
+            elif mutation == 'wrong flag': states[inherited[0]]['enabled'] = 0
+            elif mutation == 'wrong key': states['other'] = states.pop(inherited[0])
+            elif mutation == 'active user hook': hooks[-1]['enabled'] = True
+            elif mutation == 'unknown user key': hooks.pop()
+            elif mutation == 'non-user key': hooks[-1]['source'] = 'project'
+            elif mutation == 'untrusted candidate': hooks[0]['trustStatus'] = 'untrusted'
+            else: hooks.append(dict(hooks[0], key='other-plugin', sourcePath=str(self.home/'other-hooks.json')))
+            self.write_executable()
+            child = self.owned(metadata=True, argv=metadata)
+            with self.subTest(mutation=mutation), self.admitted(child, metadata=True, original=original,
+                    bounded=True) as (decision, _, __), self.assertRaises(doctor.ObservationError):
+                codex.observe_setup_metadata(child, decision)
 
     def test_claimed_cli_issues_partial_witness_without_fabricated_behavior(self):
         content,projection = self.partial()

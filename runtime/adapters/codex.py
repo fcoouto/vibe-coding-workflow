@@ -9,7 +9,9 @@ import shlex
 import shutil
 import subprocess
 import time
+import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 
 from runtime.adapters import session_start
 from runtime.adapters.session_start import diagnostic, render
@@ -1052,12 +1054,60 @@ def _setup_executable(process):
     return dict(path=str(path),binding=binding,sha256=digest)
 
 
+def _disabled_inherited_hook_keys(config):
+    states = config['hooks']['state']
+    if (not isinstance(states, dict) or not 0 < len(states) <= 64 or config != {'hooks': {'state': states}}
+            or any(not isinstance(key, str) or not key.strip() or len(key) > 4096 or not key.isprintable()
+                   or not isinstance(value, dict) or set(value) != {'enabled'} or value['enabled'] is not False
+                   for key, value in states.items())):
+        raise ObservationError('setup_hook_override_unverified')
+    return sorted(states)
+
+
+def _setup_hook_override(process, projection, *, metadata=False):
+    execution = projection['attempt'].get('native_execution', {})
+    argv = process.argv[1:]
+    valid_argv = (len(argv) == 5 and argv[:4] == ('app-server', '--listen', 'stdio://', '-c')) if metadata else (
+        len(argv) == 8 and argv[:5] == ('exec', '--json', '--sandbox', 'read-only', '-c') and argv[6] == '--')
+    if (not valid_argv or execution.get('source_contract') != 'bounded-native-source-v1'
+            or projection['target']['disposable'] is not True or execution.get('argv') != list(process.argv)
+            or execution.get('cwd') != process.launch_cwd):
+        raise ObservationError('setup_hook_override_unverified')
+    override = argv[4] if metadata else argv[5]
+    if (not override.startswith('hooks.state={') or not override.endswith('}') or not override.isprintable()
+            or len(override.encode()) > 16384):
+        raise ObservationError('setup_hook_override_unverified')
+    return _disabled_inherited_hook_keys(tomllib.loads(override))
+
+
+def _verify_setup_hook_isolation(package, cwd, listed, layers, disabled):
+    from runtime import doctor
+    session = [layer['config'] for layer in layers if layer['name']['type'] == 'sessionFlags']
+    if len(session) != 1 or _disabled_inherited_hook_keys(session[0]) != disabled:
+        raise ObservationError('setup_hook_override_unverified')
+    source = package / 'hooks/codex.json'
+    definitions = json_object(source.read_bytes())['hooks']
+    if doctor.inspect_hooks(listed, SimpleNamespace(repository_root=cwd), definitions, package=package)['status'] != 'passed':
+        raise ObservationError('setup_hook_isolation_unverified')
+    keys, inherited = set(), set()
+    for hook in listed['data'][0]['hooks']:
+        key = hook.get('key')
+        if not isinstance(key, str) or not key or key in keys:
+            raise ObservationError('setup_hook_isolation_unverified')
+        keys.add(key)
+        if hook['sourcePath'] != str(source):
+            if hook.get('enabled') is not False:
+                raise ObservationError('setup_hook_isolation_unverified')
+            if hook.get('source') == 'user' and hook.get('isManaged') is False:
+                inherited.add(key)
+    if not set(disabled) <= inherited:
+        raise ObservationError('setup_hook_isolation_unverified')
+
+
 def _setup_partial(process, projection):
     from runtime import doctor, startup
     if not isinstance(process,NativeProcess) or process.launch_cwd != projection['identity']['repository_root']:
         raise ObservationError('setup_launch_mismatch')
-    header = startup._canonical_plain(process.cli_header())
-    executable = _setup_executable(process)
     binding = dict(accepted_scope_digest=startup._canonical_digest(projection['identity']),
         attempt_ref=projection['attempt']['reference'],transaction_id=projection['transaction_id'])
     options = process.argv[2:process.argv.index('--')] if '--' in process.argv[2:] else process.argv[2:]
@@ -1065,6 +1115,10 @@ def _setup_partial(process, projection):
         or value.startswith(('--config=','--profile=','--enable=','--disable='))
         or value.startswith(('-c','-p')) and value not in ('-c','-p') for value in options)
     launch = dict(cwd=process.launch_cwd,codex_home=process.launch_codex_home,configuration_overrides_present=overrides)
+    if overrides and projection['attempt'].get('native_execution', {}).get('source_contract') == 'bounded-native-source-v1':
+        launch['disabled_inherited_hook_keys'] = _setup_hook_override(process, projection)
+    header = startup._canonical_plain(process.cli_header())
+    executable = _setup_executable(process)
     thread = dict(id=header['thread_id'],surface='codex-cli',launch=launch,capture_binding=binding)
     executable_source = dict(reference=executable['path']+'#native-executable-binding',
         sha256=startup._canonical_digest(executable))
@@ -1100,8 +1154,7 @@ def observe_setup_metadata(process, attempt):
         raise ObservationError('setup_metadata_source_mismatch')
     original = startup._canonical_plain(setup_observation.setup_capture_projection(attempt,process=process))
     try:
-        if (not isinstance(process,NativeProcess) or tuple(process.argv[1:]) != ('app-server','--listen','stdio://')
-                or process.identity is not None or process.bytes_read or process.process.stdin is None
+        if (process.identity is not None or process.bytes_read or process.process.stdin is None
                 or original['package_root'] != str(doctor.PACKAGE)
                 or original['binding']['accepted_scope_digest'] != startup._canonical_digest(projection['identity'])
                 or process.launch_cwd != projection['identity']['repository_root']
@@ -1111,18 +1164,24 @@ def observe_setup_metadata(process, attempt):
             raise ObservationError('setup_metadata_source_mismatch')
         retained = original['native']['threads'][0]
         if (retained['launch']['cwd'] != process.launch_cwd
-                or retained['launch']['codex_home'] != process.launch_codex_home
-                or retained['launch']['configuration_overrides_present']):
+                or retained['launch']['codex_home'] != process.launch_codex_home):
             raise ObservationError('cli_configuration_source_unverified')
+        disabled = retained['launch'].get('disabled_inherited_hook_keys')
+        if retained['launch']['configuration_overrides_present']:
+            if (not disabled or '#native-observation:' not in projection['attempt']['source_capture']['reference']
+                    or _setup_hook_override(process, projection, metadata=True) != disabled):
+                raise ObservationError('cli_configuration_source_unverified')
+        elif disabled is not None or process.argv[1:] != ('app-server','--listen','stdio://'):
+            raise ObservationError('setup_metadata_source_mismatch')
         thread_id = _review_id(retained['id'])
         if projection['attempt']['native_sessions'] != [thread_id]:
             raise ObservationError('setup_metadata_session_mismatch')
         sources = []
         sequence = 0
-        def request(method, params):
+        def request(method, params, **limits):
             nonlocal sequence
             sequence += 1
-            result = process.request(sequence,method,params)
+            result = process.request(sequence,method,params,**limits)
             sources.append(startup._canonical_plain(process.response_source))
             return result
         initialized = request('initialize',dict(clientInfo=dict(name='vibe-workflow-native-observer',version='1'),
@@ -1137,10 +1196,13 @@ def observe_setup_metadata(process, attempt):
         originator = _native_surface(thread,'codex-cli')
         native_version = _review_id(thread.get('cliVersion'))
         listed = request('hooks/list',dict(cwds=[process.launch_cwd]))
-        layers = request('config/read',dict(cwd=process.launch_cwd,includeLayers=True)).get('layers')
+        limits = {'response_limit': MAX_OUTPUT} if disabled else {}
+        layers = request('config/read',dict(cwd=process.launch_cwd,includeLayers=True),**limits).get('layers')
         requirements = request('configRequirements/read',{}).get('requirements')
         if not isinstance(layers,list):
             raise ObservationError('setup_metadata_layers_unavailable')
+        if disabled:
+            _verify_setup_hook_isolation(doctor.PACKAGE, process.launch_cwd, listed, layers, disabled)
         probe = setup_observation.setup_probe_projection(attempt, process=process)
         context = setup_observation.setup_context_projection(attempt, process=process)
         native_path = thread.get('path')

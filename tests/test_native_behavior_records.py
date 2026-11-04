@@ -380,7 +380,7 @@ class NativeBehaviorOwnerTests(unittest.TestCase):
         self.assertEqual(source, owner.reconcile_native_source(reference, source, stopped))
         return original
 
-    def _observe_original_cli(self, *, limited=False):
+    def _observe_original_cli(self, *, limited=False, isolated_hook=False):
         import copy
         import os
         import sys
@@ -447,6 +447,12 @@ class NativeBehaviorOwnerTests(unittest.TestCase):
             serialization_reference=dict(reference='fixture:independently-verified-native-state-exclusion', sha256='b'*64))
         if limited:
             native['source_contract'] = 'bounded-native-source-v1'
+        hook_key = None
+        if isolated_hook:
+            inherited = home/'hooks.json'
+            inherited.write_text(json.dumps(dict(Stop=[dict(hooks=[dict(type='command', command='true')])])))
+            hook_key = f'{inherited}:stop:0:0'
+            native['argv'][5:5] = ['-c', 'hooks.state={'+json.dumps(hook_key)+'={enabled=false}}', '--']
         attempt = dict(reference=reference, task=None, native_sessions=[], operations=['observe-cli-basic'],
             capability_keys=['startup-context'], limits=dict(deadline=time.time()+60, max_attempts=1, max_resource_units=1),
             stop_conditions=['Stop after original policy canary; retain uncertainty'], native_execution=native,
@@ -469,7 +475,7 @@ class NativeBehaviorOwnerTests(unittest.TestCase):
         self.assertNotIn('submitted-write-policy-rejection', json.dumps(original))
         self.assertNotIn('bootstrap_verified', json.dumps(original))
         return dict(home=home, canary=canary, executable=executable, settings=settings, source=source,
-            allocation=attempt, decision=decision, original=original, rollout=rollout)
+            allocation=attempt, decision=decision, original=original, rollout=rollout, hook_key=hook_key)
 
     def test_real_owner_cli_source_retains_original_probe_without_qualification(self):
         self._observe_original_cli()
@@ -512,6 +518,12 @@ class NativeBehaviorOwnerTests(unittest.TestCase):
             'config/read':dict(layers=[dict(name=dict(type='system', file=str(system/'config.toml')), config={}, version='fixture'),
                 dict(name=dict(type='user', file=str(config)), config=user, version='fixture')]),
             'configRequirements/read':dict(requirements=None)}
+        hook_key = original.get('hook_key')
+        if hook_key is not None:
+            hooks.append(dict(key=hook_key, eventName='stop', sourcePath=str(home/'hooks.json'), source='user',
+                enabled=False, isManaged=False))
+            data['responses']['config/read']['layers'].insert(0, dict(name=dict(type='sessionFlags'),
+                config=dict(hooks=dict(state={hook_key:dict(enabled=False)})), version='fixture'))
         original['settings'].write_text(json.dumps(data))
         metadata_directory = self.fixture.directory.parent
         plan_bytes = (self.fixture.directory/'plan.json').read_bytes()
@@ -529,6 +541,8 @@ class NativeBehaviorOwnerTests(unittest.TestCase):
         reference = dict(reference='fixture:native-metadata', sha256='d'*64)
         execution = copy.deepcopy(original['allocation']['native_execution'])
         execution['argv'] = [str(original['executable']), 'app-server', '--listen', 'stdio://']
+        if hook_key is not None:
+            execution['argv'].extend(original['allocation']['native_execution']['argv'][5:7])
         allocation = dict(reference=reference, task=None, native_sessions=[thread], operations=['observe-setup-metadata'],
             capability_keys=['startup-context'], limits=dict(deadline=time.time()+60, max_attempts=1, max_resource_units=1),
             stop_conditions=['Retain exact policy source and pending Toolkit cases'], native_execution=execution,
@@ -614,6 +628,18 @@ class NativeBehaviorOwnerTests(unittest.TestCase):
 
     def test_real_owner_metadata_policy_source_keeps_toolkit_cases_pending(self):
         self._observe_metadata(self._observe_original_cli())
+
+    def test_real_owner_scoped_hook_isolation_preserves_filtered_file_backed_proof(self):
+        from runtime import setup_observation
+
+        original = self._observe_original_cli(limited=True, isolated_hook=True)
+        filtered = self._observe_metadata(original)
+        content = startup._canonical_plain(filtered['filtered'].content)
+        self.assertEqual(content['native']['threads'][0]['launch']['disabled_inherited_hook_keys'], [original['hook_key']])
+        row, _, part = setup_observation._read_native_reference(startup._canonical_plain(filtered['source']), setup_observation._budget())
+        self.assertIsNone(part)
+        self.assertEqual(row['result']['content']['source']['native_capture'], startup._canonical_plain(original['source']))
+        self.assertEqual(row['result']['content']['source']['native_source_contract']['kind'], 'bounded-native-source-v1')
 
     def _publish_partial_source(self, observed, original, name, *, managed_attempt=None, legacy_context=False):
         import copy
