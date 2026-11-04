@@ -5,6 +5,7 @@
 - Support cooperative completion for bounded managed native workers and reviewers. Reconcile known work so checks and review can proceed, and keep uncertain ownership reserved.
 - Recognize exact Codex `functions.exec` records for the guarded patch and foreground wait. Keep repository merge gates and strict recovery proof separate.
 - Use the existing D4 journal limit when rereading retained recovery evidence.
+- Recognize macOS's system configuration path during Codex setup verification.
 
 ## 0.1.22
 

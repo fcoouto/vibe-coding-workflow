@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import sys
 import time
 import tomllib
 from types import SimpleNamespace
@@ -353,6 +354,21 @@ def collect_setup(witness, accepted_identity, transaction_id, verified_assessmen
     return _collect_content(observed,accepted_identity,transaction_id,verified_assessment,predecessor=predecessor)
 
 
+def _system_layer_path(path):
+    alias = Path('/etc')
+    if sys.platform != 'darwin' or path != alias/'codex/config.toml' or not alias.is_symlink():
+        return path
+    # Codex reports the Unix system location even on macOS, where /etc is an OS alias.
+    d3._require(alias.readlink() == Path('private/etc') and alias.lstat().st_uid == 0,
+        'Unexpected macOS system configuration alias')
+    directory = Path('/private/etc')
+    for parent in (directory, directory.parent):
+        info = parent.lstat()
+        d3._require(stat.S_ISDIR(info.st_mode) and info.st_uid == 0,
+            'Unexpected macOS system configuration parent')
+    return directory/'codex/config.toml'
+
+
 def _collect_content(observed, accepted_identity, transaction_id, verified_assessment, *, predecessor=None, capture_reference=None):
     from runtime.doctor import inspect_hooks
     from runtime.state import _accepted_identity, _runtime_sources, PACKAGE
@@ -417,6 +433,8 @@ def _collect_content(observed, accepted_identity, transaction_id, verified_asses
         projection = _projection(value, config, user=kind in ('user', 'sessionFlags'))
         if kind in ('system', 'user', 'packagedDefaults', 'legacyManagedConfigTomlFromFile'):
             path = startup._canonical_path(name['file'])
+            if kind == 'system':
+                path = _system_layer_path(path)
         elif kind == 'project':
             path = startup._canonical_path(name['dotCodexFolder'])/'config.toml'
         else:

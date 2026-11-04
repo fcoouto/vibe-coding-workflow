@@ -76,6 +76,29 @@ def hook(*, text=CONTEXT, provenance=None):
 
 
 class NativeBehaviorRecordTests(unittest.TestCase):
+    def test_darwin_system_config_uses_only_the_builtin_etc_alias(self):
+        import stat
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from runtime import setup_observation
+
+        path = Path('/etc/codex/config.toml')
+        canonical = Path('/private/etc/codex/config.toml')
+
+        def stat_path(entry):
+            return SimpleNamespace(st_uid=0, st_mode=stat.S_IFLNK if entry == Path('/etc') else stat.S_IFDIR)
+
+        with patch('sys.platform', 'darwin'), patch.object(Path, 'lstat', stat_path):
+            with patch.object(Path, 'readlink', return_value=Path('private/etc')):
+                self.assertEqual(setup_observation._system_layer_path(path), canonical)
+                alternate = Path('/etc/other/config.toml')
+                self.assertEqual(setup_observation._system_layer_path(alternate), alternate)
+            with patch.object(Path, 'readlink', return_value=Path('/tmp/alternate-etc')):
+                with self.assertRaises(startup.StartupError):
+                    setup_observation._system_layer_path(path)
+        with patch('sys.platform', 'linux'):
+            self.assertEqual(setup_observation._system_layer_path(path), path)
+
     def test_canary_rejects_a_path_codex_would_trim(self):
         from runtime.setup_observation import _public_canary_patch
         root = Path('/public/disposable')
