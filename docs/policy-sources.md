@@ -12,7 +12,10 @@ supplies a role and leaves native thread owners without a role badge.
 
 Workspace preparation and integration discovery load the existing-hook
 [reconciliation procedure](../clients/worker-visibility.md#reconcile-on-discovery-and-upgrade)
-during onboarding and authorized upgrades. Native presentation reuses the
+during fresh installation, onboarding and authorized upgrades. The packaged
+[receiver procedure](../clients/habblaud-receiver.md) applies the bundled patch
+to compatible upstream source, verifies and deploys the resulting build, and
+recognizes an already-patched installation. Native presentation reuses the
 verified child's model display metadata and formats its actual identifier when
 catalog lookup is unavailable, following Vibe Setup's
 [consumer display guidance](https://github.com/fcoouto/vibe-setup/blob/main/skills/vibe-setup/native-display.md).

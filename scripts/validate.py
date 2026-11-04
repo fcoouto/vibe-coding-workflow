@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Check this plugin's metadata, local paths, and instruction budget; no network."""
 
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -91,6 +92,14 @@ def validate(root=ROOT):
         raise ValueError("Prepared instruction map is stale; run scripts/read_instructions.py --prepare during authoring")
     validate_codex_hooks(root, manifest)
     validate_startup_hook(root, claude, "claude-code", "CLAUDE_PLUGIN_ROOT")
+    receiver = read_json(local_file(root, "./assets/habblaud/receiver.json"))
+    receiver_patch = local_file(root, "./assets/habblaud/receiver.patch").read_bytes()
+    local_file(root, "./assets/habblaud/LICENSE")
+    if receiver.get("patch_sha256") != hashlib.sha256(receiver_patch).hexdigest():
+        raise ValueError("Bundled receiver patch digest differs from its provenance")
+    patched_files = re.findall(r"^diff --git a/(\S+) b/\S+$", receiver_patch.decode("utf-8"), re.MULTILINE)
+    if receiver.get("version") != 1 or not patched_files or receiver.get("files") != patched_files:
+        raise ValueError("Bundled receiver patch inventory differs from its provenance")
     for path in ("scripts/workflow.py", "runtime/__init__.py", "runtime/startup.py",
                  "runtime/engine.py", "runtime/state.py", "runtime/doctor.py", "runtime/evidence.py",
                  "runtime/adapters/__init__.py", "runtime/adapters/session_start.py",
@@ -100,6 +109,7 @@ def validate(root=ROOT):
                  "runtime/review_storage.py", "runtime/screening.py",
                  "runtime/delegation.py", "clients/delegation.md", "runtime/repository_gate.py",
                  "runtime/worker_visibility.py", "scripts/worker_visibility.py", "clients/worker-visibility.md",
+                 "clients/habblaud-receiver.md",
                  "scripts/repository_gate.py", "clients/repository-gate.md",
                  "skills/onboard-my-project/SKILL.md",
                  "skills/onboard-my-project/references/procedure.md",

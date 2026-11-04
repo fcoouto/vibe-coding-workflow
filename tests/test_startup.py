@@ -336,6 +336,21 @@ class StartupTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "root manifest hides hooks"):
             validate(package)
 
+    def test_package_validator_requires_complete_verified_receiver_bundle(self):
+        package = self.base / "package"
+        shutil.copytree(PACKAGE, package, ignore=shutil.ignore_patterns(".git", "__pycache__"))
+        for name in ("receiver.patch", "receiver.json", "LICENSE"):
+            path = package / "assets/habblaud" / name
+            original = path.read_bytes()
+            path.unlink()
+            with self.subTest(missing=name), self.assertRaises((ValueError, OSError)):
+                validate(package)
+            path.write_bytes(original)
+        path = package / "assets/habblaud/receiver.patch"
+        path.write_bytes(path.read_bytes() + b"\nChanged patch.\n")
+        with self.assertRaisesRegex(ValueError, "receiver patch digest"):
+            validate(package)
+
     def test_package_validator_rejects_duplicate_claude_hooks(self):
         package = self.base / "package"
         shutil.copytree(PACKAGE, package, ignore=shutil.ignore_patterns(".git", "__pycache__"))
