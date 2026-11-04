@@ -4,7 +4,8 @@
 qualification sequence for one disposable Codex CLI scope. Release requires
 separate authorization of the reviewed packet and its exact effects. The
 [held pilot plan](2026-11-03-d6-managed-lifecycle-pilot.md) owns the acceptance
-criteria and ceilings.
+criteria and ceilings. The Lima/Docker preflight is retired. The current
+gate is read-only inspection of the exact native frontend.
 
 ## Source checkpoint
 
@@ -15,7 +16,7 @@ criteria and ceilings.
 | Package and schemas | `0.1.8`. Canonical project authority 2, runtime configuration and SQLite 3. |
 | Policy digest | `12a8ecdf666fd6408a510008a4c0e2c7eb906f41b3b9b371b62a4c362cd6607e` |
 | Runtime digest | `c15e071395a0e7439feffed86c24027d503cd2119c43bcd03b79998bf136ca1a` |
-| Proposed guest CLI | Codex `0.165.0`, Linux x86_64 musl. Cached archive SHA-256 `be635d3486a5bd060d0fff582ae6d30160280c31344dd85719707fa920e187f0`. Archive member SHA-256 `c06a67fd8ac76508dc78bd99ce20c9f317b8d568beda59485f3f4134df9962d5`. Guest installation, executable identity and actual frontend remain pending. |
+| Earlier CLI planning input | Codex `0.165.0`, Linux x86_64 musl. Cached archive SHA-256 `be635d3486a5bd060d0fff582ae6d30160280c31344dd85719707fa920e187f0`. Archive member SHA-256 `c06a67fd8ac76508dc78bd99ce20c9f317b8d568beda59485f3f4134df9962d5`. Re-pin the executable and frontend if a supported native route is selected. |
 
 [PR #78](https://github.com/fcoouto/vibe-coding-workflow/pull/78) supplied the
 reviewed child guard and paired receipt fix. Its 272 affected tests passed
@@ -23,28 +24,25 @@ offline. [PR #77's D5 result](../../d5-validation.md#managed-review-readiness-on
 belongs to a different runtime digest and disposable scope. Keep the earlier
 D4 failed claim and all receipts with their original authority.
 
-The retained Colima probes are separate evidence. Three synthetic containment
-cases covered detached writers and closure. A credential-free network probe
-observed a restricted test route. A standalone CLI smoke test resumed the
-same parent and verified its history marker across closed containers. These
-observations leave managed containment, current guest egress, same-parent
-managed continuation, actual child hooks and version-2 reconciliation pending.
+Retain the earlier disposable probes and run dispositions under their original
+identities. Same-parent managed continuation, actual child hooks and version-2
+reconciliation remain pending.
 
 ## Freeze before requesting release
 
-- [ ] Bind one approved disposable Linux guest and one standalone canary
-  checkout to the exact image, executable, package contents, Git/Python,
-  effective client settings and hook registrations. Record absolute canonical
-  checkout, Git, guest-only volume, D4 journal, native home and private
-  schema-3 authority paths and physical identities in the private packet.
+- [ ] Bind one approved disposable environment and one standalone canary
+  checkout to the exact executable, package contents, Git/Python, effective
+  client settings and hook registrations. Record absolute canonical
+  checkout, Git, D4 journal, native home and private schema-3 authority
+  paths and physical identities in the private packet.
   Carry those identities across phases. Keep package files read-only.
 - [ ] Name the coordinator and independent observer in the private packet.
-  Freeze the guest-only native account route and minimum vendor egress. Require
-  positive controls for permitted access and denials for host, other workloads
-  and unapproved services. The check runs with networking disabled. Keep host
-  credentials and sockets outside the guest. Any proxy or account change
-  requires a separately scoped decision. Verify actual capacity, native
-  catalog, compatible guidance and supported observe/resume controls.
+  Freeze the native account route and minimum vendor egress. Require
+  positive controls for permitted access and denials for other workloads
+  and unapproved services. The check runs with networking disabled. Any proxy
+  or account change requires a separately scoped decision. Verify actual
+  capacity, native catalog, compatible guidance and supported observe/resume
+  controls.
 - [ ] Freeze the public canary preimage, postimage, exact `apply_patch` bytes,
   immutable test and candidate inventory. The worker changes only `canary.py`
   from `0` to `42`. The reviewer and D5 checks receive the same read-only
@@ -96,7 +94,7 @@ assert value() == 42
 | Admitted patch | `c36d9a0b62214238eb4c98765c2f8bae25dd674cb9883a3569fae81e712683a2` |
 | Denial patch (`+    return 41` in place of `+    return 42`) | `819c28ebe7290add2c91ae98839dd94ec74413b0d2b2a232f01a750bd804d14f` |
 
-Use the pinned guest Python executable with `-I -B -c` and the exact
+Use the pinned Python executable with `-I -B -c` and the exact
 argument `import sys; sys.path.insert(0, "."); import test_canary` from the
 canonical checkout. The baseline must fail on the assertion with the exact
 preimage. Both registered post-edit executions must exit zero on the reviewed
@@ -105,60 +103,48 @@ environment and read-only effects in the D5 plan.
 
 ## Independent stop proof
 
-**Proposed method.** Use the disposable Colima guest's cgroup v2 boundary.
-Use the encompassing domain cgroup of each phase container. A trusted observer
-in the guest stays outside that cgroup and controls inspection and closure.
-The worker phase contains the actual native parent, child, hooks and tools.
-Run `evidence check` and its actual registered command inside the check phase.
-The reviewer phase contains the resumed original parent, distinct reviewer and
-tools. A Codex child can share an OS process with its parent. Bind native lineage
-and process containment separately. Verify child file restrictions separately
-from the whole-phase stop boundary.
+The next decision is whether the selected native Codex frontend can enforce
+one authorized synchronous canonical `apply_patch` for the worker. Verify that the exact
+native child can use the approved patch and read-only tools, with shell, code
+execution, mutable connectors, and nested worker routes unavailable. Use the
+existing frontend controls. If coverage is missing or unknown, hold managed
+dispatch.
 
-1. **Before work.** Correlate the admitted operation with the VM boot ID,
-   full container ID, image and mount inventory, init PID and start identity,
-   cgroup path and inode, and actual allowed writable resources. Observe
-   membership before enabling work. Require restart disabled, no host mounts,
-   daemon socket, privileged mode, cgroup delegation or escape path to a writer
-   outside the boundary. Confirm the exact observer and authority.
-2. **Before closure.** Retain durable native start, child turn and result
-   evidence or the exact D5 execution record. Snapshot claimed paths and
-   candidate facts. Keep the closure independent of the workload's report.
-3. **Close and inspect.** Stop the exact full container. If forced termination
-   is needed and covered by the packet, the observer uses the original domain
-   cgroup's `cgroup.kill`. In the same boot, confirm terminal container state,
-   restart disabled, original process identities gone, and the original cgroup
-   removed or its recursive `cgroup.events` showing `populated 0`. Check for
-   escaped writers or retained writable resources and independently read back
-   the final candidate. A reused PID, cgroup path, or container name cannot
-   establish identity. [Linux cgroup v2 reference](https://docs.kernel.org/admin-guide/cgroup-v2.html)
-4. **Reconcile the exact operation.** Retain the underlying observer evidence
-   and coordinator assessment. Feed the existing [version-2 proof fields](../../../clients/delegation-proofs.md)
-   to `delegation reconcile` for each worker or reviewer and `evidence
-   reconcile-check` for each check. Bind any admitted coordinator operation
-   separately with its registered operation and resource observations. Use a
-   private absolute nonsymlink JSON file and its SHA-256. Bind current revision,
-   original pins, scope, attempt, dispatch, assignment, claims and role-specific
-   candidate and observation digests. Preserve the D5 plaintext review digest
-   separately from the D6 ledger digest. The reader checks bindings. The
-   trusted observer supplies the stop fact.
+**Read-only capability finding, 4 November 2026.** Current OpenAI docs
+describe custom-agent feature reductions such as `features.shell_tool=false`.
+Custom agents inherit parent sandbox, approval settings and MCP servers.
+The spawn control exposed in this Codex chat has no custom-agent selector
+or per-worker tool allowlist. The local Homebrew path points to CLI
+`0.165.0`. The earlier Linux candidate is a separate build of that version.
+Current docs are unpinned to either build and leave the exact boundary
+unverified.
+Tool hooks have coverage exceptions, and the package’s write guard covers
+only canonical `apply_patch`. Complete enforcement for the proposed worker remains
+unverified. Managed writable dispatch stays on hold.
+[OpenAI subagent controls](https://learn.chatgpt.com/docs/agent-configuration/subagents#custom-agent-file-schema),
+[OpenAI hook coverage](https://learn.chatgpt.com/docs/hooks#tool-coverage),
+[runtime guard limits](../../../clients/runtime.md#guard-and-continuation-limits).
 
-Before managed dispatch, the reviewed method must demonstrate a detached
-writer inside the boundary, whole-phase termination and denied escape paths
-on the exact proposed environment. Exercise wrong identity, changed candidate,
-missing closure and stale revision against the readers offline. A parent exit,
-native completion, interrupt acknowledgment, timeout, empty process group or
-the bounded D4 setup closure cannot establish this stop proof. Keep claims and
-consumed limits on uncertainty. A stopped but failed check can reconcile as
-failed. A passing check requires its durable successful execution and unchanged
-candidate. Advance only after the exact current reconciliation succeeds.
+For any later release, bind independent closure evidence to the exact
+admitted operation and its writable resources. Retain the native identity,
+turn and patch receipts or the D5 execution record, then independently verify
+that the operation and all writable descendants stopped and read back the
+candidate. A completed turn, hook receipt or parent exit alone leaves
+descendant shutdown unverified.
+
+Use the existing [version-2 proof fields](../../../clients/delegation-proofs.md)
+for the worker, reviewer, registered checks and any admitted coordinator
+operation. Retain the original claims, pins, current revision and applicable
+digests. Preserve the D5 review digest separately from the D6 ledger digest.
+Keep ownership and consumed limits on uncertainty. Advance only after the
+exact attempt reconciles.
 
 ## Staged child guard checks
 
 | Stage | Required observation and decision |
 | --- | --- |
 | D4 bootstrap | Under the separately released setup effects, capture genuine CLI provenance, restricted SessionStart context, bootstrap policy rejection, hook trust and registration, and independent canary facts. Use the exact disposable qualification-purpose task and original allocations. `task-start` and `task-patch` require the pre-tool key. Worker admission requires post-tool, Stop and Interrupt keys. Reviewer admission adds review-readiness. An allocation permits the listed bounded probe with pending cases. It does not mark those cases verified. |
-| Observe the child before allowing mutation | Accept the D5 plan, then the D6 plan. Prepare one worker and use its native launch permit once. Capture the actual parent turn and spawn item. Use `delegation observe` to record the exact child session and first turn as `inProgress`. Before launch, validate one supported same-turn barrier. Proposed barrier is one read-only wait of at most 60 seconds on a fresh, attempt-specific guest-only readiness marker controlled by the observer. The observer publishes it only after the exact receipt and working parent are confirmed. Include its read claim, time and owner in the packet. Keep it outside the child's write authority. If the frontend cannot wait and patch in the same turn, hold. |
+| Observe the child before allowing mutation | Accept the D5 plan, then the D6 plan. Prepare one worker and use its native launch permit once. Capture the actual parent turn and spawn item. Use `delegation observe` to record the exact child session and first turn as `inProgress`. Before launch, validate one supported same-turn barrier within the approved tool restrictions. Proposed barrier is one read-only wait of at most 60 seconds on a fresh, private readiness marker controlled by the observer. The observer publishes it only after the exact receipt and working parent are confirmed. Include its read claim, time and owner in the packet. Keep it outside the child's write authority. If the frontend cannot wait and patch in the same turn, hold. |
 | Parent pre-tool reference, when required | While the original parent is still editable and `TRIAGE`, after assignment observation and before mutation, use the exact approved canary patch to obtain a native parent-hook denial. Capture the current parent task turn and unchanged canary while that evidence is current. This is the existing formal parent `pre-tool-enforcement` case. Then confirm `WORKING` before releasing the child barrier. |
 | Child denial | After exact binding, use one separately listed, syntactically valid patch to the same disposable file with a different postimage. Use its own native call ID. Require a genuine workflow PreToolUse denial, unchanged canary and no successful patch completion. Stop on missing callback or unexpected effect. Keep foreign session, mismatched turn, malformed payload, timeout and Post collision cases in offline fixtures. |
 | Child success and paired witness | In the same admitted turn, invoke canonical `apply_patch` once with the exact approved command. Keep the observed child turn and working parent current until PostToolUse persists. Record actual hook session, turn, call and command plus the result. Require the expected one-file effect. Use `observe_managed_case` with `stream='child'` and `case_id='post-tool-handling'`. Independently read the exact native rollout, ordered fresh pre/post receipts, assignment-bound fingerprint and final canary. The generation delta must match all fresh unconflicted Post receipts in the observation window. Collect during a quiet window and account for all tool completions. |
@@ -210,9 +196,10 @@ zero retries or replacements. Reserve the second check phase explicitly.
 Count all bootstrap and setup turns and contexts in the exact schedule.
 Overflow or an incompatible managed resume means hold before launch.
 
-**Release decision remains pending.** The private identity and effect pins,
-exact ledger schedule, independent stop method on the selected environment,
-same-turn barrier and native guard route still need review. Actual native
+**Release decision remains pending.** Effective patch-only worker controls
+and an independent stop source are the first gates. The private identity
+and effect pins, exact ledger schedule, same-turn barrier and native guard
+route still need review if those gates can be met. Actual native
 observations require separate release. Keep the base pilot free of optional
 Habblaud, Desktop, external models and D7 enforcement. Report software checks,
 native guard observations and reconciled ownership separately. No live step

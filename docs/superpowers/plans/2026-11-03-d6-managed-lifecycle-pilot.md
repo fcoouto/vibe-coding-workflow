@@ -5,6 +5,8 @@ planning. Installation, trust changes, runtime preparation/activation and live
 qualification are not authorized. Current live execution allowance is **zero**.
 The limits below are proposed ceilings for a later, explicitly released packet;
 neither this document nor a passing fixture supplies that release.
+The Lima/Docker preflight is retired. Managed writable handoffs remain
+blocked on effective native tool restrictions and independent stop evidence.
 
 **Goal:** observe one managed Codex CLI coordinator, one leaf worker and one
 independent reviewer, with admission before launch and independently verified
@@ -177,7 +179,7 @@ first managed CLI display. The base lifecycle pilot does not require Habblaud.
 | Native frontend and authentication | Actual CLI executable/surface, account route, creation provenance, supported native spawn/catalog/observation controls and compatible guidance. Preserve the user's coordinator model, reasoning, provider and authentication. No credential copying, proxy, billing or global configuration change. |
 | Staged admission and guards | Genuine setup witnesses and an exact qualification-purpose attempt; current startup/pre-tool and, for editing, post-tool evidence for the selected path. PR #78 provides offline child-guard coverage. The release packet must identify the staged path to genuine child PreToolUse and PostToolUse evidence. A stored label or fixture cannot supply it. |
 | Independent stop source | Identify a qualified method that can prove the exact worker/reviewer/check and every writable descendant stopped. Per-attempt evidence is collected after execution; the method must exist before launch. |
-| Actual isolation and ownership | One known shared authority, exact file/Git/resource claims, no conflicting or uncertain owners, and adequate actual client restrictions. Briefs are cooperative; missing mandatory isolation blocks launch. Never claim host-wide or OS enforcement from them. |
+| Actual isolation and ownership | One known shared authority, exact file/Git/resource claims, no conflicting or uncertain owners, and effective restrictions for the exact native child. The proposed worker uses one synchronous canonical patch and read-only tools. Shell, code execution, mutable connectors, and nested worker routes must be unavailable. Missing or unknown restrictions block launch. |
 | Capacity and settings | Observe available capacity and suitable native selection/inheritance. Keep requested, configured, spawn-observed and execution settings separate; unknown stays unknown. No non-native fallback. |
 | Display, only if selected | Reviewed native role binding and an explicitly approved existing Habblaud connection. Custom-name support must be demonstrated, not assumed from the badge. |
 
@@ -310,24 +312,24 @@ an applicable mandatory prerequisite or certify complete onboarding.
 
 ### What remains before resumption
 
-The 3 November probes observed restricted credential-free guest connectivity
-and a same-parent CLI resume that retained its history marker across separate
-closed phases. These are earlier bounded observations. The managed worker,
-registered check and reviewer sequence still needs exact containment and
-ownership evidence. Preserve the earlier failed D4 claim for reconciliation
-under its original authority.
+The 3 November probes remain historical observations for their original
+environment. Preserve the earlier failed D4 claim for reconciliation under
+its original authority.
 
-1. **Freeze and independently review a successor packet.** Bind the current
-   package and Linux CLI to one disposable checkout, one private D4 journal
-   and authority, the actual hook trust and supported account route, exact
-   claims and the original finite limits. Confirm that the selected guest
+1. **Check native controls read-only.** Determine whether the exact frontend
+   can enforce the patch-only worker described in §3. If the controls are
+   unavailable or unverified, leave writable managed D6 on hold. Record the
+   capability finding in the [successor packet](2026-11-04-d6-successor-release-packet.md#independent-stop-proof).
+2. **Freeze and independently review a successor packet if the route is supported.**
+   Bind the current package and selected CLI to one disposable checkout, one
+   private D4 journal and authority, the actual hook trust and supported account route, exact
+   claims and the original finite limits. Confirm that the selected route's
    egress, isolation, capacity and operation schedule meet the gate in §3.
-2. **Establish an independent stop source before managed dispatch.** Bind the
-   trusted observer to exact phase and operation identities. Demonstrate a
-   method that can prove every writable descendant stopped for the worker,
-   reviewer and check. Collect actual version-2 per-attempt proof after each
-   phase and before releasing its claims or advancing.
-3. **Define the staged native guard proof.** Use the exact supported CLI and
+3. **Establish an independent stop source before managed dispatch.** Bind the
+   trusted observer to exact phase and operation identities. Collect actual
+   version-2 proof that the admitted operation and its writable descendants
+   stopped before releasing its claims or advancing.
+4. **Define the staged native guard proof.** Use the exact supported CLI and
    tool route to observe D4 bootstrap, same-parent managed continuation, the
    admitted and denied child patch calls, and the successful assignment-bound
    PostToolUse receipt. Observe the canonical `apply_patch` callback. A
@@ -338,7 +340,7 @@ under its original authority.
    child denial evidence. Resolve any missing reader or callback capability
    before relying on it. If Habblaud is selected, add its separate first
    managed CLI display check.
-4. **Obtain explicit release for the exact packet before any live effect.**
+5. **Obtain explicit release for the exact packet before any live effect.**
    Until release, the live allowance is zero. After release, run only the
    authorized staged qualification. Stop at the first unresolved go/no-go
    condition and retain original claims, evidence and consumed limits.
