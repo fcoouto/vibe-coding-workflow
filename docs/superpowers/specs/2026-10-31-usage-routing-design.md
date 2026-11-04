@@ -277,7 +277,27 @@ This evaluation is a dependency inside the current Smart Balance delivery, not a
 - Keep one original task outstanding through integration/review. Preserve approved local-model preferences; do not disable a better local route to manufacture API savings. Allocate enough reasoning/output to satisfy the task; decline unaffordable work instead of reducing its quality floor.
 - Run Smart Balance shadow decisions against those same cases, with no extra inference or polling. Test deterministic choices, consent, capacity, money limits, expiry, explicit provider choices and failure pauses. Profile qualification and native-capacity calibration happen here; neither is an unspecified later project.
 
-Record accepted-task quality, blocking findings, repair work, API usage/cost and retained reservations, native allowance where credibly attributable, preparation/monitoring/integration/review overhead, latency and measurement uncertainty. Keep full financial records private and routine context compact. Count baseline/hybrid evaluation overhead separately from expected ordinary use. Coarse account-wide percentage deltas are not isolated request costs.
+### Paired comparison template
+
+Copy this table for each matched native baseline and candidate. Record the task
+class, client, actual execution route, model and reasoning, input snapshot,
+evaluation order, identical checks, and blind independent review rubric.
+Give the reviewer an anonymous diff and check results with route labels and
+route-identifying paths removed. Record quality, blocking findings, repairs,
+handoff, and elapsed time for each arm.
+
+| Measure | Native baseline | Candidate | Difference, source, and uncertainty |
+| --- | --- | --- | --- |
+| Tokens by phase | | | Split cached input, uncached input, and output. Record reasoning within output when available. |
+| API cost (USD) | | | Separate provider-reported charges, estimates, and retained reservations. Record grant settlement if verified. |
+| Native weekly quota (percentage points) | | | Record whole-percent start and end readings, timestamps, and reset identity. Flag unrelated activity, rounding, and unsettled readings. |
+
+Include coordinator preparation, dispatch, supervision, verification, and
+integration, as well as worker execution and independent review. Count failed
+attempts and repairs in each arm. Record shared evaluation overhead separately
+from expected ordinary use and count it once in pilot totals. Keep full financial
+records private. Mark missing or unattributable measures inconclusive, including
+account-wide quota changes that cannot be assigned to an arm.
 
 Automatic activation requires unchanged acceptance and independent review, no unresolved blocking findings or unauthorized funding/provider change, qualified capacity evidence, and credible material net subscription savings exceeding measurement uncertainty for the named class/profile. Remove the arbitrary exact 20% savings bar. If only proxies are available, report them and keep savings-based automatic activation unqualified. This evidence gap must stay visible as a Smart Balance dependency; do not claim automatic readiness or quietly substitute a Manual-only completion. Twelve cases are not proof of rare-defect rates or general model quality.
 
