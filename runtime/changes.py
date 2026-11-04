@@ -3753,7 +3753,7 @@ def _existing_recovery_age(contexts,identity,*,read_context=None):
 def _observe_recovery_source(path, journal, contexts, task_refs):
     """Observe exact existing source owners under caller-held complete authority guards."""
     raw=d3._read_file(path/'transaction.json',MAX_JOURNAL,private=True)
-    d3._require(d3.read_request(raw)==journal,'Recovery journal changed during source observation')
+    d3._require(d3.read_request(raw, limit=MAX_JOURNAL)==journal,'Recovery journal changed during source observation')
     _scoped_journal_shape(journal); contexts=tuple(contexts)
     use_roots=[]
     tasks,assignments,artifacts,foreign=_collect_recovery_references(journal['manifest'],contexts,task_refs,use_roots=use_roots)
