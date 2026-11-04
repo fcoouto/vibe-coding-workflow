@@ -158,11 +158,11 @@
       ]
     },
     "clients/habblaud-receiver.md": {
-      "sha256": "4322d8b388a86f9f213efbc33433cd5bb162b05736b01f2ea9b6a9bbb728e1f8",
+      "sha256": "090bd7a5ed5e778a42bb0196f1c13d6c20a97e833c473738992cb50d382c2acb",
       "ranges": [
         [
           1,
-          90
+          120
         ]
       ]
     },
@@ -220,7 +220,7 @@
       ]
     },
     "clients/worker-visibility.md": {
-      "sha256": "ebc2ac125d350f480136d604a66125daa027b489c44db7adcd3dcf99a26f5aa1",
+      "sha256": "558d93b004714dcd0d9e31852210fb7d43fa898e9d5c7a3573eb2a542acd0b10",
       "ranges": [
         [
           1,
@@ -228,7 +228,7 @@
         ],
         [
           143,
-          222
+          244
         ]
       ]
     },
@@ -326,14 +326,14 @@
       ]
     },
     "policies/03-agent-delegation.md": {
-      "sha256": "ebaf470723f943689c09471e7c12138427f5dcad6efe8ca86cb6b0e2ef0fcaf2",
+      "sha256": "580034bd9ef271c1fa79363a38e2966c8faac623f859703aad8f21027602170e",
       "ranges": [
         [
           1,
-          43
+          39
         ],
         [
-          44,
+          40,
           62
         ]
       ]

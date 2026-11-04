@@ -2,22 +2,19 @@
 
 from contextlib import contextmanager
 import fcntl
-import importlib
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import stat
-import sys
 import tempfile
-from uuid import NAMESPACE_URL, UUID, uuid5
+import uuid
 
 
 ROLES = frozenset({'Coordinator', 'Scout', 'Builder', 'Tester', 'Reviewer', 'Scribe', 'Investigator'})
 LIMIT = 128 * 1024
 LABEL_LIMIT = 2 * 4096 + len(' · ')
-MANAGED_DISPLAY_FIELD = 'vcw_display_label'
-TERMINAL = frozenset({'accepted', 'rejected', 'failed', 'unresolved', 'completed', 'cancelled'})
 
 
 def text(value, limit=4096):
@@ -43,16 +40,6 @@ def optional_declaration(value):
         return declaration(value)
     except ValueError:
         return None
-
-
-def display_label(value, model_display_name):
-    if value is None:
-        return 'Subagente (Codex)'
-    value = declaration(value)
-    # Retain the existing model-display normalization; custom names remain exact.
-    model = (' '.join(''.join(c for c in model_display_name if c.isprintable()).split())
-             if isinstance(model_display_name, str) else '')
-    return text(value.get('custom_role_name', value['role']) + ' · ' + text(model or 'Model unknown'), LABEL_LIMIT)
 
 
 def private_path(path):
@@ -118,129 +105,120 @@ def locked(path):
         os.close(fd)
 
 
-def transport(plugin_root):
-    """Load only the already-installed optional transport, without its job store."""
-    root = str(Path(plugin_root).resolve(strict=True))
-    sys.path.insert(0, root)
+PACKAGE = Path(__file__).resolve().parents[1]
+CONTEXT_FIELDS = {'parent_session_id', 'checkout', 'task_name', 'visibility'}
+CONTEXT_OPTIONAL = {'version', 'prompt_marker', 'ledger_assignment_digest', 'observed'}
+
+
+def context_path(path, checkout=None, plugin_root=None):
+    path = private_path(path)
+    protected = [PACKAGE]
+    if checkout is not None:
+        protected.append(Path(checkout).resolve(strict=True))
+    if plugin_root is not None:
+        protected.append(Path(plugin_root).resolve(strict=True))
+    if any(path.is_relative_to(root) for root in protected) or any(
+            os.path.lexists(parent / '.git') for parent in path.parents):
+        raise ValueError('native_visibility_context_must_be_private')
+    return path
+
+
+def prepare_native(path, request, *, reuse=False, observed=None):
+    if not isinstance(request, dict) or not CONTEXT_FIELDS <= set(request) <= CONTEXT_FIELDS | {'ledger_assignment_digest'}:
+        raise ValueError('invalid_native_visibility_request')
+    parent = request['parent_session_id']
+    if not isinstance(parent, str) or str(uuid.UUID(parent)) != parent:
+        raise ValueError('invalid_native_parent')
+    checkout = Path(request['checkout'])
+    if not checkout.is_absolute() or checkout.resolve(strict=True) != checkout or not checkout.is_dir():
+        raise ValueError('invalid_native_checkout')
+    text(request['task_name'], 128)
+    context = dict(request, version=1, visibility=declaration(request['visibility']))
+    if 'ledger_assignment_digest' in request:
+        digest = request['ledger_assignment_digest']
+        if not isinstance(digest, str) or not re.fullmatch('[0-9a-f]{64}', digest):
+            raise ValueError('invalid_visibility_assignment_digest')
+    else:
+        context['prompt_marker'] = 'VCW worker visibility ' + uuid.uuid4().hex
+    path = context_path(path, checkout)
+    if reuse and path.exists():
+        existing = read_context(path)
+        if ({key: value for key, value in context.items() if key != 'prompt_marker'} !=
+                {key: value for key, value in existing.items() if key not in {'prompt_marker', 'observed'}}):
+            raise ValueError('native_visibility_context_changed')
+        context = existing
+    else:
+        if observed is not None:
+            context['observed'] = observed
+        save(path, context, exclusive=True)
+    return dict(prepared=True, visibility=context['visibility'],
+                **({'prompt_marker': context['prompt_marker']} if 'prompt_marker' in context else {}))
+
+
+def assignment_context_path(request, context=None, context_directory=None):
+    path = context
+    if path is None:
+        directory = context_directory or default_context_directory(create=True)
+        path = hook_context_path(directory, request['parent_session_id'], request['task_name'])
+        context_path(path.parent, request['checkout']).mkdir(mode=0o700, exist_ok=True)
+    return context_path(path, request['checkout'])
+
+
+def prepare_context(request, *, context=None, context_directory=None, reuse=False):
+    path = assignment_context_path(request, context, context_directory)
+    return path, prepare_native(path, request, reuse=reuse)
+
+
+def prepare_assignment(request, *, context=None, context_directory=None):
+    """Assemble one native brief; display failure preserves its original spawn inputs."""
+    if 'worker_id' in request:
+        from runtime.habblaud import prepare_reuse
+        return prepare_reuse(request, context=context, context_directory=context_directory)
+    result = dict(prepared=False, task_name=request.get('task_name'), message=request.get('message'))
     try:
-        module = importlib.import_module('local_model_delegation.habblaud')
-        if not Path(module.__file__).resolve().is_relative_to(root):
-            raise ValueError('visibility_adapter_mismatch')
-        return module
-    finally:
-        sys.path.remove(root)
+        message = request['message']
+        if not isinstance(message, str) or len(message.encode('utf-8')) > LIMIT:
+            raise ValueError('invalid_native_assignment_message')
+        brief = {key: value for key, value in request.items() if key != 'message'}
+        brief['visibility'] = declaration(request.get('visibility'))
+        path, prepared = prepare_context(brief, context=context,
+                                         context_directory=context_directory, reuse=True)
+        message = prepared['prompt_marker'] + '\n' + message if 'prompt_marker' in prepared else message
+        return result | prepared | dict(context=str(path), message=message)
+    except (ValueError, OSError, TypeError, RuntimeError, KeyError):
+        return result | dict(reason='native_visibility_unavailable')
 
 
-def publisher(module, endpoint, account, binding, visibility, receipt, *, managed_native_label=False):
-    """Freeze before delivery; reuse actual native or explicitly external identity."""
-    visibility = declaration(visibility) if visibility is not None else None
-    binding = dict(binding)
-    if set(binding) != {'parent', 'agent_id', 'label', 'cwd'}:
-        raise ValueError('invalid_visibility_binding')
-    for key, value in binding.items():
-        text(value, LABEL_LIMIT if key == 'label' else 4096)
-    text(account, 200)
-    client = module.Client(endpoint)
-    receipt = private_path(receipt)
-    expected_roles = ({binding['label']} if visibility is not None else
-                      {'Subagente (Codex)', 'Subagent (Codex)', 'Sous-agent (Codex)'})
-
-    def observed_binding():
-        snapshot = client.snapshot(account)
-        matches = [item for item in snapshot['agents'] if item.get('id') == account + ':' + binding['agent_id']]
-        if len(matches) > 1 or any(item.get('parentId') != account + ':' + binding['parent']
-                or item.get('role') not in expected_roles for item in matches):
-            raise ValueError('habblaud_binding_mismatch')
-        return bool(matches)
-
-    def publish(phase):
-        status = dict(version=1, binding=binding, visibility=visibility, account=account,
-                      delivered=False, phase=text(phase, 256), started=False, stopped=False)
-        try:
-            with locked(receipt.with_name(receipt.name + '.lock')):
-                old = read(receipt)
-                if old is not None and 'binding' in old:
-                    if (not set(status) <= set(old) <= set(status) | {'reason'}
-                            or type(old['version']) is not int or old['version'] != 1
-                            or any(type(old[key]) is not bool for key in ('delivered', 'started', 'stopped'))):
-                        return status | dict(reason='invalid_visibility_receipt')
-                    text(old['phase'], 256)
-                    if 'reason' in old:
-                        text(old['reason'], 256)
-                    old_binding = old['binding']
-                    if visibility is None and isinstance(old_binding, dict):
-                        old_label = old_binding.get('label')
-                        if isinstance(old_label, str) and old_label.startswith('Role not reported · '):
-                            old_binding = old_binding | dict(label=binding['label'])
-                    if (old_binding != binding or old['visibility'] != visibility
-                            or old['account'] != account):
-                        return status | dict(reason='visibility_binding_changed')
-                    status.update(started=old.get('started') is True, stopped=old.get('stopped') is True)
-                elif old is not None:
-                    if (type(old.get('delivered')) is not bool or set(old) - {
-                            'delivered', 'phase', 'reason', 'agent_id', 'parent', 'account', 'observed_at'}):
-                        return status | dict(reason='invalid_visibility_receipt')
-                    if old['delivered']:
-                        if (old.get('agent_id'), old.get('parent'), old.get('account')) != (
-                                binding['agent_id'], binding['parent'], account):
-                            return status | dict(reason='visibility_binding_changed')
-                        status['started'] = True
-                # Freeze even when the first delivery fails.
-                save(receipt, status)
-                if 'guardian' in binding['label'].casefold():
-                    status['reason'] = 'unsupported_display_label'
-                    save(receipt, status)
-                    return status
-                try:
-                    present = observed_binding()
-                    if not present and not status['stopped'] and (not status['started'] or phase not in TERMINAL):
-                        start = module._event(binding, 'SubagentStart')
-                        if managed_native_label:
-                            start[MANAGED_DISPLAY_FIELD] = binding['label']
-                        client.event(account, start)
-                        status['started'] = True
-                        save(receipt, status)
-                        present = observed_binding()
-                    if not present:
-                        status['reason'] = 'visibility_unconfirmed'
-                    else:
-                        status['started'] = True
-                        if not status['stopped']:
-                            client.event(account, module._event(binding, 'PreToolUse', phase))
-                            if phase in TERMINAL:
-                                client.event(account, module._event(binding, 'SubagentStop'))
-                                status['stopped'] = True
-                        status['delivered'] = True
-                except (ValueError, OSError, KeyError, TypeError, AttributeError, RecursionError) as error:
-                    reason = str(error)
-                    status['reason'] = {
-                        'habblaud_binding_mismatch': 'habblaud_binding_mismatch',
-                        'habblaud_event_too_large': 'unsupported_display_label',
-                    }.get(reason, 'visibility_unavailable')
-                save(receipt, status)
-                return status
-        except (ValueError, OSError, KeyError, TypeError, AttributeError, RecursionError):
-            return status | dict(delivered=False, reason='visibility_unavailable')
-
-    return publish
+def prepare_managed(checkout, parent, report, *, context_directory=None):
+    """Consume an already-prepared worker/reviewer result outside its transaction."""
+    prepared = prepare_assignment(dict(parent_session_id=parent, checkout=str(checkout),
+        task_name=report.get('task_name'), message=report.get('prompt'), visibility=report.get('visibility'),
+        ledger_assignment_digest=report.get('ledger_assignment_digest', report.get('assignment_digest'))),
+        context_directory=context_directory)
+    return report | dict(visibility_preparation={key: prepared[key] for key in ('prepared', 'context', 'reason')
+                                                if key in prepared})
 
 
-def register_external(*, module, endpoint: str, account: str, parent: str, checkout: str,
-                      run_id: str, execution_route: str, model_display_name: str,
-                      visibility: dict | None, state_directory: Path) -> dict:
-    """Publish display metadata using the transport and identity verified by the host."""
-    try:
-        if (str(UUID(text(parent, 36))) != parent
-                or re.fullmatch(r'[A-Za-z0-9_-]+', text(execution_route, 256)) is None):
-            raise ValueError('invalid_external_visibility_identity')
-        text(run_id, 256)
-        external_id = str(uuid5(NAMESPACE_URL, f'vcw:{execution_route}:{parent}:{run_id}'))
-        metadata = declaration(visibility) if visibility is not None else None
-        badge_role = {key: metadata[key] for key in ('version', 'role', 'specialty')} if metadata else None
-        binding = dict(parent=parent, agent_id=external_id, cwd=checkout,
-                       label=display_label(badge_role, text(model_display_name, 160)))
-        receipt = state_directory / f'habblaud-{external_id}.json'
-        status = publisher(module, endpoint, account, binding, metadata, receipt)('completed')
-        return {key: status[key] for key in ('delivered', 'reason') if key in status}
-    except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError, ImportError):
-        return dict(delivered=False, reason='visibility_unavailable')
+def read_context(path):
+    context = read(path)
+    if (not isinstance(context, dict) or type(context.get('version')) is not int or context['version'] != 1
+            or not CONTEXT_FIELDS <= set(context) or set(context) - (CONTEXT_FIELDS | CONTEXT_OPTIONAL)
+            or len({'prompt_marker', 'ledger_assignment_digest'} & set(context)) != 1):
+        raise ValueError('invalid_native_visibility_context')
+    return context
+
+
+def hook_context_path(directory, parent, task_name):
+    if not isinstance(parent, str) or str(uuid.UUID(parent)) != parent:
+        raise ValueError('invalid_native_parent')
+    key = hashlib.sha256(text(task_name, 128).encode()).hexdigest()
+    return Path(directory) / parent / (key + '.json')
+
+
+def default_context_directory(*, create=False):
+    home = Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex').resolve(strict=True)
+    directory = home / 'vibe-worker-visibility' / 'contexts'
+    if create:
+        directory.parent.mkdir(mode=0o700, exist_ok=True)
+        private_path(directory).mkdir(mode=0o700, exist_ok=True)
+    return directory

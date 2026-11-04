@@ -11,6 +11,7 @@ import unittest
 import uuid
 from unittest.mock import patch
 
+from runtime import worker_visibility
 from runtime.adapters import codex
 from runtime.startup import StartupError
 
@@ -43,10 +44,10 @@ def fixture_transport(provider='codex'):
 class VisibilityTests(unittest.TestCase):
     def setUp(self):
         try:
-            from runtime import worker_visibility
+            from runtime import habblaud, worker_visibility
         except ImportError:
             self.fail('Shared native/OpenRouter visibility implementation is missing')
-        self.api = worker_visibility
+        self.api = habblaud
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
@@ -509,7 +510,7 @@ class NativeVisibilityTests(unittest.TestCase):
         self.assertEqual(helper.read_context(path)['observed']['forwarded_label'], label)
 
     def test_historical_forwarded_label_is_not_rewritten_by_catalog_lookup(self):
-        from runtime import worker_visibility
+        from runtime import habblaud, worker_visibility
         helper = self.native_helper()
         request = self.native_request()
         path = helper.hook_context_path(self.task_context, self.parent, request['task_name'])
@@ -527,7 +528,7 @@ class NativeVisibilityTests(unittest.TestCase):
         self.assertEqual(helper.read_context(path)['observed'], observed)
 
     def test_missing_catalog_formats_actual_model_and_invalid_saved_label_passes_through(self):
-        from runtime import worker_visibility
+        from runtime import habblaud, worker_visibility
         helper = self.native_helper()
         request = self.native_request()
         path = helper.hook_context_path(self.task_context, self.parent, request['task_name'])
@@ -545,7 +546,7 @@ class NativeVisibilityTests(unittest.TestCase):
                                                 Path(sys.executable).resolve()), event)
 
     def test_legacy_observation_keeps_raw_model_for_receipt_continuation(self):
-        from runtime import worker_visibility
+        from runtime import habblaud, worker_visibility
         helper = self.native_helper()
         client, transport = fixture_transport()
         request = self.native_request()
@@ -557,11 +558,11 @@ class NativeVisibilityTests(unittest.TestCase):
         binding = dict(parent=self.parent, agent_id=self.child, cwd=str(self.root),
                        label='Audit lead · gpt-6-astra')
         receipt = path.with_name(path.name + '.delivery.json')
-        publisher = worker_visibility.publisher(transport, 'http://127.0.0.1:1',
+        publisher = habblaud.publisher(transport, 'http://127.0.0.1:1',
                                                 'account', binding, request['visibility'], receipt)
         self.assertTrue(publisher('Working')['delivered'])
         with patch.object(codex, 'observe_worker_visibility', return_value=self.observe()), \
-                patch.object(worker_visibility, 'transport', return_value=transport):
+                patch.object(habblaud, 'transport', return_value=transport):
             result = helper.publish_native(path, self.child, 'Continuing', self.root,
                                            'http://127.0.0.1:1', 'account')
         self.assertTrue(result['delivered'])
@@ -581,7 +582,7 @@ class NativeVisibilityTests(unittest.TestCase):
         self.assertEqual(result.returncode, 7)
 
     def test_native_binding_preserves_context_and_child_across_continuation(self):
-        from runtime import worker_visibility
+        from runtime import habblaud, worker_visibility
         helper = self.native_helper()
         client, transport = fixture_transport()
         path = self.task_context / 'assignment.json'
@@ -591,7 +592,7 @@ class NativeVisibilityTests(unittest.TestCase):
         self.assertEqual(client.events, [])
         with self.assertRaises(FileExistsError):
             helper.prepare_native(path, request | dict(visibility=request['visibility'] | dict(role='Builder')))
-        with patch.object(codex, '_native_reader', self.reader), patch.object(worker_visibility, 'transport', return_value=transport):
+        with patch.object(codex, '_native_reader', self.reader), patch.object(habblaud, 'transport', return_value=transport):
             first = helper.publish_native(path, self.child, 'Reviewing', self.root, 'http://127.0.0.1:1', 'account')
             second = helper.publish_native(path, self.child, 'Continuing', self.root, 'http://127.0.0.1:1', 'account')
             replaced = helper.publish_native(path, str(uuid.uuid4()), 'Continuing', self.root, 'http://127.0.0.1:1', 'account')
@@ -611,14 +612,14 @@ class NativeVisibilityTests(unittest.TestCase):
         self.assertFalse(any(p.suffix in {'.db', '.sqlite', '.sqlite3'} for p in self.task_context.iterdir()))
 
     def test_no_native_character_when_child_lineage_is_unobserved(self):
-        from runtime import worker_visibility
+        from runtime import habblaud, worker_visibility
         helper = self.native_helper()
         client, transport = fixture_transport()
         path = self.task_context / 'assignment.json'
         helper.prepare_native(path, dict(parent_session_id=self.parent, checkout=str(self.root),
             task_name='review_original', visibility=dict(version=1, role='Reviewer', specialty='Read only')))
         self.child_thread['parentThreadId'] = str(uuid.uuid4())
-        with patch.object(codex, '_native_reader', self.reader), patch.object(worker_visibility, 'transport', return_value=transport):
+        with patch.object(codex, '_native_reader', self.reader), patch.object(habblaud, 'transport', return_value=transport):
             result = helper.publish_native(path, self.child, 'Reviewing', self.root, 'http://127.0.0.1:1', 'account')
         self.assertFalse(result['delivered'])
         self.assertEqual(result['reason'], 'native_visibility_identity_unobserved')
@@ -657,7 +658,7 @@ class NativeVisibilityTests(unittest.TestCase):
                 self.assertFalse(result['prepared'])
                 self.assertEqual(result['task_name'], request['task_name'])
                 self.assertEqual(result['message'], request['message'])
-        with patch.object(helper, 'prepare_native', side_effect=OSError('private storage unavailable')):
+        with patch.object(worker_visibility, 'prepare_native', side_effect=OSError('private storage unavailable')):
             result = helper.prepare_assignment(request, context_directory=self.task_context)
         self.assertFalse(result['prepared'])
         self.assertEqual(result['message'], request['message'])
@@ -696,6 +697,60 @@ class NativeVisibilityTests(unittest.TestCase):
         self.assertEqual(output['task_name'], request['task_name'])
         self.assertEqual(output['message'], request['message'])
         self.assertEqual(list(self.task_context.iterdir()), [])
+
+    def test_reused_child_binds_once_and_keeps_followup_message(self):
+        helper = self.native_helper()
+        request = self.native_request() | dict(worker_id=self.child, message='Review the follow-up change.')
+        with patch.object(codex, '_native_reader', self.reader):
+            first = helper.prepare_assignment(request, context_directory=self.task_context)
+            self.assertTrue(first['prepared'])
+            self.assertEqual(first['message'], request['message'])
+            path = Path(first['context'])
+            original = path.read_bytes()
+            self.assertEqual(helper.read_context(path)['observed']['worker_id'], self.child)
+            followup = {k: v for k, v in request.items() if k != 'visibility'} | dict(message='Check one more detail.')
+            second = helper.prepare_assignment(followup, context_directory=self.task_context)
+            self.assertTrue(second['prepared'])
+            self.assertEqual(second['context'], first['context'])
+            self.assertEqual(second['message'], followup['message'])
+            self.assertEqual(path.read_bytes(), original)
+            wrong = helper.prepare_assignment(followup | dict(worker_id=str(uuid.uuid4())),
+                                              context_directory=self.task_context)
+            self.assertFalse(wrong['prepared'])
+            self.assertEqual(wrong['message'], followup['message'])
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_restore_previously_observed_context_sends_badge_only(self):
+        helper = self.native_helper()
+        path = self.task_context / 'legacy.json'
+        helper.prepare_native(path, self.native_request())
+        from runtime import habblaud, worker_visibility
+        saved = helper.read_context(path)
+        worker_visibility.save(path, saved | dict(observed=self.observe() | dict(forwarded_label='Audit lead · Native model')))
+        original = path.read_bytes()
+        from runtime import habblaud
+        client, transport = fixture_transport()
+        with patch.object(habblaud, 'transport', return_value=transport):
+            self.assertEqual(habblaud.restore_badge(path, self.root, 'http://127.0.0.1:1', 'account'),
+                             dict(delivered=True))
+        self.assertEqual(client.events, [dict(hook_event_name='SubagentBadge', session_id=self.parent,
+                                              agent_id=self.child, vcw_display_label='Audit lead · Native model')])
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_restore_keeps_frozen_legacy_model_name(self):
+        from runtime import habblaud
+        path = self.task_context / 'legacy.json'
+        worker_visibility.prepare_native(path, self.native_request())
+        saved = worker_visibility.read_context(path)
+        label = 'Audit lead · ' + 'Legacy model name ' * 12 + 'edition'
+        self.assertGreater(len(label.encode('utf-16-le')), 400)
+        observed = self.observe() | dict(model_display_name='Catalog Name', forwarded_label=label)
+        worker_visibility.save(path, saved | dict(observed=observed))
+        client, transport = fixture_transport()
+        with patch.object(habblaud, 'transport', return_value=transport):
+            result = habblaud.restore_badge(path, self.root, 'http://127.0.0.1:1', 'account')
+        self.assertTrue(result['delivered'])
+        self.assertEqual(client.events[0]['vcw_display_label'], label)
 
     def test_managed_preparation_reuses_role_without_changing_frozen_prompt(self):
         helper = self.native_helper()
@@ -739,7 +794,7 @@ class NativeVisibilityTests(unittest.TestCase):
         import io
         import os
         from contextlib import redirect_stdout
-        from scripts import workflow, worker_visibility
+        from scripts import workflow
         from runtime import delegation, evidence
         scope = SimpleNamespace(repository_root=self.root, runtime=object())
         metadata = self.native_request()['visibility']
@@ -792,20 +847,20 @@ class NativeVisibilityTests(unittest.TestCase):
         self.assertEqual(list(self.root.iterdir()), [path])
 
     def test_same_parent_is_insufficient_without_original_task_marker(self):
-        from runtime import worker_visibility
+        from runtime import habblaud, worker_visibility
         helper = self.native_helper()
         client, transport = fixture_transport()
         path = self.task_context / 'assignment.json'
         helper.prepare_native(path, self.native_request())
         del self.child_thread['source']['subAgent']['thread_spawn']['agent_path']
-        with patch.object(codex, '_native_reader', self.reader), patch.object(worker_visibility, 'transport', return_value=transport):
+        with patch.object(codex, '_native_reader', self.reader), patch.object(habblaud, 'transport', return_value=transport):
             result = helper.publish_native(path, self.child, 'Reviewing', self.root, 'http://127.0.0.1:1', 'account')
         self.assertFalse(result['delivered'])
         self.assertEqual(result['reason'], 'native_visibility_identity_unobserved')
         self.assertEqual(client.events, [])
 
     def test_missing_native_path_can_use_exact_observed_spawn_binding(self):
-        from runtime import worker_visibility
+        from runtime import habblaud, worker_visibility
         helper = self.native_helper()
         del self.child_thread['source']['subAgent']['thread_spawn']['agent_path']
         for managed in (False, True):
@@ -824,14 +879,25 @@ class NativeVisibilityTests(unittest.TestCase):
                     prepared = helper.prepare_native(path, request)
                     self.assertIn('prompt_marker', prepared)
                     self.spawn_prompt = prepared['prompt_marker'] + '\nRead only.'
-                with patch.object(codex, '_native_reader', self.reader), patch.object(worker_visibility, 'transport', return_value=transport):
+                with patch.object(codex, '_native_reader', self.reader), patch.object(habblaud, 'transport', return_value=transport):
                     valid_prompt = self.spawn_prompt
                     self.spawn_prompt = 'Different assignment'
                     wrong = helper.publish_native(path, self.child, 'Reviewing', self.root, 'http://127.0.0.1:1', 'account',
                                                   parent_turn_id='parent-turn', spawn_item_id='spawn')
                     self.assertFalse(wrong['delivered'])
                     self.assertEqual(client.events, [])
+                    followup = {key: request[key] for key in ('parent_session_id', 'checkout', 'task_name')}
+                    followup.update(worker_id=self.child, message='Continue the review.',
+                                    parent_turn_id='parent-turn', spawn_item_id='spawn')
+                    before = path.read_bytes()
+                    self.assertFalse(helper.prepare_assignment(followup, context=path)['prepared'])
+                    self.assertEqual(path.read_bytes(), before)
                     self.spawn_prompt = valid_prompt
+                    continued = helper.prepare_assignment(followup, context=path)
+                    self.assertTrue(continued['prepared'])
+                    self.assertEqual(continued['message'], followup['message'])
+                    self.assertEqual(helper.read_context(path)['observed']['worker_id'], self.child)
+                    self.assertEqual(client.events, [])
                     result = helper.publish_native(path, self.child, 'Reviewing', self.root, 'http://127.0.0.1:1', 'account',
                                                    parent_turn_id='parent-turn', spawn_item_id='spawn')
                 self.assertTrue(result['delivered'])

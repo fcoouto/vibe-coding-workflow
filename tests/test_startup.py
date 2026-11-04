@@ -339,17 +339,20 @@ class StartupTests(unittest.TestCase):
     def test_package_validator_requires_complete_verified_receiver_bundle(self):
         package = self.base / "package"
         shutil.copytree(PACKAGE, package, ignore=shutil.ignore_patterns(".git", "__pycache__"))
-        for name in ("receiver.patch", "receiver.json", "LICENSE"):
+        for name in ("receiver.patch", "receiver-upgrade.patch", "receiver.json", "LICENSE"):
             path = package / "assets/habblaud" / name
             original = path.read_bytes()
             path.unlink()
             with self.subTest(missing=name), self.assertRaises((ValueError, OSError)):
                 validate(package)
             path.write_bytes(original)
-        path = package / "assets/habblaud/receiver.patch"
-        path.write_bytes(path.read_bytes() + b"\nChanged patch.\n")
-        with self.assertRaisesRegex(ValueError, "receiver patch digest"):
-            validate(package)
+        for name in ("receiver", "receiver-upgrade"):
+            path = package / "assets/habblaud" / (name + ".patch")
+            original = path.read_bytes()
+            path.write_bytes(original + b"\nChanged patch.\n")
+            with self.subTest(changed=name), self.assertRaisesRegex(ValueError, name + " patch digest"):
+                validate(package)
+            path.write_bytes(original)
 
     def test_package_validator_rejects_duplicate_claude_hooks(self):
         package = self.base / "package"

@@ -1,5 +1,11 @@
 # Release notes
 
+## 0.1.20
+
+- Restore saved Habblaud badges after a receiver restart. The bundled upgrade patch preserves the receiver's existing data and supports restoring previously observed declarations.
+- Reuse the same badge declaration when preparing a follow-up for an existing native subagent. Capture a missing role once and keep the follow-up available if badge delivery fails.
+- Keep Habblaud delivery and recovery in one adapter shared by native delegation, OpenRouter and Usage Routing.
+
 ## 0.1.19
 
 - Make cumulative and per-task Usage Routing caps optional. Verified funding, applicable monthly limits, and full per-request reservations still apply. [PR #91](https://github.com/fcoouto/vibe-coding-workflow/pull/91)
