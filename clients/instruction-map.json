@@ -290,11 +290,11 @@
       ]
     },
     "clients/workstreams.md": {
-      "sha256": "6719f719cf5d1794ffce617a75277c5fc4bac911c140583efe144fcaf3d1718d",
+      "sha256": "d3ebd94a839bf691a37c62a31695cd3849fd70240c22a7bfb5f573645bce5906",
       "ranges": [
         [
           1,
-          126
+          113
         ]
       ]
     },
@@ -326,7 +326,7 @@
       ]
     },
     "policies/03-agent-delegation.md": {
-      "sha256": "00d68798b6a8e0bbee449ad1e98d94b8c15fe5cc230d25dacba34c6c2c903f08",
+      "sha256": "1e947e25cebbd3c38e73c124c27b2c076cbc4acc2827c9374ee5bd934fc26804",
       "ranges": [
         [
           1,
@@ -334,7 +334,7 @@
         ],
         [
           53,
-          90
+          117
         ]
       ]
     },
@@ -370,7 +370,7 @@
       ]
     },
     "policies/07-context-and-handoff.md": {
-      "sha256": "dbf4bf4632b329fd8814515db8a8d208ed0338e54ea85dd2f5e9446051651f42",
+      "sha256": "08aa554cf50f511f72e8ef0862438afe7ab0208fffd0142cf9f4a4d36056470c",
       "ranges": [
         [
           1,
