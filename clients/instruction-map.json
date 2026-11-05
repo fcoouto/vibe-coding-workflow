@@ -95,11 +95,11 @@
       ]
     },
     "clients/evidence-plan.md": {
-      "sha256": "65423a3dcd2300f81fbabc71adcb9a0f63077c4bedcdef93429d1f9376bcc62d",
+      "sha256": "78e864ce3f65919ca959f9a0412775a549d465b761e84666cc70185b99c40cdf",
       "ranges": [
         [
           1,
-          5
+          95
         ]
       ]
     },
@@ -140,7 +140,7 @@
       ]
     },
     "clients/evidence.md": {
-      "sha256": "0ff82523428ddf78f33ed7416030d6509cf6ba7fa760f1c6b3e9221ec3ff799c",
+      "sha256": "7632772a0329856a162abf217453611fa98b4db11f55a64af980ca1cf94ff831",
       "ranges": [
         [
           1,
@@ -299,7 +299,7 @@
       ]
     },
     "policies/00-index.md": {
-      "sha256": "64a82eebb5cf39ffd05369d663ce174f05e396be326360c01edf34bb76bb17ce",
+      "sha256": "f71791d7a126c86f4be1ebcf7b54f22cd733409d6c3cbb7af86b0b664c56594f",
       "ranges": [
         [
           1,
@@ -587,11 +587,11 @@
       ]
     },
     "skills/onboard-my-project/references/reviewed-configuration.md": {
-      "sha256": "e4845abd1f403d5005e36334ff0072ba4bc0d0bb3550186de6203a14cbc9ea27",
+      "sha256": "81c1e1e7667738788b86068776d58f2cfb534bf9eba9b746506962eb8476d33e",
       "ranges": [
         [
           1,
-          37
+          57
         ]
       ]
     },

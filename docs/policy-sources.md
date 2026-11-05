@@ -1,5 +1,28 @@
 # Policy source map
 
+## Selective workflow examples — Phase 1, 5 November 2026
+
+The user approved the [Phase 1 plan](superpowers/plans/2026-11-05-workflow-templates-phase-one.md)
+under the [selective-template design](superpowers/specs/2026-11-05-workflow-template-design.md),
+including a requirement that routine complexity stay flat or decrease. The
+authoring review used Toolkit revision `21b71b68679c11184f49c23168852014bf6dde8b`.
+This selected-source assessment does not repin unrelated contracts or active tasks.
+
+| Source requirement | Local owner and proof |
+| --- | --- |
+| Adapt only useful template components; retain actual project facts and existing equivalents (`templates/README.md`, `docs/06-project-defaults.md`) | Basic and selected-managed examples in `skills/onboard-my-project/references/reviewed-configuration.md`; relevant-inspection and unenrolled-checkout regressions preserve ordinary native work and recovery. |
+| Keep ordinary work proportionate and load details on demand (`docs/prompts/12-existing-project-setup.md`, authoring reference only) | `README.md` and `clients/evidence.md` route managed evidence only when selected; shared policies still own ordinary checks, security impact and review. |
+| Establish initial smoke cases and requalify material instruction changes without inventing an optimization trial (`docs/07-harness-evaluation.md`) | `policies/00-index.md` routes initial setup and material instruction/memory changes to the existing maintenance owner; observed cases and their limits are recorded in the implementation plan. |
+| Validate real invariants and distinguish accepted plans from executed evidence (`docs/prompts/12-existing-project-setup.md`, `docs/07-harness-evaluation.md`) | Named examples in `clients/evidence-plan.md` run through existing `runtime/evidence.py` operations in `tests/test_evidence.py`; malformed and stale requests retain their current rejection paths. |
+
+No source prompt is copied into routine instructions. Existing validators, task
+records and recovery remain authoritative. The delegation audit preserves the
+early role check and the direct-entry check: removing either loses a distinct
+boundary, while consolidating them adds more machinery than the duplicated
+computation warrants. No new runtime layer, role-only step or spawn blocker is
+introduced. Package checks and native observations are separate; this provenance
+section is authoring/update material, not a routine loading dependency.
+
 ## Cooperative D6 scope — 4 November 2026
 
 The user approved cooperative native delegation, retained uncertain ownership

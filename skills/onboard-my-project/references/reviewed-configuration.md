@@ -10,19 +10,39 @@ Explain the following when relevant, using short paragraphs or a small table:
 - **Changes:** each concrete path or resource, what changes and why. Link large exact proposals rather than pasting JSON or hashes into the summary.
 - **Next:** the next authorized action, checks and remaining prerequisites. Do not turn internal transaction stages into user approval steps.
 - **Decisions needed:** only unresolved material exceptions. Say “None” when none remain. Describe each exception, its consequence and recommendation; identify the dependent work that waits.
-- **Status:** what has actually completed and what remains. Distinguish completed file configuration from an active workflow. Say that activation is pending when required proof is missing; never translate a successful helper exit into native qualification.
+- **Status:** what has actually completed and what remains. Distinguish completed file configuration from client startup integration and any selected managed activation. Report missing startup proof under [Verify and finish](../../../policies/10-project-onboarding.md#verify-and-finish); say managed activation is pending only when selected and its required proof is missing. Never translate a successful helper exit into native qualification.
 - **Recovery:** what can resume or be undone, which later edits or uncertain ownership will be preserved, and any limit that affects the user. Link exact recovery instructions and retained records; do not promise lossless recovery without those records.
 - **Technical records:** direct links to the concrete plan, proposed file contents, check results and recovery material. Keep internal stage codes, schema fields, digests and receipt identifiers here.
 
 Do not show credentials, raw transcripts or secret contents. Omit irrelevant sections and avoid repeating the full coverage matrix. Retain material blockers and limitations even when the normal path is simple. A technical status may be translated into ordinary language only when its meaning remains exact.
 
-## Example
+## Examples
 
-This illustrates wording, not a plan or approval for any real project. Replace example paths and technical references with actual supported links before presenting a real document.
+These illustrate wording, not plans or approval for any real project. Replace example paths and technical references with actual supported links before presenting a real document.
 
-> # Reviewed Configuration — Example project
+### Basic setup
+
+> # Reviewed Configuration — Example project, basic setup
 >
-> **Scope:** Set up this checkout in Codex, preserving existing project settings.
+> **Scope:** Set up useful project guidance for this checkout in Codex, preserving existing project settings.
+>
+> **Changes:** Add the project commands and local workflow links to `docs/setup.md`, link it from the existing project instructions, and reuse valid startup-only membership. Retain private preimages and recovery instructions beside the setup plan.
+>
+> **Next:** Apply the reviewed file changes and run the project's accepted checks natively. Verify startup integration through the [onboarding procedure](../../../policies/10-project-onboarding.md#client-startup-integration). This basic setup creates no runtime database and requires no managed task activation.
+>
+> **Decisions needed:** None. The onboarding request covers these effects.
+>
+> **Status:** The file proposal is reviewed; application and project checks remain. Startup membership is present, but native-session delivery has not been observed, so client integration remains pending.
+>
+> **Recovery:** Use the retained preimages and file-operation record to resume or undo changes still matching this operation's results. Preserve later edits and reconcile uncertain ownership.
+>
+> **Technical records:** The real document links the exact proposal, accepted project commands and results, startup observations and private recovery material here.
+
+### Selected managed setup
+
+> # Reviewed Configuration — Example project, managed setup
+>
+> **Scope:** Set up the selected managed workflow for this checkout in Codex, preserving existing project settings.
 >
 > **Changes:** Add the project setup guide at `docs/setup.md` and the project registration at `.vibe-coding-workflow/project.json`. Keep private recovery records beside the setup plan.
 >
