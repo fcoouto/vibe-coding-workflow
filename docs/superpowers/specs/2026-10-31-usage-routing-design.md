@@ -40,12 +40,10 @@ affected request while leaving saved consent visible.
   source consent and unchanged snapshots. Manual uses the original native
   user message selecting the task and authorizing its data or exact approval
   when needed. No ordinary follow-up repeats authority already established.
-- Keep a distinct, ready native reviewer. Reserve five percentage points of
-  native allowance while retaining the existing 20-point interactive floor. Use fresh
-  native account/window evidence and retain the original task's reserve through
-  independent review or evidenced abandonment.
+- Keep a distinct, ready native reviewer and record independent acceptance
+  of the exact candidate or the task's evidenced abandonment.
 - Verify current consent, grant, price, budget and time before each send.
-  Hold one original task through integration and review. A blocked API-only
+  Keep each original task bound through integration and review. A blocked API-only
   task waits for resolution. Otherwise, use the authorized native path when
   available.
 
@@ -161,7 +159,7 @@ Attempt states: reserved, dispatching, completed, rejected-before-send, unresolv
 
 ### One run, two separately accounted calls
 
-One immutable `run_id` owns the active API slot and references the original task ID's shared native reserve. It has two distinct attempt IDs, `(run_id, count)` and `(run_id, generation)`, each with its own request digest, maximum cost, admission-cycle identity, dispatch state and usage. Even a qualified free count has a zero-money admission record. Never reuse one attempt ID for both calls.
+One immutable `run_id` owns the active API slot and references the original task ID. It has two distinct attempt IDs, `(run_id, count)` and `(run_id, generation)`, each with its own request digest, maximum cost, admission-cycle identity, dispatch state and usage. Even a qualified free count has a zero-money admission record. Never reuse one attempt ID for both calls.
 
 | Event | Required transition |
 | --- | --- |
@@ -169,21 +167,21 @@ One immutable `run_id` owns the active API slot and references the original task
 | Count is uncertain | Retain its maximum reservation and the slot; do not send generation |
 | Generation is denied before sending | Record `rejected-before-send`; release any proven-unsent generation reservation and the run's slot; preserve count cost and any native work already incurred |
 | Crash between completed count and generation dispatch | Recovery may close the run only when the durable dispatch protocol proves generation was not sent; preserve count accounting, release the slot, and do not automatically continue |
-| Generation completes | Settle its local accounting independently; release the API slot, retaining credit deductions and the native reserve until integration/review finish |
+| Generation completes | Settle its local accounting independently; release the API slot, retaining credit deductions and the task's independent-review requirement |
 | Either dispatch is ambiguous | Keep that attempt's maximum and the slot; require trusted recovery |
 | Any run or attempt ID is replayed | Return its stored state only; never transmit again |
 
-A correction is a new explicitly selected run within the original task scope and applicable spending limits, reusing the original task's native reserve and remaining repair allowance. Each call records `dispatching` before transmission; recovery cannot infer no dispatch from process death. A slot released before generation does not by itself release native capacity; the native-capacity rule still applies.
+A correction is a new explicitly selected run within the original task scope and applicable spending limits, retaining the original task's identity and remaining repair allowance. Each call records `dispatching` before transmission; recovery cannot infer no dispatch from process death.
 
 The runner does not retry inference automatically. A known rate-limit rejection pauses; credit/spend-limit errors are terminal for the route until conditions change. No automatic model escalation is included. A reasoned correction or profile escalation requires explicit selection within the approved task scope, applicable spending limits and attempt bounds, preserving all outstanding reservations. No automatic fallback to OpenRouter, unapproved API credits or new paid funding is permitted. Conservative grant/budget/expiry stops may hand remaining work to the authorized native route; retain independent review and do not replay the API attempt.
 
 ### Native handoff on conservative API stops
 
-A grant/budget/expiry pause returns `handoff_recommended`. The coordinator requests one bounded handoff containing the original task, remaining-work instructions, source snapshot references and pending API accounting. Persist only task identifiers, digest, state and native capacity in the ledger, not source text. Keep the same handoff ID across refreshes; unclaimed requests recheck the latest API-only/provider choices, reviewer and native capacity. Missing capacity waits rather than selecting a paid alternative.
+A grant/budget/expiry pause returns `handoff_recommended`. The coordinator requests one bounded handoff containing the original task, remaining-work instructions, source snapshot references and pending API accounting. Persist only task identifiers, digest, state and native task identity in the ledger, not source text. Keep the same handoff ID across refreshes; unclaimed requests recheck the latest API-only/provider choices, reviewer readiness. A missing reviewer waits rather than selecting a paid alternative.
 
 Claim the handoff once with a native dispatch attempt marker **before** calling the existing native agent tools. `new_claim:true` authorizes that one dispatch attempt under the original task scope; replay returns `new_claim:false` and must observe/reconcile the existing native attempt, never spawn again. The claim is tracking metadata, not proof of actual agent execution, review or completion. Preserve existing worker selection, permissions and provenance.
 
-Tool-free API proposals cannot mutate the repository. Native continuation can therefore pick up remaining work while a previous API call's charge remains unresolved, using fresh source checks and ignoring late output unless independently revalidated. Do not replay external actions or release any outstanding API maximum/slot merely because native work starts. The original native task reserve stays through integration/review; first handoff claim advances its freshness boundary. A later explicit API-only/provider choice needs resolution before native dispatch. Existing native capacity/review gates still apply; this is not permission to run when subscription capacity is unavailable.
+Tool-free API proposals cannot mutate the repository. Native continuation can therefore pick up remaining work while a previous API call's charge remains unresolved, using fresh source checks and ignoring late output unless independently revalidated. Do not replay external actions or release any outstanding API maximum/slot merely because native work starts. A later explicit API-only/provider choice needs resolution before native dispatch. Independent native review remains required.
 
 ## Model and execution scope
 

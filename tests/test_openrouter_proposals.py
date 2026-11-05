@@ -39,6 +39,73 @@ class ProposalTests(unittest.TestCase):
     def call(self, action, request=None, now=100):
         return self.api.run(action, self.store, request or {}, now=now, cwd=self.repo)
 
+    def scoped_request(self):
+        from runtime import external_delegation as external
+        from tests.test_external_delegation import permission
+        consent = permission('openrouter', model='model/v1', provider='p', effort=None)
+        disabled = settings.disable(self.repo, dict(expected_revision=self.settings['revision']))
+        configured = settings.configure(self.repo, dict(expected_revision=disabled['revision'], routes=['proposals'],
+            opencode=None, auth_data=None, external_permission=consent))
+        self.settings = settings.enable(self.repo, dict(expected_revision=configured['revision']))
+        (self.repo / 'src').mkdir()
+        (self.repo / 'src/code.py').write_text('source bytes\n')
+        packet = external.prepare(self.repo, consent, [dict(kind='source', path='src/code.py')])
+        self.publish()
+        return dict(self.begin_request(), external=dict(packet['binding'], automatic=True, local_preferred=False,
+            class_name='investigation', coordinator='native-coordinator', reviewer='native-reviewer',
+            integration_available=True))
+
+    def test_scoped_proposals_use_admitted_checkout_when_cwd_is_a_subdirectory(self):
+        from runtime import external_delegation as external
+        request = self.scoped_request()
+        subroot = self.repo / 'excluded'
+        (subroot / 'src').mkdir(parents=True)
+        (subroot / 'src/code.py').write_text('unapproved subdirectory bytes')
+        consent = self.settings['external_permission']
+        nested = external.prepare(subroot, consent, [dict(kind='source', path='src/code.py')])
+        bad = dict(request, external=dict(request['external'], **nested['binding']))
+        with self.assertRaisesRegex(ValueError, 'source_changed'):
+            self.api.run('begin', self.store, bad, cwd=subroot, now=100)
+        begin = self.api.run('begin', self.store, request, cwd=subroot, now=100)
+        dispatch = dict(request, attempt_token=begin['attempt_token'])
+        with self.assertRaisesRegex(ValueError, 'source_changed'):
+            self.api.run('dispatch', self.store, dict(bad, attempt_token=begin['attempt_token']),
+                         cwd=subroot, now=100)
+        result = self.api.run('dispatch', self.store, dispatch, cwd=subroot, now=100)
+        self.assertIn('source bytes', result['packet'])
+        self.assertNotIn('unapproved subdirectory bytes', result['packet'])
+
+    def test_scoped_proposal_dispatch_uses_checked_packet_once_and_requires_review(self):
+        request = self.scoped_request()
+        begin = self.call('begin', request)
+        dispatch = dict(request, attempt_token=begin['attempt_token'])
+        self.assertEqual(self.call('dispatch', dispatch, now=90000)['fallback'], 'stale_discovery')
+        result = self.call('dispatch', dispatch)
+        self.assertIn('source bytes', result['packet'])
+        self.assertEqual(self.call('dispatch', dispatch)['fallback'], 'already_dispatched')
+        self.assertNotIn('source bytes', self.store.read_text())
+        with self.assertRaisesRegex(ValueError, 'independent_review'):
+            self.call('record', dict(attempt_token=begin['attempt_token'], disposition='accepted',
+                native_review_ref='review', native_checks=[dict(success=True, ref='tests')], reviewer='native-coordinator'))
+        self.call('record', dict(attempt_token=begin['attempt_token'], disposition='unresolved'))
+        self.assertEqual(self.call('begin', request)['fallback'], 'task_already_attempted')
+
+    def test_scoped_proposal_denies_local_destination_source_and_revocation(self):
+        request = self.scoped_request()
+        for change, reason in ((dict(local_preferred=True), 'local_preference'),
+                               (dict(reviewer='native-coordinator'), 'independent_review')):
+            with self.assertRaisesRegex(ValueError, reason):
+                self.call('begin', dict(request, external=dict(request['external'], **change)))
+        with self.assertRaisesRegex(ValueError, 'destination'):
+            self.call('begin', dict(request, provider='unapproved'))
+        begin = self.call('begin', request)
+        (self.repo / 'src/code.py').write_text('new source\n')
+        with self.assertRaisesRegex(ValueError, 'source_changed'):
+            self.call('dispatch', dict(request, attempt_token=begin['attempt_token']))
+        settings.disable(self.repo, dict(expected_revision=self.settings['revision']))
+        self.assertEqual(self.call('dispatch', dict(request, attempt_token=begin['attempt_token']))['fallback'],
+                         'openrouter_disabled')
+
     def test_begin_requires_saved_checkout_enablement_and_selected_store(self):
         self.publish()
         request = self.begin_request()

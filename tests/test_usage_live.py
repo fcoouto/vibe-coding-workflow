@@ -242,13 +242,13 @@ class LiveAdmissionTests(unittest.TestCase):
         self.assertEqual(len(counted.requests), 1)
         self.assertEqual(self.ledger.snapshot()['runs']['run']['calls']['count']['cost'], 7)
 
-    def test_smart_live_rejects_missing_calibration_without_transport(self):
+    def test_smart_live_uses_verified_profile_without_quota_calibration(self):
         _, proof = self.smart_candidate(calibrated=False)
         self.enable_legacy_smart()
-        with self.assertRaisesRegex(budget.BudgetError, 'native_calibration_unqualified'):
+        with self.assertRaisesRegex(budget.BudgetError, 'provider_request_rejected'):
             self.run_candidate(proof)
-        self.factory.assert_not_called()
-        self.resolver.assert_not_called()
+        self.factory.assert_called_once()
+        self.resolver.assert_called_once()
 
     def test_exact_count_cannot_increase_the_approved_cap(self):
         self.controller.enable(1)

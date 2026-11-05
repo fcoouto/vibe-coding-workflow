@@ -9,7 +9,7 @@ records the checks for this candidate separately from earlier live tests.
 ## Initial offline implementation
 
 Smart Balance/Manual selection, local configuration, maximum-cost admission,
-count/generation orchestration, native capacity, restart/replay protection and
+count/generation orchestration, native review, restart/replay protection and
 recovery have **68 passing offline tests**. Seven selected existing OpenRouter and
 native-review regressions pass. Package/skill validation and whitespace/link checks
 pass. Independent behavior/security review passed after scoped fixes.
@@ -54,11 +54,11 @@ The user revoked the auto-reload-OFF/provider-isolation requirement. Default rem
 OFF, but explicit local enablement now succeeds with a warning and no billing
 change. Credit/freshness/expiry stops recommend one native handoff, preserving all
 pending API accounting and required independent review. Unclaimed handoffs refresh
-current choices/capacity; one-time claims precede native host tools, and replay must
+current choices and reviewer readiness; one-time claims precede native host tools, and replay must
 observe rather than respawn. Actual native execution is not claimed by a queue entry.
 
 74 focused offline tests pass. Independent review found and verified fixes for
-stale handoff choices/capacity and native reserve freshness at first claim. Real
+stale handoff choices and one-use claim identity. Real
 adapter/authentication, request billing attribution and provider funding behavior
 remain unqualified. No actual user configuration was enabled by this change; no
 billing settings, purchases, live API requests or actual task handoff occurred.
@@ -132,7 +132,7 @@ safe OFF receipt. The Codex host owns approval and the one connector call.
 The authenticated transport uses verified TLS to the fixed OpenAI host and a
 one-shot ledger grant immediately before each POST. A credential failure before
 generation leaves a completed count charge in place, rejects generation as
-unsent, and retains the native task reserve. Connection preparation returns at
+unsent, and retains the task's review requirement. Connection preparation returns at
 the deadline. OS resolver work may finish later and closes any late socket
 without a POST. The setup helper stops its process group before reaping the
 leader, including when a writer survives an early Node exit.
@@ -151,8 +151,8 @@ grant row, pricing, approval cap, and distinct native reviewer to one run.
 Separate count and generation reservations recheck the same pin and cap.
 The final transaction rechecks checkout scope, source snapshots, and deadlines.
 A newer depleted or conflicting grant observation invalidates older evidence
-even when the new observation prevents a request. The review reserve survives
-both successful transport and conservative stops.
+even when the new observation prevents a request. Native review remains
+required after successful transport.
 
 122 focused offline tests passed, including duplicate run contention, scope
 revocation before dispatch, exact-count cap enforcement, and grant conflicts.
@@ -220,12 +220,12 @@ remain pending. All 15 focused tests and package validation passed.
 The [foreground procedure](../skills/manage-usage-routing/references/first-canary.md)
 binds one direct Codex user approval to the checkout, staged package, selected
 key, grant, fixed request and independent reviewer. The coordinator reads the
-native thread and quota tools directly. The local verifier checks their bindings.
+native thread tools directly. The local verifier checks their bindings.
 This qualifies foreground coordination only. Installed Desktop skill discovery
 and unattended execution remain separate.
 
 The disposable ledger rehearsal used fake transport connections. It sent one
-count and one generation, kept the native review allowance, returned the scope
+count and one generation, kept independent native review, returned the scope
 to OFF, and rejected a replay. A regression test reproduced activation committing
 before an exception, then verified that cleanup disables the owned revision.
 Astra independently confirmed the fix. All 135 focused offline tests passed.
@@ -254,14 +254,13 @@ plan. All 136 focused offline tests passed. The scope still reports OFF.
 
 Codex Desktop verified the direct approval against the staged candidate. The
 official connector created the approved project credential and the local bridge
-confirmed Keychain storage. The grant and native quota checks passed. One
+confirmed Keychain storage. The grant checks passed. One
 [free input count](https://help.openai.com/en/articles/4936856-understanding-and-counting-tokens)
 and one generation completed. GPT-6.1 Sol returned `READY`. The ledger recorded
 a $0.000700 generation reservation and a $0.000110 conservative usage estimate
 under the approved $0.05064 ceiling. Routing returned to OFF at revision 3.
 
-Astra independently accepted the result. A fresh quota read allowed the review
-reserve to be released, and the API accounting was retained. The Platform Usage
+Astra independently accepted the result. Task completion was recorded, and the API accounting was retained. The Platform Usage
 view showed the selected project and key with no matching activity yet. The
 estimate is local. Project billing attribution and grant settlement remain
 pending and must be checked before a further evaluation case.
@@ -272,7 +271,7 @@ The management skill loads setup, status, mode selection and proposal procedures
 as needed. Setup stays OFF. Explicit mode selection changes checkout consent
 without replacing the connection or shared budget. Offline tests exercise the
 typed Smart Balance runner, including qualification changes between count and
-generation and the native review reserve. The proposal instructions surface
+generation and the independent review requirement. The proposal instructions surface
 routing outcomes in chat and use existing optional Habblaud visibility for
 actual native reviewers and handoff workers.
 
@@ -286,12 +285,10 @@ shadow until class qualification. This slice made no live request.
 ## Foreground Codex host integration · 4 November 2026
 
 The [coordinator procedure](../skills/manage-usage-routing/references/codex-host.md)
-uses the installed helper to read native thread and quota receipts. Manual binds
+uses the installed helper to read native thread receipts. Manual binds
 one explicit task to its active approval. Smart Balance may reuse direct consent
 for an exact bounded batch in the same chat. Each dispatch binds the checkout,
-package, current settings, task, funding, price and distinct reviewer. Smart
-Balance uses the measured native allowance and preserves the review reserve.
-Missing or changed evidence stops dispatch, and the public CLI cannot send.
+package, current settings, task, funding, price and distinct reviewer. Missing or changed evidence stops dispatch, and the public CLI cannot send.
 
 All 147 focused offline tests passed. Synthetic checks exercised the bridge and
 shared ledger, including stale approval, replay, mismatched evidence, one task
@@ -308,8 +305,7 @@ qualification still require separate evidence.
 
 ## Codex Desktop host dry run · 4 November 2026
 
-The current Desktop chat supplied a genuine active-turn receipt and a supported
-weekly quota window. A native history read retrieved an earlier direct user turn
+The current Desktop chat supplied a genuine active-turn receipt. A native history read retrieved an earlier direct user turn
 in the same chat. Desktop returned its cursor at `page.nextCursor`. The original
 helper expected a top-level cursor, so Smart Balance could not recover earlier
 approval. The nested response fixture reproduced the failure and passed after
@@ -320,9 +316,7 @@ The packaged bridge prepared both modes with the actual Desktop receipts and
 denied genuine messages that lacked the exact plan approval. Separate disposable
 ledgers used synthetic approval, pricing, funding and transport to exercise the
 positive paths. Each mode recorded one simulated count and one simulated
-generation. Both results required native review and retained its reserve.
-Manual rejected replay. Smart Balance blocked a second task while that reserve
-was held. The harness denied network access and active ledger access, and
+generation. Both results required native review. Manual rejected replay. The harness denied network access and active ledger access, and
 forbade real HTTPS and credential resolution.
 
 Astra reviewed the candidate, harness and evidence. All 147 focused offline
@@ -353,15 +347,15 @@ OFF and made no live API request.
 ## Bounded live Manual host test · 4 November 2026
 
 The staged foreground host verified the exact native approval, selected grant,
-pricing, quota and reviewer readiness. It reused the existing Keychain binding.
+pricing and reviewer readiness. It reused the existing Keychain binding.
 One free count and one generation completed. GPT-6.1 Sol returned `MANUAL`, the
 exact requested word. Generation reserved $0.000710 after counting and recorded
 a conservative local cost of $0.000130. Combined retained accounting was
 $0.000240. The host returned routing to OFF at revision 5 with the run closed
 and the API slot clear.
 
-Astra independently accepted the result. A fresh quota read supported release
-of the review reserve while preserving the API ledger. The Platform project
+Astra independently accepted the result. Task completion was recorded while
+preserving the API ledger. The Platform project
 aggregate showed two requests, but the exact key filter still showed only the
 prior canary. Attribution for this request and grant settlement remain pending.
 This qualifies the tested one-shot Manual path.
@@ -411,8 +405,7 @@ The staged host froze the four proposals against the OFF configuration. The
 new API maximum is $0.03024. The cumulative local ceiling is $0.03048 with
 prior costs retained. The offline rehearsal proved that Manual restores OFF
 and preserves the saved profile after each case. It also proved that the next
-case requires the previous run to complete, independent review acceptance and
-native reserve release. All 150 focused offline tests and package validation
+case requires the previous run to complete, independent review acceptance and recorded task completion. All 150 focused offline tests and package validation
 passed. Astra independently reviewed the bound, consent and review lifecycle.
 Live pilot results and measured savings are pending. No pilot API calls ran.
 
@@ -420,8 +413,7 @@ Live pilot results and measured savings are pending. No pilot API calls ran.
 
 The exact approval admitted the first supervised Manual case. One free count
 and one generation completed. The generation's conservative local cost was
-$0.001655. The API slot cleared, routing returned to OFF, and the native review
-reserve was released after both answers were reviewed. No later case ran.
+$0.001655. The API slot cleared, routing returned to OFF, and both answers were independently reviewed. No later case ran.
 
 Astra scored the anonymized outputs against the frozen rubric. Both found the
 correct fix. The native answer tested the expiry instant alone. The API answer
@@ -450,7 +442,7 @@ The approved pilot completed four pairs. Astra independently scored both
 arms 3/3 on every frozen rubric. Four free counts and four generations used
 $0.008180 in conservative local accounting against the $0.03024 new cap.
 The host returned to OFF after each case. The final ledger had no open API
-slot or native reserves. No retry or paid fallback ran.
+slot. No retry or paid fallback ran.
 
 The weekly account-wide display stayed at 53% across arm and review readings.
 That granularity does not establish zero native use, isolate preparation, or
@@ -473,8 +465,7 @@ rejected the previous approval. Routing remains OFF pending exact approval.
 
 The linked-checkout input count completed. The runner rejected the first
 generation as `incomplete_response` and restored OFF. The parser did not
-retain a provider reason or validated usage for that response. The API slot
-and native review reserve remain held, with $0.004420 retained as maximum
+retain a provider reason or validated usage for that response. The API slot remains held, with $0.004420 retained as maximum
 exposure for the unresolved generation. No native coding arm, second case,
 retry or fallback ran. This pilot produced no quality or savings comparison.
 
@@ -483,7 +474,7 @@ retry or fallback ran. This pilot produced no quality or savings comparison.
 The selected project's Responses Logs returned no match for the exact client
 request ID. The original runner retained no provider identifiers, reason or
 usage. The scoped reconciliation command reported `manual_recovery_required`.
-At that point, the $0.004420 reservation, API slot and native reserve were held.
+At that point, the $0.004420 reservation and API slot were held.
 Routing was OFF, and no API request was sent during reconciliation.
 
 The updated runner retains allowlisted incomplete reasons, validated request
@@ -497,8 +488,7 @@ offline tests passed, and the staged candidate read the legacy pending record.
 
 A separate authorized local operation recorded the generation as
 `retired_unverified`. Readback showed routing OFF and the API slot clear. The
-$0.004420 remains included in the $0.014495 cumulative accounting, and the
-native review reserve is still held. Provider outcome and actual charge remain
+$0.004420 remains included in the $0.014495 cumulative accounting. Provider outcome and actual charge remain
 unknown. No API request, retry or fallback occurred during retirement.
 
 ## Delegation registration integration · 4 November 2026
@@ -527,5 +517,5 @@ In the live OpenRouter Desktop check, the native activity showed
 `Review totals via openrouter finished`. The first Habblaud badge read
 `Scout · GLM 5.3 Flash`. The OpenAI API preview showed `Scout · GPT-6.1 Sol`
 with synthetic settlement evidence. Live API registration and a Claude Code
-transport remain unqualified. The unresolved API charge and native review
-reserve stayed on hold during this integration.
+transport remain unqualified. The unresolved API charge stayed on hold during
+this integration.

@@ -62,6 +62,8 @@ The quote uses the highest input rate and total output including reasoning.
 Counting has its own maximum charge. A digest binds inputs without authenticating
 counts/prices or granting spending permission. Use synthetic inputs for tests.
 
+For reusable coding-source or automatic-selection permission, use the [shared permission contract](../../../clients/external-delegation.md#reusable-permission); preserve the existing budget and funding choices.
+
 ## Explicit local configuration
 
 `configure --cwd ...` accepts bounded stdin JSON with exactly:
@@ -74,6 +76,7 @@ counts/prices or granting spending permission. Use synthetic inputs for tests.
 - `policy`: `cycle`, `start`, `end`, `expiry`, `stop_at`, `ceiling`, `amount`,
   `grant_amount`, `pilot_limit`, `task_limit`;
 - `profile` as above; `class_name`; `mode` (`manual` or `smart`).
+- Optional `external_permission` follows that shared contract; omission preserves it and null revokes it.
 - Optional `production_budget: true` for an existing smoke-test configuration
   in the same organization and accounting cycle.
 
@@ -124,19 +127,14 @@ The coordinator's local `Controller.observe` retains a conservative balance
 after checking organization/project, USD, selected pool, expiry and source/age.
 For a comparative evaluation, `record_qualification` accepts `class_name`,
 `profile_digest`, `samples`, `quality_passed`, `net_native_saved`,
-`uncertainty`, `unit`, `native_calibrated`, `observed_at`, and
-`valid_until`. Use attributable `allowance_pp` deltas to report measured
-allowance savings. Mark unknown rounding or unrelated account
-activity that prevents attribution. Neither preview records nor their inputs
+`uncertainty`, `unit`, `observed_at`, and `valid_until`. Report attributable
+measurements in the stated unit and mark unrelated activity that prevents attribution. Neither preview records nor their inputs
 authorize transmission.
 
 A preview task contains exactly `task_id`, `run_id`, `class_name`, `packet`,
 `provider` (`auto`, `openai-api`, or explicit other provider),
 `local_preferred`, `api_only`, `reviewer_available`, `native`, and
-`snapshots`. Native evidence contains `account`, `task`, and `windows`;
-each window has `id`, `remaining_pp`, `resolution_pp`, `allowance_pp`,
-`observed_at`, and `reset_at`. Capacity values are integer percentage
-points. Snapshots contain `path` and `sha256` for unchanged files within
+`snapshots`. Native task identity contains `account`, `task`, and `windows: []`. Snapshots contain `path` and `sha256` for unchanged files within
 the selected checkout. Other-provider/local choices retain priority.
 
 ## Optional local checks
@@ -153,7 +151,7 @@ These checks use disposable SQLite and fake connections. Use the
 If evaluate returns `handoff_recommended:true`, use `handoff --cwd ...` with
 `{"task": <the bounded task>, "reason": <the decision reason>}`. The result includes
 one stable handoff ID, state, native brief, pending API accounting and mandatory
-review flags. Request again with fresh native evidence if capacity changes;
+review flags. Refresh an unclaimed handoff when task choices or reviewer readiness change;
 unclaimed handoffs respect the latest API-only/provider/reviewer choices. No source
 text is persisted in the handoff ledger.
 
@@ -162,7 +160,7 @@ Before existing native agent tools, call `claim_handoff --cwd ...` with
 Only `new_claim:true` permits that dispatch attempt under existing task authority.
 A replay returns `new_claim:false`; observe/reconcile the existing native attempt,
 never create another child. The claim is not proof of agent execution or review.
-Explicit API-only/provider choices require resolution; unavailable native capacity
+Explicit API-only/provider choices require resolution; a missing reviewer
 waits rather than switching to another paid API. The existing native workflow owns
 actual child identity, permissions, completion and fresh independent review.
 

@@ -62,12 +62,12 @@ class Plan:
     account: str
     reviewer: str
     pool: str
-    native_allowance_pp: int
     maximum_usd_micros: int
     quoted_usd_micros: int
     proposal_digests: tuple[str, ...]
     created_at: int
     expires_at: int
+    native_allowance_pp: int | None = None
     manual_price_window: tuple[int, int] | None = None
     pilot_digest: str | None = None
     pilot_revision: int | None = None
@@ -109,7 +109,7 @@ def _settings(control, data, *, one_shot=False):
     require('canary_owner' not in config and 'manual_test_owner' not in config, 'live_mode_unqualified')
     if one_shot:
         require(config['enabled'] is False and config['requested_mode'] == 'manual', 'manual_test_requires_off')
-        require(data['slot'] is None and not data['native'], 'manual_test_in_use')
+        require(data['slot'] is None, 'manual_test_in_use')
     else:
         require(config['enabled'] is True and config['disabled'] is False
                 and config['requested_mode'] in ('manual', 'smart'), 'live_mode_unqualified')
@@ -134,7 +134,7 @@ def _execution_proposal(proposal):
 
 
 def _proposal(control, config, proposal, now):
-    fields(proposal, _PROPOSAL_FIELDS)
+    fields(proposal, _PROPOSAL_FIELDS + (' external' if isinstance(proposal, dict) and 'external' in proposal else ''))
     name(proposal['task_id'])
     require(proposal['class_name'] == config['class_name'], 'task_class_unqualified')
     require((proposal['provider'] == 'openai-api'
@@ -142,6 +142,7 @@ def _proposal(control, config, proposal, now):
             and proposal['local_preferred'] is False and type(proposal['api_only']) is bool,
             'explicit_api_selection_required')
     control._snapshots(proposal['snapshots'])
+    control._external(config, proposal)
     quote = usage_routing.quote(proposal['packet'], config['profile'], now)
     return quote['maximum_usd_micros'] + quote['count_maximum_usd_micros']
 
@@ -151,8 +152,8 @@ def _funding_pool(policy, pool):
             and (policy['ceiling'] != 'subscription_benefit' or pool == 'benefit'), 'pool_unqualified')
 
 
-def freeze(cwd, proposals, *, thread_snapshot, native_limits, reviewer, expires_at,
-           maximum_usd_micros=None, pool='benefit', manual_allowance_pp=5, manual_price=None, pilot_digest=None,
+def freeze(cwd, proposals, *, thread_snapshot, native_limits=None, reviewer, expires_at,
+           maximum_usd_micros=None, pool='benefit', manual_allowance_pp=None, manual_price=None, pilot_digest=None,
            standing_consent=False):
     """Pin the exact proposals and limits without dispatching or writing settings."""
     now = int(time.time())
@@ -196,7 +197,10 @@ def freeze(cwd, proposals, *, thread_snapshot, native_limits, reviewer, expires_
                 config = _temporary_config(config, manual_price, now, pilot_output_limit=pilot_output_limit)
             proposals = [_execution_proposal(proposal) for proposal in proposals]
             if standing_consent:
-                require(len(proposals) == 1 and proposals[0].get('snapshots') == [],
+                require(all('external' not in item or item['external'].get('automatic') is True for item in proposals),
+                        'external_automatic_selection_denied')
+                require(len(proposals) == 1 and (proposals[0].get('snapshots') == []
+                        or proposals[0].get('external', {}).get('automatic') is True),
                         'standing_source_scope_exceeded')
             maximum = sum(_proposal(control, config, proposal, now) for proposal in proposals)
             if maximum_usd_micros is None or one_shot:
@@ -208,20 +212,15 @@ def freeze(cwd, proposals, *, thread_snapshot, native_limits, reviewer, expires_
                     require(exposure <= maximum_usd_micros, 'live_cap_exceeded')
             require(len({proposal['task_id'] for proposal in proposals}) == len(proposals)
                     and maximum <= maximum_usd_micros, 'codex_proposals_invalid')
-            if live_consent:
-                allowance = usage_admission.NATIVE_REVIEW_ALLOWANCE_PP
-            elif mode == 'manual':
-                allowance = manual_allowance_pp
-            else:
-                allowance = usage_admission.smart_native_allowance(usage_admission.smart_qualification(config, now))
-            account = name(native_limits['accountId'])
-            native_capacity(account, native_limits, now, now, allowance)
+            account = native_limits.get('accountId') if isinstance(native_limits, dict) else None
+            if not isinstance(account, str) or not account.strip():
+                account = thread_id
             return Plan(
                 thread_id=thread_id, host_id=host_id, checkout=checkout, scope=control.scope,
                 package_digest=package_digest(), settings_digest=settings_digest, mode=mode,
                 organization=config['binding']['organization'], project=config['binding']['project'],
                 model=config['profile']['model'], reasoning=config['profile']['reasoning'], account=account,
-                reviewer=reviewer_id, pool=pool, native_allowance_pp=allowance, maximum_usd_micros=maximum_usd_micros,
+                reviewer=reviewer_id, pool=pool, maximum_usd_micros=maximum_usd_micros,
                 quoted_usd_micros=maximum, proposal_digests=tuple(usage_admission.digest(item) for item in proposals),
                 created_at=now, expires_at=expires_at,
                 manual_price_window=(manual_price.observed_at, manual_price.valid_until) if one_shot else None,
@@ -265,7 +264,8 @@ def _task_authorization(plan, proposal, proposal_digest, current, previous, sele
             and usage_admission.live_consent_current(config, policy, now), 'live_consent_required')
     if plan.standing_consent:
         require(plan.mode == 'smart' and selection is None and len(plan.proposal_digests) == 1
-                and proposal['snapshots'] == [], 'standing_source_scope_exceeded')
+                and (proposal['snapshots'] == [] or proposal.get('external', {}).get('automatic') is True),
+                'standing_source_scope_exceeded')
         # Refreezing one task must not create another automatic attempt.
         key = ['standing', plan.scope, proposal['task_id']]
         return now, 'codex-api-' + usage_admission.digest(key)
@@ -355,7 +355,7 @@ def _publish_generation(plan, task, evidence, result, habblaud, *, visibility):
 
 
 def execute(plan, proposal, *, thread_snapshot, approval_snapshot=None, reviewer,
-            native_limits, native_observed_at, grant, price, prior_review=None,
+            native_limits=None, native_observed_at=None, grant, price, prior_review=None,
             habblaud=None, generation_ready=None, manual_selection=None):
     """Issue exact, short-lived admission from current trusted Codex observations."""
     now = int(time.time())
@@ -388,7 +388,7 @@ def execute(plan, proposal, *, thread_snapshot, approval_snapshot=None, reviewer
             profile = config['profile']
             require(type(price) is Price and price == Price(usage_admission.digest(profile),
                     profile['verified_at'], profile['valid_until']), 'pricing_stale')
-            native = native_capacity(plan.account, native_limits, native_observed_at, now, plan.native_allowance_pp)
+            native = native_capacity(plan.account)
             qualification = None
             if plan.mode == 'smart' and not usage_admission.live_consent_current(config, policy, now):
                 record = usage_admission.smart_qualification(config, now)

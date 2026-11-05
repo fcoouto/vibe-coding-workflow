@@ -14,7 +14,7 @@ an expressly selected test.
 Default Off. After Keychain setup and explicit activation, Manual can route
 the first explicitly selected eligible task. Smart Balance can route the first
 eligible task within standing consent. Trusted admission checks scope, funding,
-price, capacity and independent review before transmission.
+price and independent review before transmission.
 
 Keep the coordinator and existing provider choices. Use approved existing
 credits, retain uncertain costs and warn about possible provider-side funding

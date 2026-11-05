@@ -63,12 +63,6 @@ class RoutingTests(unittest.TestCase):
             with self.subTest(packet=packet, profile=profile, now=now), self.assertRaises(BudgetError):
                 routing.quote(packet, profile, now)
 
-    def test_calibration_includes_rounding_uncertainty_and_rejects_unknown_semantics(self):
-        self.assertEqual(routing.calibrate([0], 1, True), 2)
-        self.assertEqual(routing.calibrate([2, 3], 2, True), 10)
-        for samples, resolution, qualified in [([],1,True),([0],0,True),([0],1,False),([True],1,True)]:
-            with self.assertRaises(BudgetError): routing.calibrate(samples,resolution,qualified)
-
     def test_cli_status_and_quote_are_offline_and_bounded(self):
         command = [sys.executable, '-I', '-B', 'scripts/usage_routing.py']
         result = subprocess.run(command + ['status', '--cwd', '.'], capture_output=True, text=True)

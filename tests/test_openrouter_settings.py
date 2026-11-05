@@ -53,6 +53,19 @@ class SettingsTests(unittest.TestCase):
         record.update(version=1, revision=2, enabled=True)
         self.path.write_text(json.dumps(record))
 
+    def test_optional_permission_preserves_omitted_legacy_and_explicit_no_expiry(self):
+        from tests.test_external_delegation import permission
+        consent = permission('openrouter', 'worker')
+        first = self.settings.configure(self.repo, dict(self.request, external_permission=consent))
+        self.assertEqual(first['external_permission'], consent)
+        retained = self.settings.configure(self.repo, dict(self.request, expected_revision=first['revision']))
+        self.assertEqual(retained['external_permission'], consent)
+        self.assertIsNone(retained['external_permission']['valid_until'])
+        removed = self.settings.configure(self.repo, dict(self.request, expected_revision=retained['revision'],
+                                                          external_permission=None))
+        self.assertIsNone(removed['external_permission'])
+        self.assertFalse(removed['enabled'])
+
     def test_legacy_worker_consent_is_readable_but_cannot_admit(self):
         self.legacy_worker_consent()
         before = self.snapshot()

@@ -24,6 +24,8 @@ Apply with the [shared contract rules](00-index.md).
 - Apply the test-first and self-review procedure in [Task Planning](02-task-planning.md#planning-and-verification) to each assignment; parallel dispatch preserves it.
 - Split work by the [outcome ownership rules](#outcome-ownership). Use narrow specialist roles with distinct triggers; retain a standing role only for a recurring need.
 
+When a bounded assignment is a useful delegation candidate, apply the [shared external selection and consent contract](../clients/external-delegation.md) before native implementation dispatch. Preserve explicit choices and the approved local preference; consideration does not transmit or spend. Load only the chosen external executor.
+
 When considering an already authorized Usage Routing proposal, load its [proposal selection, verification and recovery procedure](../skills/manage-usage-routing/references/delegation.md). Load routing setup only for explicit routing management.
 
 Before optional automatic native delegation, honor the [project preference](../skills/workstreams/references/procedure.md) in applicable project instructions. Onboarding and the Workstreams skill manage this same Enabled/Disabled choice. It needs no managed runtime. Explicit delegation and required independent review remain available when disabled or not configured. Preserve explicitly selected protections.

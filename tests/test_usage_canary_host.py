@@ -52,8 +52,7 @@ class CanaryHostTests(unittest.TestCase):
         evidence, native = self.issue()
         task = usage_canary.task_for(evidence.approval_id, self.binding, native)
         usage_canary.validate(evidence, binding=self.binding, profile=self.config['profile'], task=task, now=106)
-        self.assertEqual(native['windows'][0]['remaining_pp'], 51)
-        self.assertEqual(native['windows'][0]['allowance_pp'], 5)
+        self.assertEqual(native['windows'], [])
         self.assertEqual(evidence.approval_until, 200)
         self.message['id'] = 'another-direct-message'
         repeated, _ = self.issue()
@@ -93,12 +92,13 @@ class CanaryHostTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(BudgetError):
                 self.issue(**change)
 
-    def test_missing_or_changed_quota_is_not_capacity(self):
-        for limits in (dict(self.limits, accountId='other'), dict(self.limits, ordinaryUsageAllowed=False),
+    def test_canary_ignores_unavailable_or_changed_quota(self):
+        for limits in (None, dict(self.limits, accountId='other'), dict(self.limits, ordinaryUsageAllowed=False),
                        dict(self.limits, rateLimitsByLimitId={}), dict(self.limits, rateLimitsByLimitId={
                            **self.limits['rateLimitsByLimitId'], 'unknown': {}})):
-            with self.assertRaises(BudgetError):
-                self.issue(native_limits=limits)
+            evidence, native = self.issue(native_limits=limits)
+            self.assertEqual(native['windows'], [])
+            self.assertEqual(evidence.reviewer, self.plan.reviewer)
 
     @contextmanager
     def controller(self):

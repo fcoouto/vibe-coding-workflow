@@ -91,6 +91,107 @@ class CodexUsageHostTests(unittest.TestCase):
                        grant=self.grant, price=self.price) | overrides
         return self.host.execute(plan, proposal if proposal is not None else self.proposal(), **options)
 
+    def test_authorized_api_runs_with_low_exhausted_or_unavailable_native_quota(self):
+        self.configure('smart', policy=dict(POLICY, pilot_limit=None, task_limit=None))
+        for index, limits in enumerate((dict(self.limits, rateLimitsByLimitId={
+                'codex': dict(self.limits['rateLimitsByLimitId']['codex'], primary=dict(
+                    self.limits['rateLimitsByLimitId']['codex']['primary'], usedPercent=85))}),
+                dict(self.limits, ordinaryUsageAllowed=False, rateLimitsByLimitId={
+                    'codex': dict(self.limits['rateLimitsByLimitId']['codex'], spendControlReached=True,
+                        primary=dict(self.limits['rateLimitsByLimitId']['codex']['primary'], usedPercent=100))}), None)):
+            with self.subTest(quota=index):
+                proposal = self.proposal(task_id='quota-' + str(index), provider='auto')
+                plan = self.freeze(proposal, standing_consent=True, native_limits=limits, maximum_usd_micros=None)
+                counted = Connection(Response(dict(object='response.input_tokens', input_tokens=1200)))
+                reply = completed()
+                reply['model'] = PROFILE['model']
+                reply['usage'].update(input_tokens=1200, total_tokens=1217)
+                connections = iter((counted, Connection(Response(reply))))
+                self.dispatch.side_effect = lambda _, task, evidence: self.control._run_live(
+                    task, evidence, connection_factory=lambda *_: next(connections),
+                    credential_resolver=lambda _: b'synthetic-key')
+                result = self.execute(plan, proposal, native_limits=limits, native_observed_at=None,
+                                      thread_snapshot=self.receipt())
+                self.assertTrue(result['requires_native_review'])
+                self.assertFalse(result['accepted'])
+                self.assertEqual(len(counted.requests), 1)
+                with self.assertRaisesRegex(BudgetError, 'independent_review_unavailable'):
+                    self.execute(plan, proposal, native_limits=limits,
+                        reviewer=self.host.Reviewer('coordinator', 'coordinator'))
+        self.assertEqual(len(self.ledger.snapshot()['runs']), 3)
+
+    def scoped_source_proposal(self):
+        from runtime import external_delegation as external
+        from tests.test_external_delegation import permission
+        consent = permission(model=PROFILE['model'], effort=PROFILE['reasoning'])
+        self.control.configure(dict(version=2, expected_revision=0, expected_org_revision=0,
+            binding=self.binding, policy=dict(POLICY, pilot_limit=None, task_limit=None), profile=PROFILE,
+            class_name='investigation', mode='smart', external_permission=consent))
+        self.control.enable(1)
+        (self.root / 'src').mkdir()
+        source = self.root / 'src/code.py'
+        source.write_text('value = 1\n')
+        packet = external.prepare(self.root, consent, [dict(kind='source', path='src/code.py')])
+        proposal = self.proposal(provider='auto', packet=dict(PACKET, text=packet['text']),
+            snapshots=packet['snapshots'], external=dict(packet['binding'], automatic=True, local_preferred=False))
+        return source, proposal
+
+    def test_scoped_standing_source_is_bound_and_rechecked(self):
+        source, proposal = self.scoped_source_proposal()
+        plan = self.freeze(proposal, standing_consent=True, maximum_usd_micros=None)
+        self.execute(plan, proposal, thread_snapshot=self.receipt())
+        self.assertTrue(self.dispatch.call_args.args[1]['reviewer_available'])
+        self.assertIsNone(self.ledger.snapshot()['organizations']['org']['policy']['pilot_limit'])
+        with self.assertRaisesRegex(BudgetError, 'external_packet_changed'):
+            self.freeze(dict(proposal, packet=dict(proposal['packet'], text='unrelated copied text')),
+                        standing_consent=True, maximum_usd_micros=None)
+        with self.assertRaises(BudgetError):
+            self.freeze(dict(proposal, local_preferred=True), standing_consent=True, maximum_usd_micros=None)
+        source.write_text('value = 2\n')
+        self.dispatch.reset_mock()
+        with self.assertRaises(BudgetError):
+            self.execute(plan, proposal, thread_snapshot=self.receipt())
+        self.dispatch.assert_not_called()
+        self.control.disable(2)
+        with self.assertRaises(BudgetError):
+            self.execute(plan, proposal, thread_snapshot=self.receipt())
+
+    def test_scoped_source_changed_after_count_keeps_charge_and_blocks_generation(self):
+        source, proposal = self.scoped_source_proposal()
+        plan = self.freeze(proposal, standing_consent=True, maximum_usd_micros=None)
+        counted = Connection(Response(dict(object='response.input_tokens', input_tokens=1200)))
+        generated = Connection(Response(completed()))
+        def connection(*_):
+            if not counted.requests:
+                return counted
+            source.write_text('changed before final generation grant')
+            return generated
+        self.dispatch.side_effect = lambda _, task, evidence: self.control._run_live(
+            task, evidence, connection_factory=connection, credential_resolver=lambda _: b'synthetic-key')
+        with self.assertRaisesRegex(BudgetError, 'dispatch_admission_denied'):
+            self.execute(plan, proposal, thread_snapshot=self.receipt())
+        self.assertEqual(len(counted.requests), 1)
+        self.assertEqual(generated.requests, [])
+        run = next(iter(self.ledger.snapshot()['runs'].values()))
+        self.assertEqual(run['calls']['count']['state'], 'completed')
+        self.assertEqual(run['calls']['count']['cost'], PROFILE['count_maximum'])
+
+    def test_scoped_uncertain_attempt_cannot_resend(self):
+        from runtime.openai_api import TransportError
+        _, proposal = self.scoped_source_proposal()
+        plan = self.freeze(proposal, standing_consent=True, maximum_usd_micros=None)
+        connection = Connection(Response({}), error=OSError('synthetic transport failure'))
+        self.dispatch.side_effect = lambda _, task, evidence: self.control._run_live(
+            task, evidence, connection_factory=lambda *_: connection, credential_resolver=lambda _: b'synthetic-key')
+        with self.assertRaises(TransportError):
+            self.execute(plan, proposal, thread_snapshot=self.receipt())
+        with self.assertRaisesRegex(BudgetError, 'live_run_id_already_used'):
+            self.execute(plan, proposal, thread_snapshot=self.receipt())
+        self.assertEqual(len(connection.requests), 1)
+        run = next(iter(self.ledger.snapshot()['runs'].values()))
+        self.assertEqual(run['calls']['count']['state'], 'unresolved')
+        self.assertIsNone(run['calls']['count']['cost'])
+
     def test_default_off_and_non_explicit_manual_proposals_cannot_freeze(self):
         self.configure(enabled=False)
         before = self.ledger.snapshot()
@@ -131,7 +232,7 @@ class CodexUsageHostTests(unittest.TestCase):
         self.assertTrue(task['reviewer_available'])
         self.assertEqual(task['native']['account'], 'account')
         self.assertEqual(task['native']['task'], 'task')
-        self.assertEqual(task['native']['windows'][0]['allowance_pp'], 5)
+        self.assertEqual(task['native']['windows'], [])
         self.assertEqual(evidence.task_digest, usage_admission.digest(task))
         self.assertEqual((evidence.coordinator, evidence.reviewer), ('coordinator', 'independent-reviewer'))
         self.assertEqual(evidence.maximum_usd_micros, 100)
@@ -327,7 +428,7 @@ class CodexUsageHostTests(unittest.TestCase):
         continuation = self.receipt('Continue the approved batch.', turn='later', started=108)
         options = dict(price=price, thread_snapshot=continuation, approval_snapshot=completed_approval,
                        when=109, native_observed_at=108)
-        with self.assertRaisesRegex(BudgetError, 'manual_test_in_use'):
+        with self.assertRaisesRegex(BudgetError, 'manual_pilot_prior_case_incomplete'):
             self.execute(plan, second, **options)
         post_review = dict(self.host.native_capacity('account', self.limits, 110, 110, 5), task='task')
         self.ledger.release_native('account', 'task', post_review, 110)
@@ -359,7 +460,7 @@ class CodexUsageHostTests(unittest.TestCase):
         self.assertNotEqual(calls[0][1]['run_id'], calls[1][1]['run_id'])
         self.assertEqual(calls[0][1]['run_id'], calls[2][1]['run_id'])
         for _, task, evidence in calls:
-            self.assertEqual(task['native']['windows'][0]['allowance_pp'], 7)
+            self.assertEqual(task['native']['windows'], [])
             self.assertEqual(evidence.task_digest, usage_admission.digest(task))
             self.assertIsNotNone(evidence.qualification_digest)
             self.assertEqual(evidence.maximum_usd_micros, 100)
@@ -380,7 +481,7 @@ class CodexUsageHostTests(unittest.TestCase):
         first_plan = self.freeze(proposal, standing_consent=True)
         self.execute(first_plan, proposal, thread_snapshot=self.receipt('Investigate the issue.', started=105))
         _, task, evidence = self.dispatch.call_args.args
-        self.assertEqual(task['native']['windows'][0]['allowance_pp'], 5)
+        self.assertEqual(task['native']['windows'], [])
         self.assertIsNone(evidence.qualification_digest)
         self.now = 107
         second_plan = self.freeze(proposal, standing_consent=True,
@@ -539,7 +640,7 @@ class CodexUsageHostTests(unittest.TestCase):
                 self.assertFalse(result['accepted'])
                 self.assertEqual(result['visibility'], dict(delivered=False, reason='generation_unconfirmed'))
 
-    def test_smart_host_and_runner_keep_one_task_through_review(self):
+    def test_smart_host_and_runner_preserve_review_and_attempt_identity(self):
         self.configure('smart')
         first = self.proposal(provider='auto')
         second = self.proposal(task_id='second', provider='auto')
@@ -559,8 +660,6 @@ class CodexUsageHostTests(unittest.TestCase):
         self.assertFalse(result['accepted'])
         self.assertTrue(result['requires_native_review'])
         self.assertEqual(len(self.ledger.snapshot()['native']), 1)
-        with self.assertRaisesRegex(BudgetError, 'native_task_outstanding'):
-            self.execute(plan, second, thread_snapshot=approved)
         with self.assertRaisesRegex(BudgetError, 'live_run_id_already_used'):
             self.execute(plan, first, thread_snapshot=approved)
         self.assertEqual([conn.requests[0][1] for conn in (counted, generated)],

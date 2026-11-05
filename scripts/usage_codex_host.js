@@ -47,13 +47,11 @@
         if (!approval) throw new Error('Prior Codex approval unavailable');
     }
 
-    const nativeObservedAt = Math.floor(Date.now() / 1000);
-    const nativeLimits = result(await tools.mcp__codex_app__get_usage_limits({}));
-    const frame = {action, checkout, thread_snapshot: current, reviewer, native_limits: nativeLimits};
+    const frame = {action, checkout, thread_snapshot: current, reviewer};
     if (action === 'freeze') {
         Object.assign(frame, {proposals: request.proposals, maximum_usd_micros: request.maximumUsdMicros,
             expires_at: request.expiresAt, pool: request.pool ?? 'benefit',
-            manual_allowance_pp: request.manualAllowancePp ?? 5, manual_price: request.manualPrice ?? null,
+            manual_price: request.manualPrice ?? null,
             pilot_digest: request.pilotDigest ?? null, standing_consent: request.standingConsent ?? false});
     } else {
         if (request.grant?.pool === 'benefit') {
@@ -64,7 +62,7 @@
             }
         }
         Object.assign(frame, {plan, proposal: request.proposal, approval_snapshot: approval,
-            native_observed_at: nativeObservedAt, grant: request.grant, price: request.price,
+            grant: request.grant, price: request.price,
             prior_review: request.priorReview ?? null, habblaud: request.habblaud,
             manual_selection: request.manualSelection ?? null});
     }

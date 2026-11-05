@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from runtime import startup, usage_admission, usage_credentials
+from runtime import startup, usage_admission, usage_credentials, external_delegation
 from runtime.usage_budget import BudgetError, FRESH_SECONDS, fields, integer, name, require
 
 PACKAGE = Path(__file__).resolve().parents[1]
@@ -13,7 +13,7 @@ FUNDING_WARNING = ('Grant-only funding is best effort. Account auto-reload may b
                    'the provider may consume other funding; local limits cannot guarantee otherwise.')
 HANDOFF_REASONS = frozenset(('insufficient_headroom', 'balance_stale_or_missing',
     'expiry_or_cycle_boundary', 'evidence_deadline_expired', 'observation_stale',
-    'request_in_flight', 'native_capacity_expired'))
+    'request_in_flight'))
 
 
 def status(cwd=None):
@@ -97,19 +97,6 @@ def quote(packet, profile, now):
                 count_maximum_usd_micros=profile['count_maximum'], simulation_only=True)
 
 
-def calibrate(samples, resolution_pp, rounding_qualified):
-    """Fixed native allowance; never infer zero consumption from rounded usage."""
-    require(rounding_qualified is True and type(samples) is list and 0 < len(samples) <= 100,
-            'native_calibration_unqualified')
-    resolution = integer(resolution_pp)
-    require(0 < resolution <= 100, 'native_calibration_unqualified')
-    for value in samples: integer(value)
-    allowance = 2 * (max(samples) + resolution)
-    allowance = ((allowance + resolution - 1) // resolution) * resolution
-    require(allowance <= 100, 'native_allowance_unaffordable')
-    return allowance
-
-
 def profile_digest(profile):
     return hashlib.sha256(json.dumps(profile, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
 
@@ -133,7 +120,11 @@ class Controller:
     def configure(self, request):
         expected = 'version expected_revision expected_org_revision binding policy profile class_name mode'
         convert_budget = isinstance(request, dict) and 'production_budget' in request
-        fields(request, expected + (' production_budget' if convert_budget else ''))
+        fields(request, expected + (' production_budget' if convert_budget else '')
+               + (' external_permission' if isinstance(request, dict) and 'external_permission' in request else ''))
+        if request.get('external_permission') is not None:
+            try: external_delegation.validate_permission(request['external_permission'])
+            except ValueError as error: raise BudgetError(str(error)) from None
         version = request['version']
         require(type(version) is int and version in (1, 2), 'invalid_version')
         require(not convert_budget or (version == 2 and request['production_budget'] is True),
@@ -174,6 +165,9 @@ class Controller:
                 requested_mode=request['mode'], enabled=False, disabled=False, live_consent=False,
                 production_budget=same_canary_cycle and (convert_budget or old.get('production_budget') is True),
                 qualification=None, qualification_revision=0)
+            permission = request.get('external_permission', old.get('external_permission') if old else None)
+            if permission is not None:
+                records[self.scope]['external_permission'] = permission
         return self.status()
 
     def status(self):
@@ -202,7 +196,7 @@ class Controller:
                     warnings=[FUNDING_WARNING],
                     simulation_only=True, requested_mode=config['requested_mode'] if config else None,
                     revision=config['revision'] if config else 0,
-                    reason=reason)
+                    external_permission=config.get('external_permission') if config else None, reason=reason)
 
     def enable(self, expected_revision, *, mode=None):
         integer(expected_revision)
@@ -237,15 +231,15 @@ class Controller:
         return self.status()
 
     def record_qualification(self, record):
-        expected = 'class_name profile_digest samples quality_passed net_native_saved uncertainty unit native_calibrated observed_at valid_until'
+        expected = 'class_name profile_digest samples quality_passed net_native_saved uncertainty unit observed_at valid_until'
+        if isinstance(record, dict) and 'native_calibrated' in record:
+            expected += ' native_calibrated'
         if isinstance(record, dict) and 'native_allowance_pp' in record:
             expected += ' native_allowance_pp'
-            usage_admission.smart_native_allowance(record)
         fields(record, expected)
         for field in ('samples','net_native_saved','uncertainty','observed_at','valid_until'):
             integer(record[field])
-        for field in ('quality_passed','native_calibrated'):
-            require(type(record[field]) is bool, 'invalid_qualification')
+        require(type(record['quality_passed']) is bool, 'invalid_qualification')
         require(record['observed_at'] <= self.clock() < record['valid_until'], 'qualification_stale')
         name(record['unit'])
         with self.ledger.transaction() as data:
@@ -288,8 +282,21 @@ class Controller:
                     and path.is_file() and path.stat().st_size <= MAX_INPUT, 'snapshot_changed')
             require(hashlib.sha256(path.read_bytes()).hexdigest() == snapshot['sha256'], 'snapshot_changed')
 
+    def _external(self, config, task):
+        if 'external' not in task:
+            return
+        try:
+            packet = external_delegation.check(self.root, config.get('external_permission'), task['external'],
+                service='openai-api', mode='proposal', model=config['profile']['model'], provider='openai',
+                effort=config['profile']['reasoning'], class_name=task['class_name'], now=self.clock())
+            require(task['packet']['text'] == packet['text'] and task['snapshots'] == packet['snapshots'],
+                    'external_packet_changed')
+        except ValueError as error:
+            raise BudgetError(str(error)) from None
+
     def _evaluate(self, data, task, *, pin_qualification=False, live=False):
-        fields(task, 'task_id run_id class_name packet provider local_preferred api_only reviewer_available native snapshots')
+        fields(task, 'task_id run_id class_name packet provider local_preferred api_only reviewer_available native snapshots'
+               + (' external' if isinstance(task, dict) and 'external' in task else ''))
         for field in ('local_preferred','api_only','reviewer_available'):
             require(type(task[field]) is bool, 'invalid_task')
         for field in ('task_id','run_id','class_name','provider'): name(task[field])
@@ -304,6 +311,7 @@ class Controller:
         require(task['class_name'] == config['class_name'], 'task_class_unqualified')
         require(org['revision'] == config['org_revision'], 'policy_revision_changed')
         self._snapshots(task['snapshots'])
+        self._external(config, task)
         bound = quote(task['packet'], config['profile'], self.clock())
         require(task['native'].get('task') == task['task_id'], 'native_task_mismatch')
         # Operate on a deserialized snapshot: selection must not reserve or write.
@@ -332,7 +340,8 @@ class Controller:
         """Queue remaining work for existing native dispatch; never clears API exposure."""
         import copy
         require(reason in HANDOFF_REASONS, 'unsupported_handoff_reason')
-        fields(task, 'task_id run_id class_name packet provider local_preferred api_only reviewer_available native snapshots')
+        fields(task, 'task_id run_id class_name packet provider local_preferred api_only reviewer_available native snapshots'
+               + (' external' if isinstance(task, dict) and 'external' in task else ''))
         name(task['task_id']); name(task['run_id']); name(task['provider'])
         require(type(task['api_only']) is bool and type(task['reviewer_available']) is bool, 'invalid_task')
         require(type(task['packet']) is dict and type(task['packet'].get('text')) is str and
@@ -352,13 +361,13 @@ class Controller:
                 if task['api_only'] or task['provider'] not in ('auto','openai-api','native'):
                     state = 'user_choice_required'
                 elif not task['reviewer_available']:
-                    state = 'waiting_for_native_capacity'
+                    state = 'waiting_for_native_review'
                 else:
                     try:
                         require(task['native'].get('task') == task['task_id'], 'native_task_mismatch')
                         self.ledger._native(copy.deepcopy(data),task['native'],self.clock())
                     except BudgetError:
-                        state = 'waiting_for_native_capacity'
+                        state = 'native_task_unavailable'
                 require(record is not None or len(records) < 1000, 'handoff_capacity_reached')
                 record = dict(handoff_id=key, state=state, reason=reason, task_id=task['task_id'],
                     packet_digest=packet_id, scope=self.scope, revision=config['revision'],
@@ -519,6 +528,7 @@ class Controller:
                 if scope_check is not None:
                     scope_check()
                 self._snapshots(task['snapshots'])
+                self._external(self._config(data), task)
 
         require(decision['decision'] == 'eligible', decision['reason'])
         config = self._config(data)
@@ -527,8 +537,7 @@ class Controller:
         now = self.clock(); org_id = binding['organization']; run_id = task['run_id']
         if evidence is None:
             deadline = min(now+300, profile['valid_until'],
-                           data['organizations'][org_id]['policy']['stop_at'],
-                           min(min(w['reset_at'], w['observed_at'] + FRESH_SECONDS) for w in task['native']['windows']))
+                           data['organizations'][org_id]['policy']['stop_at'])
         else:
             deadline = min(deadline, now + 300)
         packet_id = openai_api.packet_digest(packet)

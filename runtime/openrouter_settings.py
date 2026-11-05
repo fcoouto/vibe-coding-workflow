@@ -9,7 +9,7 @@ import stat
 from types import SimpleNamespace
 import uuid
 
-from runtime import changes, local_ownership, onboarding, startup, state
+from runtime import changes, local_ownership, onboarding, startup, state, external_delegation
 
 PACKAGE = Path(__file__).resolve().parents[1]
 BASIC_STORAGE = Path.home() / ".vcw-openrouter-consent"
@@ -177,11 +177,13 @@ class Store:
         if self.stale_enrollment:
             startup._canonical_hash(binding['enrollment'])
             binding = dict(binding, enrollment=self.binding['enrollment'])
-        require(set(record) == FIELDS and type(record['version']) is int and record['version'] in (1, 2)
+        require(FIELDS <= set(record) <= FIELDS | {'external_permission'} and type(record['version']) is int and record['version'] in (1, 2)
                 and integer(record['revision']) and record['revision'] > 0
                 and type(record['enabled']) is bool and binding == self.binding,
                 'invalid_or_changed_openrouter_configuration')
         validate_routes(record['routes'])
+        if record.get('external_permission') is not None:
+            external_delegation.validate_permission(record['external_permission'])
         if isinstance(self.scope, BasicWorkerScope):
             require(record['routes'] == ['workers'], 'openrouter_basic_workers_only')
         if 'workers' in record['routes']:
@@ -226,7 +228,8 @@ class Store:
             except (SettingsError, startup.StartupError, OSError, RuntimeError):
                 readiness = 'unavailable'
         return dict(ok=True, control_scope='checkout', configured=record is not None,
-            revision=record['revision'] if record else 0, enabled=record['enabled'] if record else False,
+            revision=record['revision'] if record else 0,
+            external_permission=record.get('external_permission') if record else None, enabled=record['enabled'] if record else False,
             routes=record['routes'] if record else [], scope_id=self.binding['scope_id'],
             consent_version=record['version'] if record else None,
             worker_capability=('renewal_required' if renewal else 'read_only') if worker else 'not_applicable',
@@ -302,7 +305,7 @@ def status(cwd):
 def operate(cwd, action, request):
     require(action in ('configure', 'enable', 'disable'), 'invalid_openrouter_action')
     fields = {'expected_revision', 'routes', 'opencode', 'auth_data'} if action == 'configure' else {'expected_revision'}
-    optional = {'consent_version'} if action == 'enable' else set()
+    optional = {'consent_version'} if action == 'enable' else {'external_permission'} if action == 'configure' else set()
     require(isinstance(request, dict) and fields <= set(request) <= fields | optional
             and integer(request['expected_revision']),
             'invalid_openrouter_request')
@@ -316,6 +319,9 @@ def operate(cwd, action, request):
         if action == 'configure':
             require(current is None or not current['enabled'], 'disable_before_openrouter_reconfiguration')
             validate_routes(request['routes'])
+            if request.get('external_permission') is not None:
+                try: external_delegation.validate_permission(request['external_permission'])
+                except ValueError as error: raise SettingsError(str(error)) from None
             if isinstance(owner.scope, BasicWorkerScope):
                 require(request['routes'] == ['workers'], 'openrouter_basic_workers_only')
             opencode, auth = request['opencode'], request['auth_data']
@@ -333,6 +339,8 @@ def operate(cwd, action, request):
                 binding = dict(binding, enrollment=authority(owner.scope)['enrollment'])
             updated = dict(version=1, revision=revision + 1, binding=binding,
                 routes=sorted(request['routes']), opencode=opencode, auth_data=auth, enabled=False)
+            permission = request.get('external_permission', current.get('external_permission') if current else None)
+            if permission is not None: updated['external_permission'] = permission
         else:
             if action == 'disable' and current is None: return owner.report()
             require(current is not None, 'openrouter_not_configured')

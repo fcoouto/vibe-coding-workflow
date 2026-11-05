@@ -243,40 +243,10 @@ class Ledger:
     def _native(data, evidence, now, reserve=True):
         fields(evidence, 'account task windows')
         account, task = name(evidence['account']), name(evidence['task'])
-        windows = evidence['windows']
-        require(type(windows) is list and 0 < len(windows) <= 8, 'native_capacity_unknown')
-        require(len({w['id'] for w in windows}) == len(windows), 'duplicate_quota_window')
         key = json.dumps([account, task])
         require(key not in data['finished_native'], 'native_task_closed')
-        require(account not in data.get('native_paused', {}), 'native_requalification_required')
-        existing = data['native'].get(key)
-        if reserve:
-            require(not any(record['account'] == account and other != key
-                        for other, record in data['native'].items()), 'native_task_outstanding')
-        requested, resets = {}, {}
-        for window in windows:
-            fields(window, 'id remaining_pp resolution_pp allowance_pp observed_at reset_at')
-            name(window['id'])
-            for field in ('remaining_pp', 'resolution_pp', 'allowance_pp', 'observed_at', 'reset_at'):
-                integer(window[field])
-            require(0 < window['resolution_pp'] <= 100 and 0 < window['allowance_pp'] <= 100
-                    and window['remaining_pp'] <= 100 and 0 <= now-window['observed_at'] <= FRESH_SECONDS
-                    and now < window['reset_at'], 'native_capacity_unknown')
-            requested[window['id']] = window['allowance_pp']
-            resets[window['id']] = window['reset_at']
-            outstanding = sum(record['windows'].get(window['id'], 0) for other, record in data['native'].items()
-                              if other != key and record['account'] == account)
-            if reserve:
-                require(window['remaining_pp'] - window['resolution_pp'] >=
-                        20 + outstanding + window['allowance_pp'], 'native_capacity_reserved')
-        require(all(record['resets'] == resets for record in data['native'].values()
-                    if record['account'] == account), 'native_window_changed')
-        if existing:
-            require(existing['windows'] == requested, 'native_calibration_changed')
-        elif reserve:
-            data['native'][key] = dict(account=account, task=task, windows=requested, resets=resets, latest_at=now,
-                baseline={w['id']: dict(remaining=w['remaining_pp'], resolution=w['resolution_pp']) for w in windows},
-                valid_until=min(min(w['reset_at'], w['observed_at']+FRESH_SECONDS) for w in windows))
+        if reserve and key not in data['native']:
+            data['native'][key] = dict(account=account, task=task, latest_at=now)
         return key
 
     def begin(self, organization, task, run_id, digest, maximum, revision, now, native, *, consent=None, live_gate=None):
@@ -294,7 +264,6 @@ class Ledger:
             require(native.get('task') == task, 'native_task_mismatch')
             key = self._native(data, native, now)
             data['native'][key]['latest_at'] = now
-            data['native'][key]['valid_until'] = min(min(w['reset_at'], w['observed_at']+FRESH_SECONDS) for w in native['windows'])
             if consent is not None:
                 self._consent(data, consent)
             run = dict(consent=consent, organization=organization, task=task, digest=digest, revision=revision,
@@ -330,9 +299,6 @@ class Ledger:
                 self._consent(data, run['consent'])
             require(data['slot'] == run_id and not run['closed'] and call['state'] == 'reserved', 'dispatch_forbidden')
             require(run['revision'] == revision, 'policy_revision_changed')
-            native = data['native'][run['native']]
-            require(now < native['valid_until'], 'native_capacity_expired')
-            require(native['account'] not in data.get('native_paused', {}), 'native_requalification_required')
             # The call's own reservation has already reduced headroom.
             self._live_admit(data, run['organization'], 0, now, live_gate, run)
             self._admit(data, run['organization'], run['task'], 0, revision, now)
@@ -382,31 +348,14 @@ class Ledger:
             if data['slot'] == run_id: data['slot'] = None
 
     def release_native(self, account, task, evidence, now):
-        overrun = False
         with self.transaction() as data:
-            key = json.dumps([account, task])
+            key = json.dumps([name(account), name(task)])
             runs = [run for run in data['runs'].values() if run['native'] == key]
             require(all(run['closed'] for run in runs), 'native_task_active')
             require(evidence['account'] == account and evidence['task'] == task, 'native_task_mismatch')
-            require(key in data['native'] and all(w['observed_at'] > data['native'][key]['latest_at']
-                    for w in evidence['windows']), 'native_observation_precedes_work')
-            self._native(data, evidence, now, reserve=False)
-            record = data['native'][key]
-            fixed_live = runs and all(run.get('live_admission') and run.get('consent')
-                                      and run['consent']['qualification_revision'] is None for run in runs)
-            # Account-wide changes cannot measure consumption for a fixed live task.
-            if not fixed_live:
-                for window in evidence['windows']:
-                    base = record['baseline'][window['id']]
-                    # Reporting uncertainty is not evidence of zero consumption.
-                    measured = max(0, base['remaining'] - window['remaining_pp'])
-                    if measured > record['windows'][window['id']]:
-                        data.setdefault('native_paused', {})[account] = 'native_allowance_overrun'
-                        overrun = True
-            if not overrun:
-                data['native'].pop(key)
+            require(key in data['native'], 'native_task_missing')
+            if key not in data['finished_native']:
                 data['finished_native'].append(key)
-        require(not overrun, 'native_requalification_required')
 
     def reject_unsent(self, run_id, phase):
         """Host transport established no send; not a user/worker receipt."""

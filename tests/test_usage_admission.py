@@ -42,9 +42,9 @@ class UsageAdmissionTests(unittest.TestCase):
         self.policy['stop_at'] = 1090
         self.assertEqual(self.validate(self.evidence(price_valid_until=1100)), 1090)
         self.task['native']['windows'][0].update(reset_at=1050)
-        self.assertEqual(self.validate(self.evidence(price_valid_until=1100)), 1050)
+        self.assertEqual(self.validate(self.evidence(price_valid_until=1100)), 1090)
         self.task['native']['windows'][0].update(reset_at=2000, observed_at=101)
-        self.assertEqual(self.validate(self.evidence(price_valid_until=1100)), 1001)
+        self.assertEqual(self.validate(self.evidence(price_valid_until=1100)), 1090)
 
     def test_json_and_changed_digest_inputs_are_rejected(self):
         evidence = self.evidence()
@@ -82,15 +82,12 @@ class UsageAdmissionTests(unittest.TestCase):
             with self.subTest(approval=change), self.assertRaises(BudgetError):
                 self.validate(self.evidence(**change))
 
-    def test_live_smart_requires_fixed_native_review_allowance(self):
+    def test_live_smart_ignores_optional_quota_measurements(self):
         self.config.update(requested_mode='smart', live_consent=True)
         self.task['provider'] = 'auto'
-        for allowance in (0, 4, 6, 5.0):
-            self.task['native']['windows'][0]['allowance_pp'] = allowance
-            with self.subTest(allowance=allowance), self.assertRaises(BudgetError):
-                self.validate(self.evidence())
-        self.task['native']['windows'][0]['allowance_pp'] = 5
-        self.assertEqual(self.validate(self.evidence()), 1750)
+        for windows in ([], None, [dict(remaining_pp=0, reset_at=0)]):
+            self.task['native']['windows'] = windows
+            self.assertEqual(self.validate(self.evidence()), 1750)
 
     def test_grant_must_match_platform_row_and_selected_pool(self):
         self.policy.update(ceiling='subscription_benefit', amount=None)
@@ -101,7 +98,7 @@ class UsageAdmissionTests(unittest.TestCase):
                 self.validate(self.evidence(grant=replace(self.grant, **change)))
         self.assertEqual(self.validate(self.evidence()), 1750)
 
-    def test_stale_or_unpinned_price_and_native_windows_are_rejected(self):
+    def test_stale_or_unpinned_price_rejected_and_quota_measurements_ignored(self):
         for change in (dict(price_observed_at=901), dict(price_valid_until=1799)):
             with self.subTest(price=change), self.assertRaises(BudgetError):
                 self.validate(self.evidence(**change))
@@ -113,8 +110,8 @@ class UsageAdmissionTests(unittest.TestCase):
             self.task['native'] = native()
             self.task['native']['windows'][0].update(observed_at=980, reset_at=2000)
             self.task['native']['windows'][0].update(fields)
-            with self.subTest(window=fields), self.assertRaises(BudgetError):
-                self.validate(self.evidence())
+            with self.subTest(window=fields):
+                self.assertGreater(self.validate(self.evidence()), 1000)
 
     def test_malformed_input_errors_do_not_echo_values(self):
         with self.assertRaisesRegex(BudgetError, '^invalid_live_admission$'):

@@ -50,6 +50,11 @@ enrollment and native lifecycle own those prerequisites.
 
 ## Configure and enable
 
+For reusable source/automatic selection, `configure` accepts optional
+`external_permission` under the [shared permission contract](../../../clients/external-delegation.md#reusable-permission).
+Omission preserves existing permission; null removes it. Keep existing funding
+choices and approvals. Enablement alone does not authorize automatic selection.
+
 Reuse the user's authorization within its scope. An explicit request to enable
 this integration authorizes the selected checkout's controls; merely opening this
 skill or completing onboarding does not. Keep task transmission within approved
@@ -120,7 +125,9 @@ retains settings, cache, task history and pending results for inspection and
 settlement; it does not erase data or revoke the OpenRouter key.
 
 Both public helpers enforce saved consent and the configured scope and paths.
-Proposal `begin` admits exactly one bounded call under a short shared guard;
+Legacy proposal `begin` admits exactly one bounded call under a short shared guard;
+scoped `external` proposals require the final `dispatch` check before their call.
+That check revalidates permission, revision and source and consumes the same token;
 its issued token may settle after disable. Worker preparation is not launch:
 the runner checks consent again at process creation, including the prepared
 revision and configured executable/auth directory. Disable after preparation

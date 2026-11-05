@@ -28,7 +28,7 @@ const tools = {
       : {thread:head, turns:[turn('current','inProgress')], page:{nextCursor:'older',hasMore:true}}};
   },
   mcp__codex_app__get_usage_limits: async () => {
-    checks.push('quota'); return {structuredContent:{accountId:'account'}};
+    throw new Error('Native quota observation is unavailable');
   },
   mcp__openai_api_credit_promo__preview_api_credit_promo: async () => {
     checks.push('expiry'); return {structuredContent:{benefit:{currency:'USD',cadence:'monthly',
@@ -49,7 +49,7 @@ const request = {root:'/installed', python:'/python', threadId:'parent', hostId:
   thread_snapshot:{fake:'forged input'}, grant:{pool:'benefit',expiry:1794902186}};
 (async () => {
   assert.deepEqual(await run(request,tools), {ok:true});
-  assert.deepEqual(checks.sort(), ['current','expiry','historical','python','quota']);
+  assert.deepEqual(checks.sort(), ['current','expiry','historical','python']);
   checks.length = 0;
   await assert.rejects(run({...request, grant:{pool:'benefit',expiry:0}},tools), /expiry/);
   assert.ok(!checks.includes('python'));
