@@ -7,7 +7,8 @@ and adoption trigger.
 
 ## Adopt a parent or child
 
-First resolve the [display-family association](workstreams-naming.md#resolve-the-display-family),
+First apply the [new-thread scope](workstreams-naming.md#new-thread-scope), then
+resolve the [display-family association](workstreams-naming.md#resolve-the-display-family),
 then inspect the existing title and recorded presentation ownership. Reuse the
 adopted mapping, reconcile manual edits before writing, and
 retain any manual-title pause. A known user-selected title is an override even
@@ -59,7 +60,8 @@ ownership when established. Older records without that observation retain their
 topic during an automatic switch. `workflow_topic` is a configure input only.
 
 For an explicitly associated member, supply its recorded root coordinator UUID as
-`parent_session_id` and its internal `member` (for example `C1`, rendered as `C`).
+`parent_session_id` and `member: "C"`. Store and display the same literal `P` or
+`C` role; the actual native UUID identifies the context.
 Title controls use `parent_session_id` for the display root; delegation and worker
 visibility use that field for the actual native parent. This display binding must
 satisfy the selected runtime's validation; it never changes native lineage,
@@ -69,7 +71,7 @@ Configuration resolves the declared root's shared family code, records the curre
 title, then synchronizes the managed format. The same bound task cannot be configured twice. After an authorized task
 replacement in the same native thread, an explicit configuration or resumption
 request rebinds presentation to the new task and archives the old presentation.
-The family/member identity remains stable; an existing manual-title pause survives
+The family/member binding remains stable; an existing manual-title pause survives
 configuration until the user explicitly requests resumption. Unmanaged threads and unrelated chats stay outside
 automatic title synchronization.
 
@@ -88,14 +90,6 @@ write against that same identity before retrying. Update titles during existing
 milestone, phase and blocker handling using accepted plan progress. Do not create
 a runtime task or runtime database, watcher or extra model turn solely for naming. This
 direct path does not acquire the runtime event-repair guarantees below.
-
-For an explicit user correction of an ordinary display-only family/member error,
-reconcile the current title and association record, then repair through supported
-display controls and verify readback. Preserve manual overrides, pauses, topic,
-progress and historical allocations. Runtime-bound family/member identities
-remain immutable: do not bypass a selected managed binding with a direct rename
-or infer permission for generic reparenting. Report an unsupported repair as a
-naming limitation.
 
 ## Record status and accepted progress
 
@@ -237,11 +231,8 @@ state authority. Existing ownership and unresolved assignments remain binding.
 
 An authorized display-format update can reconcile saved titles with earlier
 status layouts or without the leading meter character. Preserve the family/member
-binding, topic-only edits and manual-title pauses. Unchanged legacy `C<number>`
-observations can render as `C`; retain the observed token when comparing manual
-edits. Unexplained changes between `C1`, `C2`, `C` or `P`, or changes to layout,
-meter, status or family, remain whole-format overrides. Exact pending
-acknowledgments and topic-only edits still reconcile. Do not bulk-rewrite titles, replace
+binding, topic-only edits and manual-title pauses. A user changing the layout
+or meter remains a whole-format override. Do not bulk-rewrite titles, replace
 original runtime readers or silently repin active tasks for a format change.
 
 Formatting, state, command and hook-boundary tests qualify source behavior.

@@ -233,15 +233,15 @@
       ]
     },
     "clients/workstreams-naming.md": {
-      "sha256": "0cf0b079ea68737afce125be4d8ba63cd59a37011c4b942a2d7ad5fb42316eb2",
+      "sha256": "a745caf061c4f8494a70bbef315c8f067c6958bb5ff736b2861e91829e6e2b35",
       "ranges": [
         [
           1,
-          148
+          150
         ],
         [
-          149,
-          175
+          151,
+          183
         ]
       ]
     },
@@ -277,15 +277,15 @@
       ]
     },
     "clients/workstreams-titles.md": {
-      "sha256": "5d578facd7281c291f918b1dc8f7ff540e66b11971b28097c893688cfd2a0b16",
+      "sha256": "79ba45b18b394564d6fc1777051c4f266ea2ce3a170ef724b7f9dd089035dc35",
       "ranges": [
         [
           1,
-          141
+          142
         ],
         [
-          142,
-          250
+          143,
+          241
         ]
       ]
     },

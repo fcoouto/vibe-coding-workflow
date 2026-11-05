@@ -2,6 +2,17 @@
 
 For adoption, event repair and manual edits, read [title synchronization](workstreams-titles.md).
 
+## New-thread scope
+
+Apply this revision only to a native context created under it. Establish creation
+from the existing native observation, creation brief or task record. First
+implementation, first adoption, continuation, resume or task replacement does not
+make an existing thread new; an absent saved title proves nothing. If creation
+cannot be established, leave its title and record untouched and continue
+authorized work. Existing contexts keep their current titles, records, original
+controls, readers and pins; this fix adds no migration or repair. Once an eligible
+new context is adopted, its ordinary title lifecycle continues through that record.
+
 ## Automatic implementation naming
 
 Activate title synchronization immediately before the first authorized
@@ -19,7 +30,7 @@ starting implementation. Naming changes display metadata only; it does not
 activate managed task controls.
 
 At activation, resolve the [display-family association](#resolve-the-display-family)
-before allocating a family or child ordinal. Adopt the title through the title
+before allocating a family. Adopt the title through the title
 procedure. Keep prepared native `task_name`, attempt marker, lineage and ownership
 unchanged.
 
@@ -69,15 +80,12 @@ Standalone unrelated chats start their own families. An uncertain or unavailable
 association is a naming limitation: report it without guessing; continue authorized
 work.
 
-The root coordinator owns unique internal members `C1`, `C2`, etc. across the
-family, including reviewers and nested workers. These ordinals are not displayed;
-recognizable topics distinguish children. Before new native dispatch or explicitly
-requested sidebar-chat creation, reserve the next ordinal in the existing task
-record. Carry the root coordinator UUID, family, internal member and mapping owner in the
-brief. After the actual identity returns, bind it once to that mapping and verify
-title readback through the title procedure. Follow-ups reuse their mapping;
-replacement contexts receive new ordinals. Preserve historical allocations and
-never recycle an ordinal or represent a display association as native parentage.
+Before new native dispatch or explicitly requested sidebar-chat creation, carry
+the root coordinator UUID, family, role `C` and mapping owner in the brief. Record
+the actual returned native UUID as the context's identity, then verify title
+readback through the title procedure. Follow-ups reuse that binding; a new context
+has its own returned UUID. Recognizable topics distinguish children; repeated `C`
+roles need no counter. Never represent display association as native parentage.
 
 ## Allocate a family once across projects
 
@@ -160,9 +168,9 @@ accepted progress; `CANCELLED` retains partial progress and never implies comple
 Update display titles on meaningful milestone, phase, blocker or next-action
 owner changes during existing handling, without extra model turns, polling or
 a progress registry.
-For naming-only requests, change display metadata without enabling Workstreams,
-starting work or altering task state. Apply this convention to requested existing
-titles through supported controls; do not bulk-rename unrelated threads.
+For naming-only requests within the [new-thread scope](#new-thread-scope), change
+display metadata without enabling Workstreams, starting work or altering task
+state. Use supported controls; do not bulk-rename unrelated threads.
 
 Internal responsibilities remain coordinator, deliverable owner and independent
 reviewer, assigned from each objective. Models/reasoning stay in metadata. Title

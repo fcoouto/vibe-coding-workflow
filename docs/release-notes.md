@@ -2,8 +2,8 @@
 
 ## 0.1.28
 
-- Keep associated deliverable chats and nested workers in their coordinator's display family. Pass the family binding in each assignment before creating a context.
-- Show child roles as `C`; keep numbered identities internal and read legacy titles safely. Preserve manual-title overrides, historical allocations and managed bindings.
+- For new threads, keep associated deliverable chats and nested workers in the root coordinator's display family. Pass that binding before creation.
+- Store and display child role `C`; use native thread IDs for identity. Leave existing threads and their records unchanged.
 
 ## 0.1.27
 

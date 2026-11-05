@@ -27,80 +27,51 @@ class TitleSyncTests(unittest.TestCase):
             '\uFFFB▰▱▱▱▱ [W1] P · Thread naming')
         self.assertEqual(title_sync.format_title('W1','P','Thread naming','WORKING',2),
             '\uFFFB▰▰▱▱▱ [W1] P · Thread naming')
-        self.assertEqual(title_sync.format_title('W1','C2','Review','DONE',0), '\uFFFB▰▰▰▰▰ [W1] C · Review')
+        self.assertEqual(title_sync.format_title('W1','C','Review','DONE',0), '\uFFFB▰▰▰▰▰ [W1] C · Review')
         self.assertEqual(title_sync.format_title('W1','P','Topic','REVIEW',5), '\uFFFB▰▰▰▰▱ [W1] P · Topic')
         for status in ('active','IN PROGRESS','ready'):
             with self.assertRaises(ValueError): title_sync.format_title('W1','P','Topic',status,0)
 
-    def test_child_display_hides_ordinal_without_relaxing_internal_member_validation(self):
-        for member in ('C1', 'C2', 'C999'):
-            with self.subTest(member=member):
-                self.assertEqual(title_sync.format_title('W1', member, 'Owner', 'WORKING', 2),
-                    '\uFFFB▰▰▱▱▱ [W1] C · Owner')
-        for member in ('', 'C', 'C0', 'C01', 'C-1', 'Cx', None, 'C' + '1' * 5000):
-            with self.subTest(member=member):
-                with self.assertRaises(ValueError):
-                    title_sync.format_title('W1', member, 'Owner', 'WORKING', 2)
+    def test_child_role_is_literal_and_numbered_members_are_rejected(self):
+        self.assertEqual(title_sync.format_title('W1', 'C', 'Owner', 'WORKING', 2),
+            '\uFFFB▰▰▱▱▱ [W1] C · Owner')
+        for member in ('', 'C1', 'C2', 'C0', 'C01', 'C-1', 'Cx', None, 'C' + '1' * 5000):
+            with self.subTest(member=member), self.assertRaises(ValueError):
+                title_sync.format_title('W1', member, 'Owner', 'WORKING', 2)
 
-    def test_child_legacy_and_current_topic_edits_preserve_internal_identity(self):
-        for applied in ('▰▰▱▱▱ [W1] C2 · Thread naming · WORKING',
-                        '▰▰▱▱▱ WORKING · [W1] C2 · Thread naming',
-                        '\uFFFB▰▰▱▱▱ [W1] C2 · Thread naming',
-                        '\uFFFB▰▰▱▱▱ [W1] C · Thread naming'):
+    def test_title_length_bound_still_reserves_future_statuses(self):
+        family = 'W' + '1' * 4067
+        self.assertEqual(len(title_sync.format_title(family, 'C', 'Title', 'WAITING', 0,
+            user_attention=True)), 4097)
+        with self.assertRaises(ValueError):
+            title_sync.format_title(family + '1', 'C', 'Title', 'TRIAGE', 0)
+
+    def test_child_topics_and_pending_acknowledgments_preserve_role(self):
+        applied = '\uFFFB▰▰▱▱▱ [W1] C · Thread naming'
+        for pending in (None, '\uFFFB▰▰▱▱▱ REVIEW · [W1] C · Thread naming'):
             for topic in ('Thread naming', 'Owner topic'):
-                with self.subTest(applied=applied, topic=topic):
-                    current = applied.replace('Thread naming', topic)
-                    saved = self.saved() | dict(member='C2', applied=applied)
-                    updated, desired = title_sync.reconcile(saved, current, self.task())
+                with self.subTest(pending=pending, topic=topic):
+                    saved = self.saved() | dict(member='C', applied=applied, pending=pending)
+                    current = (pending or applied).replace('Thread naming', topic)
+                    task = self.task('REVIEW' if pending else 'WORKING') | dict(user_attention=bool(pending))
+                    updated, desired = title_sync.reconcile(saved, current, task)
                     self.assertFalse(updated['paused'])
-                    self.assertEqual((updated['family'], updated['member']), ('W1', 'C2'))
+                    self.assertIsNone(updated['pending'])
+                    self.assertIsNone(desired)
+                    self.assertEqual(updated['member'], 'C')
                     self.assertEqual(updated['topic'], topic)
-                    self.assertEqual(desired or current, f'\uFFFB▰▰▱▱▱ [W1] C · {topic}')
 
-    def test_manual_child_identity_or_managed_field_change_pauses(self):
+    def test_manual_child_role_or_managed_field_change_pauses(self):
         title = '\uFFFB▰▰▱▱▱ [W1] C · Thread naming'
-        changes = [(title.replace(' C ', f' {before} '), title.replace(' C ', f' {after} '))
-                   for before, after in (('C1', 'C2'), ('C1', 'C'), ('C', 'C1'), ('C', 'P'), ('P', 'C'))]
-        changes += [(title, changed) for changed in (title.replace('W1', 'W2'),
-            title.replace('▰▰▱▱▱', '▰▰▰▱▱'), title.replace(' [', ' REVIEW · ['),
-            title.removeprefix('\uFFFB'), '▰▰▱▱▱ [W1] C · Thread naming · WORKING')]
-        for before, current in changes:
-            with self.subTest(before=before, current=current):
-                updated, desired = title_sync.reconcile(self.saved() | dict(member='C1', applied=before),
+        for current in (title.replace(' C ', ' P '), title.replace(' C ', ' C1 '),
+                        title.replace('W1', 'W2'), title.replace('▰▰▱▱▱', '▰▰▰▱▱'),
+                        title.replace(' [', ' REVIEW · ['), title.removeprefix('\uFFFB'),
+                        '▰▰▱▱▱ [W1] C · Thread naming · WORKING'):
+            with self.subTest(current=current):
+                updated, desired = title_sync.reconcile(self.saved() | dict(member='C', applied=title),
                     current, self.task())
                 self.assertTrue(updated['paused'])
                 self.assertIsNone(desired)
-
-    def test_child_pending_acknowledgments_and_topic_edits_upgrade_without_pause(self):
-        for pending in ('▰▰▱▱▱ [W1] C2 · Thread naming · REVIEW',
-                        '\uFFFB▰▰▱▱▱ REVIEW · [W1] C · Thread naming'):
-            for topic in ('Thread naming', 'Owner topic'):
-                with self.subTest(pending=pending, topic=topic):
-                    saved = self.saved() | dict(member='C2', pending=pending)
-                    updated, desired = title_sync.reconcile(saved, pending.replace('Thread naming', topic),
-                        self.task('REVIEW') | dict(user_attention=True))
-                    self.assertFalse(updated['paused'])
-                    self.assertIsNone(updated['pending'])
-                    self.assertEqual(updated['member'], 'C2')
-                    self.assertEqual(desired or updated['applied'],
-                        f'\uFFFB▰▰▱▱▱ REVIEW · [W1] C · {topic}')
-
-    def test_child_topic_edits_respect_retained_internal_member_length(self):
-        applied = '\uFFFB▰▰▱▱▱ [W1] C · Title'
-        for pending in (None, '\uFFFB▰▰▱▱▱ REVIEW · [W1] C · Title'):
-            for topic, paused in (('Title!', True), ('Edit', False)):
-                with self.subTest(pending=pending, topic=topic):
-                    saved = self.saved() | dict(member='C' + '1' * 4066, topic='Title',
-                        applied=applied, pending=pending)
-                    current = (pending or applied).replace('Title', topic)
-                    task = self.task('REVIEW' if pending else 'WORKING') | dict(user_attention=bool(pending))
-                    updated, desired = title_sync.reconcile(saved, current, task)
-                    self.assertEqual(updated['paused'], paused)
-                    self.assertIsNone(desired)
-                    self.assertIsNone(updated['pending'])
-                    self.assertEqual(updated['topic'], 'Title' if paused else topic)
-                    self.assertEqual(updated['member'], saved['member'])
-                    self.assertEqual(updated['applied'], applied if paused else current)
 
     def test_working_fallback_applies_only_without_measurable_milestones(self):
         self.assertEqual(title_sync.progress_cells(self.task()), 1)
@@ -120,7 +91,7 @@ class TitleSyncTests(unittest.TestCase):
     def test_managed_field_or_custom_title_pauses_without_mutating_task(self):
         for current in ('My title', self.saved()['applied'].replace(' [', ' REVIEW · ['),
                         self.saved()['applied'].replace('W1','W2'),
-                        self.saved()['applied'].replace(' P ',' C1 '),
+                        self.saved()['applied'].replace(' P ',' C '),
                         self.saved()['applied'].replace('▰▰▱▱▱','▰▰▰▱▱'),
                         self.saved()['applied'].removeprefix('\uFFFB')):
             task=self.task()
