@@ -183,28 +183,32 @@ def enrich_start(event, directory, checkout, executable):
         return event
     try:
         cwd = Path(event['cwd'])
-        if str(cwd) != event['cwd'] or (checkout is not None and cwd != checkout):
+        if str(cwd) != event['cwd']:
             return event
-        checkout = cwd
         parent, child = event['session_id'], event['agent_id']
         executable = Path(executable)
         if (not executable.is_absolute() or executable.resolve(strict=True) != executable
                 or not executable.is_file() or executable.stat().st_mode & 0o022):
             return event
-        observed = codex.observe_worker_visibility(checkout, parent, child, deadline=time.monotonic() + 1,
+        observed = codex.observe_worker_visibility(cwd, parent, child, deadline=time.monotonic() + 1,
                                                    executable=str(executable), resolve_hook_parent=True)
         task = observed['task_name']
+        checkouts = {observed.get('parent_checkout', observed['checkout']),
+                     observed.get('worker_checkout', observed['checkout'])}
         if (not task or observed.get('hook_session_id', observed['parent_session_id']) != parent
-                or observed['worker_id'] != child or observed['checkout'] != str(checkout)):
+                or observed['worker_id'] != child or observed['checkout'] != str(cwd)
+                or (checkout is not None and str(checkout) not in checkouts)):
             return event
         parent = observed['parent_session_id']
-        path = context_path(hook_context_path(directory, parent, task), checkout)
+        path = context_path(hook_context_path(directory, parent, task), cwd)
         if not path.is_file():
             return event
         with visibility.locked(path.with_name(path.name + '.lock')):
             context = read_context(path)
-            if (context['parent_session_id'], context['checkout'], context['task_name']) != (parent, str(checkout), task):
+            if ((context['parent_session_id'], context['task_name']) != (parent, task)
+                    or context['checkout'] not in checkouts):
                 return event
+            context_path(path, context['checkout'])
             prior = context.get('observed')
             if prior is not None and prior['worker_id'] != child:
                 return event
@@ -215,7 +219,8 @@ def enrich_start(event, directory, checkout, executable):
                     or label[0].upper() != label[0] or 'guardian' in label.casefold()):
                 return event
             if prior is None:
-                visibility.save(path, context | dict(observed=observed | dict(forwarded_label=label)))
+                visibility.save(path, context | dict(observed=observed | dict(checkout=context['checkout'],
+                                                                           forwarded_label=label)))
             role = incoming_role if specific_native_role(incoming_role) else label
             return event | dict(session_id=parent, agent_role=role, agent_type=label) | (
                 {MANAGED_DISPLAY_FIELD: label} if managed else {})
