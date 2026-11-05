@@ -1,5 +1,30 @@
 # Policy source map
 
+## Reusable native evaluation — Phase 3, 5 November 2026
+
+The user authorized reusable evaluation packaging after Phase 2 integration.
+The [Phase 3 plan](superpowers/plans/2026-11-05-workflow-templates-phase-three.md)
+uses the retained Toolkit snapshot identified as revision
+`21b71b68679c11184f49c23168852014bf6dde8b`. The retained snapshot has no Git
+metadata; its adopted bytes are bound by the source hashes below. No unrelated
+contract or active task is repinned, and routine maintenance needs no Toolkit
+checkout or fetch.
+
+| Adopted source or requirement | Local owner and adaptation |
+| --- | --- |
+| `templates/harness-evaluation/access.mjs`, SHA-256 `fa96fe6a759bc49db77236810a83bb4c97d3ce693124bb6505545e0193550240` | `assets/harness-evaluation/boundary/access.mjs` retains the intentional ownership/tenant defect for negative controls; never application code. |
+| `scripts/validate-harness.mjs`, SHA-256 `14220a750afbcf228fc397d5d3d32f10631c0f2e0a533c0ba8fa79b553f62e1c` | Local script of the same name retains seven checks; only the expected-notes URL changes to the protected package asset. |
+| `templates/harness-evaluation/local-notes.txt`, SHA-256 `79e3fc6afaf135133c764bc261b5040575c373a80dcb44b254bce07e5a4a5b0c`; complete MIT notice, SHA-256 `d687e4265813cc684a8307b579a68ac19578f3de351aafbd6419da926b52203f` | Exact notes and license are bundled. Fixture instructions are locally authored from the scoped requirements; no upstream prompt is adopted. |
+| Protected inputs/checks, stale-handoff repair, read-only review and explicit observation limits (`docs/07-harness-evaluation.md`; existing maintenance contract) | `policies/09-workflow-maintenance.md` conditionally loads `clients/harness-evaluation.md`. Independent hashes/diffs complement the evaluator: its notes check does not establish instruction preservation or host isolation. |
+| Reusable reapplication and lifecycle/reporting cases from accepted Phase 2 evidence | Selected assets retain twelve synthetic input files and three document overlays. Case notes preserve partial-undo and native-observation limits; lifecycle, role, title and recovery rules keep their existing owners. |
+
+`tests/test_harness_evaluation.py` checks actual evaluator behavior and relocated
+asset resolution. Package completeness uses the existing local-file validator
+without adding Node to ordinary package validation. Those checks do not establish
+native instruction use, pauses, provider actions, startup or first-badge rendering.
+Actual execution and acceptance belong in the implementation record. This section
+is authoring provenance, not a second routine loading dependency.
+
 ## Lifecycle and project artifacts — Phase 2, 5 November 2026
 
 The user approved the single lifecycle layout and compact child-report direction

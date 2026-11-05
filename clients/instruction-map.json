@@ -175,6 +175,15 @@
         ]
       ]
     },
+    "clients/harness-evaluation.md": {
+      "sha256": "61c2a3f3bcafa51ed47c5472b43044ae00ae45b604907577963b59d9e3e97dfa",
+      "ranges": [
+        [
+          1,
+          39
+        ]
+      ]
+    },
     "clients/index.md": {
       "sha256": "dd8da23ef85970da7f40a047738b6a2bc9f33389b848bc95e766deab3f0c36e9",
       "ranges": [
@@ -397,11 +406,11 @@
       ]
     },
     "policies/09-workflow-maintenance.md": {
-      "sha256": "6825341621d21b73f5d30ce151247c6dfd25f02797dac8306947fa4a09e52247",
+      "sha256": "a6211377110094bbf38a9a702b43be34d5f9d431afbfbd90db6b96f71c1ddef0",
       "ranges": [
         [
           1,
-          49
+          51
         ]
       ]
     },
