@@ -7,10 +7,10 @@ database, qualification or separate activation is required.
 
 ## Meaning and scope
 
-Enabled means automatically use suitable cooperative native child work when it
-helps the task. Follow [Agent Delegation](../../../policies/03-agent-delegation.md)
-for worker selection, bounded briefs, permissions, ownership, budgets, result
-verification and independent review. Small tasks can stay with the coordinator.
+Enabled automatically selects useful cooperative delivery through native children.
+Follow [Agent Delegation](../../../policies/03-agent-delegation.md), including its
+[outcome ownership rules](../../../policies/03-agent-delegation.md#outcome-ownership).
+Native children execute this saved preference; it selects no separate service.
 
 Disabled stops optional future automatic native child work. Explicit user
 delegation requests and required independent review still apply. Reconcile

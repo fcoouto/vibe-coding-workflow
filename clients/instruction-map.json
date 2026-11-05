@@ -326,15 +326,15 @@
       ]
     },
     "policies/03-agent-delegation.md": {
-      "sha256": "2deccd07038bc722231f4529cf568d302bf1bf15e71b13bf722cce023cf6e487",
+      "sha256": "b1ebbefccd56fd70d8c1131064e3bf06420b6a0d5904c6b211c58a4e2f1e587b",
       "ranges": [
         [
           1,
-          40
+          51
         ],
         [
-          41,
-          64
+          52,
+          90
         ]
       ]
     },
@@ -370,7 +370,7 @@
       ]
     },
     "policies/07-context-and-handoff.md": {
-      "sha256": "f09f1ca0411dd633c44e43e43cddefa5df800a95fabc8536a75ebaa3aa90bbc0",
+      "sha256": "dbf4bf4632b329fd8814515db8a8d208ed0338e54ea85dd2f5e9446051651f42",
       "ranges": [
         [
           1,
@@ -653,7 +653,7 @@
       ]
     },
     "skills/workstreams/SKILL.md": {
-      "sha256": "66a4829607049aae191be793e3356ee0adae45e6909056373789e18a1a841d3d",
+      "sha256": "499de72af2c27a6a7295f661c53ebd2a044502daf481e55fbc6223ada95d61cd",
       "ranges": [
         [
           1,
@@ -671,7 +671,7 @@
       ]
     },
     "skills/workstreams/references/procedure.md": {
-      "sha256": "037f0b327a6ad0c1307cc41c3fcc2cd3c755ac7177d2d19cb861d780d16254a5",
+      "sha256": "f757d3e2b9f6cc63586b550f8971584cd305b446707810c69252d9c662df95dd",
       "ranges": [
         [
           1,

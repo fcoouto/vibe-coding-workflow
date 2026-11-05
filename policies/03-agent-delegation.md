@@ -22,7 +22,7 @@ Apply with the [shared contract rules](00-index.md).
 - Read a concise local copy of the relevant platform guidance. Store source URLs, checked time, applicability and a content/version digest. Refresh during periodic environment maintenance, on relevant capability/catalog changes, missing/corrupt guidance or user request, outside hooks; apply [capability-based compatibility](11-tool-integrations.md#qualify-the-actual-workflow) to client updates and do not query upstream on every task. Cache age is a maintenance signal, not a correctness guarantee or automatic dispatch blocker. A failed refresh retains the last verified copy with stale freshness; suppress repeated attempts for the same trigger until a later maintenance run, relevant change or explicit retry. Reuse guidance only while its applicability and available controls remain compatible; otherwise hold dependent dispatch and continue independent work. Discover actual model availability separately.
 - Give each worker its objective, necessary context/instructions, exact files, dependencies, mutable resources, acceptance criteria, checks and stop condition. Request a short report of paths, findings, evidence and limitations. Grant only necessary tools and permissions; avoid copying the whole conversation or loading an unused specialist roster.
 - Apply the test-first and self-review procedure in [Task Planning](02-task-planning.md#planning-and-verification) to each assignment; parallel dispatch preserves it.
-- Split work at separable context boundaries. Keep tightly coupled work together. Use narrow specialist roles with distinct triggers; retain a standing role only for a recurring need.
+- Split work by the [outcome ownership rules](#outcome-ownership). Use narrow specialist roles with distinct triggers; retain a standing role only for a recurring need.
 
 When considering an already authorized Usage Routing proposal, load its [proposal selection, verification and recovery procedure](../skills/manage-usage-routing/references/delegation.md). Load routing setup only for explicit routing management.
 
@@ -34,12 +34,38 @@ Choose each subagent's role once while preparing its assignment, using the [work
 
 Resource admission and capacity recovery are independent preferences. A new supported scope with no saved choice starts with both enabled; preserve each existing choice, including a legacy combined choice where separate settings do not exist. The [Workstreams skill](../skills/workstreams/SKILL.md) routes naming, feature controls, heavy resource work and parent recovery. Ordinary delegation and its shared dependency, continuation, ownership and acceptance checks apply in all four preference combinations. Resource-managed coordinator, worker and reviewer phases require current resource authority; parent recovery registration requires current recovery authority and no resource lease. A stale/disabled feature permission never authorizes the other feature. Uncertain recovery state does not block ordinary delegation or resource admission. Saved preferences grant no route, ownership, budget or native capability; load only the applicable operation procedure.
 
+## Outcome ownership
+
+Assign delegated implementation as small, self-contained outcomes rather than
+helper files. The child owns implementation, focused tests, relevant guidance,
+self-review and fixes from independent review through verified handoff. Reuse
+that native child for follow-ups.
+Keep tightly coupled work together; trivial tasks can stay direct.
+
+The coordinator owns scope, priorities, interfaces/dependencies, ownership,
+review/acceptance, shared tracking/configuration, lockfiles, Git operations and
+integration. Small integration fixes are reasonable. Keeping most feature
+implementation in the coordinator needs a task-specific reason.
+
+Outcome ownership is responsibility; a native child is its reusable execution
+context. A worktree separates checkout files. A user-owned sidebar chat is a
+separate conversation: create one only on explicit user request. Prefer separate
+worktrees for independent concurrent reviewable outcomes when useful. Preserve
+partial work in place rather than migrate it merely for presentation.
+
+Owners are not simultaneous workers. Decide dependent interfaces before affected
+work; start only ready independent outcomes within capacity and the original
+budgets. Keep outcome-to-child bindings and the
+[family/member mapping](../clients/workstreams-naming.md) in the existing task
+record. Reconcile actual results, checks, blockers and next actions during
+milestone and handoff handling; a worker report alone is not acceptance.
+
 ## Ownership and parallel work
 
 1. Reserve canonical writable files and mutable resources before dispatch, including path aliases, ancestor overlaps, ports, build directories, databases and services. Parallel tasks need disjoint files, independent or isolated mutable resources, and no direct or transitive dependencies. Unknown scope means serialize or combine the affected tasks. Different sections of one file are not independent scopes.
 2. Make conflicting reservations mutually exclusive. Describe ownership/read-only restrictions as enforced only when the qualified mechanism prevents violations; otherwise record the limitation. Uncontrolled external writers remain a limitation. Branch names and worktrees alone do not isolate shared services.
 3. Cap concurrency by actual authorized slots, host resources and the task budget. For waves, retain each task's brief, start eligible workers together, wait for their results before integration, and let the coordinator record one progress entry per wave.
-4. The coordinator owns lockfiles, shared configuration, tracking records and Git operations. Serialize authorized commits in task order, recording current HEAD immediately before each. If commits are not authorized, review recorded working-tree snapshots instead; workers must not commit or publish implicitly.
+4. Serialize authorized commits in task order, recording current HEAD immediately before each. If commits are not authorized, review recorded working-tree snapshots instead; workers must not commit or publish implicitly.
 
 ## Progress and result retrieval
 
