@@ -117,16 +117,18 @@ class TitleIntegrationTests(unittest.TestCase):
         self.task['state'] = 'TRIAGE'
         member = 'C' + '1' * 4066
         self.call('configure', topic='Title', parent_session_id='parent', member=member)
-        self.assertEqual(len(self.native.title), 4087)
+        self.assertEqual(self.native.title, '\uFFFB▱▱▱▱▱ [W1] C · Title')
         for status in ('READY', 'WORKING', 'REVIEW', 'WAITING', 'BLOCKED', 'PAUSED', 'DONE', 'CANCELLED'):
             attention = status in ('REVIEW', 'WAITING', 'BLOCKED')
             self.task.update(state=status, user_attention=attention, revision=self.task['revision'] + 1)
             self.call()
             label = f'{status} · ' if attention else ''
-            self.assertEqual(self.native.title.split(' ', 1)[1], f'{label}[W1] {member} · Title')
+            self.assertEqual(self.native.title.split(' ', 1)[1], f'{label}[W1] C · Title')
             if status == 'WAITING':
-                self.assertEqual(len(self.native.title), 4097)
-            self.assertTrue(self.call('status')['managed'])
+                self.assertEqual(self.native.title, '\uFFFB▱▱▱▱▱ WAITING · [W1] C · Title')
+            report = self.call('status')
+            self.assertTrue(report['managed'])
+            self.assertEqual(report['presentation']['member'], member)
         self.assertFalse(self.call('resume')['paused'])
 
     def test_oversized_manual_title_is_preserved_and_pauses_once(self):
@@ -139,6 +141,26 @@ class TitleIntegrationTests(unittest.TestCase):
         self.assertIsNone(self.call()['notification'])
         self.assertEqual(self.native.title, 'x' * 5000)
         self.assertEqual(self.native.writes, 1)
+
+    def test_long_member_pending_topic_override_pauses_and_notifies_once(self):
+        member = 'C' + '1' * 4066
+        self.call('configure', topic='Title', parent_session_id='parent', member=member)
+        self.task.update(state='REVIEW', user_attention=True, revision=self.task['revision'] + 1)
+        self.native.lose_ack = True
+        with self.assertRaises(OSError):
+            self.call()
+        self.native.title = '\uFFFB▱▱▱▱▱ REVIEW · [W1] C · Title!'
+        current = self.native.title
+        result = self.call()
+        self.assertTrue(result['paused'])
+        self.assertIsNotNone(result['notification'])
+        self.assertIsNone(self.call()['notification'])
+        self.assertEqual(self.native.title, current)
+        self.assertEqual(self.native.writes, 2)
+        presentation = self.call('status')['presentation']
+        self.assertEqual(presentation['member'], member)
+        self.assertEqual(presentation['topic'], 'Title')
+        self.assertIsNone(presentation['pending'])
 
     def test_oversized_pending_metadata_is_refused_before_native_write(self):
         self.task['scope_ref'] = '💡' * 1024
@@ -186,13 +208,16 @@ class TitleIntegrationTests(unittest.TestCase):
         self.assertEqual(self.native.title, '\uFFFB▰▱▱▱▱ [W1] P · Thread naming')
 
     def test_failed_acknowledgment_repairs_without_duplicate_write(self):
-        self.call('configure', topic='Thread naming')
+        self.call('configure', topic='Thread naming', parent_session_id='parent', member='C2')
         self.task.update(state='REVIEW', revision=self.task['revision']+1)
         self.native.lose_ack = True
         with self.assertRaises(OSError): self.call()
         self.call()
         self.assertEqual(self.native.writes, 2)
-        self.assertFalse(self.call('status')['presentation']['paused'])
+        presentation = self.call('status')['presentation']
+        self.assertFalse(presentation['paused'])
+        self.assertEqual(presentation['member'], 'C2')
+        self.assertEqual(self.native.title, '\uFFFB▱▱▱▱▱ [W1] C · Thread naming')
 
     def test_stale_revision_cannot_adopt_or_rename(self):
         with self.assertRaises(ValueError):
@@ -348,6 +373,28 @@ class BoundTaskTitleTests(unittest.TestCase):
     def test_workflow_topic_rebind_respects_ownership(self):
         self.configure(workflow_topic='Old objective')
         self.assert_topic_rebind('\uFFFB▱▱▱▱▱ [W1] P · New objective')
+
+    def test_child_display_update_preserves_binding_through_resume_and_task_replacement(self):
+        self.configure(workflow_topic='Owner task', parent_session_id='root', member='C2')
+        self.assertEqual(self.native.title, '\uFFFB▱▱▱▱▱ [W1] C · Owner task')
+        task = self.fixture.status()['task']
+        request = {key: task[key] for key in ('client', 'session_id', 'task_id', 'scope_ref')} | dict(
+            expected_revision=task['revision'], reference='user:resume')
+        for change in (dict(member='C1'), dict(parent_session_id='another-root')):
+            self.command(['task', 'title', 'resume'], request | change, expected_code=1)
+        self.command(['task', 'title', 'resume'], request)
+        report = self.command(['task', 'title', 'status'], dict(client='codex', session_id='session'))
+        self.assertEqual((report['presentation']['family'], report['presentation']['member']), ('W1', 'C2'))
+        self.start_new_objective()
+        task = self.fixture.status()['task']
+        replacement = {key: task[key] for key in ('client', 'session_id', 'task_id', 'scope_ref')} | dict(
+            expected_revision=task['revision'], reference='user:replace', workflow_topic='New owner task')
+        for change in (dict(member='C1'), dict(parent_session_id='another-root')):
+            self.command(['task', 'title', 'configure'], replacement | change, expected_code=1)
+        self.configure(workflow_topic='New owner task')
+        self.assertEqual(self.native.title, '\uFFFB▱▱▱▱▱ [W1] C · New owner task')
+        report = self.command(['task', 'title', 'status'], dict(client='codex', session_id='session'))
+        self.assertEqual((report['presentation']['family'], report['presentation']['member']), ('W1', 'C2'))
 
     def test_workflow_topic_rebind_preserves_explicit_topic(self):
         self.configure(topic='User wording')

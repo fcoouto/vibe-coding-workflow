@@ -1,5 +1,10 @@
 # Release notes
 
+## 0.1.28
+
+- Keep associated deliverable chats and nested workers in their coordinator's display family. Pass the family binding in each assignment before creating a context.
+- Show child roles as `C`; keep numbered identities internal and read legacy titles safely. Preserve manual-title overrides, historical allocations and managed bindings.
+
 ## 0.1.26
 
 - Assign complete outcomes to reusable native children through tests, guidance and review fixes. Keep coordinator decisions and integration distinct.
