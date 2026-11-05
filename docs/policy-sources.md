@@ -41,7 +41,13 @@ Ordinary native preparation accepts the full brief and returns the native name
 and message with its existing correlation marker. Managed D6 worker and D5
 review CLI preparation captures the returned declaration and ledger digest
 outside the runtime transaction, preserving immutable prompts and launch results.
-OpenRouter and Usage Routing reuse their existing brief or proposal fields.
+Managed continuation preparation reuses the existing child's role and retained
+request prompt after the ledger operation, before consuming its one-use intent.
+Ordinary retries reuse matching saved declarations and their exact first-line
+marker. OpenRouter and Usage Routing require the assignment role in their
+existing brief or proposal fields for workflow-created jobs, including separate
+native supervisor assignments. The shared rule covers lightweight reviewers,
+testers/evaluators and nested children independently of Habblaud configuration.
 Display preparation failure never blocks dispatch. Legacy role-only preparation
 remains a compatibility and recovery path, not an extra routine step.
 For a reused native child, the same assignment preparation preserves the

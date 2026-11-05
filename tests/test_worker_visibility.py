@@ -810,6 +810,56 @@ class NativeVisibilityTests(unittest.TestCase):
         self.assertFalse(malformed['prepared'])
         self.assertEqual(path.read_bytes(), original)
 
+    def test_assignment_retry_reuses_saved_role_when_visibility_is_omitted(self):
+        helper = self.native_helper()
+        request = self.native_request() | dict(message='Review the original change.')
+        first = helper.prepare_assignment(request, context_directory=self.task_context)
+        path = Path(first['context'])
+        original = path.read_bytes()
+        retry = {key: value for key, value in request.items() if key != 'visibility'}
+        for message in (request['message'], 'Review the clarified assignment.'):
+            with self.subTest(message=message):
+                result = helper.prepare_assignment(retry | dict(message=message), context_directory=self.task_context)
+                self.assertTrue(result['prepared'])
+                self.assertEqual(result['visibility'], request['visibility'])
+                self.assertEqual(result['message'], first['prompt_marker'] + '\n' + message)
+                self.assertEqual(path.read_bytes(), original)
+
+    def test_assignment_retry_does_not_duplicate_exact_saved_marker(self):
+        helper = self.native_helper()
+        request = self.native_request() | dict(message='Review this change.\nKeep the second line.')
+        first = helper.prepare_assignment(request, context_directory=self.task_context)
+        for omit_role in (False, True):
+            retry = {key: value for key, value in request.items() if not (omit_role and key == 'visibility')}
+            with self.subTest(omit_role=omit_role):
+                result = helper.prepare_assignment(retry | dict(message=first['message']),
+                                                   context_directory=self.task_context)
+                self.assertTrue(result['prepared'])
+                self.assertEqual(result['message'], first['message'])
+        foreign = first['prompt_marker'] + ' other\nKeep this text.'
+        result = helper.prepare_assignment(request | dict(message=foreign), context_directory=self.task_context)
+        self.assertEqual(result['message'], first['prompt_marker'] + '\n' + foreign)
+
+    def test_saved_assignment_conflicts_keep_original_inputs_and_context(self):
+        helper = self.native_helper()
+        request = self.native_request() | dict(message='Review this change.')
+        first = helper.prepare_assignment(request, context_directory=self.task_context)
+        path = Path(first['context'])
+        original = path.read_bytes()
+        unrelated = self.root.parent / 'other-checkout'
+        unrelated.mkdir()
+        retry = {key: value for key, value in request.items() if key != 'visibility'}
+        for change in (dict(parent_session_id=str(uuid.uuid4())), dict(checkout=str(unrelated)),
+                       dict(task_name='other_assignment'), dict(visibility=None), dict(visibility={}),
+                       dict(visibility=request['visibility'] | dict(role='Tester'))):
+            incoming = retry | change
+            with self.subTest(change=change):
+                result = helper.prepare_assignment(incoming, context=path)
+                self.assertFalse(result['prepared'])
+                self.assertEqual(result['task_name'], incoming['task_name'])
+                self.assertEqual(result['message'], incoming['message'])
+                self.assertEqual(path.read_bytes(), original)
+
     def test_assignment_cli_keeps_missing_role_nonblocking(self):
         helper = self.native_helper()
         request = self.native_request() | dict(message='Inspect one file.')
@@ -915,6 +965,102 @@ class NativeVisibilityTests(unittest.TestCase):
         self.assertEqual({key: actual[key] for key in report}, report)
         self.assertFalse(actual['visibility_preparation']['prepared'])
         self.assertEqual(list(self.task_context.iterdir()), [])
+
+    def test_managed_continuation_binds_same_child_without_exposing_private_prompt(self):
+        report = dict(ok=True, revision=7, token='one-use-token', worker_id=self.child,
+                      task_name='review_original', state='prepared', send_admitted=False,
+                      visibility=self.native_request()['visibility'])
+        original = copy.deepcopy(report)
+        prompt = 'Continue the original assignment.\nKeep this private prompt exact.'
+        with patch.object(codex, '_native_reader', self.reader):
+            actual = worker_visibility.prepare_managed(self.root, self.parent, report, prompt=prompt,
+                                                       context_directory=self.task_context)
+        self.assertEqual({key: actual[key] for key in original}, original)
+        self.assertEqual(report, original)
+        self.assertNotIn('prompt', actual)
+        preparation = actual['visibility_preparation']
+        self.assertTrue(preparation['prepared'])
+        path = Path(preparation['context'])
+        saved = worker_visibility.read_context(path)
+        self.assertEqual(saved['observed']['worker_id'], self.child)
+        self.assertEqual(saved['visibility'], report['visibility'])
+        before = path.read_bytes()
+        without_role = {key: value for key, value in report.items() if key != 'visibility'}
+        replay = worker_visibility.prepare_managed(self.root, self.parent, without_role, prompt=prompt,
+                                                   context_directory=self.task_context)
+        self.assertTrue(replay['visibility_preparation']['prepared'])
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_managed_continuation_missing_or_invalid_role_preserves_intent(self):
+        report = dict(ok=True, revision=7, token='one-use-token', worker_id=self.child,
+                      task_name='review_original', state='prepared', send_admitted=False)
+        prompt = 'Exact admitted follow-up.\nKeep this prompt private.'
+        for index, metadata in enumerate(({}, dict(visibility=None), dict(visibility={}),
+                dict(visibility=dict(version=1, role='Guess', specialty='Read only')))):
+            with self.subTest(metadata=metadata):
+                directory = self.task_context / str(index)
+                directory.mkdir(mode=0o700)
+                incoming = report | metadata
+                original = copy.deepcopy(incoming)
+                actual = worker_visibility.prepare_managed(self.root, self.parent, incoming, prompt=prompt,
+                                                           context_directory=directory)
+                self.assertEqual({key: actual[key] for key in original}, original)
+                self.assertEqual(incoming, original)
+                self.assertNotIn('prompt', actual)
+                self.assertFalse(actual['visibility_preparation']['prepared'])
+
+    def test_managed_continuation_cli_prepares_once_after_operation_and_never_at_consume(self):
+        import io
+        import os
+        from contextlib import redirect_stdout
+        from runtime import delegation, workstreams  # Load forwarding aliases before patching their source.
+        from scripts import workflow
+        scope = SimpleNamespace(repository_root=self.root, runtime=object())
+        prepare = worker_visibility.prepare_managed
+        for action in ('prepare-continuation', 'consume-continuation'):
+            for unavailable in (False, True):
+                with self.subTest(action=action, unavailable=unavailable):
+                    home = self.task_context / f'{action}-{unavailable}'
+                    home.mkdir(mode=0o700)
+                    prompt = 'Exact admitted follow-up.\nDo not rewrite this prompt.'
+                    report = dict(ok=True, revision=7, token='one-use-token', worker_id=self.child,
+                        task_name='review_original', send_admitted=action == 'consume-continuation',
+                        visibility=self.native_request()['visibility'])
+                    if action == 'consume-continuation':
+                        report['prompt'] = prompt
+                    request = dict(client='codex', session_id=self.parent, prompt=prompt, token='one-use-token')
+                    order = []
+                    def operation(*args):
+                        order.append('operation')
+                        return copy.deepcopy(report)
+                    def presentation(*args, **kwargs):
+                        order.append('display')
+                        return prepare(*args, **kwargs)
+                    output = io.StringIO()
+                    with patch('sys.argv', ['workflow.py', 'delegation', 'workstreams', action, '--cwd', str(self.root)]), \
+                            patch('sys.stdin', SimpleNamespace(buffer=io.BytesIO(json.dumps(request).encode()))), \
+                            patch.dict(os.environ, {'CODEX_HOME': str(home)}), \
+                            patch('runtime.startup.acquire_project_entry', return_value=object()), \
+                            patch('runtime.startup._entry_scope', return_value=scope), \
+                            patch.object(delegation, action.replace('-', '_'), side_effect=operation), \
+                            patch.object(worker_visibility, 'prepare_managed', side_effect=presentation), \
+                            patch.object(worker_visibility, 'prepare_native',
+                                         side_effect=OSError('unavailable') if unavailable else worker_visibility.prepare_native), \
+                            patch.object(codex, '_native_reader', self.reader), \
+                            patch.object(workflow, 'title_report', side_effect=lambda s, c, p, value: value), \
+                            redirect_stdout(output):
+                        code = workflow.control_main()
+                    actual = json.loads(output.getvalue())
+                    self.assertEqual(code, 0, actual)
+                    self.assertEqual({key: actual[key] for key in report}, report)
+                    if action == 'prepare-continuation':
+                        self.assertEqual(order, ['operation', 'display'])
+                        self.assertNotIn('prompt', actual)
+                        self.assertEqual(actual['visibility_preparation']['prepared'], not unavailable)
+                    else:
+                        self.assertEqual(order, ['operation'])
+                        self.assertEqual(actual, report)
+                        self.assertEqual(list(home.iterdir()), [])
 
     def test_managed_cli_captures_both_routes_after_admission_and_keeps_display_failure_optional(self):
         import io

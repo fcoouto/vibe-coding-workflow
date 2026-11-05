@@ -180,21 +180,32 @@ def prepare_assignment(request, *, context=None, context_directory=None):
         if not isinstance(message, str) or len(message.encode('utf-8')) > LIMIT:
             raise ValueError('invalid_native_assignment_message')
         brief = {key: value for key, value in request.items() if key != 'message'}
-        brief['visibility'] = declaration(request.get('visibility'))
+        if 'visibility' not in brief:
+            path = context if context is not None else hook_context_path(
+                context_directory or default_context_directory(), brief['parent_session_id'], brief['task_name'])
+            brief['visibility'] = read_context(context_path(path, brief['checkout']))['visibility']
+        brief['visibility'] = declaration(brief['visibility'])
         path, prepared = prepare_context(brief, context=context,
                                          context_directory=context_directory, reuse=True)
-        message = prepared['prompt_marker'] + '\n' + message if 'prompt_marker' in prepared else message
+        marker = prepared.get('prompt_marker')
+        if marker is not None and message.partition('\n')[0] != marker:
+            message = marker + '\n' + message
         return result | prepared | dict(context=str(path), message=message)
     except (ValueError, OSError, TypeError, RuntimeError, KeyError):
         return result | dict(reason='native_visibility_unavailable')
 
 
-def prepare_managed(checkout, parent, report, *, context_directory=None):
-    """Consume an already-prepared worker/reviewer result outside its transaction."""
-    prepared = prepare_assignment(dict(parent_session_id=parent, checkout=str(checkout),
-        task_name=report.get('task_name'), message=report.get('prompt'), visibility=report.get('visibility'),
-        ledger_assignment_digest=report.get('ledger_assignment_digest', report.get('assignment_digest'))),
-        context_directory=context_directory)
+def prepare_managed(checkout, parent, report, *, prompt=None, context_directory=None):
+    """Consume a prepared assignment or same-child intent outside its transaction."""
+    request = dict(parent_session_id=parent, checkout=str(checkout), task_name=report.get('task_name'),
+                   message=report.get('prompt') if prompt is None else prompt)
+    if 'visibility' in report:
+        request['visibility'] = report['visibility']
+    if 'worker_id' in report:
+        request['worker_id'] = report['worker_id']
+    else:
+        request['ledger_assignment_digest'] = report.get('ledger_assignment_digest', report.get('assignment_digest'))
+    prepared = prepare_assignment(request, context_directory=context_directory)
     return report | dict(visibility_preparation={key: prepared[key] for key in ('prepared', 'context', 'reason')
                                                 if key in prepared})
 

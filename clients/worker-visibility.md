@@ -8,7 +8,11 @@ failed Habblaud delivery never prevents execution.
 
 Choose the role once while writing this assignment, just before delegation.
 Record it in the existing brief or preparation request; display integration
-reuses it. Use this versioned object or the route's equivalent fields:
+reuses it. Apply this preparation to every workflow subagent: builders,
+lightweight reviewers, testers/evaluators, nested workers and native supervisors
+of external routes, whether or not Habblaud is configured. External workers use
+their existing brief or proposal fields; their native supervisors have separate
+assignments and roles. Use this versioned object or the route's equivalent fields:
 
 ```json
 {"version":1,"role":"Reviewer","specialty":"Security assessment","custom_role_name":"Threat reviewer"}
@@ -66,8 +70,13 @@ python3 -I -B <package>/scripts/worker_visibility.py prepare
 
 Supply `parent_session_id` (actual native UUID), `checkout` (the chat's current
 canonical absolute working directory), `task_name` (the immutable creation name),
-`message` (the full assignment brief), and `visibility` (the object above) on
-stdin; the entire JSON request must fit 128 KiB. Retain the original `task_name`,
+`message` (the full assignment brief), and an explicit `visibility` for a fresh
+assignment on stdin; the entire JSON request must fit 128 KiB. An existing context
+with the same parent, checkout and creation name can reuse its saved declaration
+when `visibility` is omitted. Retrying with the returned marked message preserves
+that exact first-line marker without duplicating it. Invalid or conflicting
+metadata falls back to the original inputs; never infer a missing role.
+Retain the original `task_name`,
 `message`, model, effort, fork settings and permissions before invoking the
 helper. On success, copy the returned `task_name` and `message` into the native
 spawn tool and preserve those execution controls. Preparation automatically
@@ -87,9 +96,10 @@ preserves the exact immutable prompt.
 
 A native CLI probe received encrypted spawn text in `PreToolUse`, so this
 workflow uses assignment preparation and adds no pre-spawn hook. The exposed
-native spawn tool has no role argument: a direct call that bypasses
-assignment preparation can still omit role metadata and use the original
-fallback. Qualification must observe the first badge; preparation alone does
+native spawn tool has no role argument: code cannot intercept arbitrary native
+tool calls outside this workflow. A direct call that bypasses assignment
+preparation can still omit role metadata and use the original fallback.
+Qualification must observe the first badge; preparation alone does
 not prove rendering.
 
 ### Prepare a follow-up for an existing child
@@ -110,8 +120,13 @@ For configured Habblaud delivery, include the same `--visibility-plugin`,
 `--habblaud-endpoint` and `--habblaud-account` options as publication below.
 The result's `badge` reports a display-only update. An unavailable declaration
 or receiver never prevents the authorized follow-up. For managed continuations,
-prepare display before consuming the one-use send intent. Use the exact
-admitted prompt and the existing continuation controls to send it.
+`workflow.py delegation workstreams prepare-continuation` performs this same-child
+preparation once after the ledger operation and before the one-use intent is
+consumed. It reuses the original declaration and retained request prompt without
+adding the prompt to the public response. Display failure preserves the token,
+revision and continuation fields. Do not prepare the role separately or again at
+`consume-continuation`. Use the exact admitted prompt and existing continuation
+controls to send it.
 
 ### Forward the original Desktop start event
 
