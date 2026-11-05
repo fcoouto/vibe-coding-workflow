@@ -1,5 +1,13 @@
 # Release notes
 
+## 0.1.32
+
+- Present the existing credit and routing management skill as **Manage API Usage**, preserving its command and reference paths.
+- Reuse approved API connection and funding setup when explicitly activating another enrolled checkout. Keep project permissions, qualification and consent separate, without adding a mandatory spending cap or smoke test.
+- Preserve other projects' activation when the shared funding policy is unchanged. Reject stale setup selections and conflicting or missing ledger pins before reuse.
+- Explain profile and stored-connection differences, and resolve equivalent setups using the requested target mode. The shared limit remains one managed API run at a time across the local ledger.
+- Include the native workflow evaluation contract and fixtures already merged on `main`; package validation does not establish client execution or live API qualification.
+
 ## 0.1.31
 
 - Consider eligible repository coding tasks for approved OpenAI API and OpenRouter routes while preserving local-model priority.
