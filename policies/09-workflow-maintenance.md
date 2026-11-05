@@ -30,6 +30,8 @@ Select applicable behavioral cases:
 | Partial blocker | Complete independent authorized work without inventing unavailable integration results. |
 | Pause/resume | Observe the pause, verify state on resume and complete only the authorized remainder. |
 
+For a selected stale-handoff, read-only review or retained project/lifecycle case, use the [local harness evaluation procedure](../clients/harness-evaluation.md) for protected inputs and package-local checks.
+
 Use separate credential-free copies outside the original project. Evaluation alone does not authorize changes to that project. Keep evaluators and initial inputs outside workers' writable scope; give the task and acceptance criteria without revealing the fix. Verify known baseline failures and preserved passing checks, then independently rerun the same checks and inspect diffs. If an evaluator changes, confirm it still rejects the broken baseline. File checks alone cannot prove pauses, tool loading or avoided external actions; unavailable observations remain not run. Keep sensitive traces private; do not export project content to external graders. Clean up only evaluation-owned resources after retaining useful evidence.
 
 ## One bounded improvement

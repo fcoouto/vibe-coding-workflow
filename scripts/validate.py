@@ -124,7 +124,27 @@ def validate(root=ROOT):
                  "skills/onboard-my-project/SKILL.md",
                  "skills/onboard-my-project/references/procedure.md",
                  "skills/onboard-my-project/references/apply-and-recovery.md",
-                 "skills/onboard-my-project/agents/openai.yaml"):
+                 "skills/onboard-my-project/agents/openai.yaml",
+                 "clients/harness-evaluation.md", "scripts/validate-harness.mjs",
+                 "assets/harness-evaluation/LICENSE", "assets/harness-evaluation/cases.md",
+                 "assets/harness-evaluation/boundary/AGENTS.md",
+                 "assets/harness-evaluation/boundary/access.mjs",
+                 "assets/harness-evaluation/boundary/local-notes.txt",
+                 "assets/harness-evaluation/phase-two/minimal/input/README.md",
+                 "assets/harness-evaluation/phase-two/minimal/input/AGENTS.md",
+                 "assets/harness-evaluation/phase-two/minimal/input/arithmetic.py",
+                 "assets/harness-evaluation/phase-two/minimal/input/check.py",
+                 "assets/harness-evaluation/phase-two/minimal/expected-final/README.md",
+                 "assets/harness-evaluation/phase-two/minimal/expected-final/AGENTS.md",
+                 "assets/harness-evaluation/phase-two/customized/input/README.md",
+                 "assets/harness-evaluation/phase-two/customized/input/AGENTS.md",
+                 "assets/harness-evaluation/phase-two/customized/input/check.py",
+                 "assets/harness-evaluation/phase-two/customized/input/handbook/overview.md",
+                 "assets/harness-evaluation/phase-two/customized/input/handbook/engineering.md",
+                 "assets/harness-evaluation/phase-two/customized/input/handbook/ARCHITECTURE.md",
+                 "assets/harness-evaluation/phase-two/customized/input/src/AGENTS.md",
+                 "assets/harness-evaluation/phase-two/customized/input/src/cleaning.py",
+                 "assets/harness-evaluation/phase-two/customized/expected-after-partial-undo/handbook/engineering.md"):
         local_file(root, "./" + path)
     if manifest.get("skills") != "./skills/":
         raise ValueError("Discover the packaged skills directory")
