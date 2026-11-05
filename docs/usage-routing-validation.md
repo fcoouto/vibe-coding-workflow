@@ -1,5 +1,48 @@
 # Usage Routing validation
 
+## Safe setup reuse and API management · 5 November 2026
+
+The source candidate adds read-only reusable-setup discovery and optional
+`enable.reuse_scope` selection. Explicit activation creates fresh checkout consent
+without copying source permission or qualification. Validated identical funding
+policies retain their shared revision; actual policy changes still invalidate
+stale consent. Existing accounting, reservations, funding choices and ledger
+identity remain intact. The public skill name is **Manage API Usage**; the
+`manage-usage-routing` invocation and reference paths remain compatible.
+
+181 affected offline tests passed using disposable ledgers, synthetic data and
+fake connections. Focused settings/budget tests passed again with 49 tests after
+the final boundary assertions. RED tests first reproduced cross-checkout consent
+loss, the missing reuse path, binding-write failure after consent commit and
+misleading status for a missing pinned ledger. GREEN tests cover equivalence,
+ambiguity/selection, stale/expired/smoke/test-owned setups, permissions, revision
+and disable behavior, write rollback and retained charges/reservations.
+Four existing test failures were outdated revision assumptions: the policy-change
+fixture now changes the policy, and three live tests use the retained revision.
+
+Package validation and Skill Creator quick validation passed; the entrypoint is
+145 words. The bounded instruction reader delivered management alone for
+activation/status/ambiguity and the shared permission contract when applicable.
+An implementer walkthrough checked those requests, preserving new-connection,
+delegation and canary procedures as conditional loads. This is offline package
+and contract evidence. Independent review remains the coordinator's next step;
+actual client activation and live execution were not exercised. No real account,
+credential, billing, enrollment or installation state changed.
+
+The first independent review identified stale setup selection, incomplete
+replacement-ledger recovery, mode-only ambiguity and hidden profile/connection
+differences. One combined repair adds a required first-reuse `reuse_pin`, checked
+against the selected source and current policy within the consent transaction;
+validates retained canonical/source ledger pins before new bindings; compares
+effective target modes; and exposes full safe profile/conversion plus connection
+comparison metadata. Omitted or mismatched pins cannot enable. A separate source
+revision/freshness pin does not create ambiguity between equivalent settings.
+190 affected offline tests passed after the repair, including changed setup/source
+state, unrelated-checkout stability, reduced-accounting replacement recovery,
+missing/late-lost source pins, explicit-mode equivalence and visible safe
+differences. Package and Skill Creator checks passed again. Scoped independent
+re-review remains pending; no live client or account operation was performed.
+
 Manual and Smart Balance passed a
 [foreground Desktop dry run](#codex-desktop-host-dry-run--4-november-2026).
 The [live canary](#first-live-foreground-canary--4-november-2026) passed and

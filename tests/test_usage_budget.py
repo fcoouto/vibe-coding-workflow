@@ -135,6 +135,18 @@ class BudgetTests(unittest.TestCase):
         with self.assertRaises(budget.BudgetError): self.ledger.dispatch('run', 'count', 1, 102)
         self.assertEqual(self.ledger.headroom('org'), 0)
 
+    def test_unchanged_validated_policy_preserves_revision_and_all_accounting(self):
+        self.observe(); self.begin()
+        before = self.ledger.snapshot()
+        policy = before['organizations']['org']['policy'].copy()
+        self.assertEqual(self.ledger.configure('org', policy, 1), 1)
+        self.assertEqual(self.ledger.snapshot(), before)
+        with self.assertRaisesRegex(budget.BudgetError, 'policy_revision_changed'):
+            self.ledger.configure('org', policy, 0)
+        with self.assertRaisesRegex(budget.BudgetError, 'invalid_integer'):
+            self.ledger.configure('org', dict(policy, amount=True), 1)
+        self.ledger.dispatch('run', 'count', 1, 102)
+
     def test_same_task_correction_reuses_identity_but_retains_call_cost(self):
         self.observe(); self.begin(); self.count_done(); self.ledger.close_run('run')
         self.begin('correction')

@@ -44,8 +44,32 @@ def _read_marker(path):
     return record
 
 
+def _bind(marker, identity, key):
+    record = json.dumps(dict(identity=identity,scope=key)).encode()
+    try:
+        fd = os.open(marker,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)
+    except FileExistsError:
+        require(_read_marker(marker) == dict(identity=identity,scope=key), 'ledger_binding_changed')
+    else:
+        with os.fdopen(fd,'wb') as out:
+            out.write(record); out.flush(); os.fsync(out.fileno())
+
+
+def _check_bindings(folder, identity, data):
+    scopes = set()
+    for marker in folder.glob('checkout-*.json'):
+        try:
+            record = _read_marker(marker)
+        except (OSError, ValueError, TypeError, KeyError):
+            raise BudgetError('manual_recovery_required') from None
+        require(record['identity'] == identity and marker.name == 'checkout-' + record['scope'] + '.json',
+                'manual_recovery_required')
+        scopes.add(record['scope'])
+    require(set(data.get('routing', {})) <= scopes, 'manual_recovery_required')
+
+
 @contextmanager
-def _controller(cwd, *, create=False):
+def _controller(cwd, *, create=False, discover=False, attach=False):
     from runtime.usage_routing import Controller
     key, root = scope(cwd)
     folder = directory()
@@ -59,8 +83,10 @@ def _controller(cwd, *, create=False):
         binding = _read_marker(marker)
         require(binding['scope'] == key, 'scope_changed')
         identity = binding['identity']
+        unbound = False
     else:
-        require(create, 'not_configured')
+        require(create or discover or attach, 'not_configured')
+        unbound = True
         if database.exists() or database.is_symlink():
             private(database)
             # First binding to an existing canonical database; subsequent reads pin identity.
@@ -70,23 +96,22 @@ def _controller(cwd, *, create=False):
                 identity = json.loads(row[0])['identity']
         else:
             require(not any(folder.glob('checkout-*.json')), 'manual_recovery_required')
+            require(create, 'not_configured')
             identity = usage_budget.initialize(database)
-        record = json.dumps(dict(identity=identity,scope=key)).encode()
-        try:
-            fd = os.open(marker,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)
-        except FileExistsError:
-            require(_read_marker(marker) == dict(identity=identity,scope=key), 'ledger_binding_changed')
-        else:
-            with os.fdopen(fd,'wb') as out:
-                out.write(record); out.flush(); os.fsync(out.fileno())
     with usage_budget.Ledger(database,identity) as ledger:
-        yield Controller(ledger,key,root=root)
+        check = lambda data: _check_bindings(folder, identity, data)
+        if unbound:
+            check(ledger.snapshot())
+        if unbound and create:
+            _bind(marker, identity, key)
+        bind = (lambda: _bind(marker, identity, key)) if unbound and attach else None
+        yield Controller(ledger,key,root=root,bind=bind,check_authority=check)
 
 
 @contextmanager
-def controller(cwd, *, create=False):
+def controller(cwd, *, create=False, discover=False, attach=False):
     try:
-        with _controller(cwd,create=create) as control:
+        with _controller(cwd,create=create,discover=discover,attach=attach) as control:
             yield control
     except sqlite3.Error:
         raise BudgetError('manual_recovery_required') from None

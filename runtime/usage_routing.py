@@ -30,11 +30,13 @@ def status(cwd=None):
                   canary_active=False,
                   review_authority=False, enrolled=enrolled, enrollment=enrollment,
                   reason='live_adapter_unavailable', enabled=False, funding_policy='best_effort_grant',
+                  reusable_setups=[], reuse_reason='not_configured',
+                  reuse_reason_by_mode=dict(manual='not_configured', smart='not_configured'),
                   warnings=[FUNDING_WARNING])
     from runtime.usage_settings import controller, directory
-    if (directory() / 'organizations.sqlite3').exists() and cwd is not None:
+    if cwd is not None and directory().exists():
         try:
-            with controller(cwd) as control:
+            with controller(cwd, discover=True) as control:
                 result.update(control.status())
         except (BudgetError, OSError, ValueError, KeyError, TypeError):
             result['reason'] = 'configuration_or_scope_unavailable'
@@ -46,9 +48,13 @@ def enable(cwd, request):
     if cwd is None:
         raise BudgetError('live_execution_unavailable')
     from runtime.usage_settings import controller
-    fields(request, 'expected_revision mode' if isinstance(request, dict) and 'mode' in request else 'expected_revision')
-    with controller(cwd) as control:
-        return control.enable(request['expected_revision'], mode=request.get('mode'))
+    fields(request, 'expected_revision'
+           + (' mode' if isinstance(request, dict) and 'mode' in request else '')
+           + (' reuse_scope' if isinstance(request, dict) and 'reuse_scope' in request else '')
+           + (' reuse_pin' if isinstance(request, dict) and 'reuse_pin' in request else ''))
+    with controller(cwd, attach=True) as control:
+        return control.enable(request['expected_revision'], mode=request.get('mode'),
+                              reuse_scope=request.get('reuse_scope'), reuse_pin=request.get('reuse_pin'))
 
 
 def run(cwd, request):
@@ -106,11 +112,13 @@ class Controller:
 
     Shadow observations and qualifications grant no live authority.
     """
-    def __init__(self, ledger, scope, *, clock=None, root=None):
+    def __init__(self, ledger, scope, *, clock=None, root=None, bind=None, check_authority=None):
         import time
         self.ledger, self.scope = ledger, name(scope)
         self.clock = clock or (lambda: int(time.time()))
         self.root = Path(root).resolve() if root is not None else None
+        self._bind = bind
+        self._check_authority = check_authority
 
     def _config(self, data):
         config = data.get('routing', {}).get(self.scope)
@@ -151,6 +159,8 @@ class Controller:
             records = data.setdefault('routing', {})
             old = records.get(self.scope)
             require((old['revision'] if old else 0) == request['expected_revision'], 'consent_revision_changed')
+            if old is None and self._check_authority is not None:
+                self._check_authority(data)
             organization, policy = binding['organization'], request['policy']
             previous = data['organizations'].get(organization, {}).get('policy')
             revision = self.ledger._configure(data, organization, policy, request['expected_org_revision'])
@@ -170,6 +180,51 @@ class Controller:
                 records[self.scope]['external_permission'] = permission
         return self.status()
 
+    def _reusable(self, data):
+        if self._check_authority is not None:
+            self._check_authority(data)
+        setups = {}
+        for scope, config in data.get('routing', {}).items():
+            if scope == self.scope:
+                continue
+            try:
+                binding = config['binding']
+                usage_credentials.validate_binding(binding)
+                org = data['organizations'][binding['organization']]
+                policy = org['policy']
+                require(config['org_revision'] == org['revision'] and not org['blocked'],
+                        'policy_revision_changed')
+                self.ledger._configure(data, binding['organization'], policy, org['revision'])
+                require(policy['start'] <= self.clock() < policy['stop_at']
+                        and not usage_admission.canary_budget_only(config, policy)
+                        and 'canary_owner' not in config and 'manual_test_owner' not in config,
+                        'routing_budget_required')
+                profile = config['profile']
+                quote(dict(version=1, model=profile['model'], reasoning=profile['reasoning'],
+                           text='qualification', input_tokens=0, max_output_tokens=1), profile, self.clock())
+                name(scope); name(config['class_name'])
+                require(config['requested_mode'] in ('manual', 'smart'), 'invalid_mode')
+                setups[scope] = dict(binding=binding.copy(), org_revision=org['revision'],
+                    profile=profile.copy(), class_name=config['class_name'],
+                    requested_mode=config['requested_mode'], production_budget=config.get('production_budget', False))
+            except (ValueError, KeyError, TypeError):
+                continue
+        return setups
+
+    @staticmethod
+    def _reuse_reason(setups, mode=None):
+        distinct = {usage_admission.digest(dict(setup, requested_mode=mode or setup['requested_mode']))
+                    for setup in setups.values()}
+        return ('reuse_available' if len(distinct) == 1 else
+                'reuse_selection_required' if distinct else 'reusable_setup_unavailable')
+
+    @staticmethod
+    def _setup_pin(data, scope, setup):
+        source = data['routing'][scope]
+        return usage_admission.digest(dict(scope=scope, setup=setup, source_revision=source['revision'],
+            enabled=source['enabled'], disabled=source['disabled'], live_consent=source.get('live_consent'),
+            policy=data['organizations'][setup['binding']['organization']]['policy']))
+
     def status(self):
         data = self.ledger.snapshot()
         config = data.get('routing', {}).get(self.scope)
@@ -183,6 +238,20 @@ class Controller:
         locally_enabled = bool(config and config.get('enabled', False) and not config['disabled'])
         canary_active = locally_enabled and 'canary_owner' in config
         enabled = locally_enabled and not canary_only
+        setups = self._reusable(data) if config is None else {}
+        reuse_reason = 'already_configured' if config else self._reuse_reason(setups)
+        by_mode = {mode: 'already_configured' if config else self._reuse_reason(setups, mode)
+                   for mode in ('manual', 'smart')}
+        reusable = [dict(scope=scope, organization=setup['binding']['organization'],
+                        api_project=setup['binding']['project'], org_revision=setup['org_revision'],
+                        model=setup['profile']['model'], reasoning=setup['profile']['reasoning'],
+                        class_name=setup['class_name'], requested_mode=setup['requested_mode'],
+                        profile=setup['profile'].copy(), production_budget=setup['production_budget'],
+                        setup_pin=self._setup_pin(data, scope, setup),
+                        connection=dict(storage_kind=setup['binding']['storage_kind'],
+                            fingerprint=usage_admission.digest(setup['binding']), key_name=None),
+                        policy=data['organizations'][setup['binding']['organization']]['policy'].copy())
+                    for scope, setup in sorted(setups.items())]
         reason = 'live_adapter_unavailable'
         if canary_only:
             reason = 'routing_budget_required'
@@ -196,14 +265,36 @@ class Controller:
                     warnings=[FUNDING_WARNING],
                     simulation_only=True, requested_mode=config['requested_mode'] if config else None,
                     revision=config['revision'] if config else 0,
+                    reusable_setups=reusable, reuse_reason=reuse_reason,
+                    reuse_reason_by_mode=by_mode,
                     external_permission=config.get('external_permission') if config else None, reason=reason)
 
-    def enable(self, expected_revision, *, mode=None):
+    def enable(self, expected_revision, *, mode=None, reuse_scope=None, reuse_pin=None):
         integer(expected_revision)
         require(mode in (None, 'manual', 'smart'), 'invalid_mode')
+        if reuse_scope is not None:
+            name(reuse_scope)
         with self.ledger.transaction() as data:
-            config = self._config(data)
-            require(config['revision'] == expected_revision, 'consent_revision_changed')
+            config = data.get('routing', {}).get(self.scope)
+            require((config['revision'] if config else 0) == expected_revision, 'consent_revision_changed')
+            if config is None:
+                setups = self._reusable(data)
+                if reuse_scope is not None:
+                    require(reuse_scope in setups, 'reusable_setup_unavailable')
+                else:
+                    reason = self._reuse_reason(setups, mode)
+                    require(reason == 'reuse_available', reason)
+                require(reuse_pin is not None, 'reuse_pin_required')
+                selected = {scope: candidate for scope, candidate in setups.items()
+                            if (reuse_scope is None or scope == reuse_scope)
+                            and self._setup_pin(data, scope, candidate) == reuse_pin}
+                require(selected, 'reusable_setup_changed')
+                setup = next(iter(selected.values()))
+                config = dict(setup, revision=0, enabled=False, disabled=False, live_consent=False,
+                              qualification=None, qualification_revision=0)
+                data.setdefault('routing', {})[self.scope] = config
+            else:
+                require(reuse_scope is None and reuse_pin is None, 'already_configured')
             require('manual_test_owner' not in config, 'manual_test_in_use')
             org = data['organizations'][config['binding']['organization']]
             require(not usage_admission.canary_budget_only(config, org['policy']), 'routing_budget_required')
@@ -217,6 +308,8 @@ class Controller:
                 require(config['org_revision'] == org['revision'], 'policy_revision_changed')
                 require(usage_admission.live_consent_current(config, org['policy'], self.clock()),
                         'expiry_or_cycle_boundary')
+            if self._bind is not None:
+                self._bind()
         return self.status()
 
     def disable(self, expected_revision):

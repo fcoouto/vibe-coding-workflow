@@ -319,6 +319,7 @@ class SmartBalanceTests(unittest.TestCase):
     def test_shared_organization_policy_change_invalidates_other_scope(self):
         other = routing.Controller(self.ledger, 'other-scope', clock=lambda:101)
         req = copy.deepcopy(self.request);req['expected_org_revision']=1
+        req['policy']['amount'] = 400
         other.configure(req)
         self.assertEqual(self.controller.evaluate(task())['reason'], 'policy_revision_changed')
 

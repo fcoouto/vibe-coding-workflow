@@ -151,6 +151,8 @@ class Ledger:
         require((org['revision'] if org else 0) == expected_revision, 'policy_revision_changed')
         if org:
             old = org['policy']
+            if old == policy:
+                return org['revision']
             if old['cycle'] == policy['cycle']:
                 require((old['start'], old['end']) == (policy['start'], policy['end']), 'cycle_changed')
             else:

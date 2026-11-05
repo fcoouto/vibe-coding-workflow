@@ -23,12 +23,16 @@ Use the separate [Manage Observability Integration](skills/manage-observability/
 
 Observability activation stays outside project onboarding; successful onboarding may propose the separate skill as an optional follow-up.
 
-Use [Manage Usage Routing](skills/manage-usage-routing/SKILL.md) for opt-in OpenAI
+Use [Manage API Usage](skills/manage-usage-routing/SKILL.md) for OpenAI credit
+usage, spending limits and opt-in
 API proposals in enrolled Codex checkouts. Routing defaults to OFF.
 
 To opt in, open the project checkout in Codex and ask **“Enable Smart Balance
 for this project”** or **“Enable Manual Usage Routing for this project.”**
-Connect an OpenAI project key if prompted. Activation saves the selected mode,
+Existing compatible account setup is reused. If several setups apply, select one;
+connect an OpenAI project key only when a new connection is needed. Each checkout
+needs explicit activation and its own task/data permission. The API project is
+separate from your local repository. Activation saves the selected mode,
 task scope and funding policy, including any spending caps you choose. Manual
 uses the API for tasks you select. Smart Balance chooses eligible tasks within
 the approved scope. Each live request

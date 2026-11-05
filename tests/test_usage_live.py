@@ -152,7 +152,7 @@ class LiveAdmissionTests(unittest.TestCase):
             record['native_allowance_pp'] = 10
         self.controller.record_qualification(record)
         self.task = task()
-        proof = replace(self.proof, config_revision=3, org_revision=2,
+        proof = replace(self.proof, config_revision=3, org_revision=1,
                         task_digest=admission.digest(self.task), qualification_digest=admission.digest([1, record]))
         return record, proof
 
