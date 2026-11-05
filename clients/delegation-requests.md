@@ -21,6 +21,8 @@ read current state and reconcile intent, not reset a budget or replay a native s
 
 Accept D5 evidence first. The immutable D6 plan records native route/controls,
 shared ownership, task-selected finite budgets, fallback and dependency jobs.
+A check job uses the registered D5 check ID as its job ID. That check must satisfy
+its D6 dependencies before reserving or executing.
 `git_directory` is observed internally; do not supply it. Roles are worker, review,
 coordinator or check. Review claims must be read-only. Claims use `kind`, `key`,
 `mode`; path keys are absolute, service/port claims also require their execution
@@ -210,10 +212,27 @@ Native review admission uses D5's [review preparation](evidence-review-prepare.m
 and [common request fields](evidence.md#request-fields),
 not the worker brief above.
 
+For the selected managed child-hook witness, an approved standalone Codex CLI worker may include `brief.foreground_wait`
+with absolute canonical `marker` and `python` paths and integer `seconds` from
+1 to 20. Reserve the exact marker path for reading. Its observer owns a private
+directory outside the checkout and starts with the marker absent. Use
+`foreground_wait_args` in `runtime/adapters/codex.py` to generate the exact
+`exec_command` arguments for the private packet and worker instructions before
+prepare. The prepared brief pins the descriptor and replay cannot change it.
+The generated wait uses `/bin/sh`, a non-login, non-TTY command and a yield
+window longer than its own deadline. Use a fresh marker per attempt.
+Publish the marker only after independently confirming the original child and
+turn are observed and the parent can authorize the patch. End dependent work
+if the bounded wait fails or returns a resumable session.
+
+Use the wait only for a route that declares it. The standalone CLI qualification
+canary can bind the exact patch to the prepared child claim through paired hook
+receipts without a marker. Preserve the selected route's admission rules.
+
 Return: `attempt_id`, task `revision`, `assignment_digest`, native `task_name`,
 `candidate_digest`, requested settings and the exact `prompt` containing the
 immutable assignment body and its pinned plan.
-Ordinary workers launch only on `launch_admitted:true`; Workstreams preparation
+Managed native workers outside Workstreams dispatch launch only on `launch_admitted:true`; Workstreams preparation
 instead returns `dispatch_prepared:true` and requires its separate consume step.
 A replay is not another launch. Keep the exact marker, assignment and candidate
 binding for subsequent observation; status is not delivery proof.
@@ -224,15 +243,17 @@ Action `observe` adds `attempt_id`, `parent_turn_id`, `spawn_item_id` to the com
 envelope. Use the actual original native parent turn and spawn event, not display
 titles. Return: `attempt_id`, `status`, current `revision`, `observation_digest`,
 `replayed` and limitations. Uncertain observation retains ownership. Observed
-completion still requires independent effect/descendant reconciliation.
+completion still requires independent reconciliation. Set optional
+`cooperative:true` only when collecting a completed turn for the supported
+cooperative path. A successful observation adds the bounded `activity` object.
 
 ## Reconcile
 
 Action `reconcile` adds `attempt_id`, `host_proof:{path,sha256}` and `assessment`.
 For proof construction, load the complete role schema in
 [reconciliation proof fields](delegation-proofs.md).
-Proof path is absolute, private and content-hash bound to a trusted independently
-inspected stop result. An assessment has `outcome` (completed, failed or cancelled),
+Proof path is absolute, private and content-hash bound to independently inspected
+facts. An assessment has `outcome` (completed, failed or cancelled),
 `changed_paths`, `result_assessment`, `partial_change_assessment`, nonempty
 `evidence` and `coordinator_ref`. Assessment text is bounded at 4,096 characters;
 path/evidence lists at 64 entries of at most 4,096 characters. Do not manufacture
@@ -241,7 +262,7 @@ Follow [native reconciliation](delegation.md#observe-and-reconcile-independently
 the proof, then submit this envelope. Checks/coordinator operations have distinct
 role proofs under [model-free controls](runtime.md#coordinator-resource-claims).
 
-Return: `attempt_id`, settled `status`, current `revision`, reconciled `outcome`,
+Return: `attempt_id`, `status` (`settled` or `cooperative-completed`), current `revision`, reconciled `outcome`,
 `replayed` and limitations. Only matching independently verified effects release
 ownership. A replay requires the same semantic request. Failed/cancelled outcomes
 do not complete dependencies; uncertainty never clears merely with time.

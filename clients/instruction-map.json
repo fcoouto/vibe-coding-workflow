@@ -29,16 +29,16 @@
       ]
     },
     "clients/delegation-proofs.md": {
-      "sha256": "07e883df6e752378807301cddb04a7749e17ea974ba0521bb39aa0e8f6ac52e7",
+      "sha256": "ae0a04298279c9de1784529890c4b2dd4240029b153b1e39c5adf083b2f21617",
       "ranges": [
         [
           1,
-          78
+          115
         ]
       ]
     },
     "clients/delegation-requests.md": {
-      "sha256": "38d71351577a79c072bdc0af3abf76a6f2c7d7977d38d0780fc3e477b1ec5222",
+      "sha256": "f619e2adcae8ee34d9665863c0b3dd1544057bf22d7b6b80d2066e656500ef50",
       "ranges": [
         [
           1,
@@ -46,12 +46,12 @@
         ],
         [
           209,
-          274
+          295
         ]
       ]
     },
     "clients/delegation.md": {
-      "sha256": "3f81a213a9e6455fe14ae37cfd3086d68399c8f8ccb736070dbe863293615c3a",
+      "sha256": "d91d1cd82ec45c3600c07a96d406db917ffbc3112a52ac0d4c74a7f68e428fb3",
       "ranges": [
         [
           1,
@@ -59,7 +59,7 @@
         ],
         [
           55,
-          67
+          75
         ]
       ]
     },
@@ -77,11 +77,11 @@
       ]
     },
     "clients/evidence-checks.md": {
-      "sha256": "6db5b7cbe4d70cb6547d9804dbc58720b35ea0fe0480976911f478e5fa447273",
+      "sha256": "25798dd9b972b70d4a9cd9d26fd8815fff91e5dca71199a772441c452602609a",
       "ranges": [
         [
           1,
-          14
+          16
         ]
       ]
     },
@@ -574,7 +574,7 @@
       ]
     },
     "skills/onboard-my-project/references/qualification.md": {
-      "sha256": "173b2df7b1db5d25d24fcc2b6f0235e31b7b9626b634e160c8575a35c9aedb78",
+      "sha256": "dd6c84bb8401f708bc4eb6e59879e5b27b5a00802e5b42e59b98ee19c0019320",
       "ranges": [
         [
           1,
@@ -582,7 +582,7 @@
         ],
         [
           29,
-          37
+          39
         ]
       ]
     },

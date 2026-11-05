@@ -704,7 +704,7 @@ def _register_recovery_source(scope, db, source, *, context=None):
     lifetime=changes._check_d4_publication(source, selected, db)
     prior_registration=lifetime['registrations'].get(str(selected.database))
     if prior_registration is not None:
-        _check_recovery_registration(selected,db,source)
+        _verify_recovery_registration(selected,db,source,lifetime)
         _require(prior_registration['reference'] is not None,'Recovery registration is already in progress')
         return _canonical_freeze(prior_registration['reference'])
     baseline = state._source_baseline(None, db, context=selected)
@@ -730,7 +730,7 @@ def _register_recovery_source(scope, db, source, *, context=None):
         if projection['reference']==previous:
             lifetime['registrations'][str(selected.database)]=dict(baseline=baseline,expected=baseline,
                 content=prior,created_at=created,dependencies=_recovery_source_dependencies(prior,_canonical_plain(selected.authority_set[0])),reference=previous)
-            _check_recovery_registration(selected,db,source)
+            _verify_recovery_registration(selected,db,source,lifetime)
             return _canonical_freeze(previous)
     dependencies = projection['dependencies']
     registration=dict(baseline=baseline,expected=baseline,content=content,created_at=created,dependencies=dependencies,reference=None)
@@ -746,7 +746,8 @@ def _register_recovery_source(scope, db, source, *, context=None):
     metadata['dependencies'] = edges
     db.execute('update evidence_metadata set data=? where name=?', (_raw(metadata).decode(),baseline['reference']['name']))
     registration['expected']=dict(baseline,dependencies=edges)
-    _check_recovery_registration(selected,db,source)
+    # The writer reobserves the source again immediately before commit.
+    _verify_recovery_registration(selected,db,source,lifetime)
     return _canonical_freeze(reference)
 
 
@@ -2909,8 +2910,10 @@ def _retention_detail_shape(body):
         'assignments_digest attempt_ids attempts_digest candidate_digest coordinator_ref descendants_stopped expected_pins expected_revision generation identity kind observation_ref observed_turn_id stopped task_digest verification_digest version',
         'current_candidate proof request_digest source_digest version',
         'assessment current_candidate proof request_digest reservation_snapshot_digest revision source_digest version',
+        'assessment current_candidate prior_cooperative proof request_digest reservation_snapshot_digest revision source_digest version',
         'error raw receipt report request result',
         'conflict error incoming previous receipt report request result revision status version',
+        'activity conflict error incoming previous receipt report request result revision status version',
         'capability_digest catalog client_surface dispatch_controls limitations native_version originator parent_model_provider parent_session_id version',
         'base checks comparison criteria decision_ref exclusions instructions nontrivial review_limit reviews security_impact version',
         'authority fallback git_directory jobs limits route selection_constraints version',
@@ -2998,7 +3001,9 @@ def _retention_routes(context,db,original):
             projections=[item for worker in original['workers'] for item in worker['observations'] if item['source']==ref]
             _require(len(projections)==1 and all(body[field]==projections[0][field] for field in
                 ('status','receipt','revision','report','error','conflict')),'Original observation differs from its issued closure projection')
-        elif kind=='reconciliation':child(body.get('current_candidate'),'candidate')
+        elif kind=='reconciliation':
+            child(body.get('current_candidate'),'candidate')
+            child(body.get('prior_cooperative'),'reconciliation')
         elif kind=='synchronous':
             _require(body['kind']=='synchronous-verification','Original synchronous reconciliation kind changed')
             child(body['verification'],'verification')
@@ -5391,7 +5396,13 @@ def _check_admission(scope, db, task, check, claims, records):
     _require(not any(r['data']['role'] == 'check' and r['data']['job_id'] == check['id'] and
         r['data']['status'] != 'settled' and all(r['owner'][key] == value for key, value in owner.items()) for r in records),
         'Exact check remains unresolved; reconcile its original execution first')
-    delegation._resources_available(scope, db, claims, records)
+    cooperative_task = task if check['effects']['kind'] == 'read-only' else None
+    if 'delegation' in task:
+        plan = delegation._task_plan(scope, task)
+        job = next((job for job in plan['jobs'] if job['role'] == 'check' and job['id'] == check['id']), None)
+        if job is not None:
+            delegation.validate_dependencies(scope, task, plan, job, records, cooperative=cooperative_task is not None)
+    delegation._resources_available(scope, db, claims, records, cooperative_task=cooperative_task)
 
 
 def _reserve_check(scope, request):
@@ -5925,7 +5936,8 @@ def _checkout_attempt_blockers(db, scope, task, *, context=None, records=None):
     return blockers
 
 
-def _blockers(scope, task, plan, candidate, purpose, reuse, security_impact=None, *, resource_closure=None, barrier_id=None, context=None):
+def _blockers(scope, task, plan, candidate, purpose, reuse, security_impact=None, *, resource_closure=None,
+              barrier_id=None, context=None, cooperative=False):
     from runtime import delegation
     blockers = []
     evidence = task['evidence']
@@ -5936,7 +5948,8 @@ def _blockers(scope, task, plan, candidate, purpose, reuse, security_impact=None
     with (_context_database(context) if context is not None else state._database(scope)) as db:
         review_records = delegation._ledger(scope, db, context=context, task=task)
         blockers.extend(_checkout_attempt_blockers(db, scope, task, context=context, records=review_records))
-        blockers.extend(_ledger_blockers(scope, db, resource_closure, barrier_id, context=context, records=review_records))
+        blockers.extend(_ledger_blockers(scope, db, resource_closure, barrier_id, context=context,
+            records=review_records, cooperative_task=task if cooperative else None))
     if task['turn_uncertain'] and task['turn_id'] is not None:
         blockers.append('Native turn interruption/correlation remains unresolved')
     if ((security_impact or plan['security_impact'])['status'] != 'assessed' or
@@ -6055,12 +6068,13 @@ def _verification_resources(scope, task, plan):
         git_routing=delegation._git_routing(scope, git_directory))
 
 
-def _ledger_blockers(scope, db, claims, exclude=None, *, context=None, records=None):
+def _ledger_blockers(scope, db, claims, exclude=None, *, context=None, records=None, cooperative_task=None):
     from runtime import delegation
     if records is None:
         records = delegation._ledger(scope, db, context=context, current=True)
     return ['Relevant assignment ownership remains unresolved: ' + record['id'] for record in records
         if record['id'] != exclude and record['data']['status'] != 'settled' and
+        not delegation._cooperative_for(scope, record, cooperative_task) and
         (claims is None or delegation._held_overlap(claims, record['data']['claims']))]
 
 
@@ -6239,16 +6253,19 @@ def _verify_member(scope, request, *, linked=False, _held=False):
         _require('evidence' in task, 'Evidence plan is missing')
         plan = _read(scope, task['evidence']['plan'])
         _require(plan['version'] == 1 or linked and plan['version'] == 2, 'Linked acceptance requires linked verification owner integration')
+        cooperative = (not linked and not _held and request['purpose'] == 'completion' and plan['version'] == 1
+            and admission.mode == 'qualification' and 'qualification_attempt' in task)
         generation = db.execute('select generation from checkouts where scope_id=?', (state._scope_id(scope),)).fetchone()[0]
     resources, closure, routing = _verification_resources(scope, task, plan)
     def ownership_blockers():
         with state._database(scope) as db:
             current = _task(db, scope, request)
             records = delegation._ledger(scope, db, task=request)
+            cooperative_task = current if cooperative else None
             blockers = (_checkout_attempt_blockers(db, scope, current, records=records)
-                + _ledger_blockers(scope, db, closure, records=records))
+                + _ledger_blockers(scope, db, closure, records=records, cooperative_task=cooperative_task))
             try:
-                delegation._resources_available(scope, db, closure, records)
+                delegation._resources_available(scope, db, closure, records, cooperative_task=cooperative_task)
             except state.StateError as error:
                 blockers.append(str(error))
         return sorted(set(blockers))
@@ -6261,7 +6278,8 @@ def _verify_member(scope, request, *, linked=False, _held=False):
         ownership_ref=task['decision_ref'], stop_conditions=['Return after this synchronous verification'],
         verification=dict(purpose=request['purpose'], **routing))
     try:
-        reserved = delegation._reserve_operation(scope, barrier_request, role='coordinator', _verification=True)
+        reserved = delegation._reserve_operation(scope, barrier_request, role='coordinator',
+            _verification=True, _cooperative=cooperative)
     except state.StateError:
         blockers = ownership_blockers()
         if blockers:
@@ -6275,7 +6293,7 @@ def _verify_member(scope, request, *, linked=False, _held=False):
         _require(barrier['data']['claims'] == closure, 'Verifier resource closure changed before capture')
     candidate = capture_candidate(scope, plan)
     blockers = _blockers(scope, task, plan, candidate, request['purpose'], reuse, security_impact,
-                         resource_closure=closure, barrier_id=barrier['id'])
+                         resource_closure=closure, barrier_id=barrier['id'], cooperative=cooperative)
     verification = dict(version=VERSION, candidate_digest=_digest(candidate), plan_digest=_digest(plan),
         purpose=request['purpose'], generation=generation, blockers=blockers, reuse=reuse, security_impact=security_impact,
         resource_closure=closure, barrier_id=barrier['id'])
@@ -6283,13 +6301,16 @@ def _verify_member(scope, request, *, linked=False, _held=False):
     with delegation._reservation_write(scope) as db:
         current = _task(db, scope, request)
         admission = state._capability(scope, current, 'verify-merge' if request['purpose'] == 'merge-evidence' else 'verify-completion')
+        _require(not cooperative or admission.mode == 'qualification' and
+            current.get('qualification_attempt') == task['qualification_attempt'],
+            'Cooperative verification qualification authority changed')
         actual_generation = db.execute('select generation from checkouts where scope_id=?', (state._scope_id(scope),)).fetchone()[0]
         active = next(record for record in delegation._ledger(scope, db, task=request) if record['id'] == barrier['id'])
         _require(actual_generation == generation and active['data'] == barrier['data'] and
             delegation._claims(resources, maximum=delegation.MAX_VERIFICATION_CLAIMS) == closure and delegation._git_routing(scope, routing['git_directory']) == routing['git_routing'],
             'Verification generation, barrier or physical routing changed; reconcile the retained barrier')
         final_blockers = sorted(set(blockers + _checkout_attempt_blockers(db, scope, current) +
-            _ledger_blockers(scope, db, closure, barrier['id'])))
+            _ledger_blockers(scope, db, closure, barrier['id'], cooperative_task=current if cooperative else None)))
         if final_blockers != blockers:
             blockers = final_blockers
             verification['blockers'] = blockers
@@ -8459,10 +8480,12 @@ def evidence_status(scope, client, session_id):
             candidate = capture_candidate(scope, plan)
             verification = _read(scope, task['evidence']['verification']) if 'verification' in task['evidence'] else {}
             current = verification.get('candidate_digest') == _digest(candidate)
+            cooperative = (current and verification.get('purpose') == 'completion' and
+                'qualification_attempt' in task)
             _, closure, _ = _verification_resources(scope, task, plan)
             result['evidence'] = dict(candidate_digest=_digest(candidate), blockers=_blockers(scope, delivery.implementation_task(task), plan, candidate, 'completion',
                 verification.get('reuse', []) if current else [], verification.get('security_impact') if current else None,
-                resource_closure=closure))
+                resource_closure=closure, cooperative=cooperative))
             result['evidence']['implementation_verified'] = bool(current and verification
                 and not verification.get('blockers') and not result['evidence']['blockers'])
         except StartupError:

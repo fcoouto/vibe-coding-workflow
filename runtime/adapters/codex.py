@@ -2,12 +2,16 @@
 
 import hashlib
 import json
+import os
 import re
 from contextlib import contextmanager
+import shlex
 import shutil
 import subprocess
 import time
+import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 
 from runtime.adapters import session_start
 from runtime.adapters.session_start import diagnostic, render
@@ -41,6 +45,34 @@ def _tool_fingerprint(relevant):
 
 def patch_input_fingerprint(command):
     return _tool_fingerprint(dict(tool_name="apply_patch", tool_input=dict(command=command)))
+
+
+def foreground_wait_args(wait, checkout):
+    """Derive the sole foreground shell input allowed by a held D6 admission."""
+    from runtime.startup import _canonical_path
+
+    if (not isinstance(wait, dict) or set(wait) != {'marker', 'python', 'seconds'}
+            or type(wait['seconds']) is not int or not 1 <= wait['seconds'] <= 20):
+        raise StartupError('Invalid foreground wait binding')
+    marker = _canonical_path(wait['marker'])
+    executable = _canonical_path(wait['python'])
+    script = '''import os, stat, sys, time
+deadline = time.monotonic() + int(sys.argv[2])
+while time.monotonic() < deadline:
+    try:
+        mode = os.lstat(sys.argv[1]).st_mode
+    except FileNotFoundError:
+        time.sleep(0.05)
+        continue
+    if stat.S_ISREG(mode):
+        print("D6_READY")
+        raise SystemExit(0)
+    break
+raise SystemExit(1)
+'''
+    return dict(cmd=shlex.join([str(executable), '-I', '-B', '-S', '-c', script, str(marker), str(wait['seconds'])]),
+                workdir=str(_canonical_path(str(checkout))), shell='/bin/sh', login=False, tty=False,
+                yield_time_ms=(wait['seconds'] + 5) * 1000)
 
 
 def normalize_runtime(payload) -> RuntimeEvent:
@@ -77,7 +109,20 @@ def normalize_runtime(payload) -> RuntimeEvent:
         if type(payload["stop_hook_active"]) is not bool:
             raise StartupError("Invalid codex stop_hook_active")
         active = payload["stop_hook_active"]
-    return RuntimeEvent(kind, "codex", session, cwd, turn, call, tool, active, fingerprint, patch_input)
+    raw_path = payload.get('transcript_path')
+    transcript = None
+    if (patch_input is not None and isinstance(raw_path, str) and 0 < len(raw_path) <= 4096
+            and raw_path.isprintable() and Path(raw_path).is_absolute()):
+        transcript = Path(raw_path)
+    parent_session = None
+    if tool == 'apply_patch' and 'agent_id' in payload:
+        # Native child tool hooks carry the root session and the concrete child thread separately.
+        agent = native_string(payload, 'agent_id')
+        if agent == session:
+            raise StartupError('Codex child tool hook must identify a distinct agent')
+        parent_session, session = session, agent
+    return RuntimeEvent(kind, "codex", session, cwd, turn, call, tool, active, fingerprint, patch_input,
+                        transcript, parent_session)
 
 
 def render_runtime(result: HookResult) -> dict | None:
@@ -144,7 +189,7 @@ def _review_id(value):
 
 
 @contextmanager
-def _native_reader(methods, *, on_notification=None, deadline=None, executable=None):
+def _native_reader(methods, *, on_notification=None, deadline=None, executable=None, native_home=None):
     process = None
     limit = time.monotonic() + REVIEW_TIMEOUT
     deadline = limit if deadline is None else min(limit, deadline)
@@ -171,6 +216,8 @@ def _native_reader(methods, *, on_notification=None, deadline=None, executable=N
         initialized = request("initialize", {"clientInfo": {"name": "vibe-workflow-native-observer", "version": "1"},
                                               "capabilities": {"experimentalApi": True}})
         validate_initialize(initialized)
+        if native_home is not None and (initialized['codexHome'] != native_home or process.launch_codex_home != native_home):
+            raise ObservationError('native_home_mismatch')
         process.send({"method": "initialized"})
         yield observed_version, request
     finally:
@@ -258,7 +305,7 @@ def _native_chain(scope, binding, attempt_id, prefix, parent_turn_id, spawn_item
     return parent_thread, spawn, thread, agent_path, mechanism
 
 
-def _native_final(request, child, turn):
+def _native_final(request, child, turn, *, projected_tools=None, wait_args=None):
     final, cursor, seen = [], None, set()
     # One item per frame preserves all-history uniqueness within existing byte/time bounds.
     for _ in range(400):
@@ -274,6 +321,28 @@ def _native_final(request, child, turn):
                     or not isinstance(entry.get("item"), dict)):
                 raise ObservationError("malformed_history")
             item = entry["item"]
+            if projected_tools is not None:
+                kind = item.get('type')
+                if kind in {'fileChange', 'functionCallOutput'}:
+                    if (kind == 'fileChange' and item.get('status') not in {'completed', 'failed', 'declined'}
+                            or kind == 'functionCallOutput' and item.get('name') != 'apply_patch'):
+                        raise ObservationError('cooperative_projection_unverified')
+                    tool = 'apply_patch'
+                elif kind == 'commandExecution' and wait_args is not None:
+                    if (item.get('status') != 'completed' or type(item.get('exitCode')) is not int or item['exitCode'] != 0
+                            or item.get('source') != 'unifiedExecStartup' or item.get('aggregatedOutput') != 'D6_READY\n'
+                            or item.get('cwd') != wait_args['workdir']):
+                        raise ObservationError('cooperative_projection_unverified')
+                    tool = 'exec_command'
+                elif kind not in {'userMessage', 'agentMessage', 'reasoning', 'hookPrompt'} or item.get('delivery') is not None:
+                    raise ObservationError('cooperative_projection_unverified')
+                else:
+                    tool = None
+                if tool is not None:
+                    call_id = _review_id(item.get('id'))
+                    if call_id in projected_tools and (tool != 'apply_patch' or projected_tools[call_id] != tool):
+                        raise ObservationError('cooperative_projection_unverified')
+                    projected_tools[call_id] = tool
             if item.get("type") == "agentMessage" and item.get("phase") == "final_answer":
                 final.append(item)
         cursor = page.get("nextCursor")
@@ -355,6 +424,60 @@ def _native_surface(thread, surface, observer_version=None):
     return originator
 
 
+def guarded_child_lineage(event, *, deadline):
+    """Read the CLI child hook transcript. Settlement corroborates the parent spawn separately."""
+    from runtime.onboarding import _read_file
+    from runtime.startup import CANONICAL_MAX_ROWS
+
+    try:
+        if event.client != 'codex' or event.kind != 'PreToolUse' or event.tool_name != 'apply_patch':
+            raise ObservationError('guarded_child_event_unverified')
+        child = _review_id(event.session_id)
+        turn = _review_id(event.turn_id)
+        cwd = str(event.cwd)
+        home = Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex').resolve(strict=True)
+        path = event.transcript_path
+        if (time.monotonic() >= deadline or not path.is_relative_to(home / 'sessions')
+                or path.resolve(strict=True) != path or not path.name.startswith('rollout-')
+                or not path.name.endswith(f'-{child}.jsonl')):
+            raise ObservationError('guarded_rollout_unverified')
+        raw = _read_file(path, MAX_OUTPUT, private=True)
+        lines = raw.splitlines()
+        if not lines or not raw.endswith(b'\n') or len(lines) > CANONICAL_MAX_ROWS:
+            raise ObservationError('guarded_rollout_unverified')
+        first, *rows = [json_object(line) for line in lines]
+        metadata = first['payload']
+        if (first['type'] != 'session_meta' or metadata['id'] != child
+                or any(row['type'] == 'session_meta' for row in rows)):
+            raise ObservationError('guarded_rollout_unverified')
+        origin = metadata['source']['subagent']['thread_spawn']
+        parent = _review_id(origin['parent_thread_id'])
+        agent_path = _review_id(origin['agent_path'])
+        task = re.fullmatch(r'/root/(worker_[0-9a-f]{32})', agent_path)
+        version = _review_id(metadata['cli_version'])
+        if (parent == child or not task or type(origin['depth']) is not int or origin['depth'] != 1
+                or metadata['cwd'] != cwd or metadata['originator'] != 'codex_exec'
+                or metadata['agent_path'] != agent_path):
+            raise ObservationError('guarded_child_source_unverified')
+        events = [row['payload'] for row in rows if row['type'] == 'event_msg']
+        start, = [item for item in events if item['type'] in ('task_started', 'turn_started')]
+        attribution = start['turn_attribution']
+        parent_turn = _review_id(attribution['parent_turn_id'])
+        if (start['type'] != 'task_started' or start['turn_id'] != turn or attribution['turn_id'] != turn
+                or attribution['turn_trigger'] != 'exec' or attribution['root_turn_id'] != parent_turn
+                or attribution['initiating_agent_path'] != '/root'
+                or any(item['type'] in ('task_complete', 'turn_complete', 'turn_aborted') for item in events)):
+            raise ObservationError('guarded_child_turn_unverified')
+        context, = [row['payload'] for row in rows if row['type'] == 'turn_context']
+        model, effort = _review_id(context['model']), _review_id(context['effort'])
+        if (context['turn_id'] != turn or context['cwd'] != cwd or context['multi_agent_version'] != 'v2'
+                or time.monotonic() >= deadline):
+            raise ObservationError('guarded_child_turn_unverified')
+        return dict(parent_session_id=parent, task_name=task[1], native_version=version, model=model, effort=effort)
+    except (ObservationError, OSError, StartupError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        raise StartupError('Guarded native child lineage is unavailable') from None
+
+
 def _native_setting(value):
     return _review_id(value) if value is not None else None
 
@@ -416,9 +539,9 @@ def discover_native_workers(scope, control_observation):
         raise StartupError("Native worker discovery unavailable; dispatch capabilities remain unverified") from None
 
 
-def observe_native_worker(scope, attempt, parent_turn_id, spawn_item_id):
+def observe_native_worker(scope, attempt, parent_turn_id, spawn_item_id, *, cooperative=False):
     """Bind one prepared assignment to native history without claiming writer shutdown."""
-    return _observe_native_assignment(scope, attempt, parent_turn_id, spawn_item_id, review=False)
+    return _observe_native_assignment(scope, attempt, parent_turn_id, spawn_item_id, review=False, cooperative=cooperative)
 
 
 def _visibility_spawn_task(request, parent, child, binding):
@@ -561,12 +684,248 @@ def observe_worker_visibility(checkout, parent_session_id, worker_id, *, spawn_b
         raise StartupError('Native display identity unavailable; visibility remains unverified') from None
 
 
-def observe_native_review_assignment(scope, attempt_id, parent_turn_id, spawn_item_id):
+def observe_native_review_assignment(scope, attempt_id, parent_turn_id, spawn_item_id, *, cooperative=False):
     """Observe D6 reviewer lifecycle; this neither parses nor accepts a D5 review report."""
-    return _observe_native_assignment(scope, attempt_id, parent_turn_id, spawn_item_id, review=True)
+    return _observe_native_assignment(scope, attempt_id, parent_turn_id, spawn_item_id, review=True, cooperative=cooperative)
 
 
-def _observe_native_assignment(scope, attempt, parent_turn_id, spawn_item_id, *, review):
+def _exec_wrapped_input(item, tool):
+    if item.get('name') != 'exec' or not isinstance(item.get('input'), str):
+        return None
+    script = item['input'].removesuffix('\n').removesuffix(';')
+    prefix = f'text(await tools.{tool}('
+    if not script.startswith(prefix) or not script.endswith('))'):
+        return None
+    literal = script[len(prefix):-2]
+    if tool == 'exec_command':
+        return json_object(literal)
+    command = json.loads(literal)
+    return command if isinstance(command, str) and command.strip() else None
+
+
+def _exec_wrapped_pairs(raw, data, turn, *, tools):
+    """Bind a literal one-tool wrapper to its one native completion inside the call interval."""
+    rows = [row for row in data['records'] if row['payload']['type'].endswith(('_call', '_call_output'))]
+    pairs, ids = {}, set()
+    for call, output in zip(rows, rows[1:]):
+        item, result = call['payload'], output['payload']
+        if (call['turn_id'] != turn or item['type'] != 'custom_tool_call' or item.get('name') != 'exec'):
+            continue
+        for tool in tools:
+            value = _exec_wrapped_input(item, tool)
+            if value is not None:
+                break
+        else:
+            continue
+        outer = _review_id(item.get('call_id'))
+        parts = result.get('output')
+        if (output['turn_id'] != turn or item.get('namespace') not in (None, 'functions')
+                or result['type'] != 'custom_tool_call_output' or result.get('call_id') != outer
+                or result.get('namespace') not in (None, 'functions') or result.get('name') not in (None, 'exec')
+                or not isinstance(parts, list) or len(parts) != 2
+                or any(not isinstance(part, dict) or set(part) != {'type', 'text'}
+                    or part['type'] != 'input_text' or not isinstance(part['text'], str) for part in parts)
+                or not re.fullmatch(r'Script completed\nWall time [0-9]{1,6}(?:\.[0-9]{1,6})? seconds\nOutput:\n',
+                    parts[0]['text'])):
+            raise ObservationError('cooperative_wrapper_unverified')
+        _, call_offset, call_size = call['source']['reference'].rsplit(':', 2)
+        source, output_offset, output_size = output['source']['reference'].rsplit(':', 2)
+        start = int(call_offset) + int(call_size)
+        end = int(output_offset) + int(output_size)
+        middle = [json_object(line) for line in raw[start:int(output_offset)].splitlines()]
+        completion, = [row for row in middle if row['type'] != 'token_usage_record']
+        event = completion['payload']
+        if (completion['type'] != 'event_msg' or event.get('type') != 'item_completed'
+                or event.get('thread_id') != data['thread_id'] or event.get('turn_id') != turn):
+            raise ObservationError('cooperative_wrapper_unverified')
+        nested = event['item']
+        if not isinstance(nested, dict):
+            raise ObservationError('cooperative_wrapper_unverified')
+        inner = _review_id(nested.get('id'))
+        if inner == outer or {inner, outer} & ids or nested.get('status') != 'completed':
+            raise ObservationError('cooperative_wrapper_unverified')
+        ids.update((inner, outer))
+        payload = parts[1]['text']
+        if tool == 'exec_command':
+            reply = json_object(payload)
+            if (nested.get('type') != 'CommandExecution'
+                    or set(reply) - {'chunk_id', 'wall_time_seconds', 'exit_code', 'original_token_count', 'output'}
+                    or type(reply.get('exit_code')) is not int or reply['exit_code'] != 0
+                    or reply.get('output') != 'D6_READY\n' or nested.get('aggregated_output') != reply['output']):
+                raise ObservationError('cooperative_wait_unverified')
+            inner_call = dict(type='function_call', call_id=inner, name=tool, arguments=json.dumps(value))
+            inner_output = dict(type='function_call_output', call_id=inner, output=reply['output'])
+        else:
+            if (payload != '{}' or nested.get('type') != 'FileChange' or nested.get('stderr') != ''
+                    or not isinstance(nested.get('changes'), dict) or not nested['changes']
+                    or not isinstance(nested.get('stdout'), str) or not nested['stdout']):
+                raise ObservationError('cooperative_wrapper_unverified')
+            inner_call = dict(type='custom_tool_call', call_id=inner, name=tool, input=value)
+            inner_output = dict(type='custom_tool_call_output', call_id=inner, name=tool, output=nested['stdout'])
+        # Keep proof of both the nested completion and the matching outer result.
+        proof = dict(reference=f'{source}:{start}:{end-start}', sha256=hashlib.sha256(raw[start:end]).hexdigest())
+        pairs[outer] = (dict(call, payload=inner_call), dict(output, payload=inner_output, source=proof))
+    if pairs:
+        nested_ids = {call['payload']['call_id'] for call, _ in pairs.values()}
+        completed = set()
+        for line in raw.splitlines():
+            row = json_object(line)
+            event = row['payload']
+            item = event.get('item')
+            if (row['type'] == 'event_msg' and event.get('type') == 'item_completed'
+                    and event.get('turn_id') == turn and isinstance(item, dict)
+                    and isinstance(item.get('id'), str) and item['id'] in nested_ids):
+                if item['id'] in completed:
+                    raise ObservationError('cooperative_wrapper_unverified')
+                completed.add(item['id'])
+    return pairs
+
+
+def _cooperative_activity(raw, *, path, child, turn, result, review, wait_args=None):
+    """Account for one completed rollout under the native trust assumption."""
+    from runtime.doctor import native_behavior_records
+    from runtime.startup import _canonical_plain
+    data = _canonical_plain(native_behavior_records(raw, thread_id=child, source_reference=str(path)))
+    if data['turn_ids'] != [turn]:
+        raise ObservationError('cooperative_turn_unverified')
+    wrapped = {} if review else _exec_wrapped_pairs(raw, data, turn, tools=('exec_command', 'apply_patch'))
+    inner_ids = {outer: pair[0]['payload']['call_id'] for outer, pair in wrapped.items()}
+    wrapped_ids = set(inner_ids.values())
+    calls, outputs = {}, set()
+    declared = False
+    wait_call = None
+    wait_digest = _tool_fingerprint(dict(tool_name='exec_command', tool_input=wait_args)) if wait_args else None
+    for record in data['records']:
+        item = record['payload']
+        kind = item['type']
+        if (kind == 'additional_tools' and not declared and not calls and item.get('role') == 'developer'
+                and isinstance(item.get('tools'), list) and item.get('delivery') is None):
+            declared = True
+            continue
+        if kind in {'message', 'agent_message', 'reasoning'}:
+            if item.get('delivery') is not None:
+                raise ObservationError('cooperative_activity_unverified')
+            continue
+        if review or record['turn_id'] != turn or item.get('namespace') not in (None, 'functions'):
+            raise ObservationError('cooperative_activity_unverified')
+        pair = wrapped.get(item.get('call_id'))
+        if pair is not None:
+            index = {'custom_tool_call': 0, 'custom_tool_call_output': 1}.get(kind)
+            if index is None:
+                raise ObservationError('cooperative_activity_unverified')
+            item = pair[index]['payload']
+            kind = item['type']
+        call_id = _review_id(item.get('call_id'))
+        if kind == 'function_call' and item.get('name') == 'exec_command' and wait_args is not None and not calls:
+            arguments = item.get('arguments')
+            if not isinstance(arguments, str) or _tool_fingerprint(dict(tool_name='exec_command',
+                    tool_input=json_object(arguments))) != wait_digest:
+                raise ObservationError('cooperative_wait_unverified')
+            wait_call = call_id
+            calls[call_id] = dict(id=call_id, tool='exec_command', input_digest=wait_digest)
+        elif kind == 'function_call_output' and call_id == wait_call and call_id not in outputs:
+            output = item.get('output')
+            # The pinned direct tool output has no session line when it returns synchronously.
+            if pair is None and (not isinstance(output, str) or re.fullmatch(
+                    r'(?:Chunk ID: [0-9a-f]+\n)?Wall time: [0-9]+\.[0-9]{4} seconds\n'
+                    r'Process exited with code 0\n(?:Original token count: [0-9]+\n)?Output:\nD6_READY\n',
+                    output) is None):
+                raise ObservationError('cooperative_wait_unverified')
+            outputs.add(call_id)
+        elif (kind == 'custom_tool_call' and item.get('name') == 'apply_patch' and call_id not in calls
+                and (wait_args is None or wait_call in outputs)):
+            command = item.get('input')
+            if not isinstance(command, str) or not command.strip():
+                raise ObservationError('cooperative_activity_unverified')
+            calls[call_id] = dict(id=call_id, tool='apply_patch', input_digest=patch_input_fingerprint(command))
+        elif (kind == 'custom_tool_call_output' and item.get('name') in (None, 'apply_patch')
+                and call_id in calls and call_id != wait_call and call_id not in outputs):
+            output = item.get('output')
+            if not (isinstance(output, str) or isinstance(output, list) and output and all(
+                    isinstance(part, dict) and part.get('type') == 'input_text' and isinstance(part.get('text'), str)
+                    for part in output)):
+                raise ObservationError('cooperative_activity_unverified')
+            outputs.add(call_id)
+        else:
+            raise ObservationError('cooperative_activity_unverified')
+    if outputs != calls.keys() or wait_args is not None and wait_call is None:
+        raise ObservationError('cooperative_activity_unverified')
+
+    phase = 'before'
+    initial_delivery = set()
+    wait_started = False
+    wait_completed = False
+    tools_started = False
+    settings_seen = False
+    for line in raw.splitlines():
+        row = json_object(line)
+        kind, event = row['type'], row['payload']
+        if kind in {'session_meta', 'turn_context', 'token_usage_record', 'world_state'}:
+            continue
+        if kind in {'inter_agent_communication', 'inter_agent_communication_metadata'}:
+            initial_trigger = (kind == 'inter_agent_communication_metadata' and phase == 'active'
+                and settings_seen and not tools_started and event.keys() == {'trigger_turn'}
+                and event['trigger_turn'] is True)
+            if kind in initial_delivery or (phase != 'before' and not initial_trigger):
+                raise ObservationError('cooperative_activity_unverified')
+            initial_delivery.add(kind)
+            continue
+        if kind == 'response_item' and (phase == 'active' or phase == 'before'
+                and event.get('type') in {'message', 'agent_message', 'reasoning', 'additional_tools'}):
+            if event['type'] in {'function_call', 'custom_tool_call'}:
+                tools_started = True
+                call_id = event.get('call_id')
+                if wait_call is not None and inner_ids.get(call_id, call_id) == wait_call:
+                    wait_started = True
+                elif wait_call is not None and event['type'] == 'custom_tool_call' and not wait_completed:
+                    raise ObservationError('cooperative_wait_unverified')
+            continue
+        if kind != 'event_msg':
+            raise ObservationError('cooperative_activity_unverified')
+        event_type = event.get('type')
+        if event_type in {'task_started', 'turn_started'} and phase == 'before' and event.get('turn_id') == turn:
+            phase = 'active'
+        elif event_type in {'task_complete', 'turn_complete'} and phase == 'active' and event.get('turn_id') == turn:
+            if (event.get('last_agent_message') != result or event.get('error') is not None
+                    or event.get('will_retry', False) is not False):
+                raise ObservationError('cooperative_turn_unverified')
+            phase = 'after'
+        elif event_type == 'token_count':
+            continue
+        elif (event_type == 'thread_settings_applied' and not settings_seen and not tools_started
+                and (phase == 'before' or phase == 'active' and event.get('thread_id') == child
+                     and isinstance(event.get('thread_settings'), dict))):
+            settings_seen = True
+        elif phase == 'active' and event_type in {'user_message', 'agent_message', 'agent_reasoning', 'agent_reasoning_raw_content'}:
+            continue
+        elif (phase == 'active' and event_type == 'patch_apply_end' and event.get('turn_id') == turn
+                and event.get('call_id') in outputs and event.get('call_id') not in wrapped_ids):
+            continue
+        elif phase == 'active' and event_type == 'item_completed':
+            item = event.get('item')
+            if event.get('thread_id') != child or event.get('turn_id') != turn or not isinstance(item, dict):
+                raise ObservationError('cooperative_activity_unverified')
+            if item.get('type') == 'CommandExecution' and wait_args is not None:
+                if (not wait_started or wait_completed or item.get('id') != wait_call or item.get('status') != 'completed'
+                        or type(item.get('exit_code')) is not int or item['exit_code'] != 0
+                        or item.get('source') != 'unified_exec_startup' or item.get('aggregated_output') != 'D6_READY\n'
+                        or item.get('interaction_input') is not None
+                        or item.get('cwd') != Path(wait_args['workdir']).as_uri()
+                        or item.get('command') != [wait_args['shell'], '-c', wait_args['cmd']]):
+                    raise ObservationError('cooperative_wait_unverified')
+                wait_completed = True
+            elif not (item.get('type') in {'UserMessage', 'AgentMessage', 'Reasoning', 'HookPrompt'}
+                        and item.get('delivery') is None or item.get('type') in {'FileChange', 'FunctionCallOutput'}
+                        and item.get('id') in outputs and item.get('id') != wait_call):
+                raise ObservationError('cooperative_activity_unverified')
+        else:
+            raise ObservationError('cooperative_activity_unverified')
+    if phase != 'after' or wait_args is not None and not wait_completed:
+        raise ObservationError('cooperative_turn_unverified')
+    return dict(source_digest=hashlib.sha256(raw).hexdigest(), calls=list(calls.values()))
+
+
+def _observe_native_assignment(scope, attempt, parent_turn_id, spawn_item_id, *, review, cooperative):
     if review:
         from runtime.delegation import prepared_native_review_assignment as prepared
     else:
@@ -591,29 +950,63 @@ def _observe_native_assignment(scope, attempt, parent_turn_id, spawn_item_id, *,
         requested_model = _native_setting(binding.get("requested_model"))
         requested_effort = _native_setting(binding.get("requested_effort"))
         admitted_version = _review_id(binding.get("native_version"))
-        with _native_reader(REVIEW_METHODS) as (observed_version, request):
+        deadline = time.monotonic() + REVIEW_TIMEOUT
+        native_home = str(Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex').resolve()) if cooperative else None
+        with _native_reader(REVIEW_METHODS, deadline=deadline, native_home=native_home) as (observed_version, request):
             parent, spawn, thread, agent_path, mechanism = _native_chain(scope, binding, attempt, "review_" if review else "worker_",
                 parent_turn_id, spawn_item_id, request, observed_version)
             originator = _native_surface(parent, binding.get("client_surface"), observed_version)
             child = thread["id"]
 
             def latest():
-                turns = request("thread/turns/list", {"threadId": child, "limit": 1,
-                    "sortDirection": "desc", "itemsView": "notLoaded"}).get("data")
+                page = request("thread/turns/list", {"threadId": child, "limit": 1,
+                    "sortDirection": "desc", "itemsView": "notLoaded"})
+                turns = page.get("data")
                 if not isinstance(turns, list) or len(turns) > 1:
                     raise ObservationError("malformed_history")
+                if cooperative and page.get('nextCursor') is not None:
+                    raise ObservationError('cooperative_turn_unverified')
                 if not turns:
                     return None, "unknown", None, None
                 turn = turns[0]
                 if (not isinstance(turn, dict) or turn.get("status") not in {"completed", "inProgress", "interrupted", "failed"}
                         or (turn["status"] == "completed" and turn.get("error") is not None)):
                     raise ObservationError("malformed_history")
+                if cooperative and turn.get('willRetry') is not None and turn['willRetry'] is not False:
+                    raise ObservationError('cooperative_turn_unverified')
                 return _review_id(turn.get("id")), turn["status"], *_native_turn_failure(turn)
 
             turn, status, failure_code, will_retry = latest()
-            item_id, result = _native_final(request, child, turn) if status == "completed" else (None, None)
+            projected_tools = {} if cooperative else None
+            wait = binding.get('foreground_wait') if cooperative else None
+            if review and wait is not None:
+                raise ObservationError('cooperative_wait_unverified')
+            wait_args = foreground_wait_args(wait, scope.repository_root) if wait is not None else None
+            item_id, result = _native_final(request, child, turn, projected_tools=projected_tools,
+                wait_args=wait_args) if status == "completed" else (None, None)
+            if cooperative:
+                from runtime.onboarding import _no_links, _read_file
+                from runtime.startup import _canonical_path
+                if status != 'completed' or time.monotonic() >= deadline:
+                    raise ObservationError('cooperative_turn_unverified')
+                path = _canonical_path(thread.get('path'))
+                if path.suffix != '.jsonl' or not path.is_relative_to(Path(native_home)):
+                    raise ObservationError('cooperative_source_unverified')
+                _no_links(path)
+                info = path.stat()
+                physical = dict(device=info.st_dev, inode=info.st_ino)
+                raw = _read_file(path, MAX_OUTPUT, expected_binding=physical)
+                activity = _cooperative_activity(raw, path=path, child=child, turn=turn, result=result,
+                    review=review, wait_args=wait_args)
+                observed_tools = {call['id']: call['tool'] for call in activity['calls']}
+                if (not projected_tools.items() <= observed_tools.items()
+                        or wait_args is not None and 'exec_command' not in projected_tools.values()):
+                    raise ObservationError('cooperative_projection_unverified')
             if latest() != (turn, status, failure_code, will_retry) or prepared(scope, attempt) != binding:
                 raise ObservationError("assignment_changed")
+            if cooperative and (_native_metadata(scope, request, child, observed_version).get('path') != str(path)
+                    or _read_file(path, MAX_OUTPUT, expected_binding=physical) != raw or time.monotonic() >= deadline):
+                raise ObservationError('cooperative_source_changed')
             receipt = dict(version=2, mechanism=mechanism, attempt_id=attempt,
                 task_name=binding["task_name"], agent_path=agent_path, native_version=admitted_version,
                 current_observer_version=observed_version, parent_creation_version=parent["cliVersion"],
@@ -630,7 +1023,7 @@ def _observe_native_assignment(scope, attempt, parent_turn_id, spawn_item_id, *,
                 spawn_observed_model=_native_setting(spawn.get("model")), spawn_observed_effort=_native_setting(spawn.get("reasoningEffort")),
                 execution_model=None, execution_effort=None, descendants_stopped=False, prompt_delivery="unverified",
                 result_digest=hashlib.sha256(result.encode("utf-8")).hexdigest() if result is not None else None)
-            return dict(receipt=receipt, result=result)
+            return dict(receipt=receipt, result=result, **({'activity': activity} if cooperative else {}))
     except (ObservationError, OSError, ValueError, TypeError, KeyError, RecursionError, subprocess.TimeoutExpired):
         label = "review assignment" if review else "worker"
         raise StartupError(f"Native {label} observation unavailable; assignment ownership remains unresolved") from None
@@ -703,7 +1096,34 @@ def _native_patch_denied(item, output, submitted_patch):
             and denial == {'type': 'input_text', 'text': 'Script error:\n' + NATIVE_READ_ONLY_REJECTION})
 
 
-def _native_policy_rejection(records, *, submitted_patch, turn_id):
+def _verify_bootstrap_reads(rows, expected_hashes, patch_call_id):
+    if len(expected_hashes) != 3 or len(rows) not in (6, 7):
+        raise ValueError
+    seen = {patch_call_id}
+    for call, result, expected in zip(rows[:6:2], rows[1:6:2], expected_hashes, strict=True):
+        item, output = call['payload'], result['payload']
+        call_id = _review_id(item.get('call_id'))
+        script, parts = item.get('input'), output.get('output')
+        if (item['type'] != 'custom_tool_call' or item.get('name') != 'exec'
+                or item.get('namespace') not in (None, 'functions') or call_id in seen
+                or not isinstance(script, str) or hashlib.sha256(script.encode()).hexdigest() != expected
+                or output['type'] != 'custom_tool_call_output' or output.get('call_id') != call_id
+                or output.get('name') is not None or not isinstance(parts, list) or len(parts) != 2
+                or any(not isinstance(part, dict) or set(part) != {'type', 'text'}
+                    or part['type'] != 'input_text' or not isinstance(part['text'], str) for part in parts)
+                or not re.fullmatch(r'Script completed\nWall time [0-9]{1,6}(?:\.[0-9]{1,6})? seconds\nOutput:\n',
+                    parts[0]['text'])):
+            raise ValueError
+        seen.add(call_id)
+    # The instruction loader can also emit one separate notification on its own call.
+    if len(rows) == 7:
+        notification = rows[6]['payload']
+        if (notification['type'] != 'custom_tool_call_output' or notification.get('name') != 'exec'
+                or notification.get('call_id') != call_id or not isinstance(notification.get('output'), str)):
+            raise ValueError
+
+
+def _native_policy_rejection(records, *, submitted_patch, turn_id, startup_read_sha256=()):
     """Bind the submitted patch to native policy denial, not effective input or OS enforcement."""
     from runtime.startup import MAX_INPUT, _canonical_freeze, _canonical_plain
     try:
@@ -715,15 +1135,17 @@ def _native_policy_rejection(records, *, submitted_patch, turn_id):
                 or not any(line.startswith(('+', '-')) for line in submitted_patch.splitlines())
                 or data['turn_ids'] != [turn_id]):
             raise ValueError
-        calls = [row for row in data['records'] if row['payload']['type'] in {
-            'custom_tool_call', 'custom_tool_call_output', 'function_call', 'function_call_output', 'local_shell_call'}]
-        if len(calls) != 2:
+        calls = [row for row in data['records'] if row['payload']['type'].endswith(('_call', '_call_output'))]
+        if len(calls) < 2 or any(row['turn_id'] != turn_id for row in calls):
             raise ValueError
-        call, output = calls
+        call, output = calls[-2:]
         item, result = call['payload'], output['payload']
         call_id = _review_id(item.get('call_id'))
-        if (call['turn_id'] != turn_id or output['turn_id'] != turn_id
-                or item['type'] != 'custom_tool_call' or item.get('namespace') not in (None, 'functions')
+        if startup_read_sha256:
+            _verify_bootstrap_reads(calls[:-2], startup_read_sha256, call_id)
+        elif len(calls) != 2:
+            raise ValueError
+        if (item['type'] != 'custom_tool_call' or item.get('namespace') not in (None, 'functions')
                 or result['type'] != 'custom_tool_call_output' or result.get('call_id') != call_id
                 or not _native_patch_denied(item, result.get('output'), submitted_patch)):
             raise ValueError
@@ -734,7 +1156,7 @@ def _native_policy_rejection(records, *, submitted_patch, turn_id):
         raise ObservationError('native_policy_rejection_unobserved') from None
 
 
-def _native_managed_tool(records, *, submitted_patch, turn_id, call_id, case_id, child_patch=False):
+def _native_managed_tool(records, *, submitted_patch, turn_id, call_id, case_id, child_patch=False, raw=None):
     """Correlate native tool records; post success additionally requires Core-owned effects."""
     from runtime.startup import MAX_INPUT, _canonical_freeze, _canonical_plain
     try:
@@ -751,6 +1173,13 @@ def _native_managed_tool(records, *, submitted_patch, turn_id, call_id, case_id,
         calls = [row for row in data['records'] if row['payload'].get('call_id') == call_id
             and row['payload']['type'] in {'custom_tool_call', 'custom_tool_call_output',
                 'function_call', 'function_call_output', 'local_shell_call'}]
+        if child_patch and raw is not None:
+            pairs = _exec_wrapped_pairs(raw, data, turn_id, tools=('apply_patch',))
+            matches = [pair for pair in pairs.values() if pair[0]['payload']['call_id'] == call_id]
+            if matches:
+                if calls or len(matches) != 1:
+                    raise ValueError
+                calls = matches[0]
         if len(calls) != 2:
             raise ValueError
         call, output = calls
@@ -845,12 +1274,60 @@ def _setup_executable(process):
     return dict(path=str(path),binding=binding,sha256=digest)
 
 
+def _disabled_inherited_hook_keys(config):
+    states = config['hooks']['state']
+    if (not isinstance(states, dict) or not 0 < len(states) <= 64 or config != {'hooks': {'state': states}}
+            or any(not isinstance(key, str) or not key.strip() or len(key) > 4096 or not key.isprintable()
+                   or not isinstance(value, dict) or set(value) != {'enabled'} or value['enabled'] is not False
+                   for key, value in states.items())):
+        raise ObservationError('setup_hook_override_unverified')
+    return sorted(states)
+
+
+def _setup_hook_override(process, projection, *, metadata=False):
+    execution = projection['attempt'].get('native_execution', {})
+    argv = process.argv[1:]
+    valid_argv = (len(argv) == 5 and argv[:4] == ('app-server', '--listen', 'stdio://', '-c')) if metadata else (
+        len(argv) == 8 and argv[:5] == ('exec', '--json', '--sandbox', 'read-only', '-c') and argv[6] == '--')
+    if (not valid_argv or execution.get('source_contract') != 'bounded-native-source-v1'
+            or projection['target']['disposable'] is not True or execution.get('argv') != list(process.argv)
+            or execution.get('cwd') != process.launch_cwd):
+        raise ObservationError('setup_hook_override_unverified')
+    override = argv[4] if metadata else argv[5]
+    if (not override.startswith('hooks.state={') or not override.endswith('}') or not override.isprintable()
+            or len(override.encode()) > 16384):
+        raise ObservationError('setup_hook_override_unverified')
+    return _disabled_inherited_hook_keys(tomllib.loads(override))
+
+
+def _verify_setup_hook_isolation(package, cwd, listed, layers, disabled):
+    from runtime import doctor
+    session = [layer['config'] for layer in layers if layer['name']['type'] == 'sessionFlags']
+    if len(session) != 1 or _disabled_inherited_hook_keys(session[0]) != disabled:
+        raise ObservationError('setup_hook_override_unverified')
+    source = package / 'hooks/codex.json'
+    definitions = json_object(source.read_bytes())['hooks']
+    if doctor.inspect_hooks(listed, SimpleNamespace(repository_root=cwd), definitions, package=package)['status'] != 'passed':
+        raise ObservationError('setup_hook_isolation_unverified')
+    keys, inherited = set(), set()
+    for hook in listed['data'][0]['hooks']:
+        key = hook.get('key')
+        if not isinstance(key, str) or not key or key in keys:
+            raise ObservationError('setup_hook_isolation_unverified')
+        keys.add(key)
+        if hook['sourcePath'] != str(source):
+            if hook.get('enabled') is not False:
+                raise ObservationError('setup_hook_isolation_unverified')
+            if hook.get('source') == 'user' and hook.get('isManaged') is False:
+                inherited.add(key)
+    if not set(disabled) <= inherited:
+        raise ObservationError('setup_hook_isolation_unverified')
+
+
 def _setup_partial(process, projection):
     from runtime import doctor, startup
     if not isinstance(process,NativeProcess) or process.launch_cwd != projection['identity']['repository_root']:
         raise ObservationError('setup_launch_mismatch')
-    header = startup._canonical_plain(process.cli_header())
-    executable = _setup_executable(process)
     binding = dict(accepted_scope_digest=startup._canonical_digest(projection['identity']),
         attempt_ref=projection['attempt']['reference'],transaction_id=projection['transaction_id'])
     options = process.argv[2:process.argv.index('--')] if '--' in process.argv[2:] else process.argv[2:]
@@ -858,6 +1335,10 @@ def _setup_partial(process, projection):
         or value.startswith(('--config=','--profile=','--enable=','--disable='))
         or value.startswith(('-c','-p')) and value not in ('-c','-p') for value in options)
     launch = dict(cwd=process.launch_cwd,codex_home=process.launch_codex_home,configuration_overrides_present=overrides)
+    if overrides and projection['attempt'].get('native_execution', {}).get('source_contract') == 'bounded-native-source-v1':
+        launch['disabled_inherited_hook_keys'] = _setup_hook_override(process, projection)
+    header = startup._canonical_plain(process.cli_header())
+    executable = _setup_executable(process)
     thread = dict(id=header['thread_id'],surface='codex-cli',launch=launch,capture_binding=binding)
     executable_source = dict(reference=executable['path']+'#native-executable-binding',
         sha256=startup._canonical_digest(executable))
@@ -893,8 +1374,7 @@ def observe_setup_metadata(process, attempt):
         raise ObservationError('setup_metadata_source_mismatch')
     original = startup._canonical_plain(setup_observation.setup_capture_projection(attempt,process=process))
     try:
-        if (not isinstance(process,NativeProcess) or tuple(process.argv[1:]) != ('app-server','--listen','stdio://')
-                or process.identity is not None or process.bytes_read or process.process.stdin is None
+        if (process.identity is not None or process.bytes_read or process.process.stdin is None
                 or original['package_root'] != str(doctor.PACKAGE)
                 or original['binding']['accepted_scope_digest'] != startup._canonical_digest(projection['identity'])
                 or process.launch_cwd != projection['identity']['repository_root']
@@ -904,18 +1384,24 @@ def observe_setup_metadata(process, attempt):
             raise ObservationError('setup_metadata_source_mismatch')
         retained = original['native']['threads'][0]
         if (retained['launch']['cwd'] != process.launch_cwd
-                or retained['launch']['codex_home'] != process.launch_codex_home
-                or retained['launch']['configuration_overrides_present']):
+                or retained['launch']['codex_home'] != process.launch_codex_home):
             raise ObservationError('cli_configuration_source_unverified')
+        disabled = retained['launch'].get('disabled_inherited_hook_keys')
+        if retained['launch']['configuration_overrides_present']:
+            if (not disabled or '#native-observation:' not in projection['attempt']['source_capture']['reference']
+                    or _setup_hook_override(process, projection, metadata=True) != disabled):
+                raise ObservationError('cli_configuration_source_unverified')
+        elif disabled is not None or process.argv[1:] != ('app-server','--listen','stdio://'):
+            raise ObservationError('setup_metadata_source_mismatch')
         thread_id = _review_id(retained['id'])
         if projection['attempt']['native_sessions'] != [thread_id]:
             raise ObservationError('setup_metadata_session_mismatch')
         sources = []
         sequence = 0
-        def request(method, params):
+        def request(method, params, **limits):
             nonlocal sequence
             sequence += 1
-            result = process.request(sequence,method,params)
+            result = process.request(sequence,method,params,**limits)
             sources.append(startup._canonical_plain(process.response_source))
             return result
         initialized = request('initialize',dict(clientInfo=dict(name='vibe-workflow-native-observer',version='1'),
@@ -930,10 +1416,13 @@ def observe_setup_metadata(process, attempt):
         originator = _native_surface(thread,'codex-cli')
         native_version = _review_id(thread.get('cliVersion'))
         listed = request('hooks/list',dict(cwds=[process.launch_cwd]))
-        layers = request('config/read',dict(cwd=process.launch_cwd,includeLayers=True)).get('layers')
+        limits = {'response_limit': MAX_OUTPUT} if disabled else {}
+        layers = request('config/read',dict(cwd=process.launch_cwd,includeLayers=True),**limits).get('layers')
         requirements = request('configRequirements/read',{}).get('requirements')
         if not isinstance(layers,list):
             raise ObservationError('setup_metadata_layers_unavailable')
+        if disabled:
+            _verify_setup_hook_isolation(doctor.PACKAGE, process.launch_cwd, listed, layers, disabled)
         probe = setup_observation.setup_probe_projection(attempt, process=process)
         context = setup_observation.setup_context_projection(attempt, process=process)
         native_path = thread.get('path')
@@ -957,7 +1446,8 @@ def observe_setup_metadata(process, attempt):
                 if len(data['turn_ids']) != 1:
                     raise ObservationError('setup_native_turn_unobserved')
                 rejected = startup._canonical_plain(_native_policy_rejection(records,
-                    submitted_patch=probe['patch'], turn_id=data['turn_ids'][0]))
+                    submitted_patch=probe['patch'], turn_id=data['turn_ids'][0],
+                    startup_read_sha256=probe.get('startup_read_sha256', ())))
                 readback = startup._canonical_plain(setup_observation.setup_probe_readback(attempt, process=process))
                 if readback['before_reference'] != probe['reference']:
                     raise ObservationError('setup_probe_reference_mismatch')
@@ -1036,7 +1526,7 @@ def observe_managed_case(scope, task_ref, attempt_ref, case_id):
             records = native_behavior_records(raw, thread_id=stream['id'], source_reference=str(path))
             fact = startup._canonical_plain(_native_managed_tool(records, submitted_patch=probe['patch'],
                 turn_id=selectors['turn_id'], call_id=selectors['call_id'], case_id=case_id,
-                child_patch=selectors['stream'] == 'child'))
+                child_patch=selectors['stream'] == 'child', raw=raw))
             after = startup._canonical_plain(setup_observation.managed_observation_readback(
                 scope, task_ref, attempt_ref, case_id=case_id))
             before = probe['before']; receipt = after['receipt']

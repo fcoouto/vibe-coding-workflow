@@ -31,7 +31,7 @@ def _authority(scope, request, cleanup=False):
             d6._require(task['state'] in {'TRIAGE', 'READY', 'WORKING', 'REVIEW'} and
                 not any(c['status']=='pending' and c['kind'] in {'blocker','decision'} for c in task['conditions']),
                 'Resource task is paused, blocked or closed')
-            d6._require(record['data']['status'] != 'settled', 'Resource owner is settled')
+            d6._require(record['data']['status'] not in d6.TERMINAL_ASSIGNMENTS, 'Resource owner is settled')
         plan = d6._task_plan(scope, task)
         if not cleanup:
             job=next((j for j in plan['jobs'] if j['id']==record['data']['job_id']),None)
@@ -62,7 +62,7 @@ def _eligible(owner):
                 return True
             rows=d6._ledger(scope,db,task=task)
             record=next((r for r in rows if r['id']==owner['attempt_id']),None)
-            if record is None or record['data']['status']=='settled':
+            if record is None or record['data']['status'] in d6.TERMINAL_ASSIGNMENTS:
                 return False
             if 'resource_revision' not in owner:
                 legacy = workstreams._load(scope)

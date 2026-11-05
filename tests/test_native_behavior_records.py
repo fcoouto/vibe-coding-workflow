@@ -38,6 +38,36 @@ def output(text=REJECTION):
     return row('response_item', dict(type='custom_tool_call_output', call_id='native-call', output=text))
 
 
+def bootstrap_reads():
+    # Sanitized Mac rollout shape. The loader emitted both a result and a named notification.
+    inputs = [
+        'const r = await tools.exec_command({cmd:"python3 -I -B /package/scripts/read_instructions.py --batch bootstrap"}); text(r.output);\n',
+        'const r = await tools.exec_command({cmd:"cat /public/disposable/.vibe-coding-workflow/project.json"}); text(r.output);\n',
+        'text(await drain({root, paths, exec:tools.exec_command, emit:notify}));\n',
+    ]
+    rows = []
+    for index, script in enumerate(inputs):
+        call_id = f'bootstrap-read-{index}'
+        rows.extend([
+            row('response_item', dict(type='custom_tool_call', name='exec', call_id=call_id, input=script)),
+            row('response_item', dict(type='custom_tool_call_output', call_id=call_id, output=[
+                dict(type='input_text', text='Script completed\nWall time 0.5 seconds\nOutput:\n'),
+                dict(type='input_text', text='startup result'),
+            ])),
+        ])
+    rows.append(row('response_item', dict(type='custom_tool_call_output', call_id=call_id, name='exec',
+        output='Selected instructions: startup context')))
+    return rows, [hashlib.sha256(script.encode()).hexdigest() for script in inputs]
+
+
+def wrapped_patch_denial():
+    patch = call()
+    patch['payload'].update(name='exec', input='text(await tools.apply_patch(' + json.dumps(PATCH) + '));\n')
+    denial = output([dict(type='input_text', text='Script failed\nWall time 0.5 seconds\nOutput:\n'),
+        dict(type='input_text', text='Script error:\n' + REJECTION)])
+    return patch, denial
+
+
 def hook(*, text=CONTEXT, provenance=None):
     return row('response_item', dict(type='message', role='user', content=[dict(type='input_text',
         text='<hook_prompt hook_run_id="native-hook">'+text+'</hook_prompt>')],
@@ -46,6 +76,29 @@ def hook(*, text=CONTEXT, provenance=None):
 
 
 class NativeBehaviorRecordTests(unittest.TestCase):
+    def test_darwin_system_config_uses_only_the_builtin_etc_alias(self):
+        import stat
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from runtime import setup_observation
+
+        path = Path('/etc/codex/config.toml')
+        canonical = Path('/private/etc/codex/config.toml')
+
+        def stat_path(entry):
+            return SimpleNamespace(st_uid=0, st_mode=stat.S_IFLNK if entry == Path('/etc') else stat.S_IFDIR)
+
+        with patch('sys.platform', 'darwin'), patch.object(Path, 'lstat', stat_path):
+            with patch.object(Path, 'readlink', return_value=Path('private/etc')):
+                self.assertEqual(setup_observation._system_layer_path(path), canonical)
+                alternate = Path('/etc/other/config.toml')
+                self.assertEqual(setup_observation._system_layer_path(alternate), alternate)
+            with patch.object(Path, 'readlink', return_value=Path('/tmp/alternate-etc')):
+                with self.assertRaises(startup.StartupError):
+                    setup_observation._system_layer_path(path)
+        with patch('sys.platform', 'linux'):
+            self.assertEqual(setup_observation._system_layer_path(path), path)
+
     def test_canary_rejects_a_path_codex_would_trim(self):
         from runtime.setup_observation import _public_canary_patch
         root = Path('/public/disposable')
@@ -114,6 +167,43 @@ class NativeBehaviorRecordTests(unittest.TestCase):
                 self.rejection([session(), started(), changed, output(result)])
         with self.assertRaises(doctor.ObservationError):
             self.rejection([session(), started(), call(), output(), wrapper, output(text)])
+
+    def test_policy_denial_with_approved_startup_reads(self):
+        from copy import deepcopy
+
+        reads, hashes = bootstrap_reads()
+        patch, denial = wrapped_patch_denial()
+        rows = [session(), started(), *reads, patch, denial]
+
+        def verify(rows, **options):
+            return codex._native_policy_rejection(self.records(rows), submitted_patch=PATCH,
+                turn_id='native-turn', **options)
+
+        fact = verify(rows, startup_read_sha256=hashes)
+        self.assertEqual(fact['call_id'], 'native-call')
+        self.assertEqual(fact['sources'], tuple(record['source'] for record in self.records(rows)['records'][-2:]))
+        self.assertEqual(verify([session(), started(), *reads[:-1], patch, denial],
+            startup_read_sha256=hashes)['call_id'], 'native-call')
+        with self.assertRaises(doctor.ObservationError):
+            verify(rows)
+        with self.assertRaises(doctor.ObservationError):
+            verify(rows, startup_read_sha256=hashes[::-1])
+
+        for index, key, value in (
+            (2, 'input', reads[0]['payload']['input'] + 'text(1);'),
+            (3, 'call_id', 'another-call'),
+            (3, 'output', 'process still running'),
+            (8, 'name', 'apply_patch'),
+            (8, 'call_id', 'native-call'),
+        ):
+            changed = deepcopy(rows)
+            changed[index]['payload'][key] = value
+            with self.subTest(index=index, key=key), self.assertRaises(doctor.ObservationError):
+                verify(changed, startup_read_sha256=hashes)
+        unexpected = row('response_item', dict(type='web_search_call', id='unapproved'))
+        for extra in ([unexpected], [patch, denial]):
+            with self.assertRaises(doctor.ObservationError):
+                verify([*rows, *extra], startup_read_sha256=hashes)
 
     def test_retained_journal_reuse_rechecks_identity_and_preserves_bounds(self):
         import os
@@ -284,6 +374,36 @@ class NativeBehaviorRecordTests(unittest.TestCase):
             observe(self.records([session(), started(), call(), output()]), submitted_patch=PATCH,
                 turn_id='native-turn', call_id='foreign', case_id='post-tool-handling')
 
+    def test_managed_wrapped_child_patch_binds_the_nested_completion(self):
+        patch = row('response_item', dict(type='custom_tool_call', name='exec', call_id='outer',
+            input='text(await tools.apply_patch(' + json.dumps(PATCH) + '))\n'))
+        response = 'Success. Updated the following files:\nM public-canary.txt\n'
+        completed = row('event_msg', dict(type='item_completed', thread_id='native-thread', turn_id='native-turn',
+            item=dict(type='FileChange', id='inner', status='completed', changes={'public-canary.txt': {'type': 'update'}},
+                stdout=response, stderr='')))
+        result = row('response_item', dict(type='custom_tool_call_output', call_id='outer', output=[
+            dict(type='input_text', text='Script completed\nWall time 0.7 seconds\nOutput:\n'),
+            dict(type='input_text', text='{}'),
+        ]))
+        rows = [session(), started(), patch, completed, result]
+
+        def observe(rows, call_id='inner'):
+            return codex._native_managed_tool(self.records(rows), raw=encoded(rows), submitted_patch=PATCH,
+                turn_id='native-turn', call_id=call_id, case_id='post-tool-handling', child_patch=True)
+
+        fact = observe(rows)
+        self.assertEqual(fact['call_id'], 'inner')
+        self.assertEqual(fact['post_hook_fingerprint'], codex._tool_fingerprint(dict(tool_name='apply_patch',
+            tool_input=dict(command=PATCH), tool_response=response)))
+        self.assertEqual(len(fact['sources']), 2)
+        with self.assertRaises(doctor.ObservationError):
+            observe(rows, call_id='outer')
+        for changed in ([session(), started(), patch, result], [*rows[:4], completed, result],
+                        [*rows[:2], completed, patch, result], [*rows, completed],
+                        [*rows[:2], completed, *rows[2:]]):
+            with self.assertRaises(doctor.ObservationError):
+                observe(changed)
+
     def test_managed_selected_parent_turn_keeps_actual_prior_history(self):
         observe = self.api(codex, '_native_managed_tool')
         reason = 'Patching requires a WORKING editable bound task without applicable blockers'
@@ -380,7 +500,7 @@ class NativeBehaviorOwnerTests(unittest.TestCase):
         self.assertEqual(source, owner.reconcile_native_source(reference, source, stopped))
         return original
 
-    def _observe_original_cli(self, *, limited=False):
+    def _observe_original_cli(self, *, limited=False, isolated_hook=False, approved_startup_reads=False):
         import copy
         import os
         import sys
@@ -393,8 +513,12 @@ class NativeBehaviorOwnerTests(unittest.TestCase):
         home.mkdir()
         canary = self.fixture.repo/'public-canary.txt'
         canary.write_text('before\n')
+        calls = [call(), output()]
+        if approved_startup_reads:
+            reads, hashes = bootstrap_reads()
+            calls = [*reads, *wrapped_patch_denial()]
         native_rows = [row('session_meta', dict(id='native-thread', cwd=str(self.fixture.repo))),
-            started(), call(), output(), row('event_msg', dict(type='task_complete', turn_id='native-turn'))]
+            started(), *calls, row('event_msg', dict(type='task_complete', turn_id='native-turn'))]
         rollout = home/'fixture-rollout.jsonl'
         settings = home/'fixture-input.json'
         settings.write_text(json.dumps(dict(thread_id='native-thread', rollout=str(rollout), records=native_rows, responses={})))
@@ -447,10 +571,18 @@ class NativeBehaviorOwnerTests(unittest.TestCase):
             serialization_reference=dict(reference='fixture:independently-verified-native-state-exclusion', sha256='b'*64))
         if limited:
             native['source_contract'] = 'bounded-native-source-v1'
+        hook_key = None
+        if isolated_hook:
+            inherited = home/'hooks.json'
+            inherited.write_text(json.dumps(dict(Stop=[dict(hooks=[dict(type='command', command='true')])])))
+            hook_key = f'{inherited}:stop:0:0'
+            native['argv'][5:5] = ['-c', 'hooks.state={'+json.dumps(hook_key)+'={enabled=false}}', '--']
         attempt = dict(reference=reference, task=None, native_sessions=[], operations=['observe-cli-basic'],
             capability_keys=['startup-context'], limits=dict(deadline=time.time()+60, max_attempts=1, max_resource_units=1),
             stop_conditions=['Stop after original policy canary; retain uncertainty'], native_execution=native,
             probe=dict(canary=str(canary), patch=PATCH, before_sha256=hashlib.sha256(canary.read_bytes()).hexdigest()))
+        if approved_startup_reads:
+            attempt['startup_read_sha256'] = hashes
         decision = copy.deepcopy(self.decision)
         decision['qualification_scope'] = dict(
             decision_reference=dict(reference='fixture:explicit-original-native-observation', sha256='c'*64),
@@ -469,7 +601,7 @@ class NativeBehaviorOwnerTests(unittest.TestCase):
         self.assertNotIn('submitted-write-policy-rejection', json.dumps(original))
         self.assertNotIn('bootstrap_verified', json.dumps(original))
         return dict(home=home, canary=canary, executable=executable, settings=settings, source=source,
-            allocation=attempt, decision=decision, original=original, rollout=rollout)
+            allocation=attempt, decision=decision, original=original, rollout=rollout, hook_key=hook_key)
 
     def test_real_owner_cli_source_retains_original_probe_without_qualification(self):
         self._observe_original_cli()
@@ -512,6 +644,12 @@ class NativeBehaviorOwnerTests(unittest.TestCase):
             'config/read':dict(layers=[dict(name=dict(type='system', file=str(system/'config.toml')), config={}, version='fixture'),
                 dict(name=dict(type='user', file=str(config)), config=user, version='fixture')]),
             'configRequirements/read':dict(requirements=None)}
+        hook_key = original.get('hook_key')
+        if hook_key is not None:
+            hooks.append(dict(key=hook_key, eventName='stop', sourcePath=str(home/'hooks.json'), source='user',
+                enabled=False, isManaged=False))
+            data['responses']['config/read']['layers'].insert(0, dict(name=dict(type='sessionFlags'),
+                config=dict(hooks=dict(state={hook_key:dict(enabled=False)})), version='fixture'))
         original['settings'].write_text(json.dumps(data))
         metadata_directory = self.fixture.directory.parent
         plan_bytes = (self.fixture.directory/'plan.json').read_bytes()
@@ -529,6 +667,8 @@ class NativeBehaviorOwnerTests(unittest.TestCase):
         reference = dict(reference='fixture:native-metadata', sha256='d'*64)
         execution = copy.deepcopy(original['allocation']['native_execution'])
         execution['argv'] = [str(original['executable']), 'app-server', '--listen', 'stdio://']
+        if hook_key is not None:
+            execution['argv'].extend(original['allocation']['native_execution']['argv'][5:7])
         allocation = dict(reference=reference, task=None, native_sessions=[thread], operations=['observe-setup-metadata'],
             capability_keys=['startup-context'], limits=dict(deadline=time.time()+60, max_attempts=1, max_resource_units=1),
             stop_conditions=['Retain exact policy source and pending Toolkit cases'], native_execution=execution,
@@ -614,6 +754,18 @@ class NativeBehaviorOwnerTests(unittest.TestCase):
 
     def test_real_owner_metadata_policy_source_keeps_toolkit_cases_pending(self):
         self._observe_metadata(self._observe_original_cli())
+
+    def test_real_owner_scoped_hook_isolation_preserves_filtered_file_backed_proof(self):
+        from runtime import setup_observation
+
+        original = self._observe_original_cli(limited=True, isolated_hook=True, approved_startup_reads=True)
+        filtered = self._observe_metadata(original)
+        content = startup._canonical_plain(filtered['filtered'].content)
+        self.assertEqual(content['native']['threads'][0]['launch']['disabled_inherited_hook_keys'], [original['hook_key']])
+        row, _, part = setup_observation._read_native_reference(startup._canonical_plain(filtered['source']), setup_observation._budget())
+        self.assertIsNone(part)
+        self.assertEqual(row['result']['content']['source']['native_capture'], startup._canonical_plain(original['source']))
+        self.assertEqual(row['result']['content']['source']['native_source_contract']['kind'], 'bounded-native-source-v1')
 
     def _publish_partial_source(self, observed, original, name, *, managed_attempt=None, legacy_context=False):
         import copy

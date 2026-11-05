@@ -2485,7 +2485,14 @@ def _assignment_certificate_fields(context,db,task,record,rec):
     if rec.get('kind')=='synchronous-verification':return _barrier_certificate_fields(context,db,task,record,rec)
     d3._require(type(rec.get('version')) is int and rec['version']==2,'Recovery assignment requires version2 role proof')
     role=data['role']
-    task_state._fields(rec,('version','proof','source_digest','request_digest','current_candidate',*(() if role=='check' else ('assessment','revision','reservation_snapshot_digest'))))
+    task_state._fields(rec,('version','proof','source_digest','request_digest','current_candidate',*(() if role=='check' else ('assessment','revision','reservation_snapshot_digest'))),
+        ('prior_cooperative',) if role in delegation.NATIVE_ROLES else ())
+    if 'prior_cooperative' in rec:
+        prior=read(rec['prior_cooperative'])
+        d3._require(prior.get('proof',{}).get('kind')==delegation.COOPERATIVE_PROOF and
+            prior['proof'].get('attempt_id')==record['id'] and
+            prior['proof'].get('assignment_digest')==data['assignment']['digest'],
+            'Prior cooperative completion differs from the strict assignment')
     d3._hash(rec['source_digest']);d3._hash(rec['request_digest'])
     if role!='check': d3._hash(rec['reservation_snapshot_digest'])
     proof=rec['proof']; attempt=next((a for a in task.get('evidence',{}).get('attempts',[]) if a['id']==record['id']),None)
@@ -3746,7 +3753,7 @@ def _existing_recovery_age(contexts,identity,*,read_context=None):
 def _observe_recovery_source(path, journal, contexts, task_refs):
     """Observe exact existing source owners under caller-held complete authority guards."""
     raw=d3._read_file(path/'transaction.json',MAX_JOURNAL,private=True)
-    d3._require(d3.read_request(raw)==journal,'Recovery journal changed during source observation')
+    d3._require(d3.read_request(raw, limit=MAX_JOURNAL)==journal,'Recovery journal changed during source observation')
     _scoped_journal_shape(journal); contexts=tuple(contexts)
     use_roots=[]
     tasks,assignments,artifacts,foreign=_collect_recovery_references(journal['manifest'],contexts,task_refs,use_roots=use_roots)

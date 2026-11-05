@@ -24,6 +24,20 @@ class CanonicalCompositionTests(CanonicalBirthFixture):
 
 
 
+    def test_recovery_source_observes_a_journal_above_the_request_limit(self):
+        prepared = self.prepare()
+        fixture = prepared[0]
+        result = self.invoke(prepared)
+        self.assertEqual(result['state'], 'applied', result)
+        journal = changes._load_journal(fixture.directory)
+        path = fixture.directory / 'transaction.json'
+        raw = path.read_bytes()
+        padded = raw + b' ' * (onboarding.MAX_REQUEST + 1 - len(raw))
+        self.assertLessEqual(len(padded), changes.MAX_JOURNAL)
+        path.write_bytes(padded)
+        source = changes._observe_recovery_source(fixture.directory, journal, (), ())
+        self.assertEqual(source.content['journal']['sha256'], hashlib.sha256(padded).hexdigest())
+
     def test_fresh_birth_retains_original_baseline_and_pending_qualification(self):
         self.assertTrue(hasattr(startup, 'acquire_project_entry'), 'Canonical entry selector is required')
         prepared = self.prepare()

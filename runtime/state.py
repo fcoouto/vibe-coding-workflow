@@ -2364,8 +2364,8 @@ def retained_patch_guard(event, *, deadline=None):
             if (row is None or row[:4] != (owner.scope_id, physical['project_id'],
                     str(owner.repository_root), str(owner.git_common_dir)) or json_object(row[5]) != physical):
                 raise StateError('Retained checkout differs from its physical owner')
-            selected = db.execute('select 1 from bindings where scope_id=? and client=? and session_id=?',
-                (owner.scope_id, event.client, event.session_id)).fetchone() is not None
+            selected = db.execute('select 1 from bindings where scope_id=? and client=? and session_id in (?,?)',
+                (owner.scope_id, event.client, event.session_id, event.hook_parent_session_id)).fetchone() is not None
             reason = ('The selected managed task requires current authority; inspect its original task status'
                 if selected else _unbound_patch_conflict(db, owner.repository_root, context, deadline=deadline))
             selected = selected or reason is not None
@@ -2394,6 +2394,12 @@ def process_event(scope, event, *, deadline=None):
             if db is None:
                 raise StateError("Task state has not been initialized")
             scope_id = _scope_id(scope)
+            if event.hook_parent_session_id is not None:
+                parent = _task(db, scope_id, event.client, event.hook_parent_session_id)
+                if (parent is not None and 'qualification_attempt' not in parent
+                        and _task(db, scope_id, event.client, event.session_id) is None):
+                    # Ordinary native hooks retain the shared session's existing task authority.
+                    event = replace(event, session_id=event.hook_parent_session_id, hook_parent_session_id=None)
             retired_event=False
             event_identity = dict(scope_id=scope_id, client=event.client, session_id=event.session_id, turn_id=event.turn_id)
             if event.turn_id is not None:
@@ -2452,7 +2458,8 @@ def process_event(scope, event, *, deadline=None):
                     admitted = pre[1] == 0 and event.tool_name == 'apply_patch' and receipt == (post, 0)
                     if not admitted and pre[1] == 0 and event.tool_name == 'apply_patch':
                         try:
-                            admitted = delegation._qualified_child_patch(scope, db, event, budget=budget) == pre[0]
+                            admitted = delegation._qualified_child_patch(scope, db, event, budget=budget,
+                                pre_fingerprint=pre[0]) == pre[0]
                         except (StartupError, KeyError, TypeError):
                             pass
                     if admitted:
