@@ -5,6 +5,12 @@
 - Keep associated deliverable chats and nested workers in their coordinator's display family. Pass the family binding in each assignment before creating a context.
 - Show child roles as `C`; keep numbered identities internal and read legacy titles safely. Preserve manual-title overrides, historical allocations and managed bindings.
 
+## 0.1.27
+
+- Apply the shared assignment role preparation to every workflow subagent, including reviewers, evaluators, nested children and native supervisors of external routes. Reuse existing external brief and proposal fields.
+- Prepare managed continuations once before consuming the send intent. Preserve the original prompt and continuation controls when display metadata is unavailable.
+- Reuse saved roles and exact correlation markers on native assignment retries. Keep missing or conflicting display metadata nonblocking.
+
 ## 0.1.26
 
 - Assign complete outcomes to reusable native children through tests, guidance and review fixes. Keep coordinator decisions and integration distinct.

@@ -220,15 +220,15 @@
       ]
     },
     "clients/worker-visibility.md": {
-      "sha256": "8c768227c4151069ae8ff0cfa1154435593d532e03558e537141f420ff54c5e5",
+      "sha256": "ce191aeb37f4b9c8f5ea00811fe0b98d8b93d0ce641d1922cd6c020826b5a598",
       "ranges": [
         [
           1,
-          142
+          134
         ],
         [
-          143,
-          250
+          135,
+          265
         ]
       ]
     },
@@ -246,11 +246,11 @@
       ]
     },
     "clients/workstreams-protocol.md": {
-      "sha256": "74dea302e5f8b0ec6b8c9a6319af93a052a8b6d33380e895dfd73dc4ee8dc120",
+      "sha256": "4af2477a230ee0a23e67c293150963546159630c8195dc5d7e78f72c4822e25a",
       "ranges": [
         [
           1,
-          61
+          68
         ]
       ]
     },
@@ -326,14 +326,14 @@
       ]
     },
     "policies/03-agent-delegation.md": {
-      "sha256": "b1ebbefccd56fd70d8c1131064e3bf06420b6a0d5904c6b211c58a4e2f1e587b",
+      "sha256": "00d68798b6a8e0bbee449ad1e98d94b8c15fe5cc230d25dacba34c6c2c903f08",
       "ranges": [
         [
           1,
-          51
+          52
         ],
         [
-          52,
+          53,
           90
         ]
       ]
@@ -485,11 +485,11 @@
       ]
     },
     "skills/manage-usage-routing/references/codex-host.md": {
-      "sha256": "ad5c557baf666e305c05a24322b27ff9c53de8d6901173697f2fa66b5d39a5d6",
+      "sha256": "094d63f30609806a39ca16eaa307bb6d679c4b445bfc48f282633fbc1e9c72d1",
       "ranges": [
         [
           1,
-          124
+          127
         ]
       ]
     },
@@ -605,7 +605,7 @@
       ]
     },
     "skills/openrouter-proposals/references/procedure.md": {
-      "sha256": "c0f6e90a0da711282a926eae317121c4c9ffe3640e830c3b10aa167e4f92b5b8",
+      "sha256": "b464ee71a7f20443dd4caf6e869e9377c3f10705cacd77cef0315ed088d7011a",
       "ranges": [
         [
           1,
@@ -613,10 +613,10 @@
         ],
         [
           91,
-          154
+          149
         ],
         [
-          155,
+          150,
           190
         ]
       ]
@@ -631,15 +631,15 @@
       ]
     },
     "skills/openrouter-workers/references/procedure.md": {
-      "sha256": "61dca21eed3760f0f6aeaf32d38a0fbdabeba5b8278ef10c2da3c75f550ab4dd",
+      "sha256": "990d5509e2b47d6aa724d99b7713f0a1fe930f8ade6395b88f06f83f513fae1c",
       "ranges": [
         [
           1,
-          123
+          122
         ],
         [
-          124,
-          183
+          123,
+          186
         ]
       ]
     },
