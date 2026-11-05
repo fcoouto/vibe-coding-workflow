@@ -1,5 +1,10 @@
 # Release notes
 
+## 0.1.25
+
+- Preserve declared subagent badges when a coordinator moves to a worktree and its native child retains the original checkout. Validate both native checkouts independently for display while retaining exact parent, child and task identity checks.
+- Resolve global and checkout-scoped Habblaud start hooks against the verified parent and child checkouts. Saved declarations keep their original assignment checkout for recovery.
+
 ## 0.1.24
 
 - Manage one Workstreams Enabled/Disabled choice during onboarding or through the Workstreams skill. Both read and update the same project instruction checkbox.

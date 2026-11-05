@@ -220,7 +220,7 @@
       ]
     },
     "clients/worker-visibility.md": {
-      "sha256": "558d93b004714dcd0d9e31852210fb7d43fa898e9d5c7a3573eb2a542acd0b10",
+      "sha256": "8c768227c4151069ae8ff0cfa1154435593d532e03558e537141f420ff54c5e5",
       "ranges": [
         [
           1,
@@ -228,7 +228,7 @@
         ],
         [
           143,
-          244
+          250
         ]
       ]
     },

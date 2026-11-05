@@ -141,6 +141,12 @@ the native observer. For nested delegation, it verifies the native ancestry to
 the originating client and resolves a root-valued hook session to the child's
 verified immediate parent before locating its declaration and forwarding the
 display event. Explicit publication still requires the exact immediate parent.
+Display observation validates each native thread's identity and canonical working
+directory independently. The event directory, any explicit hook checkout scope,
+and the declaration checkout must each match the verified immediate parent's or
+child's directory; ancestors may use other worktrees. Saved observations retain
+the declaration checkout, and forwarded events retain their original directory.
+Execution-authority observers keep their existing checkout scope requirements.
 It preserves the incoming native role separately and forwards
 the original event if the private declaration or live identity is unavailable.
 For a matching declaration, the display label uses the native model catalog's

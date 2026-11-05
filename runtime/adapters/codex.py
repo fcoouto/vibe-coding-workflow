@@ -606,7 +606,6 @@ def _visibility_model_name(request, model):
 def observe_worker_visibility(checkout, parent_session_id, worker_id, *, spawn_binding=None, deadline=None,
                               executable=None, resolve_hook_parent=False):
     """Read actual native lineage for display only; no runtime enrollment or stop proof."""
-    from types import SimpleNamespace
     import uuid
     try:
         for identity in (parent_session_id, worker_id):
@@ -617,7 +616,6 @@ def observe_worker_visibility(checkout, parent_session_id, worker_id, *, spawn_b
         checkout = Path(checkout)
         if not checkout.is_absolute() or checkout.resolve(strict=True) != checkout or not checkout.is_dir():
             raise ObservationError('checkout_unverified')
-        scope = SimpleNamespace(repository_root=checkout)
         methods = {'initialize', 'thread/read', 'model/list'}
         if spawn_binding is not None:
             methods.add('thread/items/read')
@@ -625,7 +623,18 @@ def observe_worker_visibility(checkout, parent_session_id, worker_id, *, spawn_b
         if executable is not None:
             options['executable'] = executable
         with _native_reader(methods, **options) as (observed_version, request):
-            child = _native_metadata(scope, request, worker_id, observed_version)
+            def metadata(identity):
+                thread = request('thread/read', {'threadId': identity, 'includeTurns': False}).get('thread')
+                if not isinstance(thread, dict) or thread.get('id') != identity:
+                    raise ObservationError('thread_mismatch')
+                cwd = Path(thread['cwd'])
+                if (str(cwd) != thread['cwd'] or not cwd.is_absolute()
+                        or cwd.resolve(strict=True) != cwd or not cwd.is_dir()):
+                    raise ObservationError('checkout_unverified')
+                _review_id(thread.get('cliVersion'))
+                return thread
+
+            child = metadata(worker_id)
             source = child.get('source')
             subagent = source.get('subAgent') if isinstance(source, dict) else None
             origin = subagent.get('thread_spawn') if isinstance(subagent, dict) else None
@@ -638,7 +647,9 @@ def observe_worker_visibility(checkout, parent_session_id, worker_id, *, spawn_b
                 parent_session_id = immediate_parent
             elif immediate_parent != parent_session_id:
                 raise ObservationError('child_mismatch')
-            parent = _native_metadata(scope, request, parent_session_id, observed_version)
+            parent = metadata(parent_session_id)
+            if str(checkout) not in {parent['cwd'], child['cwd']}:
+                raise ObservationError('checkout_unverified')
             root, seen = parent, {worker_id}
             for _ in range(16):
                 if root['id'] in seen:
@@ -655,7 +666,7 @@ def observe_worker_visibility(checkout, parent_session_id, worker_id, *, spawn_b
                 if (not isinstance(origin, dict) or not isinstance(ancestor, str)
                         or str(uuid.UUID(ancestor)) != ancestor or origin.get('parent_thread_id') != ancestor):
                     raise ObservationError('child_mismatch')
-                root = _native_metadata(scope, request, ancestor, observed_version)
+                root = metadata(ancestor)
             else:
                 raise ObservationError('surface_unverified')
             if hook_session_id not in seen:
@@ -673,7 +684,8 @@ def observe_worker_visibility(checkout, parent_session_id, worker_id, *, spawn_b
                 task_name = spawn_binding['task_name']
             model = _native_setting(child.get('model'))
             return dict(version=1, parent_session_id=parent_session_id, worker_id=worker_id,
-                checkout=str(checkout), client_surface=surface, native_version=observed_version,
+                checkout=str(checkout), parent_checkout=parent['cwd'], worker_checkout=child['cwd'],
+                client_surface=surface, native_version=observed_version,
                 agent_path=agent_path, task_name=task_name, configured_model=model,
                 model_display_name=_visibility_model_name(request, model),
                 configured_provider=_native_setting(child.get('modelProvider')),
