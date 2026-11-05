@@ -318,3 +318,19 @@ Detailed private proof: `desktop-qualification/native-startup-proof.json`,
 `coordinator-verification.json`, `final-review.md`, `cleanup.json`, the exact
 configuration archive and candidate manifest in the existing investigation
 directory.
+
+### Phase 1 integration — 5 November 2026
+
+The user authorized integration into `main`. The reviewed Phase 1 snapshot was
+committed as `cd2fb90`; the earlier completed role-instruction consolidation
+`860ac89` remains in its history. The target inspected after fetching is
+`c4a4eb856b7c491d706148acb760bad066f4489c`. Reconciliation preserves its newer
+naming, handoff, runtime and release metadata. The only textual merge conflict
+was the generated instruction map, regenerated from the reconciled owners.
+
+Integration verification covers the current merged instruction/test tree.
+The existing native Desktop observations remain scoped to their frozen candidate
+and are not a new installed-package or rendered-badge qualification. Required
+checks, independent review and the actual merge result are recorded in the
+private Phase 1 integration evidence. No plugin release, marketplace update,
+installed-hook change, active-chat interruption or held-run mutation is included.

@@ -2,6 +2,17 @@
 
 For adoption, event repair and manual edits, read [title synchronization](workstreams-titles.md).
 
+## New-thread scope
+
+Apply this revision only to a native context created under it. Establish creation
+from the existing native observation, creation brief or task record. First
+implementation, first adoption, continuation, resume or task replacement does not
+make an existing thread new; an absent saved title proves nothing. If creation
+cannot be established, leave its title and record untouched and continue
+authorized work. Existing contexts keep their current titles, records, original
+controls, readers and pins; this fix adds no migration or repair. Once an eligible
+new context is adopted, its ordinary title lifecycle continues through that record.
+
 ## Automatic implementation naming
 
 Activate title synchronization immediately before the first authorized
@@ -18,14 +29,10 @@ reopen a completed task. Explicit naming-only requests remain supported without
 starting implementation. Naming changes display metadata only; it does not
 activate managed task controls.
 
-At activation, reserve or reuse the parent's family code even when no children
-exist. Before dispatch, allocate the next unused child ordinal only for a new
-eligible native context in the existing task plan.
-After the native tool returns the actual child identity, record that identity
-against its ordinal and adopt
-the display title through the title procedure. Keep the prepared native
-`task_name`, attempt marker, lineage and ownership unchanged. Continuations keep
-their existing family/member mapping; replacement contexts receive new ordinals.
+At activation, resolve the [display-family association](#resolve-the-display-family)
+before allocating a family. Adopt the title through the title
+procedure. Keep prepared native `task_name`, attempt marker, lineage and ownership
+unchanged.
 
 Follow the title procedure's initial-adoption and later baseline-comparison rules.
 Preserve known manual titles, explicit title instructions and paused
@@ -43,46 +50,63 @@ the status field and its separator only when the user needs to act. The examples
 include the leading character.
 
 ```text
-<U+FFFB><meter> [W<number>] <P|C<number>> · <short_topic>
-<U+FFFB><meter> <STATUS> · [W<number>] <P|C<number>> · <short_topic>
+<U+FFFB><meter> [W<number>] <P|C> · <short_topic>
+<U+FFFB><meter> <STATUS> · [W<number>] <P|C> · <short_topic>
 ```
 
 ```text
 ￻▰▰▱▱▱ [W1] P · Thread naming
-￻▰▰▰▰▰ [W1] C1 · Naming rules
-￻▰▰▰▰▱ REVIEW · [W1] C2 · Status tags
-￻▰▰▰▱▱ BLOCKED · [W1] C3 · Search support
-￻▰▰▰▱▱ WAITING · [W1] C4 · Client check
+￻▰▰▰▰▰ [W1] C · Naming rules
+￻▰▰▰▰▱ REVIEW · [W1] C · Status tags
+￻▰▰▰▱▱ BLOCKED · [W1] C · Search support
+￻▰▰▰▱▱ WAITING · [W1] C · Client check
 ￻▰▱▱▱▱ [W2] P · Solo fix
 ```
 
-The literal brackets enclose the shared family code. `P` identifies the parent;
-`C1`, `C2` and subsequent positive ordinals identify distinct children, including
-reviewers. Keep each family's parent and child identities stable through fixes,
-renames, replacement attempts and status changes. Never reuse a child ordinal for
-a different context. A coordinator parenting its own workers uses `P` in its own
-family; record any relationship to an enclosing family in the existing task plan.
+The literal brackets enclose the shared family code. Keep display identities
+stable through fixes, renames and status changes.
+
+## Resolve the display family
+
+First inspect the existing task record for an explicitly adopted coordinator or
+deliverable association. A source-thread ID or title alone does not establish it.
+Keep native lineage, user-owned peer chats, task associations, display identity
+and worktree scope distinct.
+
+`P` identifies only the root coordinator; associated deliverable chats and native
+workers display `C`. A deliverable chat stays in that root's family even when it
+coordinates workers. Nested owners do not allocate another family for the same objective.
+Standalone unrelated chats start their own families. An uncertain or unavailable
+association is a naming limitation: report it without guessing; continue authorized
+work.
+
+Before new native dispatch or explicitly requested sidebar-chat creation, carry
+the root coordinator UUID, family, role `C` and mapping owner in the brief. Record
+the actual returned native UUID as the context's identity, then verify title
+readback through the title procedure. Follow-ups reuse that binding; a new context
+has its own returned UUID. Recognizable topics distinguish children; repeated `C`
+roles need no counter. Never represent display association as native parentage.
 
 ## Allocate a family once across projects
 
-Before naming a new family, reserve its code with the package helper:
+For a standalone root without a recorded family, reserve its code with the
+package helper, even when no children exist:
 
 ```text
-python3 -I -B <package>/scripts/workstreams_family.py --client codex --parent <native_parent_id>
+python3 -I -B <package>/scripts/workstreams_family.py --client codex --parent <root_coordinator_uuid>
 ```
 
-Use the actual client identifier and stable native parent identity, never a title
+Use the actual client identifier and stable root coordinator UUID, never a title
 or checkout path. The helper returns `{"ok": true, "family": "W1"}`. It serializes
 allocation in `~/.vibe-coding-workflow/workstreams-families.sqlite3`, shared across
 all projects, linked checkouts and package copies for this OS user. The same
-client/parent returns the same code; distinct parents receive different codes.
+client/root returns the same code; distinct roots receive different codes.
 Keep this register when a family completes, is cancelled or is archived. Never
 reset it, delete allocations or choose a project-local counter. It stores identity
 bindings only; progress and acceptance stay in the existing task plan.
 
-Record the returned code and each child ordinal with existing task/native bindings.
-For existing native contexts, preserve their immutable creation markers and record
-the display-family mapping. A title alone cannot authorize adopting an old code.
+Record the returned code with existing task/native bindings. Preserve existing
+contexts' immutable creation markers when recording their display association.
 On allocation failure, report the naming limitation; do not guess an ID or reset
 the register. This allocator covers projects sharing the user register, not separate
 machines or OS accounts; those require one coordinated allocation authority before
@@ -144,15 +168,16 @@ accepted progress; `CANCELLED` retains partial progress and never implies comple
 Update display titles on meaningful milestone, phase, blocker or next-action
 owner changes during existing handling, without extra model turns, polling or
 a progress registry.
-For naming-only requests, change display metadata without enabling Workstreams,
-starting work or altering task state. Apply this convention to requested existing
-titles through supported controls; do not bulk-rename unrelated threads.
+For naming-only requests within the [new-thread scope](#new-thread-scope), change
+display metadata without enabling Workstreams, starting work or altering task
+state. Use supported controls; do not bulk-rename unrelated threads.
 
 Internal responsibilities remain coordinator, deliverable owner and independent
 reviewer, assigned from each objective. Models/reasoning stay in metadata. Title
 changes grant no authority and do not alter immutable native identity.
 
 Use supported client display-title controls. Preserve native creation markers,
-lineage and task ownership. If a client cannot expose the requested parent/child
-association, report that limitation before dispatch. Display titles do not qualify
-native execution or authorize new work.
+lineage and task ownership. Display titles do not qualify native execution or
+authorize new work. If the user requests native parent/child linkage that the
+client cannot expose, disclose that before dispatch. Peer-chat display association
+does not prove native linkage or grant permission to message other chats.

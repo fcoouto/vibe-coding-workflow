@@ -233,15 +233,15 @@
       ]
     },
     "clients/workstreams-naming.md": {
-      "sha256": "442877385ecb90ae350832688f92a0c956ff881bcf15c5b5a420e434ee5c2154",
+      "sha256": "a745caf061c4f8494a70bbef315c8f067c6958bb5ff736b2861e91829e6e2b35",
       "ranges": [
         [
           1,
-          144
+          150
         ],
         [
-          145,
-          158
+          151,
+          183
         ]
       ]
     },
@@ -277,7 +277,7 @@
       ]
     },
     "clients/workstreams-titles.md": {
-      "sha256": "599cf2f61b69414caa777241ff453d7fd65669b4839315251b67e66e2f8a6b3a",
+      "sha256": "79ba45b18b394564d6fc1777051c4f266ea2ce3a170ef724b7f9dd089035dc35",
       "ranges": [
         [
           1,
@@ -285,16 +285,16 @@
         ],
         [
           143,
-          237
+          241
         ]
       ]
     },
     "clients/workstreams.md": {
-      "sha256": "6719f719cf5d1794ffce617a75277c5fc4bac911c140583efe144fcaf3d1718d",
+      "sha256": "d3ebd94a839bf691a37c62a31695cd3849fd70240c22a7bfb5f573645bce5906",
       "ranges": [
         [
           1,
-          126
+          113
         ]
       ]
     },
@@ -326,7 +326,7 @@
       ]
     },
     "policies/03-agent-delegation.md": {
-      "sha256": "76cde89e2f41e0014c6ab6451dd21cf7964903225dc127c60010e4f25ef0b656",
+      "sha256": "e13c14740ef38055207351528b75d014fce39385a3924f92249d13bf9154fbe2",
       "ranges": [
         [
           1,
@@ -334,7 +334,7 @@
         ],
         [
           59,
-          90
+          117
         ]
       ]
     },
@@ -370,7 +370,7 @@
       ]
     },
     "policies/07-context-and-handoff.md": {
-      "sha256": "dbf4bf4632b329fd8814515db8a8d208ed0338e54ea85dd2f5e9446051651f42",
+      "sha256": "08aa554cf50f511f72e8ef0862438afe7ab0208fffd0142cf9f4a4d36056470c",
       "ranges": [
         [
           1,

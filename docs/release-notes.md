@@ -1,5 +1,15 @@
 # Release notes
 
+## 0.1.29
+
+- Define shared checkpoint handoffs and coordinator follow-through for ordinary and managed child work. Keep the parent responsible for collecting results, continuing ready work and reporting user-actionable blockers.
+- Preserve messaging permissions, ownership and continuation limits. A status snapshot does not complete supervision or establish automatic background wakeup.
+
+## 0.1.28
+
+- For new threads, keep associated deliverable chats and nested workers in the root coordinator's display family. Pass that binding before creation.
+- Store and display child role `C`; use native thread IDs for identity. Leave existing threads and their records unchanged.
+
 ## 0.1.27
 
 - Apply the shared assignment role preparation to every workflow subagent, including reviewers, evaluators, nested children and native supervisors of external routes. Reuse existing external brief and proposal fields.

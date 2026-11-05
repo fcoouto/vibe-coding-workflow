@@ -20,7 +20,7 @@ Apply with the [shared contract rules](00-index.md).
 - Any non-native model or execution route requires explicit user approval before use, including local models, proxies and separately billed API routes. Local models also require capability assessment, even when a client supports them natively.
 - Select each worker's model and reasoning from that platform's current official recommendations, the task's requirements and locally available controls. Prefer the lightest capable option by total effort; do not downgrade solely for price. Set worker choices through supported dispatch controls without changing the coordinator or global defaults. When only inheritance/configuration is supported, record the limitation and use it only if it satisfies the assignment. Keep commercial model names out of portable rules.
 - Read a concise local copy of the relevant platform guidance. Store source URLs, checked time, applicability and a content/version digest. Refresh during periodic environment maintenance, on relevant capability/catalog changes, missing/corrupt guidance or user request, outside hooks; apply [capability-based compatibility](11-tool-integrations.md#qualify-the-actual-workflow) to client updates and do not query upstream on every task. Cache age is a maintenance signal, not a correctness guarantee or automatic dispatch blocker. A failed refresh retains the last verified copy with stale freshness; suppress repeated attempts for the same trigger until a later maintenance run, relevant change or explicit retry. Reuse guidance only while its applicability and available controls remain compatible; otherwise hold dependent dispatch and continue independent work. Discover actual model availability separately.
-- Give each worker its objective, necessary context/instructions, exact files, dependencies, mutable resources, acceptance criteria, checks and stop condition. Request a short report of paths, findings, evidence and limitations. Grant only necessary tools and permissions; avoid copying the whole conversation or loading an unused specialist roster.
+- Give each worker its objective, necessary context/instructions, exact files, dependencies, mutable resources, acceptance criteria, checks and stop condition. Apply [handoff and supervision](#progress-and-result-retrieval). Grant only necessary tools and permissions; avoid copying the whole conversation or loading an unused specialist roster.
 - Apply the test-first and self-review procedure in [Task Planning](02-task-planning.md#planning-and-verification) to each assignment; parallel dispatch preserves it.
 - Split work by the [outcome ownership rules](#outcome-ownership). Use narrow specialist roles with distinct triggers; retain a standing role only for a recurring need.
 
@@ -54,11 +54,11 @@ worktrees for independent concurrent reviewable outcomes when useful. Preserve
 partial work in place rather than migrate it merely for presentation.
 
 Owners are not simultaneous workers. Decide dependent interfaces before affected
-work; start only ready independent outcomes within capacity and the original
-budgets. Keep outcome-to-child bindings and the
+work; start ready independent outcomes just in time within actual host capacity
+and the original budgets. A backlog does not establish capacity. Keep outcome-to-child bindings and the
 [family/member mapping](../clients/workstreams-naming.md) in the existing task
-record. Reconcile actual results, checks, blockers and next actions during
-milestone and handoff handling; a worker report alone is not acceptance.
+record. Use [handoff and supervision](#progress-and-result-retrieval) for checkpoint
+receipt and continuation.
 
 ## Ownership and parallel work
 
@@ -69,7 +69,34 @@ milestone and handoff handling; a worker report alone is not acceptance.
 
 ## Progress and result retrieval
 
-Use host completion/attention events or bounded waits. For managed progress, prefer the existing compact status view; expand the exact assignment/result only when acceptance, reconciliation, a changed observation or a specific diagnostic need requires it. Unchanged status does not justify rereading reports or whole logs. Required user updates may truthfully report waiting without another diagnostic read. Use logs when needed to investigate a failure or stall. Compact recorded progress cannot establish current readiness, permissions, liveness or stopped ownership; retain the existing authoritative checks at their decision points. Ordinary task/evidence status may revalidate readiness and is not a progress heartbeat.
+Each brief names one coordinator and the permitted handoff route. Child handoffs
+report reviewable checkpoints/results, material blockers or decisions, or changed
+dependency/ownership conditions using the [handoff payload](07-context-and-handoff.md#handoff-and-resumption).
+Use native completion/attention delivery. Separate sidebar peer chats may push
+only with direct human authorization to message the recipient; a coordinator's
+brief grants none. Otherwise report locally for coordinator retrieval.
+
+The coordinator collects and records receipt in the existing plan, then applies
+[review and integration](#review-integration-and-recovery) before acceptance.
+Release dependencies only when accepted outputs are available in the dependent
+checkout. A child may stop at reviewable output; this does not complete the
+coordinator's requested scope or release uncertain ownership. Continue already
+authorized, dependency-ready work with the same owner through the supported
+continuation operation; passive message delivery is not execution. Reading status
+or receiving a report grants no permission to start a peer's next turn. Keep ready
+independent work moving when another child is blocked.
+
+While assigned work remains active, the coordinator uses bounded native waits or
+completion/attention events, retaining current cursors when supported. Dispatch,
+a zero-timeout snapshot or a temporary timeout does not complete supervision. Consolidate user
+updates, blockers and decisions in the parent chat; users primarily deal with the
+coordinator. End supervision when the agreed scope is verified, the user explicitly
+pauses, an original limit is reached, or remaining work needs a real user action or
+unavailable capability. Record the stop reason and required resumption honestly;
+do not promise unobserved background supervision or automatic wakeup. Selected
+managed continuation and recovery controls still apply.
+
+For managed progress, prefer the existing compact status view; expand the exact assignment/result only when acceptance, reconciliation, a changed observation or a specific diagnostic need requires it. Unchanged status does not justify rereading reports or whole logs. Required user updates may truthfully report waiting without another diagnostic read. Use logs when needed to investigate a failure or stall. Compact recorded progress cannot establish current readiness, permissions, liveness or stopped ownership; retain the existing authoritative checks at their decision points. Ordinary task/evidence status may revalidate readiness and is not a progress heartbeat.
 
 ## Review, integration and recovery
 

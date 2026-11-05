@@ -105,29 +105,28 @@ class TitleIntegrationTests(unittest.TestCase):
         self.assertEqual(self.native.writes, 0)
         self.assertFalse(title_sync._path(self.scope, 'codex', 'session').exists())
 
-    def test_exact_current_limit_reserves_space_for_future_statuses(self):
+    def test_child_role_survives_status_transitions_and_resume(self):
         self.task['state'] = 'TRIAGE'
-        with self.assertRaises(ValueError):
-            self.call('configure', topic='Title', parent_session_id='parent', member='C' + '1' * 4067)
-        self.assertEqual(self.native.title, 'Original title')
-        self.assertEqual(self.native.writes, 0)
-        self.assertFalse(title_sync._path(self.scope, 'codex', 'session').exists())
-
-    def test_longest_safe_member_survives_status_transitions_and_resume(self):
-        self.task['state'] = 'TRIAGE'
-        member = 'C' + '1' * 4066
-        self.call('configure', topic='Title', parent_session_id='parent', member=member)
-        self.assertEqual(len(self.native.title), 4087)
+        self.call('configure', topic='Title', parent_session_id='parent', member='C')
         for status in ('READY', 'WORKING', 'REVIEW', 'WAITING', 'BLOCKED', 'PAUSED', 'DONE', 'CANCELLED'):
             attention = status in ('REVIEW', 'WAITING', 'BLOCKED')
             self.task.update(state=status, user_attention=attention, revision=self.task['revision'] + 1)
             self.call()
             label = f'{status} · ' if attention else ''
-            self.assertEqual(self.native.title.split(' ', 1)[1], f'{label}[W1] {member} · Title')
-            if status == 'WAITING':
-                self.assertEqual(len(self.native.title), 4097)
-            self.assertTrue(self.call('status')['managed'])
+            self.assertEqual(self.native.title.split(' ', 1)[1], f'{label}[W1] C · Title')
+            self.assertEqual(self.call('status')['presentation']['member'], 'C')
         self.assertFalse(self.call('resume')['paused'])
+
+    def test_child_role_rejects_self_root_and_numbered_members(self):
+        for root, member in (('session', 'C'), ('parent', 'P'), ('parent', 'C1'),
+                             ('parent', 'C2'), ('parent', 'C0')):
+            with self.subTest(root=root, member=member), self.assertRaises(ValueError):
+                self.call('configure', topic='Title', parent_session_id=root, member=member)
+            self.assertEqual(self.native.title, 'Original title')
+            self.assertEqual(self.native.writes, 0)
+            self.assertFalse(title_sync._path(self.scope, 'codex', 'session').exists())
+        self.call('configure', topic='Title', parent_session_id='parent', member='C')
+        self.assertEqual(self.call('status')['presentation']['member'], 'C')
 
     def test_oversized_manual_title_is_preserved_and_pauses_once(self):
         self.call('configure', topic='Title')
@@ -186,13 +185,16 @@ class TitleIntegrationTests(unittest.TestCase):
         self.assertEqual(self.native.title, '\uFFFB▰▱▱▱▱ [W1] P · Thread naming')
 
     def test_failed_acknowledgment_repairs_without_duplicate_write(self):
-        self.call('configure', topic='Thread naming')
+        self.call('configure', topic='Thread naming', parent_session_id='parent', member='C')
         self.task.update(state='REVIEW', revision=self.task['revision']+1)
         self.native.lose_ack = True
         with self.assertRaises(OSError): self.call()
         self.call()
         self.assertEqual(self.native.writes, 2)
-        self.assertFalse(self.call('status')['presentation']['paused'])
+        presentation = self.call('status')['presentation']
+        self.assertFalse(presentation['paused'])
+        self.assertEqual(presentation['member'], 'C')
+        self.assertEqual(self.native.title, '\uFFFB▱▱▱▱▱ [W1] C · Thread naming')
 
     def test_stale_revision_cannot_adopt_or_rename(self):
         with self.assertRaises(ValueError):
@@ -349,6 +351,64 @@ class BoundTaskTitleTests(unittest.TestCase):
         self.configure(workflow_topic='Old objective')
         self.assert_topic_rebind('\uFFFB▱▱▱▱▱ [W1] P · New objective')
 
+    def test_child_role_preserves_binding_through_resume_and_task_replacement(self):
+        self.configure(workflow_topic='Owner task', parent_session_id='root', member='C')
+        self.assertEqual(self.native.title, '\uFFFB▱▱▱▱▱ [W1] C · Owner task')
+        task = self.fixture.status()['task']
+        request = {key: task[key] for key in ('client', 'session_id', 'task_id', 'scope_ref')} | dict(
+            expected_revision=task['revision'], reference='user:resume')
+        for change in (dict(member='P'), dict(parent_session_id='another-root')):
+            self.command(['task', 'title', 'resume'], request | change, expected_code=1)
+        self.command(['task', 'title', 'resume'], request)
+        report = self.command(['task', 'title', 'status'], dict(client='codex', session_id='session'))
+        self.assertEqual((report['presentation']['family'], report['presentation']['member']), ('W1', 'C'))
+
+        self.start_new_objective()
+        task = self.fixture.status()['task']
+        replacement = {key: task[key] for key in ('client', 'session_id', 'task_id', 'scope_ref')} | dict(
+            expected_revision=task['revision'], reference='user:replace', workflow_topic='New owner task')
+        for change in (dict(member='P'), dict(parent_session_id='another-root')):
+            self.command(['task', 'title', 'configure'], replacement | change, expected_code=1)
+        self.configure(workflow_topic='New owner task')
+        self.assertEqual(self.native.title, '\uFFFB▱▱▱▱▱ [W1] C · New owner task')
+        report = self.command(['task', 'title', 'status'], dict(client='codex', session_id='session'))
+        self.assertEqual((report['presentation']['family'], report['presentation']['member']), ('W1', 'C'))
+
+    def test_distinct_child_sessions_share_role_without_sharing_records_or_writes(self):
+        contexts = {session: NativeFixture() for session in ('session', 'owner', 'worker')}
+
+        class SessionTitles(NativeFixture):
+            def read(self, session): return contexts[session].read(session)
+            def write(self, session, title): contexts[session].write(session, title)
+
+        self.native = SessionTitles()
+        self.configure(topic='Root')
+        self.assertEqual(contexts['session'].title, '\uFFFB▱▱▱▱▱ [W1] P · Root')
+        tasks = {}
+        for session, topic in (('owner', 'Owner'), ('worker', 'Nested worker')):
+            task = self.fixture.start(session_id=session, task_id='task-' + session)['task']
+            tasks[session] = task
+            self.command(['task', 'title', 'configure'],
+                {key: task[key] for key in ('client', 'session_id', 'task_id', 'scope_ref')} |
+                dict(expected_revision=task['revision'], reference='user:adopt', topic=topic,
+                     parent_session_id='session', member='C'))
+            self.assertEqual(contexts[session].title, f'\uFFFB▱▱▱▱▱ [W1] C · {topic}')
+            report = self.command(['task', 'title', 'status'], dict(client='codex', session_id=session))
+            self.assertEqual(report['presentation']['identity']['session_id'], session)
+            self.assertEqual(report['presentation']['member'], 'C')
+        owner_path = title_sync._path(self.fixture.scope, 'codex', 'owner')
+        worker_path = title_sync._path(self.fixture.scope, 'codex', 'worker')
+        self.assertNotEqual(owner_path, worker_path)
+        worker_before = worker_path.read_bytes()
+        task = tasks['owner']
+        self.command(['task', 'update'],
+            {key: task[key] for key in ('client', 'session_id', 'task_id', 'scope_ref')} |
+            dict(expected_revision=task['revision'], state='WORKING', reason='Owner work', reference='user:work'))
+        self.assertEqual(contexts['owner'].title, '\uFFFB▰▱▱▱▱ [W1] C · Owner')
+        self.assertEqual(contexts['owner'].written_sessions, ['owner', 'owner'])
+        self.assertEqual(contexts['worker'].written_sessions, ['worker'])
+        self.assertEqual(contexts['worker'].title, '\uFFFB▱▱▱▱▱ [W1] C · Nested worker')
+        self.assertEqual(worker_path.read_bytes(), worker_before)
     def test_workflow_topic_rebind_preserves_explicit_topic(self):
         self.configure(topic='User wording')
         self.assert_topic_rebind('\uFFFB▱▱▱▱▱ [W1] P · User wording')

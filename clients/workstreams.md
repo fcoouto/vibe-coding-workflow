@@ -1,11 +1,11 @@
 # Workstreams execution
 
 Load only for managed child delivery or when a Workstreams-specific operation is
-needed. Ordinary delegation always uses [shared delegation safety](delegation.md),
+needed. Ordinary delegation always uses [Agent Delegation](../policies/03-agent-delegation.md),
 regardless of either feature preference. For independent acceptance, load the applicable D5
 [planning](evidence-plan.md), [request fields](evidence.md#request-fields)
-and [completion](evidence-completion.md) sections under delegation's
-section-loading rule.
+and [completion](evidence-completion.md) sections under
+[native delegation's section-loading rule](delegation.md).
 Management requests use the controls route of the
 [Workstreams skill](../skills/workstreams/SKILL.md).
 
@@ -36,19 +36,15 @@ separate management procedure and do not load this execution contract.
 
 ## Contexts and ownership
 
-Use one coordinator and the existing task plan. Group work by cohesive outcomes,
-relevant files and shared decisions, keeping tightly coupled work together. Do not
-create a child for an action the coordinator can finish more cheaply. Admit ready
-contexts just in time within actual host capacity and task-derived budgets; a
-large backlog does not establish concurrent execution capacity.
+Follow [shared outcome ownership](../policies/03-agent-delegation.md#outcome-ownership)
+using the existing task plan.
 
 Each context retains its stable task/job ID, native child identity, bounded brief,
 files/resources, dependencies, acceptance/checks and next action. Native children
 remain distinct from external executions. Any separately available external route needs its own supported contract; this
 skill grants none. Do not invent native lineage or external same-thread resumption.
 
-Keep the implementer through relevant review fixes. Send findings and material
-state changes, preserving history and budgets. Reconcile the implementation owner
+Reconcile the implementation owner
 before independent review so retained write claims do not block its readers.
 Before resuming, reconcile review readers; continuation preparation reserves no
 claims for a settled owner. Consume rechecks and atomically reacquires original
@@ -71,12 +67,9 @@ resource or recovery operations. No optional feature revision is required for
 ordinary delegation. A lost response requires inspection of the same identity
 and history, not blind resend.
 
-Workers implement, run relevant checks and self-review. Use required independent
-review, then coordinator assessment and integration. Release dependencies only
-after their accepted outputs are available in the dependent checkout. Resume ready
-work on completion/dependency events with bounded rechecks. Reuse check evidence
-only while its candidate, scope and environment remain valid; rerun affected proof
-after changes.
+Follow [shared handoff and supervision](../policies/03-agent-delegation.md#progress-and-result-retrieval).
+Reuse check evidence only while its candidate, scope and environment remain valid;
+rerun affected proof after changes.
 
 Choose output/context allocation, steps, time, concurrency and recovery allowances
 from each assignment and supported route. Retain consumed attempts across fixes,
@@ -84,13 +77,7 @@ renames and toggles. Provider ceilings, permissions and validation limits remain
 binding. Requested limits are not measured consumption or proof of hard native
 token enforcement. Material reassessment uses remaining authorized totals.
 
-Use native completion/attention events and bounded waits; inspect full history
-only for decisions, failures or contradictions. Resume an idle/completed child with
-the host's continuation operation; passive messaging may not start a new turn.
-On the current collaboration surface, `followup_task` starts that turn, whereas
-`send_message` only delivers context. Retain the original child and verify the
-continuation outcome rather than treating message delivery as execution. One progress entry per wave is
-enough. Add a coordination level only when it removes observed root work.
+Add a coordination level only when it removes observed root work.
 
 The host owns its internal retries. Admitted child continuations need recognized
 terminal cause, known-finished host retry, supported recovery, reconciled writer
