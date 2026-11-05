@@ -333,11 +333,12 @@ class NativeVisibilityTests(unittest.TestCase):
         self.model_pages = {None: dict(data=[], nextCursor=None)}
         self.ancestors = {}
 
-    def reader(self, methods):
+    def reader(self, methods, **options):
         from contextlib import contextmanager
 
         @contextmanager
         def reader():
+            self.assertLessEqual(set(options), {'deadline', 'executable'})
             self.assertEqual(set(methods), {'initialize', 'thread/read', 'model/list'} |
                 ({'thread/items/read'} if self.spawn_prompt is not None else set()))
             def request(method, params):
@@ -399,6 +400,70 @@ class NativeVisibilityTests(unittest.TestCase):
                 self.observe()
             self.ancestors[root] = original
 
+    def test_native_display_accepts_parent_worktree_and_original_child_checkout(self):
+        parent_checkout = self.root.parent / 'parent-worktree'
+        parent_checkout.mkdir()
+        self.parent_thread['cwd'] = str(parent_checkout)
+        with patch.object(codex, '_native_reader', self.reader):
+            for checkout in (parent_checkout, self.root):
+                with self.subTest(checkout=checkout):
+                    value = codex.observe_worker_visibility(checkout, self.parent, self.child)
+                    self.assertEqual(value['checkout'], str(checkout))
+                    self.assertEqual(value['parent_checkout'], str(parent_checkout))
+                    self.assertEqual(value['worker_checkout'], str(self.root))
+                    self.assertEqual(value['task_name'], 'review_original')
+            with self.reader({'initialize', 'thread/read', 'model/list'}) as (version, request):
+                with self.assertRaises(codex.ObservationError):
+                    codex._native_metadata(SimpleNamespace(repository_root=parent_checkout), request,
+                                           self.child, version)
+
+    def test_nested_native_display_validates_distinct_ancestor_worktrees(self):
+        parent_checkout = self.root.parent / 'parent-worktree'
+        parent_checkout.mkdir()
+        ancestor_checkout = self.root.parent / 'ancestor-worktree'
+        ancestor_checkout.mkdir()
+        root = str(uuid.uuid4())
+        self.ancestors[root] = self.parent_thread | dict(id=root, cwd=str(ancestor_checkout))
+        self.parent_thread.update(cwd=str(parent_checkout), parentThreadId=root,
+            source={'subAgent': {'thread_spawn': {'parent_thread_id': root}}})
+        self.child_thread['source']['subAgent']['thread_spawn']['agent_path'] = '/root/nested/review_original'
+        with patch.object(codex, '_native_reader', self.reader):
+            value = codex.observe_worker_visibility(self.root, root, self.child, resolve_hook_parent=True)
+            self.assertEqual(value['parent_session_id'], self.parent)
+            self.assertEqual(value['hook_session_id'], root)
+            self.assertEqual(value['parent_checkout'], str(parent_checkout))
+            self.assertEqual(value['worker_checkout'], str(self.root))
+            self.assertEqual(value['agent_path'], '/root/nested/review_original')
+            with self.assertRaises(StartupError):
+                codex.observe_worker_visibility(ancestor_checkout, root, self.child, resolve_hook_parent=True)
+
+    def test_native_display_rejects_unrelated_checkout_and_mismatched_parents(self):
+        unrelated = self.root.parent / 'unrelated'
+        unrelated.mkdir()
+        with patch.object(codex, '_native_reader', self.reader):
+            with self.assertRaises(StartupError):
+                codex.observe_worker_visibility(unrelated, self.parent, self.child)
+            for change in (dict(parentThreadId=str(uuid.uuid4())),
+                           dict(source={'subAgent': {'thread_spawn': {'parent_thread_id': str(uuid.uuid4())}}})):
+                original = copy.deepcopy(self.child_thread)
+                self.child_thread.update(change)
+                with self.subTest(change=change), self.assertRaises(StartupError):
+                    codex.observe_worker_visibility(self.root, self.parent, self.child)
+                self.child_thread = original
+
+    def test_native_display_rejects_noncanonical_native_metadata(self):
+        alias = self.root.parent / 'checkout-alias'
+        alias.symlink_to(self.root, target_is_directory=True)
+        for thread in (self.parent_thread, self.child_thread):
+            for change in (dict(id=str(uuid.uuid4())), dict(cwd='checkout'), dict(cwd=str(alias)),
+                           dict(cwd=str(self.root) + '/'), dict(cliVersion=None)):
+                original = copy.deepcopy(thread)
+                thread.update(change)
+                with self.subTest(thread=original['id'], change=change), self.assertRaises(StartupError):
+                    self.observe()
+                thread.clear()
+                thread.update(original)
+
     def test_nested_native_observation_rejects_cycle_and_mismatched_parent(self):
         for ancestor in (self.parent, self.child):
             self.parent_thread.update(parentThreadId=ancestor,
@@ -429,11 +494,72 @@ class NativeVisibilityTests(unittest.TestCase):
         event = dict(hook_event_name='SubagentStart', session_id=root,
                      agent_id=self.child, cwd=str(self.root), agent_type='default')
         observed = self.observe() | dict(hook_session_id=root)
+        observed.pop('parent_checkout', None)
+        observed.pop('worker_checkout', None)
         with patch.object(codex, 'observe_worker_visibility', return_value=observed):
             actual = helper.enrich_start(event, self.task_context, self.root, Path(sys.executable).resolve())
         self.assertEqual(actual['session_id'], self.parent)
         self.assertEqual(actual['vcw_display_label'], 'Audit lead · Native model')
         self.assertEqual(event['session_id'], root)
+        self.assertEqual(helper.read_context(path)['observed']['checkout'], str(self.root))
+
+    def test_hook_child_checkout_uses_parent_worktree_declaration_and_preserves_event(self):
+        from runtime import habblaud
+        helper = self.native_helper()
+        parent_checkout = self.root.parent / 'parent-worktree'
+        parent_checkout.mkdir()
+        self.parent_thread['cwd'] = str(parent_checkout)
+        request = self.native_request() | dict(checkout=str(parent_checkout),
+            visibility=dict(version=1, role='Tester', specialty='Verify the change'))
+        path = helper.hook_context_path(self.task_context, self.parent, 'review_original')
+        path.parent.mkdir(mode=0o700)
+        helper.prepare_native(path, request)
+        event = dict(hook_event_name='SubagentStart', session_id=self.parent,
+                     agent_id=self.child, cwd=str(self.root), agent_type='default', extra='preserve')
+        original = copy.deepcopy(event)
+        with patch.object(codex, '_native_reader', self.reader):
+            first = helper.enrich_start(event, self.task_context, None, Path(sys.executable).resolve())
+            for checkout in (self.root, parent_checkout):
+                with self.subTest(checkout=checkout):
+                    replay = helper.enrich_start(event, self.task_context, checkout, Path(sys.executable).resolve())
+                    self.assertEqual(replay, first)
+        self.assertEqual(first, original | dict(agent_type='Tester · Native model',
+            agent_role='Tester · Native model', vcw_display_label='Tester · Native model'))
+        self.assertEqual(event, original)
+        saved = helper.read_context(path)
+        self.assertEqual(saved['observed']['checkout'], str(parent_checkout))
+        self.assertEqual(saved['observed']['worker_checkout'], str(self.root))
+        self.assertEqual(habblaud._saved_native_binding(saved)['worker_id'], self.child)
+
+    def test_hook_rejects_explicit_unrelated_checkout_scope(self):
+        helper = self.native_helper()
+        unrelated = self.root.parent / 'unrelated'
+        unrelated.mkdir()
+        path = helper.hook_context_path(self.task_context, self.parent, 'review_original')
+        path.parent.mkdir(mode=0o700)
+        helper.prepare_native(path, self.native_request())
+        before = path.read_bytes()
+        event = dict(hook_event_name='SubagentStart', session_id=self.parent,
+                     agent_id=self.child, cwd=str(self.root), agent_type='default')
+        with patch.object(codex, '_native_reader', self.reader):
+            self.assertEqual(helper.enrich_start(event, self.task_context, unrelated,
+                                                Path(sys.executable).resolve()), event)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_hook_rejects_declaration_from_unrelated_third_checkout(self):
+        helper = self.native_helper()
+        unrelated = self.root.parent / 'unrelated'
+        unrelated.mkdir()
+        path = helper.hook_context_path(self.task_context, self.parent, 'review_original')
+        path.parent.mkdir(mode=0o700)
+        helper.prepare_native(path, self.native_request() | dict(checkout=str(unrelated)))
+        before = path.read_bytes()
+        event = dict(hook_event_name='SubagentStart', session_id=self.parent,
+                     agent_id=self.child, cwd=str(self.root), agent_type='default')
+        with patch.object(codex, '_native_reader', self.reader):
+            self.assertEqual(helper.enrich_start(event, self.task_context, None,
+                                                Path(sys.executable).resolve()), event)
+        self.assertEqual(path.read_bytes(), before)
 
     def test_catalog_failure_or_ambiguity_preserves_native_identity(self):
         for page in (dict(data=None), dict(data=[dict(model='Native model', displayName='First'),

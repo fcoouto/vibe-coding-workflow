@@ -56,6 +56,10 @@ leaves native thread owners without a role badge. A native CLI probe found the
 spawn message encrypted in `PreToolUse`; automatic hook parsing cannot capture
 its role. No new hook or role inference is introduced. Direct native spawning
 can still omit metadata, and first-badge rendering needs separate observation.
+Display identity checks validate each native checkout independently when a
+coordinator moves worktrees and a child retains its original checkout. The
+declaration must match the verified parent or child checkout. Execution scope
+checks keep their existing stricter boundary.
 
 Workspace preparation and integration discovery load the existing-hook
 [reconciliation procedure](../clients/worker-visibility.md#reconcile-on-discovery-and-upgrade)
