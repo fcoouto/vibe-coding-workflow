@@ -218,6 +218,10 @@ def control_main():
                         "consume-continuation": delegation.consume_continuation,
                         "record-continuation": delegation.record_continuation}
                     report = operation[action](scope, request)
+                    if action == "prepare-continuation":
+                        from runtime.worker_visibility import prepare_managed
+                        report = prepare_managed(scope.repository_root, request.get("session_id"), report,
+                                                 prompt=request.get("prompt"))
             elif args.delegation_action == "guidance":
                 report = {"status": delegation.guidance_status, "claim": delegation.claim_guidance,
                           "record": delegation.record_guidance}[args.guidance_action](scope, request)

@@ -14,12 +14,13 @@ control changes belong to `../../manage-openrouter/SKILL.md`; ordinary delegatio
 does not load that procedure or activate a route. An account connection, copied
 cache or an `approval_ref` alone does not replace saved checkout consent.
 
-1. Follow the project's native worker selection and declaration contract. Reserve
+1. Follow the project's native worker selection and shared
+   [role-preparation rule](../../../clients/worker-visibility.md#declare-before-dispatch). Reserve
    the private run directory and give a genuine native supervisor the assignment,
    exact runner/runtime paths, role, specialty, copied inputs, checks and stop rule.
-   For selected Habblaud visibility, use the [shared role declaration](../../../clients/worker-visibility.md)
-   for both the supervisor and external worker, with their own actual responsibilities.
-   Keep its native model identity truthful. Prepare its
+   Use the owner's native assignment preparation for the supervisor and reuse the
+   external worker's existing brief fields for its own responsibility. Keep the
+   supervisor's native model identity truthful. Prepare its
    [native task name with the OpenRouter suffix](../../../clients/worker-visibility.md#external-routes-in-chat-and-habblaud)
    before dispatch, whether or not Habblaud is configured.
 2. Load only the discovery/cache and triage sections of
@@ -56,8 +57,10 @@ python3 -I -B <plugin-root>/scripts/openrouter_workers.py run
 
 The brief requires `task_id`, `coordinator_chat_id`,
 `model`, `provider`, `effort`, `objective`, `source_root`,
-`files`, `timeout_seconds`, `steps`, and `approval_ref`. Add optional
-`role`, `specialty`, and `model_display_name` for the badge. Add `custom_role_name`
+`files`, `timeout_seconds`, `steps`, and `approval_ref`. For workflow-created jobs,
+include the assigned `role` and `specialty` once in this brief and add
+`model_display_name` when known. Runtime compatibility keeps missing or invalid
+legacy display metadata nonblocking. Add `custom_role_name`
 only for an explicit native fallback declaration, using the shared bounds.
 New external badges display the declared role followed by the
 model display name, for example `Scout · GLM 5.3 Flash`. Existing receipts keep
