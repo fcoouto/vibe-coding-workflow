@@ -51,15 +51,15 @@
       ]
     },
     "clients/delegation.md": {
-      "sha256": "d91d1cd82ec45c3600c07a96d406db917ffbc3112a52ac0d4c74a7f68e428fb3",
+      "sha256": "c14faad642f571700df4337b5a58c9dd1d5db0e629d5b14273a72ae8510ae880",
       "ranges": [
         [
           1,
-          54
+          56
         ],
         [
-          55,
-          75
+          57,
+          77
         ]
       ]
     },
@@ -246,7 +246,7 @@
       ]
     },
     "clients/workstreams-protocol.md": {
-      "sha256": "b7b03eb085860c240a7ea3bf3beb2947fbe440b8eb2210f8f1813b69d19cbde6",
+      "sha256": "74dea302e5f8b0ec6b8c9a6319af93a052a8b6d33380e895dfd73dc4ee8dc120",
       "ranges": [
         [
           1,
@@ -255,14 +255,14 @@
       ]
     },
     "clients/workstreams-recovery.md": {
-      "sha256": "0fd6d2a71301d43592e8a3eb116709e66b8e2c6ece12b9f78bd6abe95b6d0ac3",
+      "sha256": "bde34d5ee0625e6fe5d2416192969de9e74404261fcb5b90703627b8395058d3",
       "ranges": [
         [
           1,
-          133
+          132
         ],
         [
-          134,
+          133,
           196
         ]
       ]
@@ -326,15 +326,15 @@
       ]
     },
     "policies/03-agent-delegation.md": {
-      "sha256": "580034bd9ef271c1fa79363a38e2966c8faac623f859703aad8f21027602170e",
+      "sha256": "2deccd07038bc722231f4529cf568d302bf1bf15e71b13bf722cce023cf6e487",
       "ranges": [
         [
           1,
-          39
+          40
         ],
         [
-          40,
-          62
+          41,
+          64
         ]
       ]
     },
@@ -565,11 +565,11 @@
       ]
     },
     "skills/onboard-my-project/references/procedure.md": {
-      "sha256": "498a4e7593c16566a34d3fbcc00ac4d39ba2084ea24b0fb5568ba5f24d41ce23",
+      "sha256": "7f8d48ecee9f48887ef962c606d94787ceddd6837808708d5ad525adbb49254b",
       "ranges": [
         [
           1,
-          57
+          63
         ]
       ]
     },
@@ -653,20 +653,29 @@
       ]
     },
     "skills/workstreams/SKILL.md": {
-      "sha256": "6be54d3bf3cd21973f130dc0822982173b2a0fc489f4f263370ca2cda44f478d",
+      "sha256": "66a4829607049aae191be793e3356ee0adae45e6909056373789e18a1a841d3d",
       "ranges": [
         [
           1,
-          17
+          18
+        ]
+      ]
+    },
+    "skills/workstreams/references/advanced-controls.md": {
+      "sha256": "021abf51cb1adca7bbf77cf9490483d14063a3bed19b21c48ba844d4c635e17c",
+      "ranges": [
+        [
+          1,
+          79
         ]
       ]
     },
     "skills/workstreams/references/procedure.md": {
-      "sha256": "3d888925699b37135743929a3d2a86ba414f4f8ec18f3205916e5dfef66ab531",
+      "sha256": "037f0b327a6ad0c1307cc41c3fcc2cd3c755ac7177d2d19cb861d780d16254a5",
       "ranges": [
         [
           1,
-          78
+          64
         ]
       ]
     }

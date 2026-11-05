@@ -8,9 +8,12 @@
 
 For task controls, read [task runtime](clients/runtime.md); for accepted checks, review and completion, load [evidence](clients/evidence.md); for worker selection and handoff, load [delegation](clients/delegation.md). Local readiness covers current task evidence and grants no merge authority. D7's [bounded fixture inspector](clients/repository-gate.md) is implemented but always exits 1; production evidence sources, publishing and repository enforcement remain unqualified.
 
-Use [Workstreams](skills/workstreams/SKILL.md) for suitable coordinated contexts,
-saved mode controls, resource admission, recovery and managed titles. New supported
-Codex runtime scopes start enabled; existing preferences remain.
+Enable [Workstreams](skills/workstreams/SKILL.md) during project onboarding or ask
+the skill to **enable**, **disable** or show **status** for this project. Both use
+one saved Enabled/Disabled checkbox in project guidance. Enabled automatically
+uses suitable native child work; small tasks can stay with the coordinator. This
+choice needs no runtime database or separate activation. Resource admission and
+capacity recovery keep their separate advanced controls and prerequisites.
 [Thread Naming](clients/workstreams-naming.md) starts automatically with
 implementation, including solo work, independently of delegation and these
 features. Question-only and planning chats stay untouched. Manual-title overrides

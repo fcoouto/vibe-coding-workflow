@@ -26,6 +26,8 @@ Apply with the [shared contract rules](00-index.md).
 
 When considering an already authorized Usage Routing proposal, load its [proposal selection, verification and recovery procedure](../skills/manage-usage-routing/references/delegation.md). Load routing setup only for explicit routing management.
 
+Before optional automatic native delegation, honor the [project preference](../skills/workstreams/references/procedure.md) in applicable project instructions. Onboarding and the Workstreams skill manage this same Enabled/Disabled choice. It needs no managed runtime. Explicit delegation and required independent review remain available when disabled or not configured. Preserve explicitly selected protections.
+
 For native delegation, load the [display naming rules](../clients/workstreams-naming.md) to assess parent/child eligibility, including ordinary workers and independent reviewers. Follow their implementation trigger; dispatch alone does not authorize title adoption. This route is independent of Workstreams feature preferences and does not select managed task controls.
 
 Choose each subagent's role once while preparing its assignment, using the [worker visibility contract](../clients/worker-visibility.md#declare-before-dispatch). Native [assignment preparation](../clients/worker-visibility.md#native-workers-and-reviewers) captures that declaration for display. When reusing a native child, follow the [same-child preparation procedure](../clients/worker-visibility.md#prepare-a-follow-up-for-an-existing-child). External routes reuse their existing brief or proposal fields. Do not add a separate role-only preparation step. Dispatch remains independent of badge metadata.

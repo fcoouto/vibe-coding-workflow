@@ -1,6 +1,6 @@
 {
   "name": "vibe-coding-workflow",
-  "version": "0.1.23",
+  "version": "0.1.24",
   "description": "Prepare development environments with the Vibe Coding Toolkit.",
   "skills": "./skills/",
   "hooks": "./hooks/codex.json",
