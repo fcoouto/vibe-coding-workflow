@@ -1,8 +1,8 @@
 # Workflow templates and behavioral verification
 
-Status: design direction and [Phase 1 implementation plan](../plans/2026-11-05-workflow-templates-phase-one.md) accepted on 5 November 2026. Phase 1 is implemented and verified locally; later phases and rollout remain outside this execution. The implementation plan records evidence and limits.
+Status: Phase 1 merged through [PR #103](https://github.com/fcoouto/vibe-coding-workflow/pull/103), commit `7dd2bdb`. Phase 2 delivery is tracked in [PR #104](https://github.com/fcoouto/vibe-coding-workflow/pull/104), following independent review against current `main` and the user-authorized corrected Desktop qualification. Its [implementation record](../plans/2026-11-05-workflow-templates-phase-two.md#corrected-qualification-and-integration-preflight) distinguishes native, routed execution, output rejection and recorded-rendering evidence. Package release and installed rollout are outside this slice. Phase 3 proceeds through its own implementation plan. The [Phase 1 record](../plans/2026-11-05-workflow-templates-phase-one.md) preserves its historical limits.
 
-Date: 5 November 2026. Repository basis: `860ac89` on `codex/consolidate-role-instructions`. This design preserves that local instruction-consolidation commit independently of any later implementation.
+Date: 5 November 2026. Initial research basis: `860ac89` on `codex/consolidate-role-instructions`. Phase 2 planning basis: `7dd2bdb`. The completed role consolidation is preserved in `main`; do not repeat it.
 
 ## Recommendation
 
@@ -10,7 +10,7 @@ Use templates selectively for recurring artifacts, executable examples for exist
 
 Templates can make omissions visible and reduce repeated composition. JSON Schema can validate structure where a real consumer invokes it. Neither makes an agent load a skipped procedure, choose the correct role, obtain authorization, or provide truthful evidence. The repeated badge failures therefore motivate better assignment preparation and behavioral checks, not mandatory JSON for all work.
 
-The first implementation slice should repair two loading boundaries, pilot two examples (a managed evidence-plan request and basic onboarding), and audit delegation preparation for redundant code. Each adopted template or example should prompt a targeted review of the code that constructs, validates and consumes its data. Broader document adaptation and a reusable native evaluation fixture follow only after that slice is reviewed. Actual client evidence remains separate from package tests.
+Phase 1 repaired two loading boundaries, piloted evidence-plan/basic-onboarding examples and completed the delegation audit with a justified retain disposition. Phase 2 adapts project artifacts and pilots one lifecycle layout with compact child reports. Each adopted example still prompts a targeted review of its constructing and consuming code; a justified retain result remains valid. Phase 3 packages reusable behavioral evaluation. Actual client evidence remains separate from package tests.
 
 ## Goals and boundaries
 
@@ -32,7 +32,7 @@ The investigation covered all 47 files in the pinned [Toolkit templates director
 
 The [template index](https://github.com/soumatheusgomes/vibe-coding-toolkit/blob/21b71b68679c11184f49c23168852014bf6dde8b/templates/README.md) describes an adaptation library. It includes documentation, application source, configuration, policy text and intentionally broken test fixtures. It is not a library of universal workflow schemas.
 
-The current package was inspected at the files below. Findings distinguish observed implementation from proposed improvements:
+The initial research inspected the files below. This table records the pre-Phase-1 findings, not unresolved defects in current `main`; the Phase 1 record identifies their implemented dispositions:
 
 | Finding | Existing evidence | Design implication |
 |---|---|---|
@@ -56,7 +56,7 @@ The earlier native badge smoke observation is historical evidence for that clien
 | Template every process with mandatory JSON Schema | Uniform shapes, editor support and easy structural checks if consumers exist | Duplicate validators and records; optional work becomes ceremony; schema validity can hide wrong semantics; ordinary work may acquire managed prerequisites | Reject as a general architecture. |
 | Selective artifact templates plus executable examples and behavior cases | Reuses current owners; clearer omissions; independently testable; progressive loading | Requires example maintenance and contextual adaptation; cannot guarantee instruction compliance | Recommended. |
 
-This is the author's recommendation, not an already approved implementation choice. A future editor, API or form may justify JSON Schema for its concrete input; that does not justify converting every workflow now.
+The selective architecture and lifecycle direction are approved. Implementation remains scoped by the selected phase and its authorization. A future editor, API or form may justify JSON Schema for its concrete input; that does not justify converting every workflow now.
 
 ## Architecture and ownership
 
@@ -93,6 +93,18 @@ For machine requests, document the minimum accepted object, identify conditional
 
 Keep `required`, `inapplicable` with reason, and `unresolved` meanings where current contracts already use them. Missing access is not inapplicability. Examples do not grant consent or turn a planned check into a passed result. Distinct input, persisted evidence and presentation digests remain distinct even when they share field names.
 
+### One lifecycle layout and compact child reports
+
+Use the existing task context or plan, with one optional layout owned by `policies/07-context-and-handoff.md`. Store objective, authorized scope, acceptance criteria and standing constraints once. Implementation start, meaningful checkpoints and completion update the same record: result/phase, candidate/proof, material exceptions, and next action/owner. Planned, observed, reviewable and accepted remain distinct. Omit irrelevant headings rather than manufacture values; tiny tasks can use prose.
+
+A child report is a compact view of that record, not another record or a full copy. Send the changed result, exact candidate/evidence references when output changes, material exceptions and necessary next action/owner. Reuse known assignment context and native sender identity; include compact context when it cannot be reliably resolved after resume or reassignment. Changed permissions, budgets, dependencies, owned resources, process state and recovery remain explicit when relevant. Preserve unknown ownership and remaining limits. A report grants no authority and does not replace parent verification.
+
+Report reviewable checkpoints/results, blockers needing attention, and changed dependency/ownership conditions. Implementation start normally needs only a local update; omit routine start acknowledgments, unchanged progress, acknowledgment loops, repeated instructions/roles, raw logs and reasoning. Retrieve detailed evidence only for a concrete acceptance, recovery or diagnostic need. No hard length cap may hide a material risk or cause excessive follow-up retrieval.
+
+At applicable lifecycle transitions, follow the existing title owner and retain actual readback or a truthful preserved/pending/unavailable outcome in existing presentation metadata. Keep title formatting, new-thread scope, manual overrides, pauses and recovery solely with that owner. Routine child reports omit title receipts; include a title exception only when relevant to the parent's decision. Display failure remains nonblocking, and an ended turn does not imply `DONE`. Child reviewable output awaits parent acceptance; root completion covers the full agreed deliverable, including required integration. Do not add model turns solely for acknowledgment or title repair.
+
+Planning and delegation link to this layout; replace overlapping field inventories rather than add competing templates. It introduces no mandatory file, JSON form, schema, parser, registry, execution blocker or new role declaration. Phase 2 runs bounded smoke cases for the changed instructions. Phase 3 makes those cases reusable and extends coverage; it does not postpone proof required to accept Phase 2.
+
 ## Code simplification alongside templates
 
 Code adjustment is an explicit deliverable of this design, where inspection demonstrates unnecessary work. Keeping an existing validator authoritative does not freeze its implementation or require every current call to remain. Consolidate the rule and simplify its callers rather than preserving duplicate implementations because they already exist.
@@ -107,7 +119,7 @@ A document template alone does not establish trusted input. A checked constructo
 | Validation of external requests, persisted state, hook events or provider responses | Retain at each genuine boundary; share rule implementation where suitable | A template cannot replace checks on independently supplied or later-read data. |
 | Authorization, current revision, ownership, path safety, concurrency, budgets and uncertain-run reconciliation | Preserve the relevant decision-time check | Earlier validation does not establish that mutable state or permission is still current. |
 
-The first bounded audit follows `runtime/worker_visibility.py::prepare_assignment` through `prepare_context` and `prepare_native`, including direct CLI callers, managed preparation and stored-context reuse. Static inspection confirms that `prepare_assignment` validates the declaration and passes it unchanged through `prepare_context` to another declaration validation in `prepare_native`. This is a credible consolidation candidate, not yet a verified safe deletion: preserve rejection before directory creation and validation for the legacy direct entry in `scripts/worker_visibility.py`.
+The completed Phase 1 audit followed `runtime/worker_visibility.py::prepare_assignment` through `prepare_context` and `prepare_native`, including direct CLI callers, managed preparation and stored-context reuse. It retained both declaration checks: the outer check preserves rejection before directory creation; the inner check covers direct/legacy entry. A helper added solely to avoid this cheap repeated computation would increase complexity. Do not reopen this audit without a new affected caller or demonstrated defect.
 
 `read_context` validates the saved envelope and marker/digest exclusivity, not the nested role declaration. Role validation after a disk read therefore serves a separate purpose. Keep saved-context reads, child/parent bindings and nonblocking display fallback distinct from validation of the original request. Extend to `runtime/delegation.py`, `runtime/evidence.py`, `scripts/workflow.py` and route adapters only where the selected examples expose actual duplication.
 
@@ -122,12 +134,12 @@ Acceptance requires valid and malformed direct requests, supported legacy input,
 | Machine preparation | Adapt existing inventory/report fields; show observed, selected, pending and qualified states | `skills/prepare-my-workspace/`; only preparation/update, not project enrollment or ordinary work |
 | Basic onboarding | One minimal worked proposal and adapted project documentation | `skills/onboard-my-project/references/procedure.md`, `reviewed-configuration.md`; use existing recovery, no runtime activation prerequisite |
 | Managed onboarding | Executable request examples for its dense shapes, after the initial pilot | `references/managed-plan.md`, `runtime/onboarding.py`; selected dispatcher only |
-| Ordinary planning and development | Existing task context; optional richer plan when complexity requires it | `policies/02-task-planning.md`; no mandatory plan file or JSON record for a small fix |
+| Ordinary planning and development | Existing task context; one optional lifecycle layout shared with handoff | `policies/02-task-planning.md` routes to the owner in `policies/07-context-and-handoff.md`; no mandatory plan file or JSON record for a small fix |
 | Delegation | Existing assignment brief and role preparation, with fresh/reuse examples only if needed | `policies/03-agent-delegation.md`, `clients/worker-visibility.md`; choose role when preparing that assignment |
 | Usage Routing and external workers | Existing brief/proposal fields and authority mapping; synthetic worked lifecycle if useful | `skills/manage-usage-routing/references/delegation.md`, OpenRouter procedures; no provider-specific role schema or second ledger |
 | Managed checks and review | Executable evidence-plan example first, then review preparation/assessment if needed | `clients/evidence*.md`, `runtime/evidence.py`; selected managed operation only |
 | Security audit | Optional private report layout for requested audit or material findings | `policies/04-security-review.md`; preserve mandatory change-impact assessment without requiring a report for every task |
-| Handoff and resume | Existing task/plan record with a concise worked example | `policies/07-context-and-handoff.md`; unfinished multisession work only; verify actual state on resume |
+| Lifecycle, child reporting and resume | Existing record with result/proof/exceptions/next; compact child reports use known context and changed facts | `policies/07-context-and-handoff.md`; applicable implementation transitions, material handoffs and resumption; verify actual state on resume |
 | Merge readiness | Existing evidence summary and stale-candidate example if needed | `policies/08-merge-readiness.md`; no new merge gate or universal readiness schema |
 | Maintenance and upgrades | Reusable cases and compact result in existing setup/evaluation record | `policies/09-workflow-maintenance.md`; material change or selected evaluation, not every tool call |
 
@@ -168,6 +180,8 @@ Important source constraints:
 
 ### Phase 1 — Repair routing and prove two examples
 
+Completed and merged; this subsection preserves its accepted scope. Execution, audit dispositions and scoped Desktop observations are historical in the Phase 1 plan.
+
 Scope: align the evidence and maintenance loading triggers; add a minimal managed evidence-plan request and a basic-onboarding worked example; complete the bounded delegation code audit above and include any proven small simplification with its regression proof. Larger changes become a separately described slice rather than an implicit rewrite. Update the existing authoring source map and prepared map only as affected. Preserve commit `860ac89` rather than redoing its role consolidation.
 
 Owners and callers: `clients/evidence.md`, `clients/evidence-plan.md`, `policies/00-index.md`, `README.md` and the existing onboarding references. Audit other direct evidence links for the same broad trigger; retain links whose managed scope is already explicit. Use tests in `tests/test_evidence.py`, `tests/test_relevant_onboarding.py`, `tests/test_unenrolled_checkout.py` and `tests/test_prepared_instructions.py` as relevant. Follow `DocumentedRequestTests` instead of adding another parser/validator framework.
@@ -180,17 +194,19 @@ Acceptance: ordinary-fix and basic-setup cases need no managed task state; expli
 
 ### Phase 2 — Adapt project artifacts without competing records
 
-Improve document adaptation through existing onboarding, then add optional handoff/security layouts only where current guidance leaves a composition gap. Preserve mapping of all nine document responsibilities, actual canonical paths and directory instructions. A simple project may need little new text; completeness does not mean empty files or repeated policies.
+Completed locally within the linked execution record's limits. The following preserves the approved scope and acceptance conditions; it does not claim startup, visible UI, general message-delivery reliability or measured token savings.
+
+Pilot the approved lifecycle layout and compact child reports through existing planning/handoff owners. Improve project-document adaptation through existing onboarding in the same phase, preserving all nine document responsibilities, canonical paths and directory instructions. The shared layout fills the identified composition need; a security-report layout remains conditional on a separate concrete gap. A simple project may need little new text; completeness does not mean empty files or repeated policies. The Phase 2 plan defines the tasks, callers, proof and cleanup.
 
 Use one minimal non-Next project and one existing project with customized documents as disposable cases. Verify first application, unchanged reapplication and later user edits. Existing preimages, hashes and undo own recovery. Generated readable configuration remains a projection of the current private plan, not another authority.
 
-Acceptance: no placeholder residue, broken destination-relative links, invented implementation claims, duplicate instruction owner or overwritten customization. The second unchanged application is a no-op for owned content. A later edit is preserved or reported for reconciliation. No extra client, service, database, permissions or enforcement is introduced to satisfy a template.
+Acceptance: no placeholder residue, broken destination-relative links, invented implementation claims, duplicate owner or overwritten customization. Unchanged reapplication is a no-op for owned content; later edits survive or require reconciliation. Bounded native smoke must distinguish lifecycle title actions from reported intent, suppress unnecessary child messages and preserve candidate-bound parent acceptance, uncertainty, ownership and budgets. Unavailable observations leave that capability unqualified. No extra client, service, database, permissions or enforcement is introduced to satisfy a template.
 
 ### Phase 3 — Make native behavior evaluation reusable
 
 Package only the small fixture, reviewed evaluator, preserved expected notes and license required by the existing maintenance procedure. A proposed location is `tests/fixtures/harness-evaluation/` for inputs, with the evaluator outside the worker-writable copy. Final packaging location is an implementation choice; installed maintenance must resolve it without a Toolkit checkout.
 
-Begin with stale handoff and read-only review, plus phase 2's reapplication case. Use existing native tooling and test facilities; add no evaluation service, paid model grader, new hook or universal startup test campaign. Reuse this asset for applicable initial setup smoke checks; additional comparisons require an observed failure or authorized material change.
+Begin with stale handoff and read-only review, plus Phase 2's reapplication and lifecycle/reporting cases. Package accepted case inputs and independent observations for reuse; do not rerun unchanged Phase 2 cases merely to re-record success. Include title start/checkpoint/completion, silent unchanged checkpoints, child acceptance before dependency release, and preservation of pauses, uncertain ownership and remaining budgets. Use existing native tooling and test facilities; add no evaluation service, paid model grader, new hook or universal startup campaign. Reuse these assets for applicable initial setup smoke; additional comparisons need an observed failure or authorized material change.
 
 Acceptance starts with the protected evaluator rejecting the intentionally broken baseline for the expected boundary/identity reasons while other checks pass. The stale-handoff task must then verify real state, repair the bug, pass all seven checks under independent rerun, preserve unrelated instructions/notes and record actual results; merely detecting the stale claim does not complete it. The read-only review must instead leave the broken fixture unchanged and substantiate the reachable finding in a private report. Its expected baseline failures remain present and do not make the review unsuccessful. Reapplication uses phase 2's preservation criteria.
 
@@ -211,6 +227,7 @@ Use the same initial fixture, client, selected model/reasoning, authentication, 
 | Ordinary small fix | Loads applicable policies, edits/tests/reviews natively, avoids managed-only procedures | Runtime enrollment or universal client support |
 | Basic onboarding | Complete catalog assessment with relevant file inspection, useful docs/checks and recoverable changes | Managed activation or remote integration |
 | Selected managed evidence | Example validates; actual state/revision requirements remain effective | Truth of a self-reported result |
+| Lifecycle and compact child report | Actual eligible title actions/readback; changed facts and candidate/proof reach the parent; unchanged checkpoints add no report; acceptance precedes dependency release | Guaranteed execution from template/JSON validity or root completion from child output |
 | Fresh, reused and nested subagent | Preparation before launch; role chosen once; reuse preserves declaration; first badge observed when available | Interception of arbitrary raw native calls |
 | Routed proposal/recovery | Synthetic provider-neutral registration; preview cannot masquerade as actual execution; uncertain attempt stays reserved | A live OpenRouter/OpenAI/Claude run |
 | Stale handoff | Agent rejects the stale claim, repairs the bug, preserves unrelated content and passes all seven independently rerun checks | Reliability across all models/sessions |
@@ -237,13 +254,13 @@ Each phase should be a separately reviewed slice against current `main`; preserv
 
 Main risk: polished templates may conceal wrong reasoning or make irrelevant steps look mandatory. Single owners, selected loading, executable examples and observed negative cases reduce that risk but do not eliminate model error. Another risk is introducing a second schema authority; defer schemas until a concrete consumer justifies them.
 
-Requested design decisions:
+Accepted direction and remaining execution boundary:
 
-1. Adopt the selective architecture; retain prose for ordinary tasks and existing validators for machine operations.
-2. Start with phase 1, including the targeted code-simplification audit, then review evidence before expanding artifact and harness work.
-3. Defer generic hooks, universal schemas and blanket framework scaffolding.
+1. Retain the approved selective architecture, prose for ordinary tasks and existing validators for machine operations.
+2. Preserve completed Phase 1; plan Phase 2's lifecycle/handoff and project-artifact pilots from its evidence. Keep reusable evaluation packaging in Phase 3 and unselected expansion in Phase 4.
+3. Use one optional lifecycle structure and compact reports, preserving mandatory applicable procedures and essential evidence. Defer generic hooks, universal schemas and blanket framework scaffolding.
 
-No blocking product question remains for producing this design. Implementation details such as exact fixture module layout can be settled by the builder within these boundaries. Approval should identify the phase scope; this document itself authorizes no execution or publication.
+The user subsequently authorized Phase 2 execution. The linked plan records its actual progress and evidence; neither document grants publication, merge or rollout authority.
 
 ## Design verification record
 

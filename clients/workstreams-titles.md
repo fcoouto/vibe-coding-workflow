@@ -80,9 +80,11 @@ reviewers. For an already-adopted bound thread, use `task title sync` rather tha
 configure again. A failed runtime synchronization retains its pending state;
 do not bypass it with a direct write.
 
-For ordinary native work without a bound runtime task, use supported client
-display-title controls directly after observing the actual native identity. Keep
-the family/member mapping, last verified managed title, pending delivery, topic
+For ordinary native work without a bound runtime task, reuse known supported
+client title controls after observing the actual native identity. If discovery
+is needed, list tool names within the current client's namespace, then inspect
+only the selected read/write definitions; do not print cross-service metadata.
+Keep the family/member mapping, last verified managed title, pending delivery, topic
 ownership and any manual-title pause in the existing task plan. Record workflow
 ownership only for a topic the workflow chose. Apply the manual-title rules below
 before every write and acknowledge delivery by readback. Resolve an uncertain

@@ -10,7 +10,9 @@
 
 **Spec:** [Workflow templates and behavioral verification](../specs/2026-11-05-workflow-template-design.md).
 
-**Scope:** Executable plan for design Phase 1 only. Phases 2–4 remain a conditional roadmap: broader project-document adaptation, reusable harness assets and further examples require Phase 1 evidence first. This plan does not authorize its own implementation, commit, publication, merge or rollout.
+**Status:** Completed and merged into `main` through [PR #103](https://github.com/fcoouto/vibe-coding-workflow/pull/103), commit `7dd2bdb`. Steps and intermediate local-only statements below are historical execution records, not work to repeat. Follow-on execution: [Phase 2 implementation record](2026-11-05-workflow-templates-phase-two.md).
+
+**Scope:** Closed record for design Phase 1 only. The linked Phase 2 plan incorporates the approved lifecycle/reporting direction; reusable evaluation and further expansion remain conditional Phases 3–4. This record grants no new implementation, publication or rollout authority.
 
 ## Global Constraints
 
@@ -147,19 +149,19 @@ Also add `test_plan_examples_reject_missing_and_unknown_fields`: remove envelope
 
 ## Completion and execution handoff
 
-Phase 1 is ready for acceptance when Tasks 1–4 have recorded outcomes, selected checks pass, relevant native routing observations are available, the code audit has an explicit disposition, and the complexity acceptance above is met. Completion does not require deleting code that remains useful. Phase 2 should be planned from these results, not started automatically.
+Phase 1 acceptance required recorded Task 1–4 outcomes, passing selected checks, relevant native routing observations, an explicit code-audit disposition and the complexity acceptance above. Those outcomes were accepted within their stated limits. Completion did not require deleting useful code. Phase 2 is planned from these results and has not started automatically.
 
 The saved Workstreams preference supports native child ownership with coordinator integration and independent review. Reuse owners for fixes; do not ask again merely to select that existing method. This planning request supplies no instruction to publish, merge or roll out the result.
 
-## Planning verification
+## Planning verification — historical pre-execution checkpoint
 
-Current source interfaces and caller paths were inspected. An Astra/ultra investigator independently located the evidence fixture, accepted request shape and missing negative-plan coverage; the coordinator checked those against the real validator. This plan was self-reviewed against design Phase 1, including the five review-focus cases. Implementation steps and new tests above are pending, not reported as executed.
+Before execution, source interfaces and caller paths were inspected. An Astra/ultra investigator independently located the evidence fixture, accepted request shape and missing negative-plan coverage; the coordinator checked those against the real validator. The plan was self-reviewed against design Phase 1, including the five review-focus cases. Implementation and tests were still pending at that checkpoint; their subsequent outcomes appear below.
 
 Authoring checks passed: package validation (`python3 -B scripts/validate.py`), local plan/spec links, code-fence balance and whitespace. Package output explicitly reports client execution not checked.
 
 ## Execution record
 
-Implementation authorized by the user on 5 November 2026. Base is `860ac89`; current local `main` was inspected at `c4a4eb8` (six newer commits plus this branch's local instruction-consolidation commit). No branch integration or publication is part of this execution. Preserve the newer naming/handoff changes when integration is later authorized.
+Implementation was authorized by the user on 5 November 2026. Base was `860ac89`; local `main` was inspected at `c4a4eb8` (six newer commits plus this branch's local instruction-consolidation commit). The implementation stage initially excluded integration/publication. The user subsequently authorized integration, recorded below, preserving newer naming/handoff changes.
 
 Coordinator: native chat `01a1aba1-7e01-7b82-8afd-1dbea16e5623`, display family `W28`. This existing chat predates the selected naming revision; its title is preserved. New implementation children use `C` under that explicit association. These native identities are not evidence of enforced isolation.
 
@@ -240,7 +242,7 @@ role check would lose a boundary or add helper machinery, so it was retained.
 
 ### Acceptance and cleanup
 
-Phase 1 is implemented and accepted locally. Required output scope is complete;
+At local acceptance, Phase 1 was implemented and its required output scope complete;
 conditional refactor tests, broader route suites and live badge requalification
 were inapplicable because the audit adopted no runtime change. Checked steps
 above include those explicit conditional dispositions, not claims they executed.
@@ -256,9 +258,10 @@ the investigation record. Evaluation-owned package copies and working fixture
 directories were removed after retaining their inputs/results. No active cache,
 held run/reservation, historical user evidence or other chat was altered.
 
-Package validation and whitespace checks pass. Runtime code/API/schema and
-dependencies are unchanged. The working diff and both planning documents remain
-local and uncommitted; no push, merge, publication or workflow rollout occurred.
+At that checkpoint, package validation and whitespace checks passed. Runtime
+code/API/schema and dependencies were unchanged. The working diff and both
+planning documents were local and uncommitted; no push, merge, publication or
+workflow rollout had occurred. Later integration is recorded below.
 At Phase 1 completion, fresh Desktop startup/discovery/trust, live managed
 integration and reliability or cost improvements were unqualified. The subsequent
 bounded Desktop follow-up below refines only the observed startup scope.
@@ -310,8 +313,9 @@ After confirming both qualification chats were idle, the coordinator archived
 the five exact disposable configuration/enrollment files and removed those
 files. Chat working directories, Git repositories, the arithmetic result and
 frozen candidate/evidence remain available. Cleanup did not edit native trust
-records, global settings, other chats or held state. The working change remains
-local and uncommitted; this check did not publish or roll out the package.
+records, global settings, other chats or held state. At this Desktop checkpoint,
+the working change was local and uncommitted; this check did not publish or roll
+out the package. Subsequent integration is recorded below.
 
 Detailed private proof: `desktop-qualification/native-startup-proof.json`,
 `native-negative-proof.json`, `positive-report.md`, `negative-report.md`,
@@ -334,3 +338,13 @@ and are not a new installed-package or rendered-badge qualification. Required
 checks, independent review and the actual merge result are recorded in the
 private Phase 1 integration evidence. No plugin release, marketplace update,
 installed-hook change, active-chat interruption or held-run mutation is included.
+
+Final result: [PR #103](https://github.com/fcoouto/vibe-coding-workflow/pull/103)
+merged as `7dd2bdb7046c80e1ccd046986213353bad830774`. The merged tree
+`3dddbf2bf74fe7c1effc16a9d2a13cb94f66a3b5` exactly matched the independently
+reviewed candidate. All 163 selected tests, package validation and whitespace
+checks passed. Local and remote `main` were synchronized; the existing worktree
+was retained clean. The completed role consolidation remains an ancestor.
+No installed-package rollout occurred, and the held API run/reservation remained
+untouched. The private integration receipt preserves the exact candidate, checks,
+review and merge observations; this result does not broaden Desktop qualification.

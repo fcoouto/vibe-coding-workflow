@@ -1,5 +1,29 @@
 # Policy source map
 
+## Lifecycle and project artifacts — Phase 2, 5 November 2026
+
+The user approved the single lifecycle layout and compact child-report direction
+and authorized the [Phase 2 plan](superpowers/plans/2026-11-05-workflow-templates-phase-two.md).
+Toolkit authoring source remains `21b71b68679c11184f49c23168852014bf6dde8b`;
+the repository HEAD and retained source/catalog hashes were checked during this
+execution. No unrelated source contract or active task is repinned.
+
+| Adopted requirement | Owner and evidence scope |
+| --- | --- |
+| One local lifecycle record for start, meaningful checkpoints and completion; compact reports preserve material facts and uncertainty (user-approved direction; existing bounded handoff requirements) | `policies/07-context-and-handoff.md#lifecycle-record-and-reports`; planning and delegation link to it. The implementation plan records static checks and subsequent bounded native observations separately. |
+| Title handling keeps its existing eligibility, ownership, readback, pause and failure semantics | Lifecycle handling references `clients/workstreams-naming.md` and its title procedure; no new title state store, runtime feature or execution blocker. Native metadata/readback does not establish visible rendering. |
+| Adapt all nine project-document responsibilities to actual project facts and canonical equivalents (`templates/project-docs/manifest.json`, `docs/06-project-defaults.md`) | `skills/onboard-my-project/references/procedure.md#adapt-project-documents`; the reviewed proposal reuses that mapping. Relevant file inspection, accepted checks, startup limitations and private recovery retain their existing owners. |
+| Preserve context, permissions, budgets, ownership and independent acceptance while keeping handoffs proportionate (`docs/tools/02-subagent-orchestration.md`; existing local delegation/handoff contracts) | The compact report is a view of existing task context, not authority. Direct/persisted validators and file-configuration transactions remain unchanged; existing recovery regressions supply only their recorded scope. |
+
+The constructing/consuming code audit found no safe simplification justified by
+these prose artifacts. Existing shared validation and transaction paths are
+retained. The security-report layout remains deferred without a concrete gap.
+The native pilot exposed broad cross-service tool-metadata retrieval; its
+successful narrow recovery supports a bounded discovery recipe in the existing
+title owner. The implementation record retains the oversized lookup and cost
+limits; no savings or transport-enforcement claim follows from that repair.
+This section is authoring provenance, not another routine loading dependency.
+
 ## Selective workflow examples — Phase 1, 5 November 2026
 
 The user approved the [Phase 1 plan](superpowers/plans/2026-11-05-workflow-templates-phase-one.md)

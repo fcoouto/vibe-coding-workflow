@@ -71,9 +71,9 @@ receipt and continuation.
 
 ## Progress and result retrieval
 
-Each brief names one coordinator and the permitted handoff route. Child handoffs
-report reviewable checkpoints/results, material blockers or decisions, or changed
-dependency/ownership conditions using the [handoff payload](07-context-and-handoff.md#handoff-and-resumption).
+Each brief names one coordinator and the permitted handoff route. Use the
+[lifecycle record's compact child report](07-context-and-handoff.md#lifecycle-record-and-reports)
+and its report triggers rather than repeating the assignment.
 Use native completion/attention delivery. Separate sidebar peer chats may push
 only with direct human authorization to message the recipient; a coordinator's
 brief grants none. Otherwise report locally for coordinator retrieval.
