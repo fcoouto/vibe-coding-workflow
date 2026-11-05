@@ -29,16 +29,16 @@
       ]
     },
     "clients/delegation-proofs.md": {
-      "sha256": "e28e35fc3ae75eefb0accce08c623effbf22367b77658ec04f4c3c19b718152a",
+      "sha256": "ae0a04298279c9de1784529890c4b2dd4240029b153b1e39c5adf083b2f21617",
       "ranges": [
         [
           1,
-          114
+          115
         ]
       ]
     },
     "clients/delegation-requests.md": {
-      "sha256": "f2c6977880241e3e20f392be7254128f6d931c22ba79d451aef417803a40ffd8",
+      "sha256": "f619e2adcae8ee34d9665863c0b3dd1544057bf22d7b6b80d2066e656500ef50",
       "ranges": [
         [
           1,
@@ -51,7 +51,7 @@
       ]
     },
     "clients/delegation.md": {
-      "sha256": "aa71e3106809ebda7461153645f633ca8b6c3e4fba444296c7a0ca6dffbd0703",
+      "sha256": "d91d1cd82ec45c3600c07a96d406db917ffbc3112a52ac0d4c74a7f68e428fb3",
       "ranges": [
         [
           1,

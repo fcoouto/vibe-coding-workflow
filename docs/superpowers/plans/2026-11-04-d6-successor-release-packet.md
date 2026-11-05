@@ -1,21 +1,39 @@
 # D6 cooperative pilot packet
 
-**On hold. Live execution allowance is zero.**
-This is the single working packet for a future bounded cooperative D6 pilot.
-The [D6 plan](../../d6-native-delegation-plan.md) defines acceptance and the
-implemented offline scope. This document grants no boot, Docker test, VM/Colima launch,
-live qualification, plugin installation or change to native settings.
+**Completed on 5 November 2026.** This packet records one authorized standalone
+Mac CLI pilot under the [D6 plan](../../d6-native-delegation-plan.md). Its live
+allowance is spent. A later attempt needs its own scope and authorization.
 
 **Purpose:** demonstrate one reserved native worker change, applicable checks,
 one independent review and a verified cooperative handoff on one native surface.
-It does not certify D4 setup, child-hook enforcement, D5 READY or D7 merge gates.
+The observed setup and paired child hooks apply to this exact fixture. D4
+adoption, D5 READY and D7 merge gates have separate acceptance rules.
 The [held managed-hook record](2026-11-03-d6-managed-lifecycle-pilot.md) preserves
 that separate stronger sequence and its historical evidence.
 
-## One attempt record
+## Completed attempt
 
-Before a later release, fill one private record with the following facts. Reuse
-existing runtime artifacts and references; do not duplicate digest tables here.
+The staged `0.1.23` package matched tested revision
+`764c39b7e0f5caeaef9c48dd805f2d26754b7768`. Codex CLI `0.165.0` on macOS arm64
+passed bounded bootstrap and metadata checks with five scoped trusted hooks.
+The user’s coordinator settings and authentication were preserved.
+
+- One native Luna/high worker changed only `app.py` from `value = 1` to
+  `value = 42`. The nested `apply_patch` produced a matched child-bound
+  PreToolUse and PostToolUse pair. The worker used no wait or marker and
+  reconciled cooperatively.
+- The registered builtin-only check rejected the baseline and accepted the
+  exact postimage, including its single newline. The original execution was
+  independently inspected and strictly reconciled.
+- One separate Astra/high reviewer used no tools and reported zero findings on
+  the same candidate. Runtime reconciled the reviewer and returned
+  `qualification_verified: true` for candidate
+  `5ebc01592bcaf858a31ef1864158c045b677bbb250c013645e4846e7728ed13f`.
+  The private verification record has SHA-256
+  `aa8013f501057edc514486955d07e87b4151ba017da17e3257cc1363cf0f31af`.
+
+For a separately authorized attempt, reuse existing artifacts and record these
+facts once.
 
 | Record | Minimum needed |
 | --- | --- |
@@ -38,24 +56,17 @@ No independent observer of hidden host queues or retries is required by the
 revised design. No known pending continuation may be ignored. Independent review
 of the result remains required.
 
-Version-3 cooperative completion and the selected guarded-canary flow now have
-offline coverage. Use the [current proof fields](../../../clients/delegation-proofs.md#cooperative-native-completion).
+Use the [current version-3 proof fields](../../../clients/delegation-proofs.md#cooperative-native-completion).
 Retained version-2 proof requirements are unchanged; do not fill their stronger
-boolean from weaker evidence. Actual native execution remains unqualified.
-Missing required evidence retains claims, capacity and consumed budget.
+boolean from weaker evidence. Missing required evidence retains claims, capacity and consumed budget.
 Automatic takeover remains deferred.
 
-The bounded offline flow uses the existing guarded patch path and an exact local
-shell-builtin check over fixture data. A later real check needs independent
-inspection of its actual pinned command, startup/environment and input, an
-established absence of child-launching behavior in that exact execution, and
-matching executor completion and candidate evidence. The fixture's external
-proof is synthetic; it supplies no live stop evidence. An arbitrary project
-runner with plugins, subprocesses or unknown imports cannot inherit this result.
+The offline fixture's external lifecycle proof is synthetic. The Mac pilot used
+its own observed command, shell, environment, input, and actual executor result.
+Project runners with plugins, subprocesses or unknown imports need their own
+writer evidence.
 
-## Bounded future sequence
-
-Every step is unrun and requires a separately released live packet.
+## Sequence for a separately authorized attempt
 
 1. Confirm the reviewed route supports the entire sequence and the chosen scope
    is available. Capture the initial candidate and a failing baseline for the
@@ -74,10 +85,9 @@ Every step is unrun and requires a separately released live packet.
    policy require it. Record the bounded result without claiming READY or merge
    authorization. Any unresolved operation prevents a successful handoff.
 
-A simple fixture may retain the earlier `value()` correction from `0` to `42`.
-For basic delegation, success depends on the result and tests, not one exact
-patch encoding or precomputed patch hash. Exact patch bytes and marker timing
-remain in the separate managed-hook record if that protection is selected.
+For basic delegation, check the result and applicable tests. The bounded managed
+canary binds the exact patch to the original child claim. The separate historical
+managed-hook record retains its original marker protocol.
 
 ## Release checklist
 
@@ -85,15 +95,13 @@ remain in the separate managed-hook record if that protection is selected.
   admission/check/reviewer path, preserving selected protections and strict
   consumers. Task-level offline regressions passed; final combined review and
   verification are recorded in the D6 plan.
-- [x] Pass affected offline checks and package validation: the final combined
-  run passed 66 tests and independent Astra review cleared the code/contracts.
+- [x] Pass affected offline checks and package validation. The tested runtime
+  passed 86 affected tests. The initial 66-case run remains historical evidence.
   Replays, conflicting claims, wrong/stale results, interruption and uncertainty
   remain offline cases; do not inject these failures into the live pilot.
-- [ ] Fill the one attempt record with a supported route, real scope, check and
-  finite limits; independently review that bounded packet.
-- [ ] Obtain the user's separate release before any live effect.
+- [x] Record the supported route, exact scope, check and finite limits. Review
+  the bounded packet independently and collect native evidence after user release.
 
 Optional display, other native surfaces, cross-repository work, schema migration,
-D7 enforcement and D9 measurement are outside this pilot. The remaining work is to
-freeze reviewed source/client inputs, obtain separate user release, then collect
-genuine observations. No hidden-host monitoring system is required. D6 remains on hold.
+D7 enforcement and D9 measurement remain separate. Earlier failed attempts retain
+their original claims and artifacts.

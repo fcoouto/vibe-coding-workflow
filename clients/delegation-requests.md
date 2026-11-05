@@ -225,9 +225,9 @@ Publish the marker only after independently confirming the original child and
 turn are observed and the parent can authorize the patch. End dependent work
 if the bounded wait fails or returns a resumable session.
 
-This optional witness mechanism is not a general delegation requirement.
-Omitting it does not establish that the current guarded child editing route
-supports a marker-free launch; preserve that route's actual admission rules.
+Use the wait only for a route that declares it. The standalone CLI qualification
+canary can bind the exact patch to the prepared child claim through paired hook
+receipts without a marker. Preserve the selected route's admission rules.
 
 Return: `attempt_id`, task `revision`, `assignment_digest`, native `task_name`,
 `candidate_digest`, requested settings and the exact `prompt` containing the

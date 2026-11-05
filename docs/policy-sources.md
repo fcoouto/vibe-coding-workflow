@@ -12,7 +12,7 @@ native activity, inspected effects and coordinator control of follow-ups, not
 independent access to hidden host queues or retry internals.
 
 The [short successor packet](superpowers/plans/2026-11-04-d6-successor-release-packet.md)
-is the core pilot plan, with zero live allowance. The
+records the completed standalone Mac CLI pilot and its spent allowance. The
 [held managed-hook record](superpowers/plans/2026-11-03-d6-managed-lifecycle-pilot.md)
 preserves the exact canary, marker, D4 bootstrap and original finite limits only
 for that selected stronger route. Enforced patch-only isolation, universal

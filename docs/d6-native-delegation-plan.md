@@ -1,6 +1,6 @@
 # D6: Native delegation and ownership
 
-**Status: both implementation tasks have offline coverage; pilot on hold. Live allowance is zero.**
+**Status:** the bounded standalone Mac CLI pilot passed on 5 November 2026.
 Scope reviewed with Astra on 4 November 2026. This plan replaces the earlier
 construction sequence and its stronger default qualification gates.
 
@@ -81,8 +81,8 @@ uncertain owner. Uncontrolled external writers remain a stated limitation.
 Independent host-internal access, forced marker waits, exact-patch canaries and
 child-hook witness choreography are not core D6 completion requirements.
 Enforced patch-only tools, per-worker containment, descendant shutdown proof and
-automatic takeover are deferred guarantees. No Docker/Lima check, VM launch,
-Colima launch, plugin installation or live qualification is authorized.
+automatic takeover are deferred guarantees. The completed pilot used the native
+Mac CLI. Docker, Lima and other VM routes are outside its scope.
 
 ## Existing implementation and boundaries
 
@@ -94,16 +94,14 @@ Keep historical databases, pins, claims and evidence with their original readers
 | Current source | Supported behavior and limits |
 | --- | --- |
 | `runtime/delegation.py`: `_prepare_native`, `_admission` | Existing reservations and once-only dispatch work offline. Managed admission still requires the selected setup/hook capabilities. A simpler plan does not bypass them. |
-| `runtime/adapters/codex.py`: `_cooperative_activity` | Supports a bounded standalone turn with synchronous patches, optional prepared wait and tool-free review. No-wait observation does not establish a usable no-wait editing route through the managed child guard. |
+| `runtime/adapters/codex.py`: `normalize_runtime`, `_cooperative_activity` | Binds patch hooks to the concrete native child and reads direct or wrapped synchronous patches, optional prepared waits and tool-free reviews. The selected Mac canary used its child hook receipts without a foreground wait. |
 | `runtime/delegation.py`: `_validate_role_proof`, `_confirm_cooperative_completion` | Version-3 proof binds observed activity and coordinator-owned follow-ups. Version-2 cooperative and strict proofs retain their original meanings. |
 | `runtime/evidence.py`: `_check_admission`, `prepare_review` | Matching registered check jobs honor D6 dependencies. A reviewer can inspect the exact candidate from a reconciled canary worker without reusing its pre-edit witness. Started checks retain strict reconciliation. |
 | `runtime/evidence.py`: `_verify_member` | Cooperative evidence supports local qualification completion only. Ordinary D5 readiness, D4 recovery and D7 merge evidence still require stronger proof. |
 
-These are implementation boundaries, not reasons to add another supervision
-system. The selected guarded-canary flow is covered offline; actual native
-execution remains unqualified.
-Do not disable a selected guard, invent a completion flag or call an unqualified
-path ready to make the plan appear complete.
+The [pilot record](superpowers/plans/2026-11-04-d6-successor-release-packet.md)
+records the actual native result and its limits. Keep selected protections and
+original evidence bindings when qualifying another route.
 
 ## Implementation and offline acceptance
 
@@ -125,11 +123,12 @@ not commit or publish implicitly; use current main when integrating completed wo
   pending work, interruption, missing results and strict-consumer rejection.
   Uncertainty retains claims and consumed budget. Astra cleared this slice.
 
-### 2. Make the complete cooperative flow usable — implemented offline
+### 2. Make the complete cooperative flow usable
 
 **Files:** `runtime/delegation.py`, `runtime/evidence.py`,
 `tests/test_delegation.py`, `tests/test_evidence.py` and the check/delegation
-instructions. The native guard and state schemas are unchanged.
+instructions. The Codex adapter binds patch events to the child and the existing
+reservation. The state schema is unchanged.
 
 - [x] Reproduced and fixed a planned check starting before its worker dependency.
   Matching D6 check jobs now use the existing dependency validator before
@@ -146,29 +145,21 @@ instructions. The native guard and state schemas are unchanged.
   lifecycle proof is explicitly synthetic. Strict readiness and merge claims
   remain unavailable.
 
-This is one bounded implementation path, not general qualification of arbitrary
-project runners or marker-free guarded edits. The later real attempt needs its
-own native observations and genuine strict check evidence. For the tiny check,
-an independent observer can inspect the exact trusted command and startup
-behavior, establish that it launches no child work, and correlate its actual
-completion and candidate. Exit zero or an empty process group alone is not that
-proof. Do not add a generic proof producer or weaker check mode to this slice.
+The registered canary check used the pinned Mac shell, builtins and the exact
+file bytes. Independent inspection established that this command launches no
+child work. The executor recorded exit zero on the unchanged candidate. Use
+each arbitrary project runner's own check and writer evidence.
 
-### 3. Verify the slice and prepare one short pilot
+### 3. Verify the slice and complete one bounded pilot
 
-- [x] Final combined verification passed **66 affected offline tests**,
-  `python3 -B scripts/validate.py` and `git diff --check`. The instruction map
-  was regenerated. Eight representative instruction paths and local links
-  passed review. Package validation reports client execution as not checked.
-- [x] Astra independently cleared Task 1 and the final combined code/contracts.
-  Task 1's 12 cases and Task 2's 14 cases overlap; the 66-case final run is the
-  combined verification count. The earlier 300-test and 56-test checkpoints
-  remain historical evidence, not additional tests on this final candidate.
-  Changes remain uncommitted; reconcile newer main changes when integrating.
-- [ ] Freeze the [successor packet](superpowers/plans/2026-11-04-d6-successor-release-packet.md)
-  with actual source/client inputs and the independently observed check method.
-  Keep it held until separate user release, then collect genuine native
-  observations within that packet. No live step occurred in this implementation.
+- [x] The tested runtime revision `764c39b7` passed **86 affected offline tests**,
+  package validation and `git diff --check`. The earlier 66-case implementation
+  run is historical evidence. Package validation reports client execution separately.
+- [x] The user released the bounded Mac pilot. A reserved native worker made one
+  guarded edit, the registered whole-file check passed, and a tool-free Astra
+  reviewer accepted the same candidate. Runtime verified qualification and
+  retained earlier failed claims under their original owners. See the
+  [completed pilot packet](superpowers/plans/2026-11-04-d6-successor-release-packet.md).
 
 **D6 qualification completion:** one supported native route can reserve, delegate, check, review
 and reconcile a bounded useful change, with no duplicate/conflicting managed

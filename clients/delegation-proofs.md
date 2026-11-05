@@ -79,7 +79,8 @@ activity, verifies effects and rechecks the candidate, ownership and pins before
 release. This permits compatible dependent work, not final acceptance by itself.
 Applicable checks and independent review still decide result acceptance. Stronger
 consumers require their strict proof. A later strict reconciliation of the same
-admission retains its cooperative evidence. Native qualification remains held.
+admission retains its cooperative evidence. Qualification covers the recorded
+Mac CLI canary. Other routes need their own evidence.
 
 **Retained version 2:** the same cooperative kind uses `activity_digest` and
 `no_pending_continuation:true`. Its original stronger contract requires observing
