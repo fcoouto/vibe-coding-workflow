@@ -1,12 +1,11 @@
 """One foreground canary using receipts read by the trusted Codex coordinator.
 
-The host obtains the native thread and quota responses directly. This module
-checks their bindings and does not authenticate copies supplied by task inputs.
+The host obtains native approval directly. This module checks its binding
+and does not authenticate copies supplied by task inputs.
 It has no public JSON entry point.
 """
 from dataclasses import asdict, dataclass
 import hashlib
-import math
 from pathlib import Path
 import re
 import time
@@ -14,7 +13,6 @@ import time
 from runtime import usage_admission, usage_canary, usage_credentials, usage_settings
 from runtime.usage_budget import BudgetError, integer, name, require
 
-_NATIVE_ALLOWANCE = 5
 PACKAGE = Path(__file__).resolve().parents[1]
 
 
@@ -67,33 +65,13 @@ def verify_approval(plan, thread_snapshot, now):
     return approved_at
 
 
-def _native(plan, response, observed_at, now):
-    return native_capacity(plan.account, response, observed_at, now, _NATIVE_ALLOWANCE)
+def native_capacity(account, response=None, observed_at=None, now=None, allowance_pp=None):
+    """Retain legacy host arguments while supplying only native task identity."""
+    return dict(account=name(account), windows=[])
 
 
-def native_capacity(account, response, observed_at, now, allowance_pp):
-    require(integer(observed_at) <= now < observed_at + usage_canary.MAX_WAIT,
-            'native_capacity_expired')
-    buckets = response['rateLimitsByLimitId']
-    require(response['accountId'] == account and response['ordinaryUsageAllowed'] is True
-            and type(buckets) is dict and set(buckets) == {'codex'}, 'native_capacity_unknown')
-    limit = buckets['codex']
-    require(limit['limitId'] == 'codex' and limit['spendControlReached'] is False
-            and limit['secondary'] is None, 'native_capacity_unknown')
-    window = limit['primary']
-    used = window['usedPercent']
-    reset = integer(window['resetsAt'])
-    require(type(used) in (int, float) and 0 <= used <= 100 and now < reset
-            and window['windowDurationMins'] == 10_080, 'native_capacity_unknown')
-    remaining = math.floor(100 - used)
-    require(remaining >= 20 + 1 + integer(allowance_pp) and allowance_pp > 0, 'native_capacity_reserved')
-    return dict(account=account, windows=[dict(
-        id='codex-weekly:' + str(reset), remaining_pp=remaining, resolution_pp=1,
-        allowance_pp=allowance_pp, observed_at=observed_at, reset_at=reset)])
-
-
-def issue(plan, *, thread_snapshot, key_receipt, config, policy, grant, native_limits,
-          native_observed_at, reviewer, scope, package_digest, now):
+def issue(plan, *, thread_snapshot, key_receipt, config, policy, grant, native_limits=None,
+          native_observed_at=None, reviewer, scope, package_digest, now):
     """Bind an approved plan to current host evidence for one canary."""
     approved_at = verify_approval(plan, thread_snapshot, now)
     require(scope == plan.scope and type(package_digest) is str
@@ -116,7 +94,7 @@ def issue(plan, *, thread_snapshot, key_receipt, config, policy, grant, native_l
                 and policy['pilot_limit'] == policy['task_limit'] == usage_canary.MAXIMUM_USD_MICROS,
                 'canary_funding_changed')
         profile = config['profile']
-        native = _native(plan, native_limits, native_observed_at, now)
+        native = native_capacity(plan.account)
         approval_id = usage_admission.digest(asdict(plan))
         task = usage_canary.task_for(approval_id, binding, native)
         evidence = usage_admission.Admission(
@@ -180,8 +158,8 @@ def _temporary_run(controller, plan, evidence, binding, profile, native):
             failure.add_note('Canary cleanup requires status and manual disable verification.')
 
 
-def execute(plan, *, thread_snapshot, key_receipt, grant, native_limits,
-            native_observed_at, reviewer, price_observed_at, price_valid_until):
+def execute(plan, *, thread_snapshot, key_receipt, grant, native_limits=None,
+            native_observed_at=None, reviewer, price_observed_at, price_valid_until):
     """Trusted foreground execution after actual approval and Keychain receipt."""
     now = int(time.time())
     verify_approval(plan, thread_snapshot, now)

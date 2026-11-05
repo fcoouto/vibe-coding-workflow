@@ -22,7 +22,7 @@ import uuid
 
 PACKAGE = Path(__file__).resolve().parents[1]
 if str(PACKAGE) not in sys.path: sys.path.insert(0, str(PACKAGE))
-from runtime import openrouter_settings as settings, onboarding, worker_visibility
+from runtime import openrouter_settings as settings, onboarding, worker_visibility, external_delegation
 
 ROLES = worker_visibility.ROLES - {'Coordinator'}
 LIMIT = 4 * 1024 * 1024
@@ -74,13 +74,36 @@ def visibility_declaration(brief):
         **({'custom_role_name': brief['custom_role_name']} if 'custom_role_name' in brief else {})))
 
 
+def scoped_packet(brief, report, now=None, workspace=None):
+    if 'external' not in brief:
+        return None
+    binding = brief['external']
+    checkout = Path(report['checkout'])
+    external_delegation.require(Path(brief['source_root']) == checkout, 'checkout_changed')
+    external_delegation.native_review(binding)
+    external_delegation.require(binding['coordinator'] == brief['coordinator_chat_id'], 'coordinator_changed')
+    packet = external_delegation.check(checkout, report['external_permission'], binding,
+        service='openrouter', mode='worker', model=brief['model'], provider=brief['provider'],
+        effort=brief['effort'], class_name=binding['class_name'], now=time.time() if now is None else now)
+    selected = {str(Path(item['path']).relative_to(brief['source_root'])): item['sha256']
+                for item in packet['snapshots']}
+    external_delegation.require(brief['objective'] == packet['text'] and set(brief['files']) == set(selected),
+                                'packet_changed')
+    if workspace is not None:
+        for path, sha in selected.items():
+            target = workspace / path
+            external_delegation.require(target.resolve() == target
+                and hashlib.sha256(target.read_bytes()).hexdigest() == sha, 'copied_source_changed')
+    return selected
+
+
 def prepare(root, brief, now=None):
     if not isinstance(brief, dict): raise ValueError('invalid_brief_fields')
     # Older callers supplied credit observations; they no longer gate or persist.
     brief = {key: value for key, value in brief.items() if key != 'credit'}
     required = {'task_id', 'coordinator_chat_id', 'model', 'provider', 'objective', 'source_root', 'files',
                 'timeout_seconds', 'steps', 'approval_ref', 'effort'}
-    optional = {'sizing', 'role', 'specialty', 'custom_role_name', 'model_display_name'}
+    optional = {'sizing', 'role', 'specialty', 'custom_role_name', 'model_display_name', 'external'}
     if not required <= set(brief) <= required | optional: raise ValueError('invalid_brief_fields')
     if len(json.dumps(brief, ensure_ascii=True, allow_nan=False).encode()) > MAX_INPUT: raise ValueError('input_limit')
     for key in required - {'files', 'timeout_seconds', 'steps'}:
@@ -99,6 +122,7 @@ def prepare(root, brief, now=None):
     files = brief['files']
     if not isinstance(files, list) or not files: raise ValueError('invalid_files')
     with settings.admission(source, 'workers', root=root) as report:
+        selected = scoped_packet(brief, report, now)
         if 'sizing' in brief: brief = dict(brief, validated_output_tokens=sizing(brief, report['proposal_store'], now))
         brief = dict(brief, management=dict(scope_id=report['scope_id'], revision=report['revision']))
     maximum = brief['sizing']['max_files'] if 'sizing' in brief else 16
@@ -121,6 +145,8 @@ def prepare(root, brief, now=None):
                                     expected_binding=dict(device=info.st_dev,inode=info.st_ino))
         total += len(raw)
         if total > allowance: raise ValueError('input_too_large')
+        if selected is not None:
+            external_delegation.require(hashlib.sha256(raw).hexdigest() == selected[name], 'source_changed')
         inputs[name] = raw.decode('utf-8')
     if time.monotonic() >= deadline: raise TimeoutError('preparation_deadline')
     root = Path(root)
@@ -336,6 +362,7 @@ def _execute(run, brief, executable, auth_data, publish):
         deadline = time.monotonic() + brief['timeout_seconds']
         with settings.admission(brief['source_root'], 'workers', root=run.parent, opencode=executable,
                                 auth_data=auth_data, revision=stamp['revision'], scope_id=stamp['scope_id']) as report:
+            scoped_packet(brief, report, workspace=workspace)
             if any(key in brief for key in ('sizing', 'sizing_digest', 'validated_output_tokens')):
                 try:
                     if brief.get('sizing_digest') != sizing_digest(brief) or sizing(brief, report['proposal_store']) != brief['validated_output_tokens']:
@@ -450,13 +477,18 @@ def _execute(run, brief, executable, auth_data, publish):
     return result
 
 
-def verify(run, disposition, checks, publish=None):
+def verify(run, disposition, checks, publish=None, *, reviewer=None, native_review_ref=None):
     run = Path(run)
     result = json.loads((run / 'result.json').read_text())
     if result['state'] != 'awaiting_verification' or disposition not in ('accepted', 'rejected'):
         raise ValueError('not_verifiable')
     if not isinstance(checks, list) or not checks or any(not isinstance(x, str) or not x.strip() for x in checks):
         raise ValueError('native_checks_required')
+    brief = json.loads((run / 'brief.json').read_text())
+    if 'external' in brief and disposition == 'accepted':
+        external_delegation.require(reviewer == brief['external']['reviewer']
+            and isinstance(native_review_ref, str) and native_review_ref.strip(), 'independent_review_required')
+        result.update(reviewer=reviewer, native_review_ref=native_review_ref)
     result.update(state=disposition, native_checks=checks,
                   native_fallback_ready=disposition == 'rejected' and result.get('local_execution_stopped') is True)
     save(run / 'result.json', result)
@@ -542,7 +574,8 @@ def main():
         publisher = habblaud_publisher(args.visibility_plugin, run, args.habblaud_endpoint, args.habblaud_account)
     if args.action == 'run': result = execute(run, args.opencode, args.auth_data, publisher)
     elif args.action == 'verify':
-        result = verify(run, request['disposition'], request['checks'], publisher)
+        result = verify(run, request['disposition'], request['checks'], publisher,
+                        reviewer=request.get('reviewer'), native_review_ref=request.get('native_review_ref'))
     else: result = status(run, compact=args.compact)
     print(json.dumps(result, allow_nan=False))
 

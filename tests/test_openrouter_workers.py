@@ -44,6 +44,66 @@ class WorkerTests(unittest.TestCase):
                           source_root=str(self.source), files=['input.txt'], timeout_seconds=5,
                           steps=3, approval_ref='user-approved', effort='low')
 
+    def scoped_brief(self):
+        from runtime import external_delegation as external
+        from tests.test_external_delegation import permission
+        consent = permission('openrouter', 'worker', model='vendor/model', provider='provider', effort='low')
+        consent['sources'] = ['input.txt']
+        disabled = settings.disable(self.source, dict(expected_revision=self.settings['revision']))
+        configured = settings.configure(self.source, dict(expected_revision=disabled['revision'], routes=['workers'],
+            opencode=str(self.root / 'worker'), auth_data=str(self.root / 'auth'), external_permission=consent))
+        self.settings = settings.enable(self.source, dict(expected_revision=configured['revision'], consent_version=2))
+        packet = external.prepare(self.source, consent,
+            [dict(kind='text', text=self.brief['objective'], sources=['input.txt'])])
+        brief = dict(self.brief, external=dict(packet['binding'], automatic=True, local_preferred=False,
+            class_name='investigation', coordinator=self.brief['coordinator_chat_id'], reviewer='native-reviewer',
+            integration_available=True))
+        return brief
+
+    def test_scoped_worker_rechecks_source_and_copied_bytes_before_launch(self):
+        brief = self.scoped_brief()
+        run = self.api.prepare(self.runs, brief)
+        (self.source / 'input.txt').write_text('changed after preparation')
+        original = self.api.subprocess.Popen
+        launched = []
+        def launch(command, **kwargs):
+            if command[0] == str(self.root / 'worker'):
+                launched.append(command)
+                raise AssertionError('worker must not launch')
+            return original(command, **kwargs)
+        with patch.object(self.api.subprocess, 'Popen', side_effect=launch):
+            result = self.api.execute(run, self.root / 'worker', self.root / 'auth')
+        self.assertEqual(launched, [])
+        self.assertTrue(result['local_execution_stopped'])
+        self.assertFalse(result['accounting_complete'])
+
+    def test_scoped_worker_rejects_subroot_but_keeps_legacy_manual_subroot(self):
+        from runtime import external_delegation as external
+        brief = self.scoped_brief()
+        subroot = self.source / 'excluded'
+        subroot.mkdir()
+        (subroot / 'input.txt').write_text('unapproved subdirectory bytes')
+        packet = external.prepare(subroot, self.settings['external_permission'],
+            [dict(kind='text', text=brief['objective'], sources=['input.txt'])])
+        nested = dict(brief, source_root=str(subroot),
+            external=dict(brief['external'], **packet['binding']))
+        with self.assertRaisesRegex(ValueError, 'checkout'):
+            self.api.prepare(self.runs, nested)
+        legacy = {key: value for key, value in nested.items() if key != 'external'}
+        run = self.api.prepare(self.runs, legacy)
+        self.assertEqual((run / 'workspace/input.txt').read_text(), 'unapproved subdirectory bytes')
+
+    def test_scoped_worker_preserves_supported_80_kib_source_with_short_objective(self):
+        (self.source / 'input.txt').write_text('x' * (80 * 1024))
+        brief = self.scoped_brief()
+        run = self.api.prepare(self.runs, brief)
+        self.assertEqual((run / 'workspace/input.txt').stat().st_size, 80 * 1024)
+        self.assertEqual(brief['objective'], self.brief['objective'])
+        from runtime import external_delegation as external
+        with self.assertRaisesRegex(ValueError, 'packet_size'):
+            external.prepare(self.source, self.settings['external_permission'],
+                [dict(kind='source', path='input.txt')])
+
     def test_disable_blocks_preparation_and_launch_without_replay(self):
         run = self.api.prepare(self.runs, self.brief)
         settings.disable(self.source, {'expected_revision': self.settings['revision']})

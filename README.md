@@ -32,7 +32,7 @@ Connect an OpenAI project key if prompted. Activation saves the selected mode,
 task scope and funding policy, including any spending caps you choose. Manual
 uses the API for tasks you select. Smart Balance chooses eligible tasks within
 the approved scope. Each live request
-checks funding, budget and review capacity. Ask **“Disable Usage Routing for
+checks funding, budget and independent review. Ask **“Disable Usage Routing for
 this project”** to stop new requests.
 
 See the [routing controls](skills/manage-usage-routing/references/procedure.md)

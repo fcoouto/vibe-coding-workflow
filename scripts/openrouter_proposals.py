@@ -19,7 +19,7 @@ import time
 
 PACKAGE = Path(__file__).resolve().parents[1]
 if str(PACKAGE) not in sys.path: sys.path.insert(0, str(PACKAGE))
-from runtime import openrouter_settings as settings, worker_visibility
+from runtime import openrouter_settings as settings, worker_visibility, external_delegation
 
 MAX_INPUT = 1024 * 1024
 MAX_STATE = 8 * 1024 * 1024
@@ -272,9 +272,27 @@ def act(action, state, request, now):
         row['discovery_evidence'] = dict(model=model, endpoint=endpoint, benchmarks=[b for b in metadata['benchmarks'] if b.get('model') == request['model']])
         if visibility is not None:
             row['visibility'] = visibility
+        if 'external' in request:
+            row['external_digest'] = external_delegation.digest({key: value for key, value in request.items()
+                if key not in ('attempt_token', 'visibility')})
+            row['reviewer'] = request['external']['reviewer']
         row.update(attempt_token=token, begun_at=now, snapshot_fetched_at=current['fetched_at'])
         state['attempts'].append(row)
         return dict(attempt_token=token, advisory=True)
+    if action == 'dispatch':
+        row = next((r for r in state['attempts'] if r['attempt_token'] == request.get('attempt_token')), None)
+        if row is None or 'external_digest' not in row:
+            raise ValueError('external_attempt_required')
+        if 'dispatched_at' in row or 'outcome' in row:
+            return dict(fallback='already_dispatched')
+        if not current['fresh'] or request.get('snapshot_digest') != current['snapshot_digest']:
+            return dict(fallback='stale_discovery')
+        expected = external_delegation.digest({key: value for key, value in request.items()
+            if key not in ('attempt_token', 'visibility')})
+        if row['external_digest'] != expected:
+            raise ValueError('external_attempt_changed')
+        row['dispatched_at'] = now
+        return dict(dispatched=True, attempt_token=row['attempt_token'])
     if action == 'record':
         row = next((r for r in state['attempts'] if r['attempt_token'] == request.get('attempt_token')), None)
         if row is None:
@@ -285,6 +303,8 @@ def act(action, state, request, now):
         if disposition not in ('accepted', 'repaired', 'rejected', 'transport_failure', 'unresolved'):
             raise ValueError('unknown disposition')
         if disposition in ('accepted', 'repaired'):
+            if 'external_digest' in row and request.get('reviewer') != row['reviewer']:
+                raise ValueError('external_independent_review_required')
             text(request.get('native_review_ref'), 'native_review_ref')
             checks = request.get('native_checks')
             if not isinstance(checks, list) or not checks or not all(isinstance(c, dict) and c.get('success') is True and isinstance(c.get('ref'), str) and c['ref'].strip() for c in checks):
@@ -296,11 +316,25 @@ def act(action, state, request, now):
 
 
 def run(action: str, store: Path, request: dict, *, now: float | None = None, cwd=None) -> dict:
-    if action == 'begin':
+    if action in ('begin', 'dispatch'):
         try:
             with settings.admission(cwd, 'proposals', store=store) as report:
-                return _run(action, store, request, now=now,
-                            management=dict(scope_id=report['scope_id'], revision=report['revision']))
+                packet = None
+                if 'external' in request:
+                    binding = request['external']
+                    external_delegation.native_review(binding)
+                    packet = external_delegation.check(Path(report['checkout']), report['external_permission'], binding,
+                        service='openrouter', mode='proposal', model=request['model'], provider=request['provider'],
+                        effort=request.get('effort'), class_name=binding['class_name'],
+                        now=time.time() if now is None else now)
+                elif action == 'dispatch':
+                    raise ValueError('external_binding_required')
+                result = _run(action, store, request, now=now,
+                    management=dict(scope_id=report['scope_id'], revision=report['revision']))
+                if action == 'dispatch' and result.get('dispatched'):
+                    result.update(packet=packet['text'], model=request['model'], provider=request['provider'],
+                                  effort=request.get('effort'), requires_native_review=True, accepted=False)
+                return result
         except settings.SettingsError as exc:
             return dict(fallback=str(exc), advisory=True)
     return _run(action, store, request, now=now)
@@ -340,6 +374,10 @@ def _run(action: str, store: Path, request: dict, *, now: float | None = None, m
                 if not isinstance(state, dict) or state.get('schema') != 1 or not isinstance(state.get('attempts'), list):
                     raise ValueError('incompatible state; preserve it and use native execution')
             before = encoded(state, MAX_STATE)
+            if action == 'dispatch':
+                row = next((row for row in state['attempts'] if row['attempt_token'] == request.get('attempt_token')), None)
+                if row is not None and row.get('management') != management:
+                    raise ValueError('openrouter_preparation_stale')
             result = act(action, state, request, now)
             if action == 'begin' and 'attempt_token' in result:
                 state['attempts'][-1]['management'] = management

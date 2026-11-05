@@ -62,6 +62,21 @@ class BudgetTests(unittest.TestCase):
         self.ledger.dispatch(run, 'count', 1, 102)
         self.ledger.complete(run, 'count', cost)
 
+    def test_quota_records_do_not_block_api_accounting_or_dispatch(self):
+        self.observe()
+        with self.ledger.transaction() as data:
+            data['native_paused'] = {'account': 'native_allowance_overrun'}
+        for index, windows in enumerate((native(remaining=15)['windows'], native(remaining=0)['windows'], [])):
+            task = 'quota-' + str(index)
+            self.begin(task, task, evidence=dict(account='account', task=task, windows=windows))
+            self.count_done(task)
+            self.ledger.close_run(task)
+        saved = self.ledger.snapshot()
+        self.assertEqual(len(saved['runs']), 3)
+        self.assertEqual(saved['native_paused'], {'account': 'native_allowance_overrun'})
+        with self.assertRaisesRegex(budget.BudgetError, 'insufficient_headroom'):
+            self.begin('unfunded', 'unfunded', maximum=1000, evidence=dict(account='account', task='unfunded', windows=[]))
+
     def test_initialization_never_overwrites_and_identity_is_required(self):
         with self.assertRaises(budget.BudgetError): budget.initialize(self.path)
         with self.assertRaises(budget.BudgetError): budget.Ledger(self.path, 'wrong')
@@ -85,7 +100,7 @@ class BudgetTests(unittest.TestCase):
         self.ledger.observe('org', 787, 110)
         self.assertEqual(self.ledger.headroom('org'), 487)
         self.assertEqual(self.ledger.credit_headroom('org'), 614)
-        self.assertEqual(len(state['native']), 1)  # Integration/review still reserved.
+        self.assertEqual(len(state['native']), 1)  # Task identity remains for integration/review.
 
     def test_unknown_count_blocks_generation_and_other_sessions_after_restart(self):
         self.observe(); self.begin(); self.ledger.dispatch('run', 'count', 1, 102)
@@ -120,27 +135,22 @@ class BudgetTests(unittest.TestCase):
         with self.assertRaises(budget.BudgetError): self.ledger.dispatch('run', 'count', 1, 102)
         self.assertEqual(self.ledger.headroom('org'), 0)
 
-    def test_same_task_correction_reuses_native_reserve_but_not_call_cost(self):
+    def test_same_task_correction_reuses_identity_but_retains_call_cost(self):
         self.observe(); self.begin(); self.count_done(); self.ledger.close_run('run')
         self.begin('correction')
         self.assertEqual(len(self.ledger.snapshot()['native']), 1)
         self.assertEqual(self.ledger.headroom('org'), 489)
 
-    def test_native_floor_missing_stale_and_overallocated_capacity(self):
-        self.observe()
-        for evidence in [native(remaining=30), {**native(), 'windows': []}, native()]:
-            now = 1001 if evidence == native() else 101
-            with self.assertRaises(budget.BudgetError): self.begin(now=now, evidence=evidence)
-        self.assertIsNone(self.ledger.snapshot()['slot'])
-
-    def test_native_release_requires_stopped_task_and_fresh_evidence(self):
+    def test_native_completion_requires_stopped_task_and_preserves_records(self):
         self.observe(); self.begin()
         with self.assertRaises(budget.BudgetError): self.ledger.release_native('account', 'task', native(), 101)
         self.ledger.close_run('run')
-        with self.assertRaises(budget.BudgetError): self.ledger.release_native('account', 'task', native(), 1001)
-        evidence = native(); evidence['windows'][0]['observed_at'] = 105
-        self.ledger.release_native('account', 'task', evidence, 106)
-        self.assertEqual(self.ledger.snapshot()['native'], {})
+        before = self.ledger.snapshot()
+        self.ledger.release_native('account', 'task', native(), 1001)
+        after = self.ledger.snapshot()
+        self.assertEqual(after['native'], before['native'])
+        self.assertEqual(after['runs'], before['runs'])
+        self.assertIn('["account", "task"]', after['finished_native'])
 
     def test_lowest_balance_is_monotonic_and_refresh_never_clears_deductions(self):
         self.observe(); self.begin(); self.count_done(); self.ledger.close_run('run')
@@ -325,49 +335,11 @@ class BudgetTests(unittest.TestCase):
         self.path.chmod(0o600)
         self.ledger = budget.Ledger(self.path, new_identity)
 
-    def test_correction_cannot_continue_after_native_reserve_was_released(self):
+    def test_correction_cannot_continue_after_task_completion(self):
         self.observe(); self.begin(); self.count_done(); self.ledger.close_run('run')
         evidence = native(); evidence['windows'][0]['observed_at'] = 105
         self.ledger.release_native('account', 'task', evidence, 106)
         with self.assertRaises(budget.BudgetError): self.begin('correction')
-
-    def test_native_release_does_not_require_capacity_for_another_task(self):
-        self.observe()
-        evidence = native(); evidence['windows'][0]['allowance_pp'] = 40
-        self.begin(evidence=evidence); self.ledger.close_run('run')
-        evidence['windows'][0].update(remaining_pp=50, observed_at=105)
-        self.ledger.release_native('account', 'task', evidence, 106)
-        self.assertEqual(self.ledger.snapshot()['native'], {})
-
-    def test_fixed_live_reserve_releases_with_fresh_capacity_after_account_usage(self):
-        self.observe()
-        with self.ledger.transaction() as data:
-            data.setdefault('routing', {})['scope'] = dict(revision=1, disabled=False, qualification_revision=0)
-        evidence = native()
-        consent = dict(scope='scope', revision=1, qualification_revision=None)
-        self.ledger.begin('org', 'task', 'run', 'digest', 1, 1, 101, evidence, consent=consent,
-                          live_gate=lambda *_: dict(pin='live', maximum=100))
-        self.ledger.close_run('run')
-        evidence['windows'][0].update(remaining_pp=10, observed_at=105)
-        self.ledger.release_native('account', 'task', evidence, 106)
-        self.assertEqual(self.ledger.snapshot()['native'], {})
-        with self.assertRaisesRegex(budget.BudgetError, 'native_capacity_reserved'):
-            self.begin('next', 'next', evidence=native('next', remaining=10))
-
-    def test_native_window_changes_cannot_hide_retained_review_reserves(self):
-        self.observe()
-        first = native(); first['windows'][0]['allowance_pp'] = 40
-        self.begin(evidence=first); self.ledger.close_run('run')
-        for change in ({'id':'weekly:2'}, {'reset_at':11000}):
-            second = native('other', remaining=70)
-            second['windows'][0].update(allowance_pp=40, **change)
-            with self.subTest(change=change), self.assertRaises(budget.BudgetError):
-                self.begin('other', 'other', evidence=second)
-        self.assertEqual(len(self.ledger.snapshot()['native']), 1)
-
-    def test_native_release_rejects_pre_task_quota_observation(self):
-        self.observe(); self.begin(); self.count_done(); self.ledger.close_run('run')
-        with self.assertRaises(budget.BudgetError): self.ledger.release_native('account', 'task', native(), 110)
 
     def test_symlink_database_rejected(self):
         alias = self.path.parent / 'alias'; alias.symlink_to(self.path)

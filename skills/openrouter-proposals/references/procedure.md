@@ -2,6 +2,8 @@
 
 Use this only for the approved OpenRouter proposal route. The native coordinator owns the task, tools, edits, review and integration. Apply the normal delegation and verification rules; this procedure supplies selection data and one external proposal, not a separate agent lifecycle.
 
+Apply the [shared selection and consent contract](../../../clients/external-delegation.md) when considering automatic work or using reusable source permission.
+
 ## Start with the available route
 
 For new proposal calls, read saved checkout consent with `scripts/openrouter.py status --cwd <selected-checkout>`
@@ -137,7 +139,17 @@ Normal completion responses report request usage and cost, not a remaining accou
 
 Call `begin` with the stable task ID, full profile, selected `model`, canonical provider slug, supported `effort` or null, current `snapshot_digest`, `approval_ref`, `base_ref`, the actual `requirements`, `output_tokens`, and `timeout_seconds`. Supply `visibility` through the shared [role-preparation contract](../../../clients/worker-visibility.md#declare-before-dispatch). Use the same requirements shape as `triage`; its `output_tokens` must equal the call's top-level value. Admission rechecks the pinned route's capabilities before consuming the attempt. Legacy credit observations are ignored and not stored in new records. Output limits remain at most 8192 tokens and timeouts at most 120 seconds. These are bounded pilot-call controls, not OpenRouter spending settings.
 
-Only a newly returned attempt token permits this coordinator to make the proposal call. `begin` requires `--cwd` and rechecks saved enablement, selected route and configured store under a short guard through durable admission. Each admitted attempt records the scope and settings revision. Disable blocks new admissions; an issued token may finish its one call and be recorded afterward. A duplicate task ID never permits a second call. If the helper reports disabled/busy consent, a pending local attempt, stale discovery, invalid controls or storage capacity, use the native path. Do not create a different task ID or store directory to evade the original attempt limit.
+For legacy manually authorized proposals, only a newly returned attempt token permits this coordinator to make the proposal call. `begin` requires `--cwd` and rechecks saved enablement, selected route and configured store under a short guard through durable admission. Each admitted attempt records the scope and settings revision. Disable blocks new admissions; an issued token may finish its one call and be recorded afterward. A duplicate task ID never permits a second call. If the helper reports disabled/busy consent, a pending local attempt, stale discovery, invalid controls or storage capacity, use the native path. Do not create a different task ID or store directory to evade the original attempt limit.
+
+For scoped packets, include `external` from the shared packet procedure in `begin`.
+Immediately before the connector call, call `dispatch` with the identical request
+plus `attempt_token`. It rechecks source, current consent/revision and native
+review readiness, returns the constructed `packet` and pins one dispatch. Send
+only that returned text and route. Changed source needs fresh preparation within
+the existing attempt/recovery rules, not a new task ID to evade a spent attempt.
+A duplicate dispatch never sends again. Disable after this final grant cannot
+cancel the call; preserve its uncertain accounting. The store retains only binding
+digests and review identity, never the packet's source/prose.
 
 Send one `send-message` with the exact chosen model, `provider.only` containing the canonical provider slug, `provider.allow_fallbacks:false`, supported `reasoning_effort` when applicable, `max_tokens` and `timeout_ms`. Pass the bounded objective, required context, relevant constraints, acceptance checks and requested proposal format. Do not enable web-search/routing variants, paid tools or an inference retry loop. This executor does not inherit OpenCode's worker retry policy. The token ceiling includes reasoning where the tool specifies it.
 
@@ -156,6 +168,8 @@ Call `record` with the original attempt token and the appropriate disposition:
 | `rejected` | Native review/checks found the proposal unsuitable |
 | `transport_failure` | A known service/transport failure prevented a usable proposal |
 | `unresolved` | The local call ended or was interrupted, but outcome, upstream execution or cost remains unknown |
+
+For scoped packets, accepted/repaired records also require `reviewer` matching the independently observed reviewer named at admission.
 
 Accepted/repaired records require `native_review_ref` and `native_checks` containing references and successful results. References identify actual native work or existing task evidence; do not use the external model's self-report. For example:
 

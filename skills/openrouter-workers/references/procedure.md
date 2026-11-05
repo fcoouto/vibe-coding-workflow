@@ -5,6 +5,8 @@ investigation over copied UTF-8 files. OpenCode owns the external tool loop; Cod
 owns original files, integration and acceptance. The original proposal route remains
 separate. Its successful tests do not qualify tool use or autonomous editing.
 
+Apply the [shared selection and consent contract](../../../clients/external-delegation.md) for automatic consideration or reusable source permission.
+
 ## Prepare
 
 Read `scripts/openrouter.py status --cwd <selected-checkout>` with `{}` on stdin.
@@ -40,6 +42,16 @@ cache or an `approval_ref` alone does not replace saved checkout consent.
 The runner disables OpenCode's background catalog fetch. The workflow's discovery
 cache remains the selection source; the pinned client uses its bundled catalog and
 explicit model configuration.
+
+For a scoped worker, add `external` from the shared packet procedure. Construct
+its objective as a text part naming every copied file in `sources`; set `objective`
+to the returned text and `files` to those exact source paths. Preparation checks
+the bytes it copies; launch rechecks original and copied bytes, permission and
+revision. Native tool-output provenance stays within that approved read scope.
+The existing OpenCode permissions, supervisor and retry ownership still apply.
+Accepted scoped results require `reviewer` matching the admitted native reviewer
+and `native_review_ref` in `verify`, alongside actual checks. Native evidence must
+identify the exact candidate; these references do not authenticate review alone.
 
 ## Run
 

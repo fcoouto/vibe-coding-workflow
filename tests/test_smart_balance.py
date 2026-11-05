@@ -70,8 +70,8 @@ class SmartBalanceTests(unittest.TestCase):
             self.assertEqual(self.controller.evaluate(task(**change))['decision'], 'native')
         self.assertEqual(self.controller.evaluate(task(provider='openrouter',api_only=True))['decision'], 'paused')
 
-    def test_missing_review_matching_class_or_capacity_pauses(self):
-        for change in (dict(reviewer_available=False), dict(class_name='new'), dict(native=native(remaining=25))):
+    def test_missing_review_or_matching_class_pauses(self):
+        for change in (dict(reviewer_available=False), dict(class_name='new')):
             self.assertEqual(self.controller.evaluate(task(**change))['decision'], 'paused')
 
     def test_report_measurements_do_not_block_smart_selection(self):
@@ -100,11 +100,11 @@ class SmartBalanceTests(unittest.TestCase):
         source.write_text('changed')
         self.assertEqual(self.controller.evaluate(task(snapshots=[snapshot]))['reason'], 'snapshot_changed')
 
-    def test_one_original_task_stays_reserved_through_review(self):
+    def test_separate_tasks_keep_independent_accounting(self):
         self.ledger.begin('org','task','run','packet',0,1,101,native())
         self.ledger.close_run('run')
-        with self.assertRaisesRegex(budget.BudgetError, 'native_task_outstanding'):
-            self.ledger.begin('org','other','other','packet',0,1,101,native('other'))
+        self.ledger.begin('org','other','other','packet',0,1,101,native('other'))
+        self.assertEqual(len(self.ledger.snapshot()['native']), 2)
 
     def test_full_fake_runner_settles_calls_but_never_accepts_model_output(self):
         from unittest.mock import patch
@@ -227,35 +227,33 @@ class SmartBalanceTests(unittest.TestCase):
         self.assertTrue(connection.closed)
         self.assertIsNone(self.ledger.snapshot()['slot'])
 
-    def test_reset_crossing_after_count_cannot_send_generation(self):
+    def test_quota_reset_does_not_prevent_generation(self):
         from unittest.mock import patch
-        from tests.test_openai_api import Connection,Response
-        clock=[101];self.controller.clock=lambda:clock[0]
-        current=task();current['native']['windows'][0]['reset_at']=102
+        from tests.test_openai_api import Connection, Response, completed
+        clock=[101]; self.controller.clock=lambda:clock[0]
+        current=task(); current['native']['windows'][0]['reset_at']=102
+        response=completed(); response['model']=PROFILE['model']
+        response['usage'].update(input_tokens=1200,total_tokens=1217)
+        replies=iter((Response(dict(object='response.input_tokens',input_tokens=1200)),Response(response)))
         sent=[]
-        def factory(host,timeout):
-            connection=Connection(Response(dict(object='response.input_tokens',input_tokens=1200)))
-            original=connection.getresponse
+        def factory(*_):
+            connection=Connection(next(replies)); original=connection.getresponse
             def received():
                 clock[0]=103
                 return original()
-            connection.getresponse=received
-            sent.append(connection)
+            connection.getresponse=received; sent.append(connection)
             return connection
-        with patch('runtime.openai_api.time.time',return_value=101),self.assertRaises(budget.BudgetError):
-            self.controller.run_shadow(current,connection_factory=factory)
-        self.assertEqual(len(sent),1)
-        self.assertIsNone(self.ledger.snapshot()['slot'])
+        with patch('runtime.openai_api.time.time',return_value=101):
+            result=self.controller.run_shadow(current,connection_factory=factory)
+        self.assertEqual(len(sent),2)
+        self.assertTrue(result['requires_native_review'])
 
-    def test_native_allowance_overrun_pauses_subsequent_automatic_work(self):
+    def test_native_completion_does_not_pause_subsequent_api_work(self):
         self.ledger.begin('org','task','run','packet',0,1,101,native())
         self.ledger.close_run('run')
-        later=native(remaining=60);later['windows'][0]['observed_at']=110
-        with self.assertRaisesRegex(budget.BudgetError,'native_requalification_required'):
-            self.ledger.release_native('account','task',later,111)
-        self.assertEqual(self.ledger.snapshot()['native_paused']['account'],'native_allowance_overrun')
-        with self.assertRaises(budget.BudgetError):
-            self.ledger.begin('org','other','next','packet',0,1,112,native('other',remaining=60))
+        self.ledger.release_native('account','task',native(remaining=0),111)
+        self.ledger.begin('org','other','next','packet',0,1,112,native('other',remaining=0))
+        self.assertNotIn('native_paused', self.ledger.snapshot())
 
     def test_handoff_keeps_pending_api_reservations_and_is_idempotent(self):
         self.ledger.begin('org','task','run','packet',10,1,101,native())
@@ -276,18 +274,18 @@ class SmartBalanceTests(unittest.TestCase):
         self.assertFalse(self.controller.claim_handoff('task','native-child')['new_claim'])
         with self.assertRaises(budget.BudgetError): self.controller.claim_handoff('task','duplicate-child')
 
-    def test_handoff_preserves_api_only_and_native_capacity_limits(self):
+    def test_handoff_preserves_api_only_and_accepts_low_quota(self):
         blocked=self.controller.request_handoff(task(api_only=True),'insufficient_headroom')
         self.assertEqual(blocked['state'],'user_choice_required')
         with self.assertRaises(budget.BudgetError): self.controller.claim_handoff('task','child')
         limited=self.controller.request_handoff(task(task_id='limited',run_id='limited',native=native('limited',remaining=25)), 'insufficient_headroom')
-        self.assertEqual(limited['state'],'waiting_for_native_capacity')
-        with self.assertRaises(budget.BudgetError): self.controller.claim_handoff('limited','child')
+        self.assertEqual(limited['state'],'ready')
+        self.assertTrue(self.controller.claim_handoff('limited','child')['new_claim'])
 
-    def test_handoff_rechecks_capacity_before_claim(self):
+    def test_handoff_does_not_require_quota_refresh(self):
         self.controller.request_handoff(task(),'insufficient_headroom')
         self.controller.clock=lambda:1001
-        with self.assertRaises(budget.BudgetError): self.controller.claim_handoff('task','child')
+        self.assertTrue(self.controller.claim_handoff('task','child')['new_claim'])
 
     def test_funding_stop_recommends_native_handoff_without_sending(self):
         self.ledger.observe('org',160,102)
@@ -308,15 +306,15 @@ class SmartBalanceTests(unittest.TestCase):
                 self.assertEqual(recovered['state'],'ready')
                 self.assertEqual(recovered['handoff_id'],ready['handoff_id'])
 
-    def test_handoff_claim_keeps_native_reserve_until_fresh_post_claim_evidence(self):
+    def test_handoff_completion_keeps_original_accounting(self):
         self.ledger.begin('org','task','run','packet',0,1,101,native())
         self.ledger.close_run('run')
         self.controller.request_handoff(task(),'insufficient_headroom')
         self.controller.clock=lambda:200
         self.controller.claim_handoff('task','native-attempt')
         stale=native();stale['windows'][0]['observed_at']=150
-        with self.assertRaisesRegex(budget.BudgetError,'native_observation_precedes_work'):
-            self.ledger.release_native('account','task',stale,201)
+        self.ledger.release_native('account','task',stale,201)
+        self.assertIn('["account", "task"]', self.ledger.snapshot()['finished_native'])
 
     def test_shared_organization_policy_change_invalidates_other_scope(self):
         other = routing.Controller(self.ledger, 'other-scope', clock=lambda:101)

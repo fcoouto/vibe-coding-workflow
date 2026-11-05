@@ -46,6 +46,28 @@ boundary, while consolidating them adds more machinery than the duplicated
 computation warrants. No new runtime layer, role-only step or spawn blocker is
 introduced. Package checks and native observations are separate; this provenance
 section is authoring/update material, not a routine loading dependency.
+## Shared external delegation — 5 November 2026
+
+The owner approved the [shared design](superpowers/specs/2026-11-05-shared-external-delegation-design.md)
+for native Astra/high implementation, preserving local priority and native review,
+then requested simple implementation without extra hardening controls. Source was
+reconciled on current `origin/main` at `c4a4eb856b7c491d706148acb760bad066f4489c`;
+no installed runtime was reconstructed or edited.
+
+| Requirement | Local contract and implementation |
+| --- | --- |
+| Explicit choices, local wait/native fallback, useful automatic consideration | [Shared selection](../clients/external-delegation.md#select-before-dispatch), loaded by Agent Delegation; offline shared selector |
+| Existing approvals, checkout/destination/mode scope, no mandatory cap/expiry | [Reusable permission](../clients/external-delegation.md#reusable-permission); optional existing Usage Routing/OpenRouter configure fields |
+| Real source packet, derived prose, exclusions, dispatch recheck | [Packet contract](../clients/external-delegation.md#construct-and-recheck-the-packet); shared byte construction, OpenAI final grants, OpenRouter dispatch and worker launch |
+| Accounting, duplicate/uncertain attempts, route-specific retry ownership | Existing route procedures and ledgers retained; scoped proposal dispatch uses its existing attempt token |
+| Funded API admission and distinct native acceptance | [Foreground host](../skills/manage-usage-routing/references/codex-host.md) binds task consent, financial coverage and a distinct native reviewer; existing ledger retains API reservations and accounting history |
+| Distinct native acceptance and truthful provenance | [Native acceptance](../clients/external-delegation.md#native-acceptance-and-recovery); trusted native preparation, existing OpenAI review receipts and scoped OpenRouter review references |
+
+The [implementation plan](superpowers/plans/2026-11-05-shared-external-delegation.md)
+records fixture checks and instruction walkthroughs separately from unobserved
+client/provider execution. These additions preserve Toolkit's delegation and
+verification requirements; source permission does not become execution authority.
+
 
 ## Cooperative D6 scope — 4 November 2026
 
@@ -133,7 +155,7 @@ binds consent to the selected configuration. The
 [proposal procedure](../skills/manage-usage-routing/references/delegation.md)
 and [trusted host](../skills/manage-usage-routing/references/codex-host.md)
 carry Manual task selection, scoped Smart Balance consent, source and funding
-checks, full reservations, fixed native review capacity, and independent
+checks, full API cost reservations, task identity and independent
 verification. Measurements, previews and bounded canaries are optional.
 The user directed that smoke-test limits stay isolated from the
 [regular-routing budget](../skills/manage-usage-routing/references/procedure.md#regular-routing-budget).

@@ -1,5 +1,10 @@
 # Release notes
 
+## 0.1.31
+
+- Consider eligible repository coding tasks for approved OpenAI API and OpenRouter routes while preserving local-model priority.
+- Keep transmitted source within its approved scope and require native checks and independent review before acceptance.
+
 ## 0.1.29
 
 - Define shared checkpoint handoffs and coordinator follow-through for ordinary and managed child work. Keep the parent responsible for collecting results, continuing ready work and reporting user-actionable blockers.

@@ -10,7 +10,6 @@ import json
 from runtime import usage_credentials
 from runtime.usage_budget import BudgetError, FRESH_SECONDS, fields, integer, name, require
 
-NATIVE_REVIEW_ALLOWANCE_PP = 5
 CANARY_CYCLE_PREFIX = 'canary-'
 
 
@@ -63,16 +62,9 @@ def smart_qualification(config, now):
             'qualification_stale')
     require(record['class_name'] == config['class_name'] and record['profile_digest'] == digest(config['profile']),
             'qualification_profile_changed')
-    require(record['samples'] >= 2 and record['quality_passed'] and record['unit'] == 'allowance_pp'
+    require(record['samples'] >= 2 and record['quality_passed']
             and record['net_native_saved'] > record['uncertainty'], 'savings_unqualified')
-    require(record['native_calibrated'], 'native_calibration_unqualified')
     return record
-
-
-def smart_native_allowance(record):
-    allowance = record.get('native_allowance_pp')
-    require(type(allowance) is int and 0 < allowance <= 100, 'native_calibration_unqualified')
-    return allowance
 
 
 def canary_budget_only(config, policy):
@@ -120,7 +112,8 @@ def _validate(evidence, scope, config, policy, task, now):
     binding, profile = config['binding'], config['profile']
     usage_credentials.validate_binding(binding)
     require(type(profile) is dict, 'invalid_live_admission')
-    fields(task, 'task_id run_id class_name packet provider local_preferred api_only reviewer_available native snapshots')
+    fields(task, 'task_id run_id class_name packet provider local_preferred api_only reviewer_available native snapshots'
+           + (' external' if isinstance(task, dict) and 'external' in task else ''))
     for observed, value, reason in (
         (evidence.policy_digest, policy, 'policy_revision_changed'),
         (evidence.binding_digest, binding, 'live_binding_changed'),
@@ -159,11 +152,9 @@ def _validate(evidence, scope, config, policy, task, now):
             and price_start <= now < price_end, 'pricing_stale')
     integer(profile['count_maximum'])
     deadline = min(observed_at + FRESH_SECONDS, price_end, stop, evidence.approval_until)
-    allowance = None
     if mode == 'smart':
         if evidence.qualification_digest is None:
             require(live_consent_current(config, policy, now), 'live_consent_required')
-            allowance = NATIVE_REVIEW_ALLOWANCE_PP
         else:
             # Retain admission for exact approvals issued under the legacy scope.
             require(config.get('live_consent') is not True, 'qualification_changed')
@@ -171,7 +162,6 @@ def _validate(evidence, scope, config, policy, task, now):
             require(evidence.qualification_digest == digest([config['qualification_revision'], record]),
                     'qualification_changed')
             deadline = min(deadline, record['valid_until'])
-            allowance = smart_native_allowance(record)
     else:
         require(evidence.qualification_digest is None, 'qualification_changed')
 
@@ -179,15 +169,4 @@ def _validate(evidence, scope, config, policy, task, now):
     fields(native, 'account task windows')
     name(native['account']); name(task['run_id'])
     require(name(native['task']) == name(task['task_id']), 'native_task_mismatch')
-    windows = native['windows']
-    require(type(windows) is list and 0 < len(windows) <= 8, 'native_capacity_unknown')
-    for window in windows:
-        if allowance is not None:
-            require(integer(window['allowance_pp']) == allowance,
-                    'native_review_allowance_invalid' if evidence.qualification_digest is None
-                    else 'native_calibration_unqualified')
-        native_start = integer(window['observed_at'])
-        native_end = min(integer(window['reset_at']), native_start + FRESH_SECONDS)
-        require(native_start <= now < native_end, 'native_capacity_expired')
-        deadline = min(deadline, native_end)
     return deadline
