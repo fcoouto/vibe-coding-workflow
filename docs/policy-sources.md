@@ -192,6 +192,31 @@ quote and reservation requirements when either cap is omitted.
 [Observed validation](usage-routing-validation.md) records its tested scope
 separately from current admission rules.
 
+## API usage activation — 5 November 2026
+
+The user approved [safe setup reuse and the public name Manage API Usage](superpowers/specs/2026-11-05-api-usage-activation-design.md).
+The [management procedure](../skills/manage-usage-routing/references/procedure.md#set-up-and-select-a-mode)
+routes explicit enablement through read-only discovery, unique compatible reuse
+or explicit selection. Its [status contract](../skills/manage-usage-routing/references/procedure.md#read-only-status-quoting-and-selection)
+distinguishes provider project identity from enrolled local checkout scope.
+The [enable schema](../skills/manage-usage-routing/references/procedure.md#explicit-local-configuration)
+defines target revision checks, selection, fresh checkout consent and permission
+isolation. Discovery supplies a required first-reuse setup pin, transactionally
+binding the selected source state, setup and current organization policy/revision;
+effective mode comparison collapses otherwise equivalent source modes. Complete
+safe profile/conversion and connection metadata make real differences visible
+without credential references or secret access. `runtime/usage_settings.py`
+checks retained canonical pins and source evidence before new bindings, preserving
+recovery for replacements or incomplete restores; it retains enrollment and ledger identity;
+`runtime/usage_budget.py` reuses validated unchanged policy revisions without
+clearing charges or reservations. Real policy changes still invalidate stale
+consent. Stale, expired, simulation-only and smoke-only setups cannot enable
+regular live routing through reuse. The public heading and UI metadata change;
+the `manage-usage-routing` identifier and reference paths remain compatible.
+No live activation, credential lookup, billing change, purchase or publication
+is authorized by this implementation. [Validation](usage-routing-validation.md)
+separates offline proof from observed client execution.
+
 ## Usage Routing delegation registration — 4 November 2026
 
 The user approved the [implementation plan](superpowers/plans/2026-11-04-usage-routing-delegation-registration.md)

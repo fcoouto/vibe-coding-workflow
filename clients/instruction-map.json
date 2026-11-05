@@ -494,7 +494,7 @@
       ]
     },
     "skills/manage-usage-routing/SKILL.md": {
-      "sha256": "a79c60c2cef5df7bc1d9002d502ae82153af8f2d8ecff8566ba119daec3faac8",
+      "sha256": "d72114e6c26347e6ec7dfa57f8bd0b2f9c382af8d8673d89bc12a7e5557ce718",
       "ranges": [
         [
           1,
@@ -539,15 +539,15 @@
       ]
     },
     "skills/manage-usage-routing/references/procedure.md": {
-      "sha256": "23d6a1f27567d09143dc162bf9748463ce6678f223e2bb4a462e1765bb1db8e8",
+      "sha256": "435855ab9db95daa6debdeb47e1aa1878ba318e8de345dd534e83fbdf0c78bc3",
       "ranges": [
         [
           1,
-          134
+          124
         ],
         [
-          135,
-          170
+          125,
+          248
         ]
       ]
     },

@@ -1,4 +1,4 @@
-# Usage Routing local management
+# Manage API Usage
 
 Manual and Smart Balance share one runner and budget. Saving settings leaves
 routing Off. A Keychain connection and explicit activation make either mode
@@ -16,14 +16,30 @@ when permitted. Never initiate a purchase or silently switch to a paid API pool.
 
 1. Read `status` in the selected enrolled Codex checkout. Show the configured
    mode and whether live consent is saved.
-2. For a requested connection, use [Keychain setup](keychain-setup.md). Confirm
-   the selected organization, project and key, approved profile, task and data
-   scope, expiry, billing cycle, funding choice and any spending caps. Reuse
-   accepted settings and the existing connection when applicable. Save
-   configuration with `configure` if needed.
+2. For an unconfigured checkout, inspect `reusable_setups` and `reuse_reason`.
+   Reuse an applicable existing connection, profile and funding policy without
+   repeating account setup or asking the user to perform an internal binding step.
+   For an explicit mode, use `reuse_reason_by_mode[mode]`: otherwise identical
+   Manual/Smart source choices need no user selection. If effective setups differ,
+   explain the organization, API project, profile limits/rates/validity, task class,
+   budget and stored connection differences and obtain only the unresolved choice.
+   Different connection fingerprints mean different stored Keychain connections;
+   key names are unavailable. Use an existing connection receipt/identifier if
+   needed to identify the intended one. Never ask for an unexplained opaque scope,
+   guess a connection, or query Keychain automatically. An API provider project identifies
+   requests at OpenAI; it is distinct from the user's local repository or checkout.
+   For a new connection, use [Keychain setup](keychain-setup.md). Save needed
+   settings changes with `configure`. Confirm only unresolved organization/key, profile, expiry,
+   cycle, funding or spending choices. Task/data permission stays local to this
+   checkout; another checkout's permission or qualification is never inherited.
 3. On the user's explicit enable request, pass the current `revision` as
    `expected_revision` and select `mode: manual` or `mode: smart`. This
-   records live consent for the approved configuration. Use the existing
+   records this checkout's live consent for the approved configuration. An
+   unconfigured checkout uses revision `0`. Internally carry the selected status
+   candidate's `scope` as `reuse_scope` and `setup_pin` as `reuse_pin`; choosing an
+   arbitrary representative of equivalent effective setups requires no new user
+   approval. Reuse needs this freshness pin even when selection is automatic.
+   Use the existing
    approved regular-routing budget and expiry. Use `live_enabled` to verify
    saved live consent. If status reports `routing_budget_required`, follow
    [regular-routing budget setup](#regular-routing-budget).
@@ -51,6 +67,35 @@ through the accepted workflow and preserve enrollment. Evaluate is an optional
 read-only preview. `eligible` plus
 `simulation_only:true` never authorizes a send. A paused/unknown decision is not a
 reason to start another provider after an API attempt.
+
+For an unconfigured enrolled checkout with an existing ledger, status adds
+`reusable_setups`: a list of objects with `scope` (opaque local source checkout
+identifier), `organization`, `api_project`, `org_revision`, `model`, `reasoning`,
+`class_name`, `requested_mode`, the existing `policy`, complete safe `profile`
+(the fields below, including rates, limits and validity), `production_budget`
+(regular-budget conversion state), `setup_pin`, and `connection`. Connection is
+`{storage_kind: "macos_keychain", fingerprint: <SHA-256>, key_name: null}`. Its
+stable nonsecret fingerprint distinguishes stored connections; no key name is
+retained. These comparison details explain differences; a digest alone is not a
+meaningful user choice. No credential reference or secret is exposed.
+Candidates require valid Keychain binding
+metadata, a current organization revision, current policy/profile windows and
+a regular-routing budget. Active test ownership is excluded. A source checkout
+may be Off or disabled; that local choice is never copied.
+
+`reuse_reason` is `reuse_available` for one distinct setup (including equivalent
+candidates), `reuse_selection_required` for different setups,
+`reusable_setup_unavailable` when none is compatible, `already_configured` for a
+configured target, or `not_configured` when no existing state is available.
+`reuse_reason_by_mode` maps `manual` and `smart` to those outcomes after applying
+that target mode. Source identity/revision and pins prove freshness separately;
+they do not make equivalent copied settings ambiguous.
+Enrollment/recovery errors retain `reason: configuration_or_scope_unavailable`;
+resolve that error before attempting activation. Existing canonical pins must
+all agree with the current ledger, and every saved source routing record must
+have its matching pin. Conflicting, corrupt or missing source evidence requires
+manual recovery, including before a new `configure`, without rewriting pins or
+creating another allowance. Status does not bind or enable.
 
 Quote input has exactly `version:1`, `packet`, `profile`, `now`. Packet fields:
 `version`, `model`, `reasoning`, `text`, `input_tokens`, `max_output_tokens`.
@@ -94,9 +139,42 @@ or replaced pinned database requires recovery, not a new allowance. This feature
 state is separate from optional managed task runtime activation.
 
 `disable` takes `expected_revision`. `enable` takes `expected_revision` and an
-optional `mode` (`manual` or `smart`). Omit `mode` to keep the saved choice. Disable
+optional `mode` (`manual` or `smart`), `reuse_scope` (a source `scope` string
+from status) and `reuse_pin` (that candidate's `setup_pin` SHA-256 string).
+Null is equivalent to omission. Omit `mode` to keep the saved choice. Disable
 blocks new admissions. Explicit enable on a Keychain configuration sets
 `live_consent` and returns the funding warning.
+For an unconfigured target, `expected_revision: 0` creates its configuration and
+records explicit consent atomically; the returned target revision is `1`.
+`reuse_scope` selects an existing compatible setup, and omission automatically
+selects one distinct setup. Equivalent candidates must match binding, profile,
+class, effective target mode, organization revision and regular-budget conversion
+state. An explicit mode replaces source modes before comparison; omitted mode
+retains genuine saved-mode ambiguity. Source revisions/pins do not participate
+in this equivalence comparison.
+Initial reuse requires `reuse_pin` even with a unique candidate or explicit scope.
+The pin binds the selected source scope, revision, enabled/disabled/live-consent
+state, binding, complete profile, class, saved mode, conversion state and current
+organization policy/revision. It is rechecked inside the existing transaction
+before binding or target consent. Unrelated checkout changes do not change this
+selected source pin. This is status-to-enable bookkeeping, never a separate
+mechanical approval prompt. Existing configured-target enable inputs need no pin.
+The target receives fresh consent, no external/source permission or qualification,
+and retains the existing ledger identity, funding policy, charges and reservations.
+No credential access, smoke test or new cap is required for reuse. Shared policies
+that validate unchanged keep their revision; real changes invalidate stale consent.
+
+Ambiguity fails with `reuse_selection_required`; read status and select
+`reuse_scope` explicitly. An unavailable, stale or expired selection fails with
+`reusable_setup_unavailable`; refresh or configure the affected setup.
+An omitted initial pin returns `reuse_pin_required`; a mismatched pin returns
+`reusable_setup_changed`. Refresh status and reconsider only the changed setup
+before retrying; never activate the updated settings using an earlier selection.
+Missing
+state returns `not_configured`; a lost or replaced pinned ledger requires recovery.
+Failed reuse leaves target consent and the ledger unchanged. A configured or
+disabled target keeps its own settings and revision checks; reuse fields cannot
+replace them (`already_configured`). Disable never silently reattaches a setup.
 The public `run` path remains unavailable.
 Live evidence belongs to the trusted host. `reconcile` takes `{}` and reports
 `manual_recovery_required`, not guessed settlement or cleared deductions.
