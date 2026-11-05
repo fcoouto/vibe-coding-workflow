@@ -46,7 +46,7 @@ recovery action without silent rollback. Preference `status` does not inspect
 the registry.
 
 To change the preference, use the shared command from the
-[management procedure](../skills/workstreams/references/procedure.md), selecting
+[advanced management procedure](../skills/workstreams/references/advanced-controls.md), selecting
 `capacity_recovery` and its current revision. Do not add schedule observations to
 that request. Complete monitor removal only through this procedure's existing
 `schedule` → actual native observation/operation → `record-schedule` loop. A saved

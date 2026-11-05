@@ -37,16 +37,22 @@ affected choice as inapplicable or pending, respectively.
    - No. I will review and merge them myself. (default)
    - Yes. Merge independently reviewed PRs marked `[READY]` when all required checks pass.
 3. **Enable Workstreams for `<project_name>`?**
-   Explain that this records a preference while separate activation remains
-   deferred. Link to [Workstreams](../../workstreams/SKILL.md) for details.
-   - Keep it off for now. (default)
-   - Yes. Enable Workstreams for this project. (recommended)
+   Explain that Enabled automatically uses suitable native child work; small
+   tasks can stay with the coordinator. Show one choice:
+   - Disabled. (default)
+   - Enabled. (recommended)
+   Reuse an existing explicit answer or saved choice. Apply a submitted answer
+   through the shared [Workstreams project preference](../../workstreams/references/procedure.md)
+   during this setup. Verify readback before reporting it enabled or disabled.
+   Ordinary coordination needs no runtime activation or qualification campaign.
 
 Retain submitted choices in the setup record with their scope and provenance.
 Publication and merge choices are separate. The `[READY]` marker summarizes
-verified readiness and grants no authority. Workstreams answers leave resource
-admission and capacity recovery settings intact. Report saved choices and
-pending effects separately.
+verified readiness and grants no authority. The project instruction block is the
+current Workstreams choice; the setup record retains provenance. Resource
+admission and capacity recovery remain independent advanced settings. Report
+unapplied choices as pending, with the concrete blocker; do not claim completion
+or ask the user to enable the same choice again.
 
 ## Selected managed planning
 

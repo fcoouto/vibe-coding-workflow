@@ -7,7 +7,7 @@ limits remain in base delegation; this file does not add a combined-mode permiss
 
 Use the installed package's base workflow delegation actions with one JSON object
 on stdin. Management actions are defined in the
-[management procedure](../skills/workstreams/references/procedure.md). Execution
+[advanced management procedure](../skills/workstreams/references/advanced-controls.md). Execution
 mutations carry the existing task identity (`client`, `session_id`,
 `task_id`, `scope_ref`, `expected_revision`) and exact `attempt_id` where applicable.
 Use the current task revision; a conflict requires reconciliation. Preparation

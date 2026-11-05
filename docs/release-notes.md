@@ -1,5 +1,11 @@
 # Release notes
 
+## 0.1.24
+
+- Manage one Workstreams Enabled/Disabled choice during onboarding or through the Workstreams skill. Both read and update the same project instruction checkbox.
+- Enable suitable automatic native coordination without a runtime database or separate activation step. Preserve small direct tasks, explicit delegation and required independent review.
+- Keep resource admission and capacity recovery as separate advanced controls. Preserve existing choices, naming, ownership and protections.
+
 ## 0.1.23
 
 - Support cooperative completion for bounded managed native workers and reviewers. Reconcile known work so checks and review can proceed, and keep uncertain ownership reserved.

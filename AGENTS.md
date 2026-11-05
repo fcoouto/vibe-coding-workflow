@@ -21,3 +21,8 @@
 - Preserve every requirement when shortening or reorganizing instructions. Maintain [source-to-contract coverage](docs/policy-sources.md) for authoring and updates; keep provenance out of routine loading paths.
 - Check affected instruction paths with representative tasks: required procedures load, every applicable requirement is satisfied, and unrelated material stays unloaded. Word counts and package validation alone do not prove behavior.
 - Write human-facing guidance in plain language: explain purpose, next action, and what completion means.
+
+<!-- vibe-coding-workflow:workstreams:start -->
+- [x] Workstreams
+Follow the [Workstreams project preference](skills/workstreams/references/procedure.md).
+<!-- vibe-coding-workflow:workstreams:end -->
