@@ -10,7 +10,7 @@ Load only the route needed:
 - **Naming:** read [naming rules](../../clients/workstreams-naming.md).
 - **Status or enable/disable, including onboarding:** read [project preference](references/procedure.md). Apply the saved choice immediately; ordinary coordination needs no runtime activation.
 - **Explicit resource-admission or capacity-recovery controls:** read [advanced controls](references/advanced-controls.md).
-- **Ordinary delegation:** read [shared delegation safety](../../clients/delegation.md). It applies with either or both features off; no Workstreams revision is needed.
+- **Ordinary child delivery:** read [Agent Delegation](../../policies/03-agent-delegation.md). No managed runtime is required.
 - **Heavy local work:** also read [resource admission](../../clients/workstreams-resources.md).
 - **Recovery activation, monitor run or departure:** read [capacity recovery](../../clients/workstreams-recovery.md).
 - **Managed child delivery:** read the [dispatch protocol](../../clients/workstreams-protocol.md).
