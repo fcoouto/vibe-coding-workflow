@@ -38,15 +38,15 @@
       ]
     },
     "clients/delegation-requests.md": {
-      "sha256": "f619e2adcae8ee34d9665863c0b3dd1544057bf22d7b6b80d2066e656500ef50",
+      "sha256": "f8a9ee20791bdd74c94991a093986b5e2647e47af42dfca9655ccbad95472c3f",
       "ranges": [
         [
           1,
-          208
+          210
         ],
         [
-          209,
-          295
+          211,
+          291
         ]
       ]
     },
@@ -95,11 +95,11 @@
       ]
     },
     "clients/evidence-plan.md": {
-      "sha256": "65423a3dcd2300f81fbabc71adcb9a0f63077c4bedcdef93429d1f9376bcc62d",
+      "sha256": "78e864ce3f65919ca959f9a0412775a549d465b761e84666cc70185b99c40cdf",
       "ranges": [
         [
           1,
-          5
+          95
         ]
       ]
     },
@@ -140,11 +140,11 @@
       ]
     },
     "clients/evidence.md": {
-      "sha256": "6aa7f74fdcc8fc1f35f58bd34139fa66041ca90d99e6390cdd92f677a16b7cf8",
+      "sha256": "7632772a0329856a162abf217453611fa98b4db11f55a64af980ca1cf94ff831",
       "ranges": [
         [
           1,
-          62
+          58
         ]
       ]
     },
@@ -220,15 +220,15 @@
       ]
     },
     "clients/worker-visibility.md": {
-      "sha256": "ce191aeb37f4b9c8f5ea00811fe0b98d8b93d0ce641d1922cd6c020826b5a598",
+      "sha256": "ad98c32ed1ffeeedded0c3c44ec1135f991ec69c17bb9ca323622db1f9d474f4",
       "ranges": [
         [
           1,
-          134
+          140
         ],
         [
-          135,
-          265
+          141,
+          260
         ]
       ]
     },
@@ -246,11 +246,11 @@
       ]
     },
     "clients/workstreams-protocol.md": {
-      "sha256": "4af2477a230ee0a23e67c293150963546159630c8195dc5d7e78f72c4822e25a",
+      "sha256": "458819d1b2ca2e3698683b93cbdb3a6059f243bb439b01531a7eea1113371852",
       "ranges": [
         [
           1,
-          68
+          64
         ]
       ]
     },
@@ -299,7 +299,7 @@
       ]
     },
     "policies/00-index.md": {
-      "sha256": "64a82eebb5cf39ffd05369d663ce174f05e396be326360c01edf34bb76bb17ce",
+      "sha256": "f71791d7a126c86f4be1ebcf7b54f22cd733409d6c3cbb7af86b0b664c56594f",
       "ranges": [
         [
           1,
@@ -326,14 +326,14 @@
       ]
     },
     "policies/03-agent-delegation.md": {
-      "sha256": "1e947e25cebbd3c38e73c124c27b2c076cbc4acc2827c9374ee5bd934fc26804",
+      "sha256": "e13c14740ef38055207351528b75d014fce39385a3924f92249d13bf9154fbe2",
       "ranges": [
         [
           1,
-          52
+          58
         ],
         [
-          53,
+          59,
           117
         ]
       ]
@@ -485,11 +485,11 @@
       ]
     },
     "skills/manage-usage-routing/references/codex-host.md": {
-      "sha256": "094d63f30609806a39ca16eaa307bb6d679c4b445bfc48f282633fbc1e9c72d1",
+      "sha256": "6ca1661422017488e1ff6c49765fdfbbf89e6f7b61d8923a73b9ae4ec195be8a",
       "ranges": [
         [
           1,
-          127
+          124
         ]
       ]
     },
@@ -587,11 +587,11 @@
       ]
     },
     "skills/onboard-my-project/references/reviewed-configuration.md": {
-      "sha256": "e4845abd1f403d5005e36334ff0072ba4bc0d0bb3550186de6203a14cbc9ea27",
+      "sha256": "81c1e1e7667738788b86068776d58f2cfb534bf9eba9b746506962eb8476d33e",
       "ranges": [
         [
           1,
-          37
+          57
         ]
       ]
     },
@@ -605,7 +605,7 @@
       ]
     },
     "skills/openrouter-proposals/references/procedure.md": {
-      "sha256": "b464ee71a7f20443dd4caf6e869e9377c3f10705cacd77cef0315ed088d7011a",
+      "sha256": "712df977c1bfd85ec5cf33914a3e9499983fc574d6f29002c37af466b36c6f06",
       "ranges": [
         [
           1,
@@ -613,10 +613,10 @@
         ],
         [
           91,
-          149
+          154
         ],
         [
-          150,
+          155,
           190
         ]
       ]
@@ -631,15 +631,15 @@
       ]
     },
     "skills/openrouter-workers/references/procedure.md": {
-      "sha256": "990d5509e2b47d6aa724d99b7713f0a1fe930f8ade6395b88f06f83f513fae1c",
+      "sha256": "d0013dd6d0c544cf38c9e2159da16ba13872ee7756a304428e0ec87b4f5c5907",
       "ranges": [
         [
           1,
-          122
+          123
         ],
         [
-          123,
-          186
+          124,
+          181
         ]
       ]
     },

@@ -6,6 +6,7 @@ import importlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -1220,6 +1221,91 @@ class CooperativeQualificationTests(unittest.TestCase):
         with self.assertRaises(state.StateError):
             setup_readiness.observe(scope, owner.request(check_attempt_id=check['attempt_id'],
                 review_attempt_id=review['attempt']['id']))
+
+
+class DocumentedEvidencePlanTests(unittest.TestCase):
+    def _example(self, name, fixture):
+        text = (Path(__file__).resolve().parents[1] / 'clients/evidence-plan.md').read_text()
+        block = re.search(r'<!-- example:' + re.escape(name) + r' -->\s*```json\n(.*?)\n```', text, re.S)
+        self.assertIsNotNone(block, 'Missing documented example: ' + name)
+        task = state.task_status(fixture.scope, 'codex', fixture.identity['session_id'])['task']
+        replacements = {
+            '<ACCEPTED_DECISION_REF>': task['decision_ref'],
+            '<BASE_COMMIT>': fixture.git('rev-parse', 'HEAD'),
+            '<GENERAL_REVIEW_REASON>': 'Review the fixture application change',
+            '<SECURITY_REVIEW_REASON>': 'Review the fixture local execution boundary',
+            '<SECURITY_IMPACT_REASON>': 'Fixture impact assessment has not run',
+            '<SECURITY_IMPACT_REFERENCE>': 'fixture:pending-impact',
+            '<ACCEPTED_ARGV>': [sys.executable, '-c',
+                "from pathlib import Path; assert Path('app.py').read_text() == 'value = 1\\n'"],
+            '<CHECK_PATH>': os.defpath,
+            '<INSPECTION_REFERENCE>': 'fixture:inspected-read-only-command',
+            '<BASELINE_REFERENCE>': 'fixture:baseline-not-run',
+        }
+        def resolve(value):
+            if isinstance(value, dict):
+                return {key: resolve(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [resolve(item) for item in value]
+            if isinstance(value, str):
+                return replacements.get(value, value)
+            return value
+        return resolve(json.loads(block.group(1)))
+
+    def _request(self, *, with_check=False):
+        fixture = EvidenceTests('runTest')
+        self.addCleanup(fixture.doCleanups)
+        fixture.setUp()
+        payload = self._example('evidence-plan-minimal', fixture)
+        if with_check:
+            payload['plan']['checks'] = [self._example('evidence-plan-read-only-check', fixture)]
+            payload['plan']['criteria'] = [dict(id='acceptance', checks=['unit'], behavior=False)]
+        return fixture, fixture.request(**payload)
+
+    def test_minimal_plan_example_executes_against_runtime_validator(self):
+        fixture, request = self._request()
+        before = request['expected_revision']
+        result = fixture.api.plan_evidence(fixture.scope, request)
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['task']['revision'], before + 1)
+        self.assertEqual(fixture.api._load_plan(fixture.scope, fixture.identity), request['plan'])
+        self.assertEqual(request['plan']['security_impact']['status'], 'unresolved')
+        self.assertNotEqual(result['task']['state'], 'DONE')
+
+    def test_read_only_check_example_preserves_thresholds(self):
+        fixture, request = self._request(with_check=True)
+        result = fixture.api.plan_evidence(fixture.scope, request)
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['task']['revision'], request['expected_revision'] + 1)
+        stored = fixture.api._load_plan(fixture.scope, fixture.identity)
+        self.assertEqual(stored, request['plan'])
+        self.assertEqual(stored['checks'][0]['thresholds'], {'exit_codes': [0]})
+        self.assertEqual(stored['checks'][0]['baseline']['status'], 'not-run')
+
+    def test_plan_examples_reject_missing_and_unknown_fields(self):
+        for target, field, value in (
+                ('envelope', 'expected_revision', None), ('plan', 'criteria', None),
+                ('envelope', 'unknown', True), ('plan', 'unknown', True), ('check', 'unknown', True)):
+            with self.subTest(target=target, field=field):
+                fixture, request = self._request(with_check=True)
+                before = request['expected_revision']
+                fields = {'envelope': request, 'plan': request['plan'], 'check': request['plan']['checks'][0]}[target]
+                if value is None:
+                    del fields[field]
+                else:
+                    fields[field] = value
+                with self.assertRaises(state.StateError):
+                    fixture.api.plan_evidence(fixture.scope, request)
+                self.assertEqual(fixture.request()['expected_revision'], before)
+
+    def test_plan_example_rejects_stale_revision(self):
+        fixture, request = self._request()
+        result = fixture.api.plan_evidence(fixture.scope, request)
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['task']['revision'], request['expected_revision'] + 1)
+        with self.assertRaisesRegex(state.StateError, 'Task revision conflict'):
+            fixture.api.plan_evidence(fixture.scope, request)
+        self.assertEqual(fixture.request()['expected_revision'], result['task']['revision'])
 
 
 if __name__ == '__main__':

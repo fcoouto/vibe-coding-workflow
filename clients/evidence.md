@@ -1,6 +1,6 @@
 # Task checks and review evidence
 
-Load this contract for a Codex task that needs accepted checks, general or security review, a completion decision, or local merge evidence. Follow the full [Tests and Builds](../policies/05-tests-and-builds.md), [Code Review](../policies/06-code-review.md), and [Security Review](../policies/04-security-review.md) contracts; this file gives the local controls, not replacements for those policies. This is task runtime guidance: do not load Toolkit sources or setup/onboarding procedures. Load [native delegation](delegation.md) only for native review preparation, lifecycle observation or recovery. Direct checks need no D6 native plan, discovery, model choice or guidance.
+Load this contract only for explicitly selected managed evidence operations in Codex: checks, general or security review, completion decisions, or local merge evidence. Ordinary work uses the [native workflow](codex.md#startup-behavior) and applicable [shared policies](../policies/00-index.md), without managed task state. Follow the full [Tests and Builds](../policies/05-tests-and-builds.md), [Code Review](../policies/06-code-review.md), and [Security Review](../policies/04-security-review.md) contracts; this file gives the local controls, not replacements for those policies. This is task runtime guidance: do not load Toolkit sources or setup/onboarding procedures. Load [native delegation](delegation.md) only for native review preparation, lifecycle observation or recovery. Direct checks need no D6 native plan, discovery, model choice or guidance.
 
 ## Plan and capture
 
@@ -39,12 +39,8 @@ Load only the guide for the current operation after this common contract.
 | Verify completion or merge evidence | [Verify completion or merge evidence](evidence-completion.md) |
 | Retire a task | [Retire a task](evidence-retirement.md) |
 
-For native review preparation, choose the reviewer's role while writing its
-assignment and include the [`visibility` declaration](worker-visibility.md#native-workers-and-reviewers)
-in that same request. The CLI prepares display context automatically and adds
-`visibility_preparation`, preserving the exact prompt, distinct review and
-ledger digests, and launch result. No separate role-only preparation call is
-needed; display failure does not prevent an otherwise admitted review.
+For review `visibility` and automatic `visibility_preparation`, follow the
+shared [role preparation](worker-visibility.md#declare-before-dispatch).
 
 ## Completion and limits
 

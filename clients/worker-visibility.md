@@ -1,18 +1,19 @@
 # Worker declarations and visibility
 
-Use this contract to label subagents. A native thread owner needs no role badge.
-Assign each subagent's role when preparing its task. Missing display metadata or
-failed Habblaud delivery never prevents execution.
+Use this contract for subagent declarations and optional display.
 
 ## Declare before dispatch
 
-Choose the role once while writing this assignment, just before delegation.
-Record it in the existing brief or preparation request; display integration
-reuses it. Apply this preparation to every workflow subagent: builders,
-lightweight reviewers, testers/evaluators, nested workers and native supervisors
-of external routes, whether or not Habblaud is configured. External workers use
-their existing brief or proposal fields; their native supervisors have separate
-assignments and roles. Use this versioned object or the route's equivalent fields:
+Prepare every workflow subagent's role with its assignment, regardless of route,
+nesting or Habblaud setup. A native thread owner needs no role badge. Choose the
+role only when no bound declaration exists; reuse it for retries, follow-ups and
+recovery. Supervisors and reviewers have their own assignments and roles.
+
+Record the declaration once in the route's existing preparation fields, OpenRouter
+brief/proposal or Usage Routing proposal. Add no separate role-only step or
+execution blocker. Missing or invalid display metadata and failed delivery
+never prevent otherwise authorized execution; runtime schemas remain permissive
+for legacy input. Use this versioned object or the route's equivalent fields:
 
 ```json
 {"version":1,"role":"Reviewer","specialty":"Security assessment","custom_role_name":"Threat reviewer"}
@@ -32,9 +33,11 @@ its wire byte limit separately from the declared text lengths. Habblaud uses its
 standard `Subagente (Codex)` fallback when it has neither a declaration nor a
 specific native role.
 
-Validate the declaration for display and reuse it for recovery. A native supervisor
-or reviewer has its own assignment and role. Dispatch follows the route's existing
-execution requirements independently of the badge.
+Validate the declaration for display; retain the route's existing execution requirements.
+
+Procedures: [native assignments](#native-workers-and-reviewers),
+[existing children](#prepare-a-follow-up-for-an-existing-child),
+[external routes](#external-routes-in-chat-and-habblaud).
 
 ## Reconcile on discovery and upgrade
 
@@ -55,10 +58,10 @@ For a managed D6 worker or D5 reviewer, include `visibility` in the existing
 `workflow.py delegation prepare` or `workflow.py evidence review prepare`
 request. The CLI captures the returned declaration and ledger assignment digest
 in a private display context after the runtime operation, outside its transaction.
-The response adds `visibility_preparation`; its failure changes neither the
-immutable prompt nor the launch result. The declaration remains optional in
-the request schema and, when supplied, part of its immutable digest, separate
-from authority roles and review report digests. Do not prepare it again.
+The response adds `visibility_preparation`; its failure preserves the immutable
+prompt, launch result, and distinct review and ledger digests. The declaration
+remains optional in the request schema and, when supplied, part of its immutable
+digest, separate from authority roles and review report digests.
 
 For ordinary native workers, reviewers and supervisors, prepare the full
 assignment in one operation with the workflow package used by the chat. This
@@ -72,20 +75,17 @@ Supply `parent_session_id` (actual native UUID), `checkout` (the chat's current
 canonical absolute working directory), `task_name` (the immutable creation name),
 `message` (the full assignment brief), and an explicit `visibility` for a fresh
 assignment on stdin; the entire JSON request must fit 128 KiB. An existing context
-with the same parent, checkout and creation name can reuse its saved declaration
-when `visibility` is omitted. Retrying with the returned marked message preserves
-that exact first-line marker without duplicating it. Invalid or conflicting
-metadata falls back to the original inputs; never infer a missing role.
-Retain the original `task_name`,
-`message`, model, effort, fork settings and permissions before invoking the
-helper. On success, copy the returned `task_name` and `message` into the native
+with the same parent, checkout and creation name reuses its saved declaration
+when `visibility` is omitted. Retain the original `task_name`, `message`, model,
+effort, fork settings and permissions before invoking the helper. On success,
+copy the returned `task_name` and `message` into the native
 spawn tool and preserve those execution controls. Preparation automatically
 adds the existing correlation marker to the message and returns the context
-path. A `prepared:false` result returns the original name and message. If the
-helper cannot run or returns invalid or error output, use the retained original
-inputs instead. In either failure case, report display unavailable and continue
-already-authorized dispatch under the route's existing execution requirements.
-Do not make another role-only preparation call or add the marker yourself.
+path; retrying with the returned message does not duplicate its exact first-line
+marker. A `prepared:false` result, including invalid or conflicting metadata,
+returns the original name and message. If the helper cannot run or returns
+invalid or error output, use the retained original
+inputs instead. Report display unavailable on failure. Do not add the marker yourself.
 
 Use a distinct task name for each child. The default context path is
 `vibe-worker-visibility/contexts` under the active Codex home, shared with the
@@ -107,9 +107,8 @@ not prove rendering.
 Use the same `prepare` action when preparing a new assignment for a reused
 native child. Add its actual `worker_id` to the full brief. Keep its original
 parent UUID, checkout and creation `task_name`; use the original `--context`
-if it was explicitly selected. Omit `visibility` when the declaration is
-already saved. Otherwise reuse the role in the managed assignment, or choose
-the role once for this follow-up if none was recorded. The helper verifies the
+if it was explicitly selected. Omit `visibility` to reuse a saved declaration;
+otherwise supply it from the assignment. The helper verifies the
 native binding before capturing a missing declaration. It preserves the child,
 saved declaration and exact follow-up message, without adding a marker to it.
 If the original context has no observed child and Codex omits its native path,
@@ -118,15 +117,13 @@ checks the saved marker or immutable assignment digest against that spawn.
 
 For configured Habblaud delivery, include the same `--visibility-plugin`,
 `--habblaud-endpoint` and `--habblaud-account` options as publication below.
-The result's `badge` reports a display-only update. An unavailable declaration
-or receiver never prevents the authorized follow-up. For managed continuations,
+The result's `badge` reports a display-only update. For managed continuations,
 `workflow.py delegation workstreams prepare-continuation` performs this same-child
 preparation once after the ledger operation and before the one-use intent is
 consumed. It reuses the original declaration and retained request prompt without
 adding the prompt to the public response. Display failure preserves the token,
-revision and continuation fields. Do not prepare the role separately or again at
-`consume-continuation`. Use the exact admitted prompt and existing continuation
-controls to send it.
+revision and continuation fields. `consume-continuation` performs no display
+preparation. Use the exact admitted prompt and existing continuation controls to send it.
 
 ### Forward the original Desktop start event
 
@@ -206,9 +203,7 @@ has no new child to register.
 
 ## External routes in chat and Habblaud
 
-Capture the assigned role once in the existing OpenRouter brief or proposal,
-or Usage Routing proposal. Their display adapters reuse those fields; no
-separate role declaration or preparation call is needed.
+Use [Declare before dispatch](#declare-before-dispatch) for declarations.
 
 When preparing the task name of a real native supervisor for an authorized
 external route, append the route suffix before recording the assignment or
@@ -262,4 +257,4 @@ prompts, raw outputs, credentials or reasoning. Readback checks the exact assign
 label, or an accepted localized standard fallback when no declaration exists,
 and the parent binding. Actual rendering and accessibility need client observation.
 Delivery, failure and display retirement never change execution, ownership,
-acceptance or evidence. Continue ordinary work when optional visibility fails.
+acceptance or evidence.
