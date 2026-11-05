@@ -277,15 +277,15 @@
       ]
     },
     "clients/workstreams-titles.md": {
-      "sha256": "79ba45b18b394564d6fc1777051c4f266ea2ce3a170ef724b7f9dd089035dc35",
+      "sha256": "3e2181c162ed99f440c7cdd0e10117072169502d270938a040b98594c552cf99",
       "ranges": [
         [
           1,
-          142
+          140
         ],
         [
-          143,
-          241
+          141,
+          243
         ]
       ]
     },
@@ -317,7 +317,7 @@
       ]
     },
     "policies/02-task-planning.md": {
-      "sha256": "155e375a5bd450743d7ee831a6759a2ad49506500b9275ca872197efc95e6f46",
+      "sha256": "efa0054af075658d385821d9444f9c7f5ba99a099a4c4e6ecc75fa6207c8c96c",
       "ranges": [
         [
           1,
@@ -326,7 +326,7 @@
       ]
     },
     "policies/03-agent-delegation.md": {
-      "sha256": "e13c14740ef38055207351528b75d014fce39385a3924f92249d13bf9154fbe2",
+      "sha256": "e8ca1705519083b24060b96cc198827e05615feeb64eb294c71d2db492ba2eee",
       "ranges": [
         [
           1,
@@ -370,11 +370,11 @@
       ]
     },
     "policies/07-context-and-handoff.md": {
-      "sha256": "08aa554cf50f511f72e8ef0862438afe7ab0208fffd0142cf9f4a4d36056470c",
+      "sha256": "9d40a4b3e82a9c8454fe6f7e186e87f38bd5987d5cb55b8cb0e09fdb1d0da775",
       "ranges": [
         [
           1,
-          33
+          53
         ]
       ]
     },
@@ -565,11 +565,15 @@
       ]
     },
     "skills/onboard-my-project/references/procedure.md": {
-      "sha256": "7f8d48ecee9f48887ef962c606d94787ceddd6837808708d5ad525adbb49254b",
+      "sha256": "0cb148be1aa4bf217b708c8d11ba4053a34c19c4e1db76a71ee896c6c6ecfc52",
       "ranges": [
         [
           1,
-          63
+          62
+        ],
+        [
+          63,
+          85
         ]
       ]
     },
@@ -587,7 +591,7 @@
       ]
     },
     "skills/onboard-my-project/references/reviewed-configuration.md": {
-      "sha256": "81c1e1e7667738788b86068776d58f2cfb534bf9eba9b746506962eb8476d33e",
+      "sha256": "42d38588e65621958ba37cff0584d12b8590445f109812296d07fd2fbf6f9719",
       "ranges": [
         [
           1,

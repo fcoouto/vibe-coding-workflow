@@ -24,10 +24,30 @@ Apply with the [shared contract rules](00-index.md).
 - Recheck memory against current code and authoritative decisions. Update or retire superseded entries, retaining useful decision history without leaving obsolete instructions active. Verify retrieval in a clean context when observable; a file's presence alone is not retrieval evidence.
 - Keep credentials, personal data, sensitive traces and unnecessary transcripts out of shared records. Store necessary private evidence in an appropriate restricted location; share sanitized summaries. A graph or index may be incomplete or stale: state coverage limits rather than invent relationships.
 
+## Lifecycle record and reports
+
+Use the existing task context or plan for starts, meaningful checkpoints, completion and unfinished work. Keep standing context once; update changes using short prose or this optional layout, omitting irrelevant headings:
+
+- **Assignment:** objective, authorized scope, acceptance criteria and standing constraints.
+- **Result and proof:** current result/phase, exact candidate and relevant paths, actual checks/results and evidence references. Distinguish planned, observed, reviewable and accepted.
+- **Material exceptions:** findings, limits, unknowns, pending work and blockers; changed permissions, remaining budgets, dependencies, owned resources, process state and recovery when relevant. Distinguish stopped, running and unknown workers/processes; claim background work only when active execution is verified.
+- **Next:** necessary next action and its owner, including the condition for resuming blocked work.
+
+A child report sends this record's changed result, snapshot-bound candidate/proof references when output changes, material exceptions and necessary next action/owner. Reuse known assignment context, saved role declarations and native sender identity; supply compact context when the receiver cannot resolve it after resume or reassignment. Reports grant no authority and replace neither independent verification nor required decision-time observations of readiness, permissions, liveness and ownership.
+
+Report reviewable output, material blockers/decisions and changed dependency/ownership conditions. Start normally updates local state without acknowledgment. Omit unchanged progress, heartbeat/acknowledgment loops, repeated roles/instructions, routine title receipts, reasoning and raw logs. Retrieve detail for acceptance, recovery or diagnosis; brevity must not hide material risk. The coordinator records receipt during existing handling without a required reply turn, then applies [delivery, supervision and acceptance](03-agent-delegation.md#progress-and-result-retrieval).
+
+At applicable starts, checkpoints and completion, follow the existing [Thread Naming owner](../clients/workstreams-naming.md), including eligibility, overrides, pauses and pending-write recovery. Keep actual readback or a truthful preserved/pending/unavailable outcome in existing presentation metadata. Report only decision-relevant display exceptions; display failure remains nonblocking. A turn ending or child report never implies `DONE`: child output awaits parent acceptance; root completion includes the full agreed deliverable and required integration. Add no model turns solely for acknowledgments or title repair.
+
+For example, when the assignment and sender are already known:
+
+> Reviewable: `src/cleaning.py`, candidate `abc123`; linked `checks.txt` records `python3 -B check.py` passed on that snapshot. Independent review pending. Next: coordinator reviews; child retains ownership.
+
+This optional layout adds no required artifact or status store and replaces no policy, machine request or continuation contract.
+
 ## Handoff and resumption
 
-Use the existing plan or task record for delegated checkpoints/results and unfinished multi-session work. Include the objective, authorized scope, exact candidate and relevant paths, verified state, checks/results, findings/limits, pending work, blockers, owned resources and next action/owner. Distinguish stopped, running and unknown workers/processes; claim background work only when an active process or execution can be verified.
-
+Use the [lifecycle record](#lifecycle-record-and-reports) for unfinished work.
 On resume, inspect the actual checkout, files, checks and processes before trusting the handoff. Reconcile discrepancies and use [Agent Delegation](03-agent-delegation.md) before taking over uncertain worker resources. Preserve pauses and limits; continue only the authorized remainder. Keep temporary progress out of permanent memory. Durable lessons belong once in the responsible record, supported by evidence and a condition for rechecking them.
 
-For delegated handoff, follow [delivery and supervision](03-agent-delegation.md#progress-and-result-retrieval). Selected managed delivery also loads the [continuation protocol](../clients/workstreams-protocol.md). Reconcile writers and review readers before resuming; preserve identity, original scope, pins and remaining budgets.
+Selected managed delivery also loads the [continuation protocol](../clients/workstreams-protocol.md). Reconcile writers and review readers before resuming; preserve identity, original scope, pins and remaining budgets.

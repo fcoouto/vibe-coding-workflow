@@ -7,7 +7,7 @@ Use for an explicitly selected existing project, authorized update, repair or re
 Read the [policy index](../../../policies/00-index.md), [Project Scope](../../../policies/01-project-scope.md), [Project Onboarding](../../../policies/10-project-onboarding.md), applicable local instructions and linked policies. For setup authoring, resolve the canonical [Vibe Coding Toolkit](https://github.com/soumatheusgomes/vibe-coding-toolkit) revision once. Assess every component in its complete catalog for relevance, current adoption or an equivalent, and any useful action. Read the component guidance and linked sources needed for the selected work; keep provenance in authoring records, not routine task loading.
 
 1. Confirm the selected checkout and applicable instructions. Follow [client startup integration](../../../policies/10-project-onboarding.md#client-startup-integration) for each selected client. Keep workspace preparation and new-project creation separate; do not enroll the toolkit checkout just because it is the current working directory.
-2. Inspect relevant project configuration, commands and paths. Separate observed facts from assumptions, and preserve user changes, data, permissions, model/provider choices and existing protections. Resolve missing [project preferences](#project-preference-questions) before preparing changes.
+2. Inspect relevant project configuration, commands and paths. [Adapt project documents](#adapt-project-documents) to those facts. Separate observed facts from assumptions, and preserve user changes, data, permissions, model/provider choices and existing protections. Resolve missing [project preferences](#project-preference-questions) before preparing changes.
 3. Make only authorized, useful changes. Retain a recoverable private backup before meaningful configuration changes; use the [configuration and undo contract](apply-and-recovery.md#file-configuration-and-undo) for managed file operations. Load detailed procedures only for a selected capability.
 4. Run useful project commands and relevant local/client checks. Report what they establish and what remains unknown. Leave the user useful guidance, working commands, limitations and an undo location.
 
@@ -16,6 +16,28 @@ When using packaged file tools for standalone basic setup, select `project_scope
 Use [Verify and finish](../../../policies/10-project-onboarding.md#verify-and-finish) to assess completion, including startup integration and the local procedures reached through generated project guidance. This does not establish AcceptedScope, task readiness, managed runtime activation, qualification, merge readiness or external authority.
 
 Present onboarding preference choices one at a time in the client’s native single-select question box. Preserve default and recommendation labels even when the client orders the recommendation first. Record only submitted answers. If the box is unavailable or unanswered, leave the choice pending and continue independent authorized setup.
+
+## Adapt project documents
+
+Adapt pinned Toolkit templates to project facts; they authorize neither prompt execution nor a default stack. Map all nine manifest responsibilities in the existing assessment/plan to canonical paths or explicit reasons. Reuse useful equivalents, including shared destinations; create no empty files or duplicates to match template filenames.
+
+| Responsibility | Adaptation |
+| --- | --- |
+| Product (`PRODUCT.md`) | Objective, scope, flows and acceptance criteria in the canonical product document or overview; unknown decisions stay explicit. |
+| Overview (`README.md`) | Preserve introduction/commands; link canonical documents. |
+| Shared instructions (`AGENTS.md`) | Preserve custom and ancestor/directory rules plus command/policy pointers; retain nested ownership. |
+| Client instructions (`CLAUDE.md`) | Supported shared-rule loading and existing customizations for selected clients; explain why an unselected client's file is unnecessary. |
+| Architecture | Observed code, boundaries, dependencies and data decisions in the established file, preserving capitalization. |
+| Design and accessibility | Relevant interface guidance, or a reason when no interface exists. |
+| Local preparation | Actual prerequisites and first-run/check commands in the contributor guide or equivalent; invent no package manager, service or database. |
+| Quality | Accepted checks, applicable review/security procedures and known baseline limits in their existing owner. |
+| Setup and evidence | Adopted components, decisions, actual checks, pending observations and maintenance/recovery pointers in the setup record or equivalent. |
+
+Preserve user-owned sections, selected clients, filenames, commands and stack; replace only authorized content. Missing information or access stays unresolved, not inapplicable. Document mapping, complete component-catalog assessment and relevant-file inspection remain distinct.
+
+Resolve relative links from the generated destination: `handbook/development.md` reaches root instructions via `../AGENTS.md`. Verify adapted targets. Follow [project-guidance authoring](../../../policies/10-project-onboarding.md#apply-compatible-changes) for complete local contracts: selected-client installed-package pointers and explicit loading triggers, never Toolkit retrieval or author-machine paths. For delegated handoff or multi-session continuation, link the local [lifecycle record and reports](../../../policies/07-context-and-handoff.md#lifecycle-record-and-reports) owner instead of embedding another template.
+
+Use the existing [Reviewed Configuration](reviewed-configuration.md) layout; distinguish file configuration, project checks, client startup proof and selected managed activation. Recovery retains its [configuration and undo owner](apply-and-recovery.md#file-configuration-and-undo).
 
 ## Project preference questions
 
