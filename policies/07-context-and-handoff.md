@@ -26,8 +26,8 @@ Apply with the [shared contract rules](00-index.md).
 
 ## Handoff and resumption
 
-Use the existing plan or task record for unfinished multi-session work. Include the objective, authorized scope, verified state, checks/results, pending work, blockers, owned resources and next action. Distinguish stopped, running and unknown workers/processes; claim background work only when an active process or execution can be verified.
+Use the existing plan or task record for delegated checkpoints/results and unfinished multi-session work. Include the objective, authorized scope, exact candidate and relevant paths, verified state, checks/results, findings/limits, pending work, blockers, owned resources and next action/owner. Distinguish stopped, running and unknown workers/processes; claim background work only when an active process or execution can be verified.
 
 On resume, inspect the actual checkout, files, checks and processes before trusting the handoff. Reconcile discrepancies and use [Agent Delegation](03-agent-delegation.md) before taking over uncertain worker resources. Preserve pauses and limits; continue only the authorized remainder. Keep temporary progress out of permanent memory. Durable lessons belong once in the responsible record, supported by evidence and a condition for rechecking them.
 
-For native child handoff, follow [outcome ownership](03-agent-delegation.md#outcome-ownership). Selected managed delivery also loads the [continuation protocol](../clients/workstreams-protocol.md). Reconcile writers and review readers before resuming; preserve identity, original scope, pins and remaining budgets.
+For delegated handoff, follow [delivery and supervision](03-agent-delegation.md#progress-and-result-retrieval). Selected managed delivery also loads the [continuation protocol](../clients/workstreams-protocol.md). Reconcile writers and review readers before resuming; preserve identity, original scope, pins and remaining budgets.
