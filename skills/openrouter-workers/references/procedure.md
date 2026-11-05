@@ -16,11 +16,9 @@ cache or an `approval_ref` alone does not replace saved checkout consent.
 
 1. Follow the project's native worker selection and shared
    [role-preparation rule](../../../clients/worker-visibility.md#declare-before-dispatch). Reserve
-   the private run directory and give a genuine native supervisor the assignment,
-   exact runner/runtime paths, role, specialty, copied inputs, checks and stop rule.
-   Use the owner's native assignment preparation for the supervisor and reuse the
-   external worker's existing brief fields for its own responsibility. Keep the
-   supervisor's native model identity truthful. Prepare its
+   the private run directory and prepare a genuine native supervisor's assignment
+   with exact runner/runtime paths, copied inputs, checks and stop rule. Keep its
+   native model identity truthful. Prepare its
    [native task name with the OpenRouter suffix](../../../clients/worker-visibility.md#external-routes-in-chat-and-habblaud)
    before dispatch, whether or not Habblaud is configured.
 2. Load only the discovery/cache and triage sections of
@@ -57,10 +55,8 @@ python3 -I -B <plugin-root>/scripts/openrouter_workers.py run
 
 The brief requires `task_id`, `coordinator_chat_id`,
 `model`, `provider`, `effort`, `objective`, `source_root`,
-`files`, `timeout_seconds`, `steps`, and `approval_ref`. For workflow-created jobs,
-include the assigned `role` and `specialty` once in this brief and add
-`model_display_name` when known. Runtime compatibility keeps missing or invalid
-legacy display metadata nonblocking. Add `custom_role_name`
+`files`, `timeout_seconds`, `steps`, and `approval_ref`. Map the shared declaration
+to `role` and `specialty`; add `model_display_name` when known. Add `custom_role_name`
 only for an explicit native fallback declaration, using the shared bounds.
 New external badges display the declared role followed by the
 model display name, for example `Scout · GLM 5.3 Flash`. Existing receipts keep
@@ -117,9 +113,8 @@ reports process-group absence; `native_fallback_ready` indicates a failed,
 unresolved or natively rejected result with that observation. These local reports
 do not authenticate approval or replace the supervisor's trusted host evidence.
 If stop cannot be confirmed, retain unresolved ownership and reconcile it first.
-On approved native fallback, retain the frozen role, specialty and custom role
-name from the original brief. Follow the shared visibility contract for a real
-new native child; the external display ID is never a native identity.
+On approved native fallback, use the frozen brief's declaration in
+preparation for a real new native child; the external display ID is never a native identity.
 Unknown upstream cancellation or billing does not prevent independent native work
 once local quiescence is confirmed. Preserve partial results and known accounting;
 independently establish any finding reused during takeover.

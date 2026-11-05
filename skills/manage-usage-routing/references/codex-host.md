@@ -12,12 +12,9 @@ host cannot validate admission, continue natively when the task permits.
    delegation controls. Keep the reviewer available for this proposal.
 2. Prepare one bounded tool-free proposal with `task_id`, `class_name`,
    `packet`, `provider`, `local_preferred`, `api_only`, and `snapshots`.
-   Use the original stable task ID. The assignment's
-   [role-preparation rule](../../../clients/worker-visibility.md#declare-before-dispatch)
-   supplies `visibility` once in the existing proposal fields for workflow-created
-   jobs. Native supervisors and reviewers prepare their own assignments through
-   that same owner. Runtime compatibility keeps missing or invalid legacy display
-   metadata nonblocking. Follow the
+   Use the original stable task ID and the shared
+   [role-preparation contract](../../../clients/worker-visibility.md#declare-before-dispatch)
+   for `visibility`. Follow the
    [packet schema](procedure.md#read-only-status-quoting-and-selection)
    and [proposal procedure](delegation.md). Keep one original task outstanding
    through integration and review.

@@ -33,12 +33,8 @@ evidence; do not issue them for new ordinary work or treat them as feature grant
 | Heavy local resource phase | Use `resource_revision` in the [resource request](workstreams-resources.md). This permits only that phase when its other task and ownership gates pass. |
 | Parent recovery registration | Use `recovery_revision` in the [recovery request](workstreams-recovery.md). This permits only that registration when its task and schedule gates pass. |
 
-The CLI runs the shared [same-child role preparation](worker-visibility.md#prepare-a-follow-up-for-an-existing-child)
-once after `prepare-continuation` returns, outside its ledger transaction and
-before consumption. It uses the returned child, creation name and original role
-with the retained request prompt; the public response still omits that prompt.
-Missing display metadata leaves the token, revision and other continuation fields
-intact. `consume-continuation` adds no second role preparation.
+For the CLI's automatic display preparation at `prepare-continuation`, follow the
+shared [role preparation](worker-visibility.md#declare-before-dispatch).
 
 Continuation still requires the base task's current ownership, finite remaining
 allowance and stopped-writer/retry evidence. A delivery assertion cannot prove
