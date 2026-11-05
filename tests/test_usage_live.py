@@ -1,6 +1,7 @@
 """Admission integration uses disposable ledgers and explicit fake I/O."""
 from dataclasses import asdict, replace
 from pathlib import Path
+import http.client
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -136,12 +137,55 @@ class LiveAdmissionTests(unittest.TestCase):
             result = routing.reconcile(self.controller.root, {})
         self.assertEqual(result, dict(state='manual_recovery_required',
             pending=dict(attempt_id='run:generation', reserved_usd_micros=generation['maximum'],
-                         incomplete=diagnostic)))
+                         incomplete=diagnostic, diagnostic=generation['diagnostic'])))
+        self.assertEqual(generation['diagnostic']['stage'], 'response_validation')
+        self.assertEqual(generation['diagnostic']['response_id'], 'resp_synthetic')
         self.assertEqual(self.ledger.reconcile(scope='other'), {'state': 'manual_recovery_required'})
         self.assertEqual(self.ledger.snapshot(), before)
         with self.assertRaisesRegex(budget.BudgetError, 'live_run_id_already_used'):
             self.run_candidate(self.proof)
         self.assertEqual(self.factory.call_count, 2)
+
+    def test_zero_cost_count_then_disconnect_keeps_diagnostic_reservation_and_slot(self):
+        from runtime import openai_api
+
+        self.profile = dict(self.profile, count_maximum=0)
+        self.controller.configure(dict(version=2, expected_revision=1, expected_org_revision=1,
+                                       binding=self.binding, policy=POLICY, profile=self.profile,
+                                       class_name='investigation', mode='manual'))
+        self.controller.enable(2)
+        proof = replace(self.proof, config_revision=3, profile_digest=admission.digest(self.profile))
+        counted = Connection(Response(dict(object='response.input_tokens', input_tokens=1200)))
+        generated = Connection(Response({}))
+        generated.getresponse = Mock(side_effect=http.client.RemoteDisconnected('private disconnect detail'))
+        self.factory.side_effect = [counted, generated]
+        with self.assertRaises(openai_api.TransportError) as caught:
+            self.run_candidate(proof)
+        self.assertTrue(caught.exception.uncertain)
+        before = self.ledger.snapshot()
+        run = before['runs']['run']
+        generation = run['calls']['generation']
+        self.assertEqual(run['calls']['count']['cost'], 0)
+        self.assertEqual(run['calls']['count']['state'], 'completed')
+        self.assertEqual(generation['state'], 'unresolved')
+        self.assertIsNone(generation['cost'])
+        self.assertGreater(generation['maximum'], 0)
+        self.assertEqual(before['slot'], 'run')
+        self.assertFalse(run['closed'])
+        diagnostic = generation.get('diagnostic')
+        self.assertIsInstance(diagnostic, dict)
+        self.assertEqual(diagnostic['phase'], 'generation')
+        self.assertEqual(diagnostic['stage'], 'response_headers')
+        self.assertEqual(diagnostic['exception_category'], 'remote_disconnected')
+        self.assertEqual(self.ledger.reconcile(scope='scope')['pending']['diagnostic'], diagnostic)
+        with self.assertRaisesRegex(budget.BudgetError, 'live_run_id_already_used'):
+            self.run_candidate(proof)
+        with self.assertRaisesRegex(budget.BudgetError, 'dispatch_forbidden'):
+            self.ledger.dispatch('run', 'generation', 1, self.clock)
+        self.assertEqual(self.ledger.snapshot(), before)
+        self.assertEqual(self.factory.call_count, 2)
+        self.assertEqual([len(conn.requests) for conn in (counted, generated)], [1, 1])
+        self.assertTrue(counted.closed and generated.closed)
 
     def smart_candidate(self, *, calibrated=True):
         self.controller.configure(dict(version=2, expected_revision=1, expected_org_revision=1,

@@ -16,7 +16,8 @@ from threading import Event, Lock, Thread, Timer
 import time
 
 from runtime import usage_credentials
-from runtime.usage_budget import BudgetError, fields, integer, name, require
+from runtime.usage_budget import (MAX_DIAGNOSTIC_MS, BudgetError, fields, integer, name,
+                                  require, transport_diagnostic)
 
 MAX_INPUT = 65536
 MAX_REQUEST = 524288
@@ -36,10 +37,11 @@ SAFE_REASONS = frozenset('invalid_fields invalid_version invalid_identity invali
 class TransportError(BudgetError):
     """Sanitized failure; uncertain means a request may have reached the server."""
 
-    def __init__(self, reason, *, uncertain=False, incomplete=None):
+    def __init__(self, reason, *, uncertain=False, incomplete=None, diagnostic=None):
         super().__init__(reason)
         self.uncertain = uncertain
         self.incomplete = incomplete
+        self.diagnostic = transport_diagnostic(diagnostic)
 
 
 class _HTTPSConnection:
@@ -47,6 +49,8 @@ class _HTTPSConnection:
         self.connection = None
         self.timer = None
         self.response = None
+        self.deadline_fired = Event()
+        self.failure_category = None
 
     def prepare(self, deadline):
         ready, lock = Event(), Lock()
@@ -63,10 +67,9 @@ class _HTTPSConnection:
                 connection = http.client.HTTPSConnection(HOST, port=443, timeout=timeout, context=context)
                 connection.auto_open = False
                 connection.connect()
-            except TimeoutError:
-                failure = TimeoutError
-            except Exception:
-                failure = OSError
+            except Exception as error:
+                self.failure_category = _exception_category(error)
+                failure = TimeoutError if isinstance(error, TimeoutError) else OSError
             with lock:
                 if not abandoned:
                     self.connection = connection
@@ -91,6 +94,7 @@ class _HTTPSConnection:
 
         def stop_io():
             # Socket inactivity timeouts alone permit slow response headers.
+            self.deadline_fired.set()
             try:
                 sock.shutdown(socket.SHUT_RDWR)
             except OSError:
@@ -120,6 +124,18 @@ class _HTTPSConnection:
 
 def _canonical(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
+
+
+def _exception_category(error):
+    for kind, category in ((socket.gaierror, 'dns'), (ssl.SSLError, 'tls'), (TimeoutError, 'timeout'),
+                           (http.client.RemoteDisconnected, 'remote_disconnected'),
+                           (ConnectionResetError, 'connection_reset'), (BrokenPipeError, 'broken_pipe'),
+                           (OSError, 'os_error'), (http.client.HTTPException, 'http_error'),
+                           (BudgetError, 'validation'),
+                           ((ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError), 'malformed')):
+        if isinstance(error, kind):
+            return category
+    return 'unknown'
 
 
 def packet_digest(packet):
@@ -198,12 +214,20 @@ def _usage(body, packet):
                 cache_write_tokens=written, reasoning_tokens=reasoning)
 
 
-def _incomplete(body, packet, response):
+def _response_id(body, packet):
     response_id = body.get('id')
-    if (body.get('object') != 'response' or body.get('error') is not None
+    if (body.get('object') != 'response' or body.get('status') not in ('completed', 'incomplete')
+            or body.get('error') is not None
             or body.get('model') != packet['model'] or body.get('service_tier') != 'default'
             or body.get('background', False) is not False or body.get('tools', []) != []
             or type(response_id) is not str or not re.fullmatch(r'resp_[A-Za-z0-9_-]{1,250}', response_id)):
+        return None
+    return response_id
+
+
+def _incomplete(body, packet, response):
+    response_id = _response_id(body, packet)
+    if response_id is None:
         return None
     details = body.get('incomplete_details')
     reason = details.get('reason') if type(details) is dict else None
@@ -260,6 +284,9 @@ def _call(packet, binding, dispatch, phase, connection_factory, *, admit=None, r
         raise TransportError('live_execution_unavailable')
     connection, sent = None, False
     incomplete = None
+    started = time.monotonic()
+    stage, deadline = 'validation', None
+    request_id = response_id = http_status = None
     try:
         fields(packet, 'version model reasoning text input_tokens max_output_tokens')
         require(type(packet['version']) is int and packet['version'] == 1, 'invalid_version')
@@ -284,8 +311,9 @@ def _call(packet, binding, dispatch, phase, connection_factory, *, admit=None, r
                 and dispatch['committed'] is True, 'uncommitted_dispatch')
         _identity(dispatch['attempt_id'])
         require(dispatch['packet_digest'] == hashlib.sha256(raw).hexdigest(), 'packet_digest_mismatch')
-        deadline = dispatch['deadline']
-        require(type(deadline) in (int, float) and math.isfinite(deadline), 'invalid_deadline')
+        candidate = dispatch['deadline']
+        require(type(candidate) in (int, float) and math.isfinite(candidate), 'invalid_deadline')
+        deadline = candidate
         if authenticated:
             deadline = min(deadline, time.time() + MAX_WAIT)
         timeout = _remaining(deadline)
@@ -299,6 +327,7 @@ def _call(packet, binding, dispatch, phase, connection_factory, *, admit=None, r
                    'OpenAI-Organization': binding['organization'], 'OpenAI-Project': binding['project'],
                    'X-Client-Request-Id': dispatch['attempt_id']}
         if authenticated:
+            stage = 'credential'
             try:
                 secret = resolver(binding.copy())
                 if (type(secret) is not bytes or not 0 < len(secret) <= usage_credentials.MAX_SECRET
@@ -308,6 +337,7 @@ def _call(packet, binding, dispatch, phase, connection_factory, *, admit=None, r
             except Exception:
                 raise BudgetError('credential_unavailable') from None
             timeout = _remaining(deadline)
+        stage = 'connect'
         if connection_factory is None:
             connection = _HTTPSConnection()
             connection.prepare(deadline)
@@ -316,6 +346,7 @@ def _call(packet, binding, dispatch, phase, connection_factory, *, admit=None, r
         _remaining(deadline)
         path = '/v1/responses/input_tokens' if phase == 'count' else '/v1/responses'
         if authenticated:
+            stage = 'admission'
             try:
                 if admit() is False:
                     raise ValueError()
@@ -323,31 +354,53 @@ def _call(packet, binding, dispatch, phase, connection_factory, *, admit=None, r
                 raise BudgetError('dispatch_admission_denied') from None
             _remaining(deadline)
         sent = True
+        stage = 'request'
         connection.request('POST', path, body, headers)
+        stage = 'response_headers'
         response = connection.getresponse()
+        http_status = response.status if type(response.status) is int and 100 <= response.status <= 599 else None
+        raw_request_id = response.getheader('x-request-id') if hasattr(response, 'getheader') else None
+        if type(raw_request_id) is str and re.fullmatch(r'req_[A-Za-z0-9_-]{1,251}', raw_request_id):
+            request_id = raw_request_id
         require(type(response.status) is int and response.status == 200, 'provider_request_rejected')
+        stage = 'response_body'
         result = _read(response, deadline)
+        stage = 'response_validation'
         if phase == 'count':
             require(result.get('object') == 'response.input_tokens', 'malformed_response')
             result = dict(input_tokens=integer(result.get('input_tokens')))
         else:
+            response_id = _response_id(result, packet)
             if result.get('status') == 'incomplete':
                 incomplete = _incomplete(result, packet, response)
             result = _generation(result, packet)
-        request_id = response.getheader('x-request-id') if hasattr(response, 'getheader') else None
-        if request_id is not None:
-            _identity(request_id)
-        return dict(result, request_id=request_id, simulation_only=connection_factory is not None)
-    except BudgetError as error:
-        reason = str(error)
-        raise TransportError(reason if reason in SAFE_REASONS else 'transport_failure', uncertain=sent,
-                             incomplete=incomplete) from None
-    except TimeoutError:
-        raise TransportError('transport_timeout', uncertain=sent) from None
-    except (ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
-        raise TransportError('malformed_response' if sent else 'invalid_request', uncertain=sent) from None
-    except Exception:
-        raise TransportError('transport_failure', uncertain=sent) from None
+        if raw_request_id is not None:
+            _identity(raw_request_id)
+        return dict(result, request_id=raw_request_id, simulation_only=connection_factory is not None)
+    except Exception as error:
+        marker = getattr(connection, 'deadline_fired', None)
+        fired = isinstance(marker, Event) and marker.is_set()
+        category = _exception_category(error)
+        if stage == 'connect' and isinstance(connection, _HTTPSConnection) and connection.failure_category is not None:
+            category = connection.failure_category
+        try:
+            remaining = None if deadline is None else int((deadline - time.time()) * 1000)
+        except Exception:
+            remaining = None
+        diagnostic = dict(version=1, phase=phase, stage=stage, exception_category=category,
+                          deadline_fired=fired,
+                          elapsed_ms=min(MAX_DIAGNOSTIC_MS, max(0, int((time.monotonic() - started) * 1000))),
+                          remaining_ms=None if remaining is None else max(-MAX_DIAGNOSTIC_MS, min(MAX_DIAGNOSTIC_MS, remaining)),
+                          request_id=request_id, response_id=response_id, http_status=http_status)
+        if isinstance(error, BudgetError):
+            reason = str(error) if str(error) in SAFE_REASONS else 'transport_failure'
+        elif isinstance(error, TimeoutError) or (fired and isinstance(error, (OSError, http.client.HTTPException))):
+            reason = 'transport_timeout'
+        elif isinstance(error, (ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError)):
+            reason = 'malformed_response' if sent else 'invalid_request'
+        else:
+            reason = 'transport_failure'
+        raise TransportError(reason, uncertain=sent, incomplete=incomplete, diagnostic=diagnostic) from None
     finally:
         if connection is not None:
             try:

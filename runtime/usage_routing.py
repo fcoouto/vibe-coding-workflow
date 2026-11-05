@@ -672,7 +672,8 @@ class Controller:
                     self.ledger.reject_unsent(run_id, phase)
                 else:
                     incomplete = error.incomplete if isinstance(error, openai_api.TransportError) else None
-                    self.ledger.uncertain(run_id, phase, incomplete=incomplete)
+                    diagnostic = error.diagnostic if isinstance(error, openai_api.TransportError) else None
+                    self.ledger.uncertain(run_id, phase, incomplete=incomplete, diagnostic=diagnostic)
             elif not any(c['state'] in ('dispatching','unresolved')
                          for c in self.ledger.snapshot()['runs'][run_id]['calls'].values()):
                 self.ledger.close_run(run_id)

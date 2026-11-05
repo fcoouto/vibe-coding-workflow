@@ -1,10 +1,15 @@
 """Run the packaged coordinator helper with synthetic native tools only."""
 from pathlib import Path
+import contextlib
+import io
+import json
 import shutil
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
+from unittest.mock import patch
 
 _HELPER = Path(__file__).resolve().parents[1] / 'scripts' / 'usage_codex_host.js'
 _NODE = shutil.which('node')
@@ -144,11 +149,55 @@ const request = {root:'/installed', python:'/python', threadId:'parent', hostId:
 
 @unittest.skipUnless(_NODE, 'Node required for the coordinator helper fixture')
 class CodexUsageBridgeTests(unittest.TestCase):
+    def test_bridge_preserves_transport_uncertainty_and_only_safe_diagnostics(self):
+        from runtime import openai_api, usage_budget
+
+        bridge = _HELPER.read_text().split('const bridge = `', 1)[1].split('`;', 1)[0]
+        diagnostic = dict(version=1, phase='generation', stage='response_headers',
+                          exception_category='remote_disconnected', deadline_fired=False,
+                          elapsed_ms=12, remaining_ms=987, request_id='req_synthetic',
+                          response_id=None, http_status=None)
+        variants = [(False, None, False), (True, diagnostic, True),
+                    (True, diagnostic | {'private header': 'secret value'}, True),
+                    ('private uncertainty', diagnostic, True)]
+        for uncertain, metadata, expected in variants:
+            with self.subTest(uncertain=uncertain, invalid=metadata != diagnostic):
+                error = openai_api.TransportError('transport_failure', uncertain=uncertain)
+                error.diagnostic = metadata
+                host = types.ModuleType('runtime.usage_codex_host')
+                host.Plan = host.Price = host.Reviewer = dict
+                host.execute = lambda *_, **__: (_ for _ in ()).throw(error)
+                admission = types.ModuleType('runtime.usage_admission')
+                admission.Grant = dict
+                package = types.ModuleType('runtime')
+                package.usage_codex_host, package.usage_admission = host, admission
+                package.openai_api, package.usage_budget = openai_api, usage_budget
+                output = io.StringIO()
+                frame = dict(action='execute', checkout='/fixture', reviewer={}, plan={},
+                             grant={}, price={}, prior_review=None)
+                with patch.dict(sys.modules, {'runtime': package, 'runtime.usage_codex_host': host,
+                                             'runtime.usage_admission': admission}), \
+                     patch.object(sys, 'argv', ['offline-bridge', '/fixture']), \
+                     patch.object(sys, 'stdin', io.StringIO(json.dumps(frame))), \
+                     patch.object(sys, 'path', list(sys.path)), contextlib.redirect_stdout(output):
+                    exec(bridge, {})
+                result = json.loads(output.getvalue())
+                self.assertIs(result['uncertain'], expected)
+                self.assertEqual(result['reason'], 'transport_failure')
+                if metadata == diagnostic:
+                    self.assertEqual(result.get('diagnostic'), diagnostic)
+                else:
+                    self.assertNotIn('diagnostic', result)
+                self.assertNotIn('private', output.getvalue())
+
     def test_bridge_reads_native_sources_and_refuses_conflicting_expiry(self):
         with tempfile.TemporaryDirectory() as folder:
             runtime = Path(folder) / 'runtime'
             runtime.mkdir()
-            (runtime / 'usage_budget.py').write_text('class BudgetError(ValueError): pass\n')
+            (runtime / 'usage_budget.py').write_text('class BudgetError(ValueError): pass\n'
+                                                   'def transport_diagnostic(value): return None\n')
+            (runtime / 'openai_api.py').write_text('from runtime.usage_budget import BudgetError\n'
+                                                 'class TransportError(BudgetError): pass\n')
             (runtime / 'usage_admission.py').write_text('Grant = dict\n')
             (runtime / 'usage_codex_host.py').write_text(
                 'from runtime.usage_budget import BudgetError\n'
