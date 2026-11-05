@@ -9,14 +9,14 @@ MAX_TITLE_BODY = 4096
 MAX_STATUS_LENGTH = max(map(len, ATTENTION_STATES))
 METER_PREFIX = '\uFFFB'  # Keeps the five cells in the compact Codex fallback font.
 # Accept saved titles with routine labels, no meter prefix, or status at the end.
-TITLE = re.compile(r'(?P<meter>\uFFFB?▰{0,5}▱{0,5}) (?:(?P<status>[A-Z ]+) · )?\[(?P<family>W[1-9][0-9]*)\] (?P<member>P|C[1-9][0-9]*) · (?P<topic>.+)')
-LEGACY_TITLE = re.compile(r'(?P<meter>▰{0,5}▱{0,5}) \[(?P<family>W[1-9][0-9]*)\] (?P<member>P|C[1-9][0-9]*) · (?P<topic>.+) · (?P<status>[A-Z ]+)')
+TITLE = re.compile(r'(?P<meter>\uFFFB?▰{0,5}▱{0,5}) (?:(?P<status>[A-Z ]+) · )?\[(?P<family>W[1-9][0-9]*)\] (?P<member>P|C) · (?P<topic>.+)')
+LEGACY_TITLE = re.compile(r'(?P<meter>▰{0,5}▱{0,5}) \[(?P<family>W[1-9][0-9]*)\] (?P<member>P|C) · (?P<topic>.+) · (?P<status>[A-Z ]+)')
 
 
 def format_title(family, member, topic, status, cells, *, user_attention=False):
     if not isinstance(family,str) or not re.fullmatch(r'W[1-9][0-9]*',family):
         raise ValueError('Invalid family code')
-    if not isinstance(member,str) or not re.fullmatch(r'P|C[1-9][0-9]*',member):
+    if not isinstance(member,str) or not re.fullmatch(r'P|C',member):
         raise ValueError('Invalid member code')
     if not isinstance(topic,str) or not topic.strip() or topic!=topic.strip() or len(topic)>160 or not topic.isprintable() or ' · ' in topic:
         raise ValueError('Topic must be short, printable and contain no field separator')

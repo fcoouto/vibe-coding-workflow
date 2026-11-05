@@ -7,8 +7,10 @@ and adoption trigger.
 
 ## Adopt a parent or child
 
-First inspect the existing title and any recorded presentation ownership. Reuse
-an adopted family/member mapping, reconcile manual edits before writing, and
+First apply the [new-thread scope](workstreams-naming.md#new-thread-scope), then
+resolve the [display-family association](workstreams-naming.md#resolve-the-display-family),
+then inspect the existing title and recorded presentation ownership. Reuse the
+adopted mapping, reconcile manual edits before writing, and
 retain any manual-title pause. A known user-selected title is an override even
 before managed adoption; preserve it until the user explicitly requests adoption.
 Explicit title instructions and recorded pauses also take precedence over
@@ -57,17 +59,19 @@ explicit user choice. Supply only one. The saved presentation records workflow
 ownership when established. Older records without that observation retain their
 topic during an automatic switch. `workflow_topic` is a configure input only.
 
-For an explicitly associated child, also provide `parent_session_id` and `member`
-(for example `C1`). The parent session must differ from the child's session;
-`P` is reserved for the family's own parent. Allocate each child ordinal once in
-the existing task plan. These labels never establish native lineage, ownership or
-dispatch authority. Existing delegation admission remains required.
+For an explicitly associated member, supply its recorded root coordinator UUID as
+`parent_session_id` and `member: "C"`. Store and display the same literal `P` or
+`C` role; the actual native UUID identifies the context.
+Title controls use `parent_session_id` for the display root; delegation and worker
+visibility use that field for the actual native parent. This display binding must
+satisfy the selected runtime's validation; it never changes native lineage,
+ownership or dispatch authority. Existing delegation admission remains required.
 
-Configuration reserves the shared family code, records the current title, then
-synchronizes the managed format. The same bound task cannot be configured twice. After an authorized task
+Configuration resolves the declared root's shared family code, records the current
+title, then synchronizes the managed format. The same bound task cannot be configured twice. After an authorized task
 replacement in the same native thread, an explicit configuration or resumption
 request rebinds presentation to the new task and archives the old presentation.
-The family/member identity remains stable; an existing manual-title pause survives
+The family/member binding remains stable; an existing manual-title pause survives
 configuration until the user explicitly requests resumption. Unmanaged threads and unrelated chats stay outside
 automatic title synchronization.
 
