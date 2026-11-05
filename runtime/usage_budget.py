@@ -3,6 +3,7 @@ from contextlib import closing, contextmanager
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import stat
 import uuid
@@ -10,6 +11,7 @@ import uuid
 MAX_INTEGER = 2**53 - 1
 MAX_RECORD = 2_000_000
 FRESH_SECONDS = 900
+MAX_DIAGNOSTIC_MS = 300000
 
 
 class BudgetError(ValueError):
@@ -33,6 +35,37 @@ def name(value):
 
 def fields(value, expected):
     require(type(value) is dict and set(value) == set(expected.split()), 'invalid_fields')
+
+
+def transport_diagnostic(value):
+    """Copy bounded transport facts, omitting invalid optional metadata."""
+    try:
+        fields(value, 'version phase stage exception_category deadline_fired elapsed_ms remaining_ms '
+                      'request_id response_id http_status')
+        require(type(value['version']) is int and value['version'] == 1, 'invalid_diagnostic')
+        for key, allowed in (
+                ('phase', ('count', 'generation')),
+                ('stage', ('validation', 'credential', 'connect', 'admission', 'request',
+                           'response_headers', 'response_body', 'response_validation')),
+                ('exception_category', ('dns', 'tls', 'timeout', 'remote_disconnected',
+                                        'connection_reset', 'broken_pipe', 'os_error', 'http_error',
+                                        'validation', 'malformed', 'unknown'))):
+            require(type(value[key]) is str and value[key] in allowed, 'invalid_diagnostic')
+        require(type(value['deadline_fired']) is bool, 'invalid_diagnostic')
+        require(type(value['elapsed_ms']) is int and 0 <= value['elapsed_ms'] <= MAX_DIAGNOSTIC_MS,
+                'invalid_diagnostic')
+        remaining = value['remaining_ms']
+        require(remaining is None or (type(remaining) is int and -MAX_DIAGNOSTIC_MS <= remaining <= MAX_DIAGNOSTIC_MS),
+                'invalid_diagnostic')
+        for key, pattern in [('request_id', r'req_[A-Za-z0-9_-]{1,251}'),
+                             ('response_id', r'resp_[A-Za-z0-9_-]{1,250}')]:
+            require(value[key] is None or (type(value[key]) is str and re.fullmatch(pattern, value[key])),
+                    'invalid_diagnostic')
+        status = value['http_status']
+        require(status is None or (type(status) is int and 100 <= status <= 599), 'invalid_diagnostic')
+        return value.copy()
+    except BudgetError:
+        return None
 
 
 def private(path, directory=False):
@@ -332,13 +365,19 @@ class Ledger:
                     data['slot'] = None; run['closed'] = True
         require(not overrun, 'cost_exceeds_bound')
 
-    def uncertain(self, run_id, phase, *, incomplete=None):
+    def uncertain(self, run_id, phase, *, incomplete=None, diagnostic=None):
+        diagnostic = transport_diagnostic(diagnostic)
         with self.transaction() as data:
             call = data['runs'][run_id]['calls'][phase]
             require(call['state'] == 'dispatching', 'uncertainty_forbidden')
             call['state'] = 'unresolved'
             if incomplete is not None:
                 call['incomplete'] = incomplete
+            if diagnostic is not None and diagnostic['phase'] == phase:
+                call['diagnostic'] = diagnostic
+                # Optional diagnostics must not prevent conservative accounting.
+                if len(json.dumps(data, allow_nan=False, separators=(',', ':'))) > MAX_RECORD:
+                    del call['diagnostic']
 
     def close_run(self, run_id):
         with self.transaction() as data:
@@ -390,5 +429,8 @@ class Ledger:
                     result['pending'] = dict(attempt_id=run_id + ':' + phase,
                                              reserved_usd_micros=call['maximum'],
                                              incomplete=call.get('incomplete'))
+                    diagnostic = transport_diagnostic(call.get('diagnostic'))
+                    if diagnostic is not None and diagnostic['phase'] == phase:
+                        result['pending']['diagnostic'] = diagnostic
                     break
         return result

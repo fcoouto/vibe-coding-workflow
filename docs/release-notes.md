@@ -1,5 +1,12 @@
 # Release notes
 
+## 0.1.33
+
+- Retain bounded transport diagnostics through Usage Routing failures, unresolved accounting, reconciliation reports, and the Codex host. Include safe failure stages, exception categories, deadline timing, and validated request identifiers without exposing credentials, prompts, headers, or provider error text.
+- Identify I/O interrupted by the local hard-deadline timer as a transport timeout while preserving whether a request may have been sent. Preserve proven-unsent failures in host output.
+- Keep unresolved reservations, occupied API slots, admission deadlines, and duplicate-dispatch protection unchanged. Invalid or oversized optional diagnostics cannot prevent unresolved accounting. Existing unresolved runs still require authoritative provider evidence and supported recovery; this release does not settle or retry them.
+- Verify with synthetic credentials, fake connections, temporary ledgers, and offline regression tests. No live API execution or installed-client rollout is established by these checks.
+
 ## 0.1.32
 
 - Present the existing credit and routing management skill as **Manage API Usage**, preserving its command and reference paths.

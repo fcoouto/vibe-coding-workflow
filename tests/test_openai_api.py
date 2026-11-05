@@ -3,6 +3,9 @@ import copy
 import hashlib
 import importlib.util
 import json
+import http.client
+import socket
+import ssl
 from threading import Event
 import time
 import unittest
@@ -245,6 +248,114 @@ class OpenAITransportTests(unittest.TestCase):
             self.api.count(PACKET, BINDING, self.dispatch('count'), connection_factory=fail)
         self.assertFalse(caught.exception.uncertain)
         self.assertEqual(str(caught.exception), 'transport_failure')
+
+    def test_disconnect_retains_safe_category_stage_and_timing(self):
+        class PrivateExceptionName(http.client.RemoteDisconnected):
+            pass
+
+        conn = Connection(Response({}))
+        conn.getresponse = lambda: (_ for _ in ()).throw(PrivateExceptionName('private exception detail'))
+        with patch('runtime.openai_api.time.monotonic', side_effect=[5, 5.5]), \
+             self.assertRaises(self.api.TransportError) as caught:
+            self.api.generate(PACKET, BINDING, self.dispatch('generation'), connection_factory=lambda *_: conn)
+        error = caught.exception
+        self.assertEqual(str(error), 'transport_failure')
+        self.assertTrue(error.uncertain)
+        diagnostic = getattr(error, 'diagnostic', None)
+        self.assertIsInstance(diagnostic, dict)
+        self.assertEqual(diagnostic['stage'], 'response_headers')
+        self.assertEqual(diagnostic['exception_category'], 'remote_disconnected')
+        self.assertEqual(diagnostic['elapsed_ms'], 500)
+        self.assertFalse(diagnostic['deadline_fired'])
+        self.assertNotIn('PrivateExceptionName', json.dumps(diagnostic))
+        self.assertNotIn('private exception detail', json.dumps(diagnostic))
+        self.assertEqual(len(conn.requests), 1)
+        self.assertTrue(conn.closed)
+
+    def test_body_failure_retains_only_valid_request_id(self):
+        class BrokenBody(Response):
+            def read(self, size):
+                raise ConnectionResetError('private body detail')
+
+        for header, expected in [('req_synthetic', 'req_synthetic'), ('private header detail', None)]:
+            with self.subTest(header=header):
+                response = BrokenBody({})
+                response.getheader = lambda _: header
+                conn = Connection(response)
+                with self.assertRaises(self.api.TransportError) as caught:
+                    self.api.generate(PACKET, BINDING, self.dispatch('generation'), connection_factory=lambda *_: conn)
+                diagnostic = getattr(caught.exception, 'diagnostic', None)
+                self.assertIsInstance(diagnostic, dict)
+                self.assertEqual(diagnostic['request_id'], expected)
+                self.assertEqual(diagnostic['stage'], 'response_body')
+                self.assertEqual(diagnostic['exception_category'], 'connection_reset')
+                self.assertEqual(diagnostic['http_status'], 200)
+                self.assertNotIn('private', json.dumps(diagnostic))
+
+    def test_response_id_requires_matching_validated_envelope(self):
+        for update, expected in [(dict(usage=None), 'resp_synthetic'),
+                                 (dict(model='other', usage=None), None),
+                                 (dict(id='private response detail', usage=None), None)]:
+            with self.subTest(update=update), self.assertRaises(self.api.TransportError) as caught:
+                self.invoke('generation', Response(completed() | update))
+            diagnostic = getattr(caught.exception, 'diagnostic', None)
+            self.assertIsInstance(diagnostic, dict)
+            self.assertEqual(diagnostic['response_id'], expected)
+
+    def test_deadline_shutdown_classifies_header_disconnect_without_changing_uncertainty(self):
+        timers, shutdowns = [], []
+        conn = Connection(Response({}))
+        conn.connect = lambda: None
+        conn.sock = type('Socket', (), {'shutdown': lambda _, how: shutdowns.append(how)})()
+
+        class Timer:
+            def __init__(self, delay, callback):
+                self.callback = callback
+                timers.append(self)
+
+            def start(self):
+                pass
+
+            def cancel(self):
+                pass
+
+        def disconnect():
+            timers[0].callback()
+            raise http.client.RemoteDisconnected('private timer detail')
+
+        conn.getresponse = disconnect
+        with patch('runtime.openai_api.Timer', Timer), \
+             patch('http.client.HTTPSConnection', return_value=conn), \
+             patch('runtime.openai_api.usage_credentials.resolve_key', return_value=SYNTHETIC_KEY):
+            with self.assertRaises(self.api.TransportError) as caught:
+                self.api._authenticated_call(PACKET, KEYCHAIN_BINDING, self.dispatch('generation'),
+                                             'generation', admit=lambda: None)
+        self.assertEqual(str(caught.exception), 'transport_timeout')
+        self.assertTrue(caught.exception.uncertain)
+        self.assertTrue(caught.exception.diagnostic['deadline_fired'])
+        self.assertEqual(shutdowns, [socket.SHUT_RDWR])
+        self.assertEqual(len(conn.requests), 1)
+        self.assertTrue(conn.closed)
+
+    def test_connection_preparation_preserves_safe_dns_and_tls_categories(self):
+        for failure, category in [(socket.gaierror('private dns detail'), 'dns'),
+                                  (ssl.SSLCertVerificationError('private tls detail'), 'tls')]:
+            with self.subTest(category=category):
+                conn = Connection(Response({}))
+                conn.connect = lambda: (_ for _ in ()).throw(failure)
+                with patch('http.client.HTTPSConnection', return_value=conn), \
+                     patch('runtime.openai_api.usage_credentials.resolve_key', return_value=SYNTHETIC_KEY), \
+                     self.assertRaises(self.api.TransportError) as caught:
+                    self.api._authenticated_call(PACKET, KEYCHAIN_BINDING, self.dispatch('generation'),
+                                                 'generation', admit=lambda: self.fail('failed connection admitted'))
+                self.assertFalse(caught.exception.uncertain)
+                diagnostic = getattr(caught.exception, 'diagnostic', None)
+                self.assertIsInstance(diagnostic, dict)
+                self.assertEqual(diagnostic['stage'], 'connect')
+                self.assertEqual(diagnostic['exception_category'], category)
+                self.assertNotIn('private', json.dumps(diagnostic))
+                self.assertEqual(conn.requests, [])
+                self.assertTrue(conn.closed)
 
     def test_injected_budget_error_cannot_leak_provider_or_credential_text(self):
         def fail(*_):

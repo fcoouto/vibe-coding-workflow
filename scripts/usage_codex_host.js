@@ -71,7 +71,8 @@
 import json, sys
 sys.path.insert(0, sys.argv[1])
 from runtime import usage_codex_host as host, usage_admission
-from runtime.usage_budget import BudgetError
+from runtime.usage_budget import BudgetError, transport_diagnostic
+from runtime.openai_api import TransportError
 frame = json.load(sys.stdin)
 action = frame.pop('action')
 checkout = frame.pop('checkout')
@@ -97,7 +98,14 @@ try:
             value = host.execute(plan, **frame)
     print(json.dumps(value, allow_nan=False))
 except BudgetError as error:
-    print(json.dumps(dict(ok=False, reason=str(error), uncertain=action == 'execute')))
+    value = dict(ok=False, reason=str(error), uncertain=action == 'execute')
+    if isinstance(error, TransportError):
+        if type(error.uncertain) is bool:
+            value['uncertain'] = error.uncertain
+        diagnostic = transport_diagnostic(error.diagnostic)
+        if diagnostic is not None:
+            value['diagnostic'] = diagnostic
+    print(json.dumps(value, allow_nan=False))
 `;
     const quote = value => "'" + value.replace(/'/g, "'\"'\"'") + "'";
     const payload = JSON.stringify(frame);

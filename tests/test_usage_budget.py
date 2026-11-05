@@ -1,8 +1,10 @@
 """Offline spending invariants; all state is disposable and no network is used."""
 import multiprocessing
+import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from runtime import usage_budget as budget
 
@@ -85,6 +87,62 @@ class BudgetTests(unittest.TestCase):
     def test_missing_observation_blocks_without_claiming_slot(self):
         with self.assertRaises(budget.BudgetError): self.begin()
         self.assertIsNone(self.ledger.snapshot()['slot'])
+
+    def test_invalid_optional_diagnostic_never_prevents_unresolved_accounting(self):
+        self.observe()
+        # Bind only the temporary ledger's test routing scope.
+        with self.ledger.transaction() as data:
+            data['routing'] = {'scope': dict(revision=1, disabled=False, qualification_revision=None)}
+        self.begin(consent=dict(scope='scope', revision=1, qualification_revision=None))
+        self.ledger.dispatch('run', 'count', 1, 102)
+        self.ledger.uncertain('run', 'count', diagnostic={'private header': 'secret value'})
+        before = self.ledger.snapshot()
+        call = before['runs']['run']['calls']['count']
+        self.assertEqual(call['state'], 'unresolved')
+        self.assertIsNone(call['cost'])
+        self.assertNotIn('diagnostic', call)
+        self.assertEqual(before['slot'], 'run')
+        # Old or corrupt optional metadata is also checked before display.
+        with self.ledger.transaction() as data:
+            data['runs']['run']['calls']['count']['diagnostic'] = {'private header': 'secret value'}
+        before = self.ledger.snapshot()
+        self.assertNotIn('diagnostic', self.ledger.reconcile(scope='scope')['pending'])
+        self.assertEqual(self.ledger.snapshot(), before)
+
+    def test_optional_transport_diagnostic_rejects_free_text_and_invalid_scalars(self):
+        diagnostic = dict(version=1, phase='count', stage='response_headers',
+                          exception_category='remote_disconnected', deadline_fired=False,
+                          elapsed_ms=12, remaining_ms=987, request_id='req_synthetic',
+                          response_id=None, http_status=200)
+        self.assertEqual(budget.transport_diagnostic(diagnostic), diagnostic)
+        for change in [dict(version=True), dict(version=2), dict(phase='private phase'),
+                       dict(stage='private stage'), dict(exception_category='PrivateExceptionName'),
+                       dict(deadline_fired=1), dict(elapsed_ms=True), dict(elapsed_ms=-1),
+                       dict(elapsed_ms=300001), dict(remaining_ms=float('nan')),
+                       dict(remaining_ms=-300001), dict(request_id='private header detail'),
+                       dict(response_id='private response detail'), dict(http_status=True),
+                       dict(http_status=600), {'private header': 'secret value'}]:
+            with self.subTest(change=change):
+                self.assertIsNone(budget.transport_diagnostic(diagnostic | change))
+        self.assertIsNone(budget.transport_diagnostic(None))
+
+    def test_optional_diagnostic_capacity_never_blocks_unresolved_transition(self):
+        self.observe()
+        self.begin()
+        self.ledger.dispatch('run', 'count', 1, 102)
+        diagnostic = dict(version=1, phase='count', stage='response_headers',
+                          exception_category='remote_disconnected', deadline_fired=False,
+                          elapsed_ms=12, remaining_ms=987, request_id=None,
+                          response_id=None, http_status=None)
+        capacity = len(json.dumps(self.ledger.snapshot(), separators=(',', ':'))) + 16
+        with patch.object(budget, 'MAX_RECORD', capacity):
+            self.ledger.uncertain('run', 'count', diagnostic=diagnostic)
+        state = self.ledger.snapshot()
+        call = state['runs']['run']['calls']['count']
+        self.assertEqual(call['state'], 'unresolved')
+        self.assertIsNone(call['cost'])
+        self.assertNotIn('diagnostic', call)
+        self.assertEqual(state['slot'], 'run')
 
     def test_count_and_generation_settle_separately_without_retiring_credit_cost(self):
         self.observe()
